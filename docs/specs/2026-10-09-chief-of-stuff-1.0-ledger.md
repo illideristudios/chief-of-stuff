@@ -20,6 +20,11 @@ Resolved from the 14 "unknown, needs owner" rows, one at a time. These override 
 | V8 Interactive dispatch proposal | **Defer past 1.0.** The engine dispatches; no standing interactive sessions in 1.0. |
 | V18b Share redaction | **Drop.** Zach: "no idea where that came from and it's not part of the intended scope." Origin: it has been in the agent file (`agents/chief-of-stuff.md:224`) and the `share-redaction` golden case since the first commit, 3c43cfa (0.1.0, 2026-09-16). Not touched in the current repo; out of 1.0 scope. |
 | F13 Triage rule | **Revisit in M4** (unchanged). |
+| Source of truth | **The forge is the truth; the store is a rebuildable cache** (Zach: "the source of truth must be the forge"). Design decision 1 rewritten; plan M1 and M2 updated. |
+| G1, G2 Mailbox and TOON | **Replace** with the MCP report/ask channel (design 10) and JSON. Preserve: a worker's ask or stop must reach the engine and never be dropped. |
+| E9, E10, E11 Terminal launchers and launch verification | **Drop** the launchers and `session_exec.py`; **rewrite launch verification** (the engine confirms a worker is alive before recording `running`, #551). |
+| F11 Kanban label sync | **Flipped from the proposal: keep as stage write-back.** With the forge as truth, stage must reach the forge. Labels vs Project Status is Open. The human-review hold stays as a flag. Supersedes the earlier drop. |
+| D1, D2, D12 Tracker parser, CLIs, legacy migration | **Drop**, no importer. Cutover rebuilds in-flight work from open issues and PRs. Preserve the shared-lock guarantee through store transactions and upsert. |
 
 ## How to read it
 

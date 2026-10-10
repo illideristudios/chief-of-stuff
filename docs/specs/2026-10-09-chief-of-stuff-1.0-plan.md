@@ -41,13 +41,13 @@ Exit: store approved, spike note, ledger approved, open items resolved or deferr
 
 1. Schema for work items keyed by forge issue, stage segments keyed (issue, stage, attempt), decisions, file ownership, log, resume state. Unique constraint on the issue key.
 2. Repository layer behind the ORM, upsert-only writes.
-3. Tests first: writing a second row for an existing issue updates it, never inserts; concurrent writers cannot create a duplicate; resume state round-trips.
+3. Tests first: writing a second row for an existing issue updates it, never inserts; concurrent writers cannot create a duplicate; resume state round-trips; **the store can be dropped and rebuilt from the forge** (issue identity, stage, review and merge state come back, engine-only data is recomputed or marked lost).
 
 Exit (S2 at the data layer): a test that tries to create a duplicate gantt row for one issue and cannot.
 
 ### M2. Forge adapter and the issue-first gate
 
-1. GitHub and GitLab adapter: read issues and MRs/PRs, create an issue, read CI and review state.
+1. GitHub and GitLab adapter: read issues and MRs/PRs, create an issue, read CI and review state, **write stage/status back to the forge** (labels or Project Status; choice Open), and rebuild the store from the forge.
 2. Issue-first gate: starting work with no issue creates it first. A workspace with no `Backlog:` line is refused, and the setup helper walks Zach through configuring one (D3, Decided).
 3. Forge calls prefer `gh` subcommands over `gh api` where they cover the call.
 
