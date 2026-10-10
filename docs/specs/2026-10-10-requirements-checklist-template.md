@@ -50,6 +50,23 @@ Distilled from <PRD title, version, date>. Tick an item only with evidence.
 
 Section headings are fixed, so the board's grouping and counts are the same for every project. Empty sections are omitted (the board parser drops a heading with no items).
 
+## What the real files show (2026-10-10)
+
+Read from four requirements files in Zach's workspace (counts only; no content copied):
+
+| File | Items | Ticked | With evidence |
+|---|---|---|---|
+| Final | 78 | 76 | 76 |
+| Week 2 | 29 | 24 | 24 |
+| Week 3 | 179 | 2 | 2 |
+| Checklist (undated) | 38 | 0 | 0 |
+
+- **The parser is not the cause.** Run on all four, the board parser read every checkbox-like line (none dropped). The "silent skip" suspect is ruled out for these files.
+- **Ticking worked at 78 and 29 items and collapsed at 179.** The tick rule ticks only when a done task is evidence for *exactly one* item. At 179 fine-grained items, nearly every task could be evidence for several, so nothing ticks and the model names items in its reply instead. This is the leading hypothesis for "ticking didn't happen"; it is not proven.
+- **The board shows nothing because every configured deadline is past.** The four deadlines on record are dated 2026-09-20 to 2026-10-02, and the board shows requirements counts only until the deadline passes. A new PRD with no deadline line shows no counts at all. That fits "no counts".
+- **Granularity is therefore a template rule**, not just a style choice: items must be coarse enough that one task is evidence for one item, and the template's "atomic" rule needs a ceiling. Open: a target size (for example, a PRD of this length distils to 20 to 40 items) and a rule for splitting an item only when its parts are separately verifiable.
+- **Counts and ticks should not depend on the model's memory.** In 1.0 the engine parses and counts deterministically and decides ticks by a rule (task closes an issue tagged to one item), with the model only proposing the mapping.
+
 ## Open
 
 - Where the template lives at runtime (engine config or a room's setup) and how a project picks it. The PRD input path (paste, file, or forge issue) is Zach's to choose.
