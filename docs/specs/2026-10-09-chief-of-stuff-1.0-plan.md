@@ -34,20 +34,20 @@ Exit: store approved, spike note, ledger approved, open items resolved or deferr
 **M0 status (2026-10-10):**
 - Store and ORM: **approved** by Zach: SQLAlchemy pinned to the 2.0.x line (2.0.54) with Alembic 1.20.0 on SQLite via stdlib `sqlite3` (adds `mako`, `markupsafe`, `typing-extensions`). Nothing is installed until M1 starts. Runner-up was Peewee.
 - Spike: done; see [`2026-10-09-chief-of-stuff-1.0-spike-claude-p.md`](2026-10-09-chief-of-stuff-1.0-spike-claude-p.md). Quota and outage behaviour is unverified and must be treated as retryable-unknown.
-- Ledger: drafted, awaiting Zach's one review; see [`2026-10-09-chief-of-stuff-1.0-ledger.md`](2026-10-09-chief-of-stuff-1.0-ledger.md).
-- Still open: code-review policy content, trio selection rule, default limits, whether workers run through the model adapter.
+- Ledger: **reviewed with Zach row by row on 2026-10-10**; his decisions are in its Owner decisions section. Open: the Triage rule (M4) and why requirements checklists broke; see [`2026-10-09-chief-of-stuff-1.0-ledger.md`](2026-10-09-chief-of-stuff-1.0-ledger.md).
+- Still open: code-review policy content, trio selection rule, default limits, whether workers run through the model adapter, and why requirements checklists broke (they are carried).
 
 ### M1. Core model and store
 
 1. Schema for work items keyed by forge issue, stage segments keyed (issue, stage, attempt), decisions, file ownership, log, resume state. Unique constraint on the issue key.
 2. Repository layer behind the ORM, upsert-only writes.
-3. Tests first: writing a second row for an existing issue updates it, never inserts; concurrent writers cannot create a duplicate; resume state round-trips.
+3. Tests first: writing a second row for an existing issue updates it, never inserts; concurrent writers cannot create a duplicate; resume state round-trips; **the store can be dropped and rebuilt from the forge** (issue identity, stage, review and merge state come back, engine-only data is recomputed or marked lost).
 
 Exit (S2 at the data layer): a test that tries to create a duplicate gantt row for one issue and cannot.
 
 ### M2. Forge adapter and the issue-first gate
 
-1. GitHub and GitLab adapter: read issues and MRs/PRs, create an issue, read CI and review state.
+1. GitHub and GitLab adapter: read issues and MRs/PRs, create an issue, read CI and review state, **write stage/status back to the forge** (labels or Project Status; choice Open), and rebuild the store from the forge.
 2. Issue-first gate: starting work with no issue creates it first. A workspace with no `Backlog:` line is refused, and the setup helper walks Zach through configuring one (D3, Decided).
 3. Forge calls prefer `gh` subcommands over `gh api` where they cover the call.
 
@@ -78,7 +78,7 @@ Zach, 2026-10-09: "we'll revisit at m5 time." This scope is provisional; reopen 
 1. Trio gate (D5a): before any ask, consult a topic-appropriate trio through the model adapter (three calls, structured verdicts). Unanimous → adopt their recommendation and record it. Any concern → escalate to Zach.
 2. Trio selection rule and verdict record (settled in M0).
 3. Interrupt set: real goal ambiguity after the trio, unrecoverable failure after retries, budget or quota about to exceed a limit.
-4. Engine config holds spend, quota and time limits, with workspace override.
+4. Engine config holds spend, quota and time limits, with workspace override. Ships with no hard default values: the engine records spend and time per issue through the 1.0 lifecycle, and the defaults are set from that measurement in 1.1 (Zach, 2026-10-10).
 
 Exit (S1): evals showing a routine question resolved by a unanimous trio with no ping, a split trio escalating, and a limit breach pinging.
 
