@@ -4,6 +4,23 @@ Status: draft for Zach's review. Written 2026-10-09 against the 1.0-design workt
 
 Every disposition below is a **proposal** for the owner to approve. Nothing is dropped or carried until Zach says so. All evidence paths are relative to the worktree root.
 
+## Owner decisions (Zach, 2026-10-10)
+
+Resolved from the 14 "unknown, needs owner" rows, one at a time. These override the proposed dispositions in the tables below.
+
+| Rows | Decision |
+|---|---|
+| E19 Worktree and resource cleanup | **Build it in 1.0**, in the engine, with the finding 27 guards (owner check, `git status --ignored`, bound containers, unlanded-work check). |
+| E18 Engine supervisor | **launchd LaunchAgent**, reusing the install code from `notify_service.py`. |
+| B3 `board_guard.py` and browser safety | **Drop.** The engine never opens a browser; workers do not need the gate. |
+| A3 Agent performance report | **Keep as a store query** over stage segments (not log-line parsing). Section 9 and compliance row C8 stay in scope. |
+| B9, H9, V23 PARA filing | **Drop.** |
+| G4, V19b Notify service and deadline notifications | **Drop.** Notify sends exception pings only. |
+| H10, V24 Requirements checklists and deadlines | **Keep.** It is a primary feature that broke, which is why Zach stopped using it. Carry the behaviour, but find the root cause of why it broke before porting anything (M0 behaviour-spec work). |
+| V8 Interactive dispatch proposal | **Defer past 1.0.** The engine dispatches; no standing interactive sessions in 1.0. |
+| V18b Share redaction | **Drop.** |
+| F13 Triage rule | **Revisit in M4** (unchanged). |
+
 ## How to read it
 
 - **carry**: bring the code or behaviour across essentially as is (port the module and its tests).
