@@ -13,7 +13,9 @@ From the repo's `CLAUDE.md` and the design's Constraints. They bind every milest
 - **Every model call goes through one model adapter.** The trio gate, the review verdicts, the backing coordinator session, and anything else that talks to Claude via `claude -p --output-format json` use a single model port with a `claude -p` adapter behind it. No module outside that adapter spawns `claude` or parses its JSON. The same rule is how a second host stays an adapter later (design D7).
 - **Examine before importing.** Old specs, golden evals, code and tests are references. Each item brought across gets an entry in a carry/drop ledger (M0) with a reason.
 - **No new dependency without Zach's yes.** Name it, say where it comes from and why, wait. The ORM and store are the first such request.
-- **Every change lands through a PR on a branch and bumps the plugin version.** `main` is protected.
+- **Every change lands through a PR on a branch and bumps the plugin version.** `main` and `develop` are both protected. Work targets `develop`; `main` takes `develop` at release (Zach, 2026-10-10).
+- **Host-neutral from the start.** 1.1 must support Codex, Cursor and Antigravity right away, so the model port and the runtime registry (`runtimes.py`, kept) are built host-neutral now. 1.0 builds and tests only `claude`.
+- **The forge is the source of truth; the store is a rebuildable cache** (design decision 1).
 
 ## Milestones
 
@@ -35,7 +37,8 @@ Exit: store approved, spike note, ledger approved, open items resolved or deferr
 - Store and ORM: **approved** by Zach: SQLAlchemy pinned to the 2.0.x line (2.0.54) with Alembic 1.20.0 on SQLite via stdlib `sqlite3` (adds `mako`, `markupsafe`, `typing-extensions`). Nothing is installed until M1 starts. Runner-up was Peewee.
 - Spike: done; see [`2026-10-09-chief-of-stuff-1.0-spike-claude-p.md`](2026-10-09-chief-of-stuff-1.0-spike-claude-p.md). Quota and outage behaviour is unverified and must be treated as retryable-unknown.
 - Ledger: **reviewed with Zach row by row on 2026-10-10**; his decisions are in its Owner decisions section. Open: the Triage rule (M4) and why requirements checklists broke; see [`2026-10-09-chief-of-stuff-1.0-ledger.md`](2026-10-09-chief-of-stuff-1.0-ledger.md).
-- Still open: code-review policy content, trio selection rule, default limits, whether workers run through the model adapter, and why requirements checklists broke (they are carried).
+- Ledger carry-ins that shape the milestones below: policy by persona, stage and room (decision 12); directed-graph workflows with one shipped (decision 13); the engine removes worktrees under the finding-27 guards (E19); launchd supervisor (E18); requirements checklists carried; the performance report kept as a store query; the install-and-pin mechanism dropped; the runtime registry kept; non-Claude hosts in 1.1.
+- Still open: code-review policy content, trio selection rule, whether workers run through the model adapter, why requirements checklists broke (find the cause before porting), and two spikes: whether a plugin `dependencies` entry (for example datetime-inject) installs its dependency, and whether `claude -p` workers loaded with `--plugin-dir` run function hooks. Default limit values are no longer a 1.0 item: they are set from 1.0 measurement in 1.1.
 
 ### M1. Core model and store
 
@@ -58,18 +61,21 @@ Exit: eval cases for work-without-issue (issue created, then one row) and no-bac
 1. State-driven reconcile (replaces mailbox-driven ticks): each pass computes what the state calls for. Free worker slots with dispatchable work → dispatch. Approved, policy-satisfied work → merge. Missing review → launch it. Reviews run in parallel.
 2. Model adapter: the `claude -p --output-format json` implementation of the model port, with fakes for tests so engine evals never call a real model. Workers launched in git worktrees. Decide in M0 whether workers also run through the adapter.
 3. Worker launch profile (D9-D11): a guard plugin of Python command hooks (forge-write and merge gates, ask and permission relay to the engine, Stop record gate, session-start state injection) and the engine's Python MCP server with `report` and `ask` tools. Tests first: each gate has a red case that a worker cannot get past, and the engine's own merge-time check passes when a hook is skipped. Replaces the mailbox and TOON files (ledger: riskiest drop 1).
-4. Supervisor: runs as a long-lived process (launchd or equivalent), restarts itself, and resumes after quota reset or outage by waiting, not by asking.
-5. Cleanup: worktree and resource hygiene is a carried behaviour (stale worktrees once used 185 GB).
+4. Supervisor: runs as a launchd LaunchAgent (E18, reusing the install code in `notify_service.py`), restarts itself and restarts on plugin update (the install-and-pin mechanism is dropped, so this covers instruction/script skew, finding 60), and resumes after quota reset or outage by waiting, not by asking.
+5. Cleanup: **built in the engine** (the repo has no cleanup code today; stale worktrees once used 185 GB). It removes finished worktrees and build output only past the finding-27 guards: owner check, `git status --ignored`, bound containers, unlanded-work check. The model and workers still never remove trees (B10).
+6. Carried modules ported with their tests: git view hardening (F1), unlanded-work rule (F3), worktree creation (F4), merge-readiness verdict (F9), process liveness (E8), login-shell resolution (E14), concurrency cap (E21).
+7. **Runtime registry (E13) and the host-neutral port.** `runtimes.py` is ported as the host table behind the model port, with the `claude_as_profile` launch (E12) applied through it. Tests first: the `claude` entry builds the right argv (effort flag, profile launch, missing `claude-as` reported, never a silent fallback to bare `claude`); the engine and adapter reach a host only through the registry and the port (an `evals/test_architecture.py` rule that nothing outside the adapter names a binary); the `codex`, `cursor` and `agy` entries load as data and are checked for shape only, with their adapters built in 1.1.
+8. **Clock** (B4, carried): the engine reads time from one Python clock module, and workers and the backing session get the clock from a datetime-inject-style `UserPromptSubmit` hook in the worker launch profile (item 3), not from the model. Tests first: the engine's deadline and age logic runs against a pinned clock; a worker launched with the profile receives one bracketed timestamp line per prompt (whether `claude -p` workers run the hook is the open M0 spike).
 
-Exit (S1, S4): an eval that kills the engine mid-run and a fake quota hit, and the run resumes with no prompt and no state loss.
+Exit (S1, S4): an eval that kills the engine mid-run and a fake quota hit, and the run resumes with no prompt and no state loss. Also: the registry and clock tests in items 7 and 8 pass.
 
 ### M4. Review and merge policy
 
-1. Declarative policy file: reviewer roles and models, what counts as an open finding, retry limits, when the architect is consulted. Content settled in M0.
+1. Policy and workflow as data (decisions 12 and 13): personas (role, model, effort, rules), rooms (a board section and a persona's space), stages, and one shipped directed-graph workflow with gate policy on its edges. Default policies ship per persona and are overridable per stage and room. Reviewer roles and models, what counts as an open finding, retry limits and when the architect is consulted live here. Content settled in M0. Standing approvals are policy exceptions that must carry an expiry; one without is refused.
 2. Engine enforces the gates (burn down to no open findings, architect consult) and merges when the policy is satisfied. Merging under policy is not an interrupt; this overturns the `merge_owner = "user"` default (D6).
 3. **Revisit the Triage rule in this phase** (Zach, 2026-10-09: "make a note to visit this during this phase"; no direction chosen yet). Today it asks about any non-trivial or security finding (`skills/review-pipeline/SKILL.md`, Triage), which conflicts with consulting Zach only on exceptions. Options raised: route every would-be ask through the trio gate; the same except security and Critical findings, which always go to Zach; or widen the automatic-fix rule and trio the rest. Decide with Zach during M4, before the rule is carried.
 
-Exit (S3): an eval where work meeting the policy merges with no human input, and one where a policy gate fails and it does not.
+Exit (S3): an eval where work meeting the policy merges with no human input, and one where a policy gate fails and it does not. Also: a gate turned on for one stage or room holds only there, and an exception with no expiry is refused.
 
 ### M5. Decision gate and interrupts
 
@@ -89,14 +95,16 @@ Zach, 2026-10-09: revisit at M6 time. This scope is provisional; reopen it befor
 1. Board reads from the store. Gantt shows one line per issue with segments by (issue, stage, attempt). Adjust the existing UI only where the model needs it (D8).
 2. Decisions that pass the gate are board items, answered on the board. No separate decision pages.
 3. Notify sends exception pings only, linking to the board item.
+4. Agent performance report as a store query over stage segments (A3, kept).
+5. Requirements checklists (H10/V24, carried): done tasks tick one item with evidence, and the board shows done counts. M0 first finds why this feature broke; nothing is ported until that cause is written down.
 
 Exit (S2): a board render test over a day with rework on one issue shows exactly one line with several segments.
 
 ### M7. Cutover and 1.0.0
 
 1. Run the new engine beside the old harness on one workspace; compare against the old behaviour using the golden cases.
-2. Fix gaps found; retire the old harness paths that are not carried.
-3. Cut `1.0.0` (plugin.json and marketplace.json).
+2. Fix gaps found; retire the old harness paths that are not carried (markdown tracker, mailbox and TOON, terminal launchers, install-and-pin, PARA, notify service, share redaction). Update the repo `CLAUDE.md` for the Claude-first engine; its rules move into per-space workflows and rooms as they land.
+3. Cut `1.0.0` (plugin.json and marketplace.json) by merging `develop` into `main`.
 4. Bake: a week of real use judged against S1-S4.
 
 Exit: S1-S4 hold for a week of real use.
@@ -114,4 +122,14 @@ M0 first and alone. M1 → M2 → M3 in sequence (each depends on the previous l
 
 ## Open items carried into the plan
 
-Resolved in M0: policy content, trio selection rule, default limits, the carry/drop ledger, and whether workers run via `claude -p`. Resolved in M3: supervision and session-state handling across `claude -p` calls.
+Resolved in M0: policy content, trio selection rule, the carry/drop ledger (done), the requirements-checklist cause, and whether workers run via `claude -p`. Resolved in M3: supervision and session-state handling across `claude -p` calls.
+
+## Deferred to 1.1
+
+Zach, 2026-10-10: 1.1 supports the other hosts right away.
+
+- Codex, Cursor and Antigravity: their model-port adapters, prompts and watcher (G5, E16's non-Claude parts), runtime prefixes and `--not-family` in model rotation (E20), and the three non-Claude eval backends (I2).
+- Default values for spend, quota and time limits, set from what 1.0 measures.
+- Interactive dispatch proposals and the peer-session eval family (V8, V20).
+- Calendar rules (B5) and `mock_calendar`. The clock comes from a datetime-inject-style hook in 1.0.
+- Making a policy exception permanent by building it into the loop through a mod.
