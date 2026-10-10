@@ -34,7 +34,7 @@ Exit: store approved, spike note, ledger approved, open items resolved or deferr
 **M0 status (2026-10-10):**
 - Store and ORM: **approved** by Zach: SQLAlchemy pinned to the 2.0.x line (2.0.54) with Alembic 1.20.0 on SQLite via stdlib `sqlite3` (adds `mako`, `markupsafe`, `typing-extensions`). Nothing is installed until M1 starts. Runner-up was Peewee.
 - Spike: done; see [`2026-10-09-chief-of-stuff-1.0-spike-claude-p.md`](2026-10-09-chief-of-stuff-1.0-spike-claude-p.md). Quota and outage behaviour is unverified and must be treated as retryable-unknown.
-- Ledger: drafted; the 14 "needs owner" rows were decided on 2026-10-10 (see its Owner decisions section); the rest of the rows and the riskiest drops are still under review; see [`2026-10-09-chief-of-stuff-1.0-ledger.md`](2026-10-09-chief-of-stuff-1.0-ledger.md).
+- Ledger: **reviewed with Zach row by row on 2026-10-10**; his decisions are in its Owner decisions section. Open: the Triage rule (M4) and why requirements checklists broke; see [`2026-10-09-chief-of-stuff-1.0-ledger.md`](2026-10-09-chief-of-stuff-1.0-ledger.md).
 - Still open: code-review policy content, trio selection rule, default limits, whether workers run through the model adapter, and why requirements checklists broke (they are carried).
 
 ### M1. Core model and store

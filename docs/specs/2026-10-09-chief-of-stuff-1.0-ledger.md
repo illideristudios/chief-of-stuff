@@ -1,6 +1,6 @@
 # chief-of-stuff 1.0: carry/drop ledger (draft)
 
-Status: draft for Zach's review. Written 2026-10-09 against the 1.0-design worktree (repo at v0.128.x). It is the M0 deliverable "carry/drop ledger" in [the plan](2026-10-09-chief-of-stuff-1.0-plan.md), and applies the decisions in [the design](2026-10-09-chief-of-stuff-1.0-design.md).
+Status: reviewed row by row with Zach on 2026-10-10; his decisions are in the Owner decisions section and override the per-row proposals below. Still open: F13 (Triage rule, M4) and the requirements-checklist root cause (H10/V24). Written 2026-10-09 as a draft for Zach's review. Written 2026-10-09 against the 1.0-design worktree (repo at v0.128.x). It is the M0 deliverable "carry/drop ledger" in [the plan](2026-10-09-chief-of-stuff-1.0-plan.md), and applies the decisions in [the design](2026-10-09-chief-of-stuff-1.0-design.md).
 
 Every disposition below is a **proposal** for the owner to approve. Nothing is dropped or carried until Zach says so. All evidence paths are relative to the worktree root.
 
@@ -64,6 +64,12 @@ Resolved from the 14 "unknown, needs owner" rows, one at a time. These override 
 | A1, A2 Clean Architecture contract, compliance rows | **Becomes part of per-space workflows and rooms**, as an architecture room/persona (the Frank Lloyd Aight role) with its own review stage. C1-C8 still close during 1.0 for this repo, and `evals/test_architecture.py` (I1) stays the enforcement target. |
 | A7, A8 Archive notes, plugin manifests | **Carry** as is. |
 | A4, A6 README and setup guides | **Setup helper configures rooms** (Zach: "Rooms"). The in-product setup helper walks Zach through configuring rooms and workflows; the static guides shrink to a pointer. |
+| I1–I7 Tests and harness | **Approved.** Carry I1, I3, I5; rewrite I2 (calls the model adapter; Codex, Cursor and Antigravity backends are 1.1), I4, I6 (mine for behaviours, no line ports); drop I7. `mock_calendar` waits with the calendar (deferred); `mock_peers` drops with the roster. |
+| V4, V5, V9, V10, V11 Done gates, orphans, assignment integrity, one-shot lifecycle, rotation | **Rewrite** as engine cases, preserving the field-incident behaviours. V11 is Claude-only until 1.1. |
+| V12, V13, V14, V15, V16 Triage, merge gates, decision pages, ask discipline, human-only authority | **Rewrite** for the policy and trio gate; V12's asserts held until the M4 Triage decision; carry V16's three golden safety cases; V13 keeps `merge-ready-not-forge-status`, the other is replaced by policy. |
+| V2, V19a, V21, V22, V25, V26 | **Rewrite or carry** on the engine, store and board. |
+| V17, V18a, V20, V3 | **Drop** (V20 can return if interactive sessions return). |
+| D9 `findings.py` | **Drop.** Findings become typed engine events. |
 | G5, E16 (non-Claude parts), E20 (runtime prefixes, `--not-family`), I2 (Codex, Cursor and Antigravity eval backends) | **Moved to 1.1 scope** (Zach: "bring them in to 1.1"). Not built, ported or tested in 1.0, and not dropped for good: they are the 1.1 host work. The 1.0 model port and runtime registry (E13) keep the seams they need. Until 1.1 they stay in git history at the 1.0 branch point. |
 | D1, D2, D12 Tracker parser, CLIs, legacy migration | **Drop**, no importer. Cutover rebuilds in-flight work from open issues and PRs. Preserve the shared-lock guarantee through store transactions and upsert. |
 
