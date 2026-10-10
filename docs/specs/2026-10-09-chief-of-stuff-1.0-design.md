@@ -87,7 +87,7 @@ A mod (TypeScript function hooks, in-terminal status line, native notify) is all
 
 - **The code-review policy's content**: reviewer roles and models, what counts as an "open finding", retry limits, when the architect is consulted, and whether the existing Triage rule (automatic fix versus ask; security always asked, `skills/review-pipeline/SKILL.md`) survives as the engine's rule for a finding that is neither a clear fix nor ambiguous.
 - **Which current behaviours carry over versus are dropped**: tick, kanban, notify, PARA filing, the herdr/tmux/ghostty launchers, `claude_profile`, the mailbox, decision pages. Decided: decisions that pass the trio gate become items on the board, where Zach answers them (no separate decision pages), and notify sends exception pings only, linking to the board item.
-- **Budget and quota limits**: Decided: set in the engine's own config (spend, quota and time limits), which a workspace can override. The default values are Open.
+- **Budget and quota limits**: Decided: set in the engine's own config (spend, quota and time limits), which a workspace can override. The default values are measured through the 1.0 lifecycle and set in 1.1 (Zach, 2026-10-10).
 - **Gantt segments**: what a segment is keyed on when rework yields several PRs or workers for one issue. Call: key segments by (issue, stage, attempt).
 - **Forge coverage for "create the issue first"**: GitHub and GitLab, and workspaces with no `Backlog:` line. Decided: a workspace with no `Backlog:` line is not run. The engine refuses the work and instead helps Zach set up or configure the backlog. Setup help is part of 1.0.
 

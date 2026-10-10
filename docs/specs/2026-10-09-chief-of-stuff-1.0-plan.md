@@ -78,7 +78,7 @@ Zach, 2026-10-09: "we'll revisit at m5 time." This scope is provisional; reopen 
 1. Trio gate (D5a): before any ask, consult a topic-appropriate trio through the model adapter (three calls, structured verdicts). Unanimous → adopt their recommendation and record it. Any concern → escalate to Zach.
 2. Trio selection rule and verdict record (settled in M0).
 3. Interrupt set: real goal ambiguity after the trio, unrecoverable failure after retries, budget or quota about to exceed a limit.
-4. Engine config holds spend, quota and time limits, with workspace override.
+4. Engine config holds spend, quota and time limits, with workspace override. Ships with no hard default values: the engine records spend and time per issue through the 1.0 lifecycle, and the defaults are set from that measurement in 1.1 (Zach, 2026-10-10).
 
 Exit (S1): evals showing a routine question resolved by a unanimous trio with no ping, a split trio escalating, and a limit breach pinging.
 
