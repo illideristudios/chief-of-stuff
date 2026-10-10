@@ -24,6 +24,13 @@ Resolved from the 14 "unknown, needs owner" rows, one at a time. These override 
 | G1, G2 Mailbox and TOON | **Replace** with the MCP report/ask channel (design 10) and JSON. Preserve: a worker's ask or stop must reach the engine and never be dropped. |
 | E9, E10, E11 Terminal launchers and launch verification | **Drop** the launchers and `session_exec.py`; **rewrite launch verification** (the engine confirms a worker is alive before recording `running`, #551). |
 | F11 Kanban label sync | **Flipped from the proposal: keep as stage write-back.** With the forge as truth, stage must reach the forge. Labels vs Project Status is Open. The human-review hold stays as a flag. Supersedes the earlier drop. |
+| B7, B13, V3 Resume block, cron checks, resume/tracker evals | **Drop.** Resume state lives in the store; restart evals (S4) replace them. Quiet-when-unchanged carries (V21). |
+| B14, C1, V17, V20 Session roster, relay, permission relay, peer polling | **Drop.** Peer text stays untrusted data in the assignment composer. V20 returns in some form only if interactive sessions return (V8 deferred). |
+| B15, C5 Tracker grammar and `tracker-rows` skill | **Drop.** The issue key replaces row identity. |
+| D7 Stage lanes and gates | **Rewrite as configurable policy.** Zach: "everything is policy driven. We have default policies, and based on personas. This is all configurable at a stage / room level." A room is both a board section and a persona's space. A persona is a reviewer/actor profile (role, model, effort, rules). New design decision 12. |
+| D8, V6 Task `size` field | **Drop.** The forecast uses mean stage duration from segment history. |
+| V7 `workflow` token | **Replaced by directed-graph workflows** (Zach: "make it so we can create directed graph workflows for different types of things. we'll ship with only one to start."). A workflow is a graph of stages, with gate policy on the edges; the issue type selects it. The old lanes and the token fold into it. New design decision 13. |
+| V15 Standing approvals (midnight expiry) | **Policy exceptions that must carry an expiry timer** (no-expiry exceptions are refused). The "modded into the agentic loop" form is deferred. |
 | D1, D2, D12 Tracker parser, CLIs, legacy migration | **Drop**, no importer. Cutover rebuilds in-flight work from open issues and PRs. Preserve the shared-lock guarantee through store transactions and upsert. |
 
 ## How to read it
