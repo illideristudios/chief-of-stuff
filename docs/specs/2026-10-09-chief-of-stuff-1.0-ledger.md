@@ -18,7 +18,7 @@ Resolved from the 14 "unknown, needs owner" rows, one at a time. These override 
 | G4, V19b Notify service and deadline notifications | **Drop.** Notify sends exception pings only. |
 | H10, V24 Requirements checklists and deadlines | **Keep.** It is a primary feature that broke, which is why Zach stopped using it. Carry the behaviour, but find the root cause of why it broke before porting anything (M0 behaviour-spec work). |
 | V8 Interactive dispatch proposal | **Defer past 1.0.** The engine dispatches; no standing interactive sessions in 1.0. |
-| V18b Share redaction | **Drop.** |
+| V18b Share redaction | **Drop.** Zach: "no idea where that came from and it's not part of the intended scope." Origin: it has been in the agent file (`agents/chief-of-stuff.md:224`) and the `share-redaction` golden case since the first commit, 3c43cfa (0.1.0, 2026-09-16). Not touched in the current repo; out of 1.0 scope. |
 | F13 Triage rule | **Revisit in M4** (unchanged). |
 
 ## How to read it
