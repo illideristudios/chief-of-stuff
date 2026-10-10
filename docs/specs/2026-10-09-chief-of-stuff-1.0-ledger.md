@@ -35,7 +35,8 @@ Resolved from the 14 "unknown, needs owner" rows, one at a time. These override 
 | F4 Worktree creation, `Agent:` line | **Agents are a more advanced persona** (Zach: "Frank Lloyd Aight is an agent because it's evolved well past a single persona, and could even use personas itself under the hood"). A persona is a profile; an agent is a full Claude Code agent that may use personas. Port worktree creation; the worker type chosen by the workflow stage is a persona or an agent. Design decision 12 to say so. |
 | B6, V2 Open the day | **Startup preflight only.** Health probe, setting validation, and the setup helper for missing config. No daily ritual; carry-over is free in a store. |
 | E12 `claude_profile` | **Keep, renamed to the claude-as profile** (Zach: "if claude_profile is claude-as support, make it claude-as profile because it's actually claude-as tool dependent"). Setting key `claude_as_profile`; workers launch as `claude-as run <profile>`. It is an option on the adapter and worker launch that depends on the external `claude-as` tool, so the adapter must detect a missing `claude-as` and report it instead of falling back to bare `claude`. |
-| E2, E13 UserPromptSubmit tick hook, runtime registry | **Drop** (proposal stands; Zach's reply addressed only E12). |
+| E2 UserPromptSubmit tick hook (`flow.py`) | **Drop. Approved.** Zach: "this should be part of the engine, so it dies." The ready predicate and stagnation rule carry into the engine (E1). |
+| E13 Runtime registry | Pending Zach's answer (explained 2026-10-10). Proposal: drop. |
 | D1, D2, D12 Tracker parser, CLIs, legacy migration | **Drop**, no importer. Cutover rebuilds in-flight work from open issues and PRs. Preserve the shared-lock guarantee through store transactions and upsert. |
 
 ## How to read it
