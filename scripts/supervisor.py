@@ -133,6 +133,14 @@ def version() -> str:
     return json.loads((RELEASE / ".claude-plugin/plugin.json").read_text())["version"]
 
 
+def _venv_python_runs(python: Path) -> bool:
+    try:
+        return python.is_file() and subprocess.run(
+            [str(python), "-c", ""], capture_output=True, timeout=30).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def ensure_venv(data: Path) -> Path:
     """The venv python for the pinned requirements.txt, built when missing or when the pins changed."""
     requirements = RELEASE / "requirements.txt"
@@ -140,7 +148,7 @@ def ensure_venv(data: Path) -> Path:
     # shortcut: superseded venvs are never removed, prune them once an engine per workspace is common.
     venv = data / f"venv-{hashlib.sha256(requirements.read_bytes()).hexdigest()[:16]}"
     python, done = venv / "bin/python", venv / ".installed"
-    if done.exists():
+    if done.exists() and _venv_python_runs(python):
         return python
     base = shell_setup.resolve("python3")
     if base is None:
@@ -168,7 +176,9 @@ def install(root: Path, engine: tuple[str, ...] = ENGINE, jobs_dir: Path | None 
     require_macos()
     root, data = root.resolve(), data_dir()
     with lock(data / "supervisor.lock"):
-        log = str(state_dir(root) / "engine.log")
+        log_path = state_dir(root) / "engine.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log = str(log_path)
         desired = {"Label": label("engine", root),
                    # Not resolved: the venv python is a symlink, and resolving it would leave the venv.
                    "ProgramArguments": [str(ensure_venv(data)), *engine],

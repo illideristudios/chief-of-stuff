@@ -77,7 +77,8 @@ class VenvTest(SupervisorTest):
                                       [str(python), "-m", "pip", "install", "--disable-pip-version-check",
                                        "-r", str(self.release / "requirements.txt")]])
         self.assertEqual(supervisor.ensure_venv(self.data), python)
-        self.assertEqual(len(self.calls), 2)
+        # Reuse probes the cached interpreter once; it must not rebuild.
+        self.assertEqual(self.calls[2:], [[str(python), "-c", ""]])
 
     def test_changed_requirements_build_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
@@ -100,6 +101,18 @@ class VenvTest(SupervisorTest):
              self.assertRaisesRegex(supervisor.ServiceError, "python3"):
             supervisor.ensure_venv(self.data)
 
+    def test_a_missing_or_dangling_venv_python_is_rebuilt(self):
+        python = supervisor.ensure_venv(self.data)
+        python.unlink()
+        self.assertEqual(supervisor.ensure_venv(self.data), python)
+        self.assertTrue(python.is_file())
+        self.assertEqual(len(self.calls), 4, "marker alone must not reuse a missing interpreter")
+        python.unlink()
+        python.symlink_to("/nonexistent/chief-of-stuff-venv-python")
+        self.assertEqual(supervisor.ensure_venv(self.data), python)
+        self.assertTrue(python.is_file() and not python.is_symlink())
+        self.assertEqual(len(self.calls), 6)
+
     def test_data_dir_falls_back_to_the_plugin_data_dir_when_unset(self):
         with mock.patch.dict(supervisor.os.environ, {"CLAUDE_PLUGIN_DATA": ""}):
             self.assertEqual(supervisor.data_dir(),
@@ -120,6 +133,14 @@ class AgentTest(SupervisorTest):
                          {"CLAUDE_PLUGIN_DATA": str(self.data), "CHIEF_OF_STUFF_VERSION": "1.0.0"})
         self.assertEqual(self.verbs(), ["print", "enable", "bootstrap"])
         self.assertEqual(supervisor.install(self.root, ENGINE, self.jobs), "engine: serving")
+
+    def test_install_creates_the_engine_log_directory(self):
+        self.assertFalse((self.root / ".chief-of-stuff").exists())
+        supervisor.install(self.root, ENGINE, self.jobs)
+        log = self.root.resolve() / ".chief-of-stuff" / "engine.log"
+        self.assertTrue(log.parent.is_dir())
+        self.assertEqual(self.job()["StandardOutPath"], str(log))
+        self.assertEqual(self.job()["StandardErrorPath"], str(log))
 
     def test_a_plugin_update_restarts_the_engine(self):
         supervisor.install(self.root, ENGINE, self.jobs)
