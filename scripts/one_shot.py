@@ -23,6 +23,7 @@ import runtimes
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
 from md import cells as _cells, is_separator as _is_separator
+from model_port import quota_reset
 from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
@@ -108,13 +109,8 @@ def quota_stop(log: Path, runtime: str, model: str) -> str:
             text = f.read().decode(errors="replace")
     except OSError:
         return ""
-    # One line must carry a standalone 429 (after whitespace, `=`, `(` or the line start) and the quota word; its reset text is the snippet.
-    for line in text.splitlines():
-        low = line.lower()
-        if re.search(r"(?<![^\s=(])429(?!\w)", line) and ("resource_exhausted" in low or "quota" in low):
-            reset = re.search(r"\bresets?\b(?:[^\".]|\.(?!\s|$))*(?:\.(?=\s|$))?", line, re.IGNORECASE)
-            return quota_marker(runtime, model) + (f"; {reset.group()[:80].rstrip()}" if reset else "")
-    return ""
+    reset = quota_reset(text)  # the detector lives with the model port (ledger E5)
+    return "" if reset is None else quota_marker(runtime, model) + (f"; {reset}" if reset else "")
 
 
 def _enclosing_repository(cwd: Path) -> Path | None:
@@ -482,7 +478,7 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
     body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
                                    runtime=runtime, one_shot=True)
     workers = load_settings(root, cfg.settings_path).workers
-    program, lead = runtimes.program(runtime, workers.claude_profile)
+    program, lead = runtimes.program(runtime, workers.claude_as_profile)
     binary = resolve(program)
     if not binary:
         raise ValueError(f"{program} is unavailable in the configured interactive login shell")
