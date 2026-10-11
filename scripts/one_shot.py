@@ -426,7 +426,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
 
 @contextmanager
 def trees_lock(trees: Path):
-    """Hold the Worktrees dir's lock: a one-shot claims its tree under it, and cleanup removes a tree under it."""
+    """Hold the Worktrees dir's lock: workers claim their trees under it, and cleanup removes a tree under it."""
     lock = os.open(trees, os.O_RDONLY)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)

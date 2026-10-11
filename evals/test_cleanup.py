@@ -8,6 +8,7 @@ no container binds it, and nothing on it is unpushed or unmerged. A guard that c
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -16,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -27,6 +29,7 @@ import cleanup  # noqa: E402
 import dispatch_prompt  # noqa: E402
 import make_repo  # noqa: E402
 import one_shot  # noqa: E402
+import session_exec  # noqa: E402
 import store  # noqa: E402
 from tree_state import unsaved  # noqa: E402
 
@@ -119,6 +122,55 @@ class CleanupTest(unittest.TestCase):
         _, out = self.run_cleanup("--remove")
         self.assertEqual(self.removable(out), ["done"])
         self.assertFalse(tree.exists())
+
+    def test_a_failing_admin_dir_removal_reports_partial_removal_and_logs_it(self) -> None:
+        tree = self.trees / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+        real = cleanup.shutil.rmtree
+
+        def remove(path: Path, *args, **kwargs) -> None:
+            if path == admin:
+                raise PermissionError("admin dir is busy")
+            real(path, *args, **kwargs)
+
+        with mock.patch.object(cleanup.shutil, "rmtree", side_effect=remove):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 1, out)
+        self.assertFalse(tree.exists())
+        self.assertTrue(admin.is_dir())
+        line = next(line for line in out.splitlines() if line.startswith("partially removed done:"))
+        self.assertIn("admin dir remains", line)
+        self.assertIn(str(admin), line)
+        self.assertEqual(self.store.log(f"{KEY}-done")[0].message, line)
+
+    def test_a_tree_removal_that_fails_partway_reports_what_remains(self) -> None:
+        tree = self.trees / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+        (tree / "node_modules").mkdir()
+        real = cleanup.shutil.rmtree
+
+        def remove(path: Path, *args, **kwargs) -> None:
+            if path == tree:
+                (tree / "node_modules").rmdir()
+                raise PermissionError("tree is busy")
+            real(path, *args, **kwargs)
+
+        with mock.patch.object(cleanup.shutil, "rmtree", side_effect=remove):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 1, out)
+        self.assertTrue(tree.is_dir() and admin.is_dir())
+        line = next(line for line in out.splitlines() if line.startswith("partially removed done:"))
+        self.assertIn("tree remains", line)
+        self.assertIn("admin dir remains", line)
+        self.assertEqual(self.store.log(f"{KEY}-done")[0].message, line)
+
+    def test_cleanup_logs_use_the_stores_injected_clock(self) -> None:
+        instant = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        with mock.patch.object(cleanup, "Store", side_effect=lambda path: store.Store(path, clock=lambda: instant)):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        for name in ("done", "unpushed", "dirty"):
+            self.assertEqual(self.store.log(f"{KEY}-{name}")[0].at, instant.isoformat())
 
     def test_a_finished_one_shot_without_a_launcher_report_keeps_its_evidence(self) -> None:
         tree = self.trees / "done"
@@ -221,6 +273,34 @@ class CleanupTest(unittest.TestCase):
         import one_shot
         self.assertIs(cleanup.trees_lock, one_shot.trees_lock)
 
+    def test_interactive_registration_after_the_first_pass_holds_the_lock_and_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        registry = self.root / ".chief-of-stuff" / "sessions" / "worker.json"
+        real_lock, real_replace = cleanup.trees_lock, Path.replace
+
+        def publish(path: Path, target: Path) -> Path:
+            if target == registry:
+                probe = os.open(self.trees, os.O_RDONLY)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(probe)
+            return real_replace(path, target)
+
+        @contextlib.contextmanager
+        def register_then_lock(trees: Path):
+            session_exec.register(registry, runtime="claude", name="worker", worktree=str(tree), pid=os.getpid())
+            with real_lock(trees):
+                yield
+
+        with mock.patch.object(Path, "replace", publish), \
+                mock.patch.object(cleanup, "trees_lock", register_then_lock), \
+                mock.patch.object(cleanup, "check", return_value=[{"pid": os.getpid(), "status": "running"}]):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("live worker", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+
     def test_an_open_item_keeps_the_tree(self) -> None:
         self.finish("done", state="open")
         _, out = self.run_cleanup("--remove")
@@ -289,6 +369,38 @@ class CleanupTest(unittest.TestCase):
         _, out = self.run_cleanup("--remove")
         self.assertIn("locked", self.kept(out)["done"])
         self.assertTrue((self.trees / "done").is_dir())
+
+    def test_a_locked_marker_added_after_the_first_pass_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        real = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def lock_then_check(trees: Path):
+            make_repo.git(["worktree", "lock", str(tree)], self.clone)
+            with real(trees):
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", lock_then_check):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("locked", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+
+    def test_a_layout_changed_after_the_first_pass_is_revalidated(self) -> None:
+        tree = self.trees / "done"
+        real = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def replace_layout_then_lock(trees: Path):
+            (tree / ".git").unlink()
+            cleanup.shutil.copytree(self.clone / ".git", tree / ".git",
+                                    ignore=cleanup.shutil.ignore_patterns("worktrees"))
+            with real(trees):
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", replace_layout_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("not a linked worktree", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
 
     def test_the_main_clone_is_never_removed(self) -> None:
         make_repo.git(["clone", "-q", str(self.root / "origin.git"), str(self.trees / "mirror")], self.root)

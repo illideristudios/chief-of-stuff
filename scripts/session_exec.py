@@ -13,16 +13,27 @@ from pathlib import Path
 
 import runtimes
 import git_trees
+from one_shot import trees_lock
 from shell_setup import clean_env, exec_login, resolve
+from workspace import worktrees_dir
 
 
 def register(path: Path, *, runtime: str, name: str, worktree: str, pid: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = {"runtime": runtime, "name": name, "worktree": worktree, "pid": pid,
-            "started": datetime.now(timezone.utc).isoformat()}
-    temp = path.with_suffix(".tmp")
-    temp.write_text(json.dumps(data) + "\n")
-    temp.replace(path)
+    # Registries live at <workspace>/.chief-of-stuff/sessions/<name>.json, so no launcher argument is needed.
+    root = path.absolute().parents[2]
+    try:
+        text = (root / "CLAUDE.md").read_text()
+    except (OSError, UnicodeDecodeError):
+        text = ""  # cleanup cannot run without a readable CLAUDE.md, so the root's lock is enough
+    trees = root / worktrees_dir(text)
+    trees.mkdir(parents=True, exist_ok=True)
+    with trees_lock(trees):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {"runtime": runtime, "name": name, "worktree": worktree, "pid": pid,
+                "started": datetime.now(timezone.utc).isoformat()}
+        temp = path.with_suffix(".tmp")
+        temp.write_text(json.dumps(data) + "\n")
+        temp.replace(path)
 
 
 def alive(path: Path) -> bool:

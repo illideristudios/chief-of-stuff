@@ -22,7 +22,6 @@ import argparse
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -104,6 +103,19 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
     return out + [f"live one-shot (pid {pid})" for path, pid, _ in one_shot_runs(trees) if path.resolve() == tree]
 
 
+def layout_guards(tree: Path) -> tuple[git_view.Layout | None, list[str]]:
+    """Re-locate the tree and check that its linked-worktree metadata permits removal."""
+    try:
+        layout = git_view.locate(tree)
+    except git_view.Unviewable:
+        return None, ["git cannot read this tree"]
+    if layout.tree is None or layout.gitdir == layout.common:
+        return layout, ["not a linked worktree"]
+    if (layout.gitdir / "locked").exists():
+        return layout, ["locked"]
+    return layout, []
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", type=Path, required=True, help="the workspace whose Worktrees dir is cleaned")
@@ -125,15 +137,8 @@ def main(argv: list[str] | None = None) -> int:
     mounts = containers()
     failed = False
     for tree in discover(root, trees_dir):
-        kept: list[str] = []
-        try:
-            layout = git_view.locate(tree)
-        except git_view.Unviewable:
-            layout, kept = None, ["git cannot read this tree"]
-        if layout is not None and (layout.tree is None or layout.gitdir == layout.common):
-            kept.append("not a linked worktree")
-        elif layout is not None and (layout.gitdir / "locked").exists():
-            kept.append("locked")
+        layout, kept = layout_guards(tree)
+        partial: list[str] = []
         items = list({item.issue_key: item for path, item in owned if inside(path, tree)}.values())
         if not items:
             kept.append("no store item owns it")
@@ -146,25 +151,36 @@ def main(argv: list[str] | None = None) -> int:
         if layout is not None and layout.tree is not None:
             kept += git_guards(tree)
         if not kept and args.remove:
+            removal_started, tree_removed = False, False
             try:
-                with trees_lock(trees):  # a one-shot claims its tree under this lock: re-check, then delete, holding it
-                    kept = claims(root, trees, tree) + git_guards(tree)
+                with trees_lock(trees):  # workers register under this lock: re-check, then delete, holding it
+                    layout, kept = layout_guards(tree)
+                    kept += claims(root, trees, tree)
+                    if layout is not None and layout.tree is not None:
+                        kept += git_guards(tree)
                     current_mounts = containers()
                     if current_mounts is None:
                         kept.append("containers cannot be checked")
                     elif any(inside(mount.resolve(), tree) for mount in current_mounts):
                         kept.append("a container binds a path in it")
                     if not kept:
+                        removal_started = True
                         shutil.rmtree(tree)
+                        tree_removed = True
                         shutil.rmtree(layout.gitdir)  # what `git worktree prune` would delete, without running git on its config
             except OSError as exc:
                 failed, kept = True, [f"removal failed ({type(exc).__name__})"]
+                if removal_started:
+                    if not tree_removed:
+                        partial.append(f"tree remains ({tree})")
+                    partial.append(f"admin dir remains ({layout.gitdir})")
         keys = ", ".join(item.issue_key for item in items)
         verb = "keep" if kept else "removed" if args.remove else "remove"
-        line = clean(f"{verb} {tree.name} — {'; '.join(kept) if kept else keys}")
+        line = clean(f"partially removed {tree.name}: {'; '.join(partial + kept)}" if partial else
+                     f"{verb} {tree.name} — {'; '.join(kept) if kept else keys}")
         print(line)
         if args.remove:
-            at = datetime.now(timezone.utc).isoformat()  # shortcut: wall clock, the engine's injected clock replaces it in M3
+            at = db.clock().isoformat()
             for item in items:
                 db.add_log(item.issue_key, line, at)
     if not args.remove:
