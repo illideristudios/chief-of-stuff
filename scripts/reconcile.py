@@ -148,8 +148,10 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
         return Wait(key, "stage is outside the workflow")
-    latest = max((s for s in history if s.started_at and s.ended_at and (stage != "merge" or s.stage != "merge")),
-                 key=lambda s: (_time(s.started_at), s.attempt, s.stage), default=None)
+    completed = tuple(s for s in history if s.started_at and s.ended_at and (stage != "merge" or s.stage != "merge"))
+    latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
+    if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
+        return Wait(key, "segments tie at the latest start")
     if stage == "merge":
         incoming = tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage)
         return _merge(item, workflow, history, policies, room, now, counts, incoming)

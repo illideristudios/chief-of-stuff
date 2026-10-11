@@ -83,7 +83,7 @@ class ReconcileTest(unittest.TestCase):
 
     def test_blocking_findings_route_review_back_to_implementation(self):
         item = replace(Item(), stage="review", review_state="changes_requested")
-        self.assertEqual(self.plan(item, [Segment("implement"), Segment("review")], {"minor": 1}),
+        self.assertEqual(self.plan(item, [Segment("implement"), Segment("review", started_at=NOW)], {"minor": 1}),
                          [reconcile.Dispatch(KEY, "implement", "builder", 2)])
 
     def test_separate_fix_stage_loops_to_review_until_its_retry_limit(self):
@@ -181,6 +181,34 @@ class ReconcileTest(unittest.TestCase):
             policy.Edge("review", "merge", "merge")))
         self.assertEqual(self.plan(item, [Segment("review")], {}),
                          [reconcile.Wait(KEY, "no unique incoming merge edge")])
+
+    def test_latest_start_tied_between_stages_waits_at_merge(self):
+        self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
+            policy.Edge("implement", "review"), policy.Edge("implement", "merge"),
+            policy.Edge("review", "merge", "merge")))
+        self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",)})
+        item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
+        for attempt in (1, 2):
+            history = [Segment("implement", attempt), Segment("review")]
+            for order in (history, history[::-1]):
+                with self.subTest(history=order):
+                    self.assertEqual(self.plan(item, order, {}),
+                                     [reconcile.Wait(KEY, "segments tie at the latest start")])
+
+    def test_latest_start_tied_between_stages_waits_outside_merge(self):
+        for attempt in (1, 2):
+            history = [Segment("implement", attempt), Segment("review")]
+            for order in (history, history[::-1]):
+                with self.subTest(history=order):
+                    self.assertEqual(self.plan(history=order),
+                                     [reconcile.Wait(KEY, "segments tie at the latest start")])
+
+    def test_latest_start_tied_within_a_stage_uses_the_highest_attempt(self):
+        history = [Segment("review", started_at=NOW - timedelta(hours=3)),
+                   Segment("implement"), Segment("implement", 2, outcome="failed")]
+        for order in (history, history[::-1]):
+            with self.subTest(history=order):
+                self.assertEqual(self.plan(history=order), [reconcile.Dispatch(KEY, "implement", "builder", 3)])
 
     def test_blocking_threshold_comes_from_review_policy(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "important"})
