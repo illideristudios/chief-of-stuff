@@ -20,6 +20,7 @@ import forge  # noqa: E402
 import store  # noqa: E402
 import test_merge_approved as tma  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 import test_merge_ready as tmr  # noqa: E402
+import test_reconcile as tr  # noqa: E402
 from settings import GitHubProject, Kanban  # noqa: E402
 
 REPO = "example/app"
@@ -82,6 +83,41 @@ class KeyTest(unittest.TestCase):
 
 
 class GitHubTest(unittest.TestCase):
+    def test_changes_requested_snapshot_prevents_merge_after_a_clean_engine_review(self):
+        for oid in (tma.HEAD, tma.OLD):
+            with self.subTest(oid=oid):
+                reviews = [tma.review("robin", "CHANGES_REQUESTED", oid=oid, at="2026-09-26T02:00:00Z"),
+                           tma.review("robin", "APPROVED")]
+                gh = FakeGh(issues=[gh_issue(3, "x", ["stage: review"])],
+                            prs=[tma.pr(21, reviews)], bodies={21: "Closes #3"})
+                snapshot, = forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots()
+                self.assertEqual((snapshot["review_state"], snapshot["merge_state"]), ("changes_requested", "ready"))
+                item = store.WorkItem(**snapshot, human_review=False)
+                for stage in ("review", "merge"):
+                    item.stage = stage
+                    self.assertEqual(tr.reconcile.plan([item],
+                                     {item.issue_key: [tr.Segment("review")]}, tr.policies(), {}, 0, tr.NOW,
+                                     {item.issue_key: {}}),
+                                     [tr.reconcile.Wait(item.issue_key, "changes requested on the forge")])
+
+    def test_approval_consumers_keep_their_blockers_and_latest_review_rules(self):
+        for reviews, approval, blockers in (
+                ([], "none", ["no approval from robin"]),
+                ([tma.review("robin", "APPROVED")], "approved", []),
+                ([tma.review("robin", "APPROVED", oid=tma.OLD)], "stale", ["robin approved an earlier commit"]),
+                ([tma.review("robin", "CHANGES_REQUESTED")], "changes_requested", ["no approval from robin"]),
+                ([tma.review("robin", "CHANGES_REQUESTED"),
+                  tma.review("robin", "COMMENTED", at="2026-09-26T02:00:00Z"),
+                  tma.review("peer", "APPROVED", at="2026-09-26T03:00:00Z")],
+                 "changes_requested", ["no approval from robin"]),
+                ([tma.review("robin", "CHANGES_REQUESTED"),
+                  tma.review("robin", "APPROVED", at="2026-09-26T02:00:00Z")], "approved", []),
+                ([tma.review("robin", "CHANGES_REQUESTED"),
+                  tma.review("robin", "DISMISSED", at="2026-09-26T02:00:00Z")], "none", ["no approval from robin"])):
+            with self.subTest(reviews=reviews):
+                request, = forge.Forge(GH, approver="robin", gh=FakeGh(prs=[tma.pr(21, reviews)])).requests()
+                self.assertEqual((request.approval, tma.ma.blocked(request)), (approval, blockers))
+
     def test_snapshots_carry_identity_stage_review_and_merge_state(self):
         got = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshots()
         self.assertEqual(got, [
