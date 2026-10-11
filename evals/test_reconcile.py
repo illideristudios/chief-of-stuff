@@ -119,22 +119,49 @@ class ReconcileTest(unittest.TestCase):
                          [reconcile.Escalate(KEY, "retry limit reached for fix")])
         self.assertEqual(self.plan(item, history, {}), [reconcile.Merge(KEY)])
 
-    def test_retry_limit_escalates_before_a_fourth_rework_but_allows_its_review(self):
+    def test_review_edge_counts_every_repair_attempt_against_the_retry_limit(self):
+        self.p.stages["repair"] = policy.Place("repair", "builder")
+        self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
+            policy.Edge("implement", "review"), policy.Edge("review", "repair"),
+            policy.Edge("repair", "review"), policy.Edge("review", "merge")))
+        for attempts in range(4):
+            for stage in ("review", "repair"):
+                with self.subTest(attempts=attempts, stage=stage):
+                    history = ([Segment("repair", attempts)] if attempts else []) + [Segment("review", started_at=NOW)]
+                    expected = (reconcile.Dispatch(KEY, "repair", "builder", attempts + 1) if attempts < 3
+                                else reconcile.Escalate(KEY, "retry limit reached for repair"))
+                    self.assertEqual(self.plan(replace(Item(), stage=stage), history, {"minor": 1}), [expected])
+        self.assertEqual(self.plan(replace(Item(), stage="repair"),
+                                   [Segment("repair", 3, outcome="failed")]),
+                         [reconcile.Escalate(KEY, "retry limit reached for repair")])
+        self.assertEqual(self.plan(replace(Item(), stage="repair"), [Segment("repair", 3)]),
+                         [reconcile.Review(KEY, 1)])
+
+    def test_fix_without_a_review_edge_gets_an_initial_attempt(self):
+        self.p.stages["fix"] = policy.Place("fix", "builder", {"retry_limit": 0})
+        self.p.workflows["standard"] = policy.Workflow("standard", "fix", (policy.Edge("fix", "merge"),))
+        item = replace(Item(), stage="fix")
+        self.assertEqual(self.plan(item), [reconcile.Dispatch(KEY, "fix", "builder", 1)])
+        self.assertEqual(self.plan(item, [Segment("fix", outcome="failed")]),
+                         [reconcile.Escalate(KEY, "retry limit reached for fix")])
+
+    def test_retry_limit_escalates_before_a_fourth_attempt_but_allows_its_review(self):
         for stage, expected in (("review", reconcile.Escalate(KEY, "retry limit reached for implement")),
-                                ("implement", reconcile.Review(KEY, 5))):
+                                ("implement", reconcile.Review(KEY, 4))):
             with self.subTest(stage=stage):
-                history = [Segment("implement", 4), Segment("review", 4)]
-                history[-1 if stage == "review" else 0] = Segment(stage, 4, started_at=NOW)
+                history = [Segment("implement", 3), Segment("review", 3)]
+                history[-1 if stage == "review" else 0] = Segment(stage, 3, started_at=NOW)
                 item = replace(Item(), stage=stage, review_state="changes_requested")
                 self.assertEqual(self.plan(item, history, {"critical": 1}), [expected])
 
     def test_retry_limit_is_resolved_for_the_target_persona_stage_and_room(self):
         self.p.personas["builder"] = replace(self.p.personas["builder"], policy={"retry_limit": 0})
-        self.assertEqual(self.plan(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual(self.plan(), [reconcile.Escalate(KEY, "retry limit reached for implement")])
         self.assertIsInstance(self.plan(history=[Segment("implement", outcome="failed")])[0], reconcile.Escalate)
         self.p.stages["implement"] = policy.Place("implement", "builder", {"retry_limit": 1})
+        self.assertEqual(self.plan(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.plan(history=[Segment("implement", outcome="failed")]),
-                         [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+                         [reconcile.Escalate(KEY, "retry limit reached for implement")])
         item = replace(Item(), stage="review", review_state="changes_requested")
         self.assertEqual(self.plan(item, [Segment("implement", 4), Segment("review", 4, started_at=NOW)],
                                    {"minor": 1}, rooms={KEY: "lab"}),

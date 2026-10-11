@@ -98,12 +98,12 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
     return any(counts.get(severity, 0) > 0 for severity in blocking)
 
 
-def _work(key: str, stage: str, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
+def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     if stage == "review":
         return Review(key, attempt)
-    # Every fix is rework; other stages get an initial attempt before their retries.
-    rounds = attempt if stage == "fix" else attempt - 1
+    # Every attempt in a review's rework stage counts; other stages get an initial attempt before their retries.
+    rounds = attempt if any(e.target == stage for e in workflow.next("review")) else attempt - 1
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
@@ -121,7 +121,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
                      key=lambda s: _time(s.started_at), default=None)
         if review is None or any(s.stage not in ("review", "merge")
                                  and _time(s.started_at) >= _time(review.started_at) for s in completed):
-            return _work(key, "review", history, policies, room)
+            return _work(key, "review", workflow, history, policies, room)
     elif item.review_state != "approved":
         return Wait(key, "review has not run")
     if counts is None:
@@ -166,9 +166,9 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
         return _merge(item, workflow, history, policies, room, now, counts, incoming)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
-        return _work(key, stage, history, policies, room)
+        return _work(key, stage, workflow, history, policies, room)
     if latest.outcome == "failed":
-        return _work(key, stage, history, policies, room)
+        return _work(key, stage, workflow, history, policies, room)
     blocking = False
     if stage == "review":
         if counts is None:
@@ -179,7 +179,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
         return Wait(key, "no unique workflow edge")
     if edge.target == "merge":
         return _merge(item, workflow, history, policies, room, now, counts, (edge,))
-    action = _work(key, edge.target, history, policies, room)
+    action = _work(key, edge.target, workflow, history, policies, room)
     if isinstance(action, Escalate):
         return action
     return _gate(key, edge, policies, room, now) or action

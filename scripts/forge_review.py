@@ -33,7 +33,7 @@ def github_approval(reviews: list[dict], approver: str, head: str) -> str:
                    and r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED")),
                   key=lambda r: r.get("submittedAt") or "")
     if not mine or mine[-1]["state"] != "APPROVED":
-        return "none"
+        return "changes_requested" if mine and mine[-1]["state"] == "CHANGES_REQUESTED" else "none"
     return "approved" if (mine[-1].get("commit") or {}).get("oid") == head else "stale"
 
 
@@ -67,7 +67,7 @@ class Request:
     title: str
     url: str
     head: str
-    approval: str   # approved | stale | none
+    approval: str   # approved | stale | changes_requested | none
     pipeline: str   # passed | failed | running | none
     mergeable: str  # yes | conflict | the forge's own word
     approver: str = ""
@@ -118,6 +118,7 @@ class Request:
     @property
     def blockers(self) -> list[str]:
         out = {"none": [f"no approval from {self.approver}"],
+               "changes_requested": [f"no approval from {self.approver}"],
                "stale": [f"{self.approver} approved an earlier commit"]}.get(self.approval, [])
         if self.pipeline in ("failed", "running"):
             out.append(f"pipeline {self.pipeline}")
