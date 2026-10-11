@@ -45,17 +45,19 @@ def _exclusive(path: Path) -> Iterator[None]:
 
 
 def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
-          max_concurrency: int | None, launch: Callable[[], None],
+          max_concurrency: int | None, launch: Callable[[], tuple[str, str] | None],
           clock: clock.Clock = clock.system,
           runtime: str | None = None, model: str | None = None,
           effort: str | None = None, agent_type: str | None = None) -> None:
-    """Claim one worker slot: recount, refuse a duplicate, launch, then record the start — or refuse."""
+    """Claim one worker slot: recount, refuse a duplicate, launch, then record the start — or refuse. Launch may return the (model, effort) actually used."""
     with _exclusive(trees):
         n = running(store)
         if free_slots(max_concurrency, n) <= 0:
             raise ValueError(f"{n} workers running; [workers] max_concurrency is {max_concurrency}")
         if any(s.stage == stage and s.attempt == attempt for s in store.segments(issue_key)):
             raise ValueError(f"segment {issue_key} {stage} attempt {attempt} already exists")
-        launch()
+        used = launch()
+        if used is not None:
+            model, effort = used
         store.record_segment(issue_key, stage, attempt, started_at=clock().isoformat(),
                              runtime=runtime, model=model, effort=effort, agent_type=agent_type)

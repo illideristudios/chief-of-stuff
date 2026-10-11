@@ -139,6 +139,21 @@ class ClaimTest(unittest.TestCase):
         self.assertEqual((got.runtime, got.model, got.effort, got.agent_type),
                          ("claude", "opus", "high", "implementer"))
 
+    def test_claim_records_model_effort_returned_by_launch(self) -> None:
+        # Rotation picks a fallback during launch; record that pair, not the pre-launch choice.
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, launch=lambda: ("sonnet", "medium"), clock=lambda: PINNED,
+                    runtime="claude", model="opus", effort="high", agent_type="implementer")
+        got = self.db.segments(KEY)[0]
+        self.assertEqual((got.model, got.effort), ("sonnet", "medium"))
+
+    def test_claim_records_passed_model_effort_when_launch_returns_none(self) -> None:
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, launch=lambda: None, clock=lambda: PINNED,
+                    runtime="claude", model="opus", effort="high", agent_type="implementer")
+        got = self.db.segments(KEY)[0]
+        self.assertEqual((got.model, got.effort), ("opus", "high"))
+
     def test_claim_refuses_when_full(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
                     max_concurrency=1, launch=_noop, clock=lambda: PINNED)
