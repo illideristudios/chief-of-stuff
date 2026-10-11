@@ -39,6 +39,14 @@ class TableTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             runtimes.get("someday")
 
+    def test_every_record_has_the_shape_an_adapter_needs(self):
+        # Ledger E13: codex, cursor and agy stay as data in 1.0, checked for shape only; 1.1 builds their adapters.
+        for r in runtimes.RUNTIMES:
+            with self.subTest(runtime=r.name):
+                self.assertTrue(all(isinstance(v, str) and v for v in (r.name, r.binary, r.display)))
+                self.assertEqual({type(r.needs_model), type(r.schedules)}, {bool})
+                self.assertEqual(sum("{effort}" in token for token in r.effort_argv), 1 if r.effort_argv else 0)
+
     def test_a_record_cannot_be_changed(self):
         with self.assertRaises(AttributeError):
             runtimes.get("claude").binary = "other"  # type: ignore[misc]

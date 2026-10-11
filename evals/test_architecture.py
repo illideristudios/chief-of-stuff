@@ -91,6 +91,49 @@ def forbidden_reach(scripts: Path, start: str, banned_scripts: set[str], banned_
 # `http` is `from urllib import request`; `urllib.parse` is not on the list.
 READER_BANS = ({"one_shot", "backlog"}, frozenset({*HTTP, "urllib", "http"}))
 
+# Design 7a: only the model adapter launches a host CLI, and the registry is where it learns the executable.
+ADAPTER = ("scripts/claude_adapter.py", "scripts/runtimes.py")
+# The modules that named a host executable before the adapter. The list may only shrink; each entry must still name one.
+# session_exec execs the worker CLI for spawn_session, and process_status matches the executable to check liveness.
+# probe_health finds each rotation's executable for the health line.
+LEGACY_LAUNCHERS = ("scripts/one_shot.py", "scripts/spawn_session.py", "start_coordinator.py", "evals/run.py",
+                    "scripts/session_exec.py", "scripts/process_status.py", "scripts/probe_health.py")
+HOST_EXECUTABLES = frozenset({"claude", "claude-as", "codex", "agent", "agy"})
+
+
+def _is_executable(nodes: list[ast.expr]) -> bool:
+    return bool(nodes) and isinstance(nodes[0], ast.Constant) and nodes[0].value in HOST_EXECUTABLES
+
+
+def names_a_host_executable(path: Path) -> list[str]:
+    """`<file>:<line>` wherever a file reaches a host CLI's executable: a call to the registry's `program` or `binary`,
+    a record's `.binary`, an argv literal or a `which`/`resolve` that starts with an executable's name, or `claude-as`.
+    Comparing a runtime's name, as in `runtime == "claude"` or `runtime in ("codex", "agy")`, is not reaching it."""
+    tree, found = ast.parse(path.read_text(encoding="utf-8"), filename=str(path)), []
+    names = {id(side) for node in ast.walk(tree) if isinstance(node, ast.Compare) for side in node.comparators}
+    for node in ast.walk(tree):
+        if id(node) in names:  # `runtime in ("codex", "cursor")`
+            continue
+        if isinstance(node, ast.Call):
+            name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", "")
+            hit = name in ("program", "binary") or (name in ("which", "resolve") and _is_executable(node.args))
+        elif isinstance(node, (ast.List, ast.Tuple)):
+            hit = _is_executable(node.elts)
+        elif isinstance(node, ast.Attribute):
+            hit = node.attr == "binary"
+        else:
+            hit = isinstance(node, ast.Constant) and node.value == "claude-as"
+        if hit:
+            found.append(f"{path.name}:{node.lineno}")
+    return found
+
+
+def launch_sources() -> list[str]:
+    """Every file that could launch a host: the scripts, the launchers at the root, the hooks and the eval runner."""
+    paths = [*SCRIPTS.glob("*.py"), *ROOT.glob("*.py"), *(ROOT / "hooks").glob("*.py"), ROOT / "evals" / "run.py"]
+    return sorted(str(path.relative_to(ROOT)) for path in paths)
+
+
 def cycle_in(graph: dict[str, set[str]]) -> list[str]:
     """One import cycle as `[a, b, ..., a]`, or `[]` when the graph has none."""
     done: set[str] = set()
@@ -158,6 +201,31 @@ class DependencyRuleTest(unittest.TestCase):
                               capture_output=True, text=True, timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(proc.stdout.split(), [], "one_shot_result loads the launcher or the forge client")
+
+
+class ModelAdapterTest(unittest.TestCase):
+    """Design 7a and plan M3 item 7: nothing outside the model adapter and the registry names a host's executable."""
+
+    def test_only_the_adapter_the_registry_and_the_legacy_launchers_name_a_host_executable(self):
+        naming = [path for path in launch_sources() if names_a_host_executable(ROOT / path)]
+        self.assertEqual(sorted(set(naming) - set(ADAPTER) - set(LEGACY_LAUNCHERS)), [])
+
+    def test_every_legacy_launcher_still_names_one_so_the_list_only_shrinks(self):
+        for path in LEGACY_LAUNCHERS:
+            with self.subTest(path=path):
+                self.assertTrue(names_a_host_executable(ROOT / path), f"{path} no longer launches a host: drop it from the list")
+
+    def test_the_check_sees_each_way_of_reaching_an_executable_and_not_a_runtime_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "m.py")
+            for source in ('subprocess.run(["claude", "-p"])', 'shutil.which("claude")', 'runtimes.program("claude")',
+                           'runtimes.get("codex").binary', 'resolve("agy")', 'x = "claude-as"'):
+                with self.subTest(source=source):
+                    path.write_text(source + "\n", encoding="utf-8")
+                    self.assertEqual(names_a_host_executable(path), ["m.py:1"])
+            path.write_text('if runtime == "claude" or runtime in ("codex", "agy"):\n    host = runtimes.get(runtime).display\n',
+                            encoding="utf-8")
+            self.assertEqual(names_a_host_executable(path), [])
 
 
 class ImportGraphTest(unittest.TestCase):
