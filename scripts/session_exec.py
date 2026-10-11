@@ -28,6 +28,8 @@ def register(path: Path, *, runtime: str, name: str, worktree: str, pid: int) ->
     trees = root / worktrees_dir(text)
     trees.mkdir(parents=True, exist_ok=True)
     with trees_lock(trees):
+        if not (root / worktree).is_dir():
+            raise FileNotFoundError(f"worktree is missing or not a directory: {worktree}")
         path.parent.mkdir(parents=True, exist_ok=True)
         data = {"runtime": runtime, "name": name, "worktree": worktree, "pid": pid,
                 "started": datetime.now(timezone.utc).isoformat()}

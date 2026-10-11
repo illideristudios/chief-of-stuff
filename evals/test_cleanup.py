@@ -251,6 +251,47 @@ class CleanupTest(unittest.TestCase):
         self.assertIn("snapshot.db", self.kept(out)["done"])
         self.assertTrue((self.trees / "done" / "snapshot.db").is_file())
 
+    def test_initialized_submodule_metadata_keeps_ignored_evidence_without_a_gitlink(self) -> None:
+        tree = self.trees / "done"
+        make_repo.git(["-c", "protocol.file.allow=always", "submodule", "add", "-f",
+                       str(self.clone), "node_modules"], tree)
+        # Removing the gitlink leaves the initialized module behind in otherwise removable build output.
+        make_repo.git(["rm", "--cached", "node_modules", ".gitmodules"], tree)
+        (tree / ".gitmodules").unlink()
+        snapshot = tree / "node_modules" / "snapshot.db"
+        snapshot.write_text("only copy\n")
+        self.assertEqual(make_repo.git(["status", "--porcelain", "--ignored"], tree), "!! node_modules/")
+        self.assertEqual(cleanup.git_guards(tree), [])
+        for flags in ((), ("--remove",)):
+            with self.subTest(flags=flags):
+                code, out = self.run_cleanup(*flags)
+                self.assertEqual(code, 0, out)
+                self.assertIn("initialized submodules", self.kept(out).get("done", out))
+                self.assertEqual(snapshot.read_text(), "only copy\n")
+
+    def test_empty_submodule_metadata_does_not_keep_the_tree(self) -> None:
+        tree = self.trees / "done"
+        (cleanup.git_view.locate(tree).gitdir / "modules").mkdir()
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+
+    def test_submodule_metadata_added_after_the_first_pass_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        modules = cleanup.git_view.locate(tree).gitdir / "modules"
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def initialize_then_lock(trees: Path):
+            (modules / "mod").mkdir(parents=True)
+            with real_lock(trees):
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", initialize_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("initialized submodules", self.kept(out).get("done", out))
+        self.assertTrue(tree.is_dir())
+
     def test_a_live_worker_keeps_the_tree(self) -> None:
         tree = self.trees / "done"
         worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "claude", str(tree)])
@@ -340,6 +381,30 @@ class CleanupTest(unittest.TestCase):
             _, out = self.run_cleanup("--remove")
         self.assertIn("live worker", self.kept(out)["done"])
         self.assertTrue(tree.is_dir())
+
+    def test_registration_refuses_to_launch_when_cleanup_wins_the_lock(self) -> None:
+        tree = self.trees / "done"
+        registry = self.root / ".chief-of-stuff" / "sessions" / "worker.json"
+        real_lock = session_exec.trees_lock
+
+        @contextlib.contextmanager
+        def cleanup_then_lock(trees: Path):
+            self.assertEqual(trees, self.trees)
+            self.assertTrue(tree.is_dir())
+            code, out = self.run_cleanup("--remove")
+            self.assertEqual(code, 0, out)
+            self.assertFalse(tree.exists())
+            with real_lock(trees):
+                yield
+
+        with mock.patch.object(session_exec, "trees_lock", cleanup_then_lock), \
+                mock.patch.object(session_exec.os, "execve", side_effect=AssertionError("worker launched")) as launch, \
+                self.assertRaisesRegex(FileNotFoundError, "worktree"):
+            session_exec.main(["--registry", str(registry), "--runtime", "cursor", "--name", "worker",
+                               "--worktree", str(tree), "--", "/bin/fake-agent"])
+        launch.assert_not_called()
+        self.assertFalse(registry.exists())
+        self.assertFalse(registry.with_suffix(".tmp").exists())
 
     def test_an_open_item_keeps_the_tree(self) -> None:
         self.finish("done", state="open")

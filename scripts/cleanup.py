@@ -8,6 +8,7 @@ verified:
 - owner: it is a linked worktree, the store items that own it are all finished (closed on the forge), and no live
   worker claims it. A registered worker whose PID was reused is gone; one that cannot be verified is not;
 - `git status --porcelain --ignored` lists nothing but build output or engine metadata (`tree_state.unsaved`);
+- no initialized submodule metadata remains (submodule contents are never inspected);
 - no container binds a path inside it;
 - nothing on it is unpushed or unmerged (`tree_state.at_risk`).
 
@@ -129,6 +130,13 @@ def layout_guards(tree: Path) -> tuple[git_view.Layout | None, list[str]]:
         return layout, ["not a linked worktree"]
     if (layout.gitdir / "locked").exists():
         return layout, ["locked"]
+    try:
+        if next((layout.gitdir / "modules").iterdir(), None) is not None:
+            return layout, ["initialized submodules"]
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return layout, ["submodules cannot be checked"]
     return layout, []
 
 
