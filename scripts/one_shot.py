@@ -425,20 +425,27 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
 
 
 @contextmanager
-def slot(trees: Path, cwd: Path, task: str, cap: int | None):
-    """Claim a worker slot under the Worktrees dir's lock, so two sessions launching at once cannot both
-    take the last one; release it when the run ends."""
+def trees_lock(trees: Path):
+    """Hold the Worktrees dir's lock: a one-shot claims its tree under it, and cleanup removes a tree under it."""
     lock = os.open(trees, os.O_RDONLY)
     try:
         fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(lock)
+
+
+@contextmanager
+def slot(trees: Path, cwd: Path, task: str, cap: int | None):
+    """Claim a worker slot under the Worktrees dir's lock, so two sessions launching at once cannot both
+    take the last one; release it when the run ends."""
+    with trees_lock(trees):
         busy = running_trees(trees)
         if cap is not None and len(busy) >= cap:
             raise ValueError(f"{len(busy)} one-shot workers running; [workers] max_concurrency is {cap} "
                              "(list them: chief-of-stuff processes --root <workspace>)")
         (cwd / PIDFILE).parent.mkdir(exist_ok=True)
         (cwd / PIDFILE).write_text(f"{os.getpid()} {task}\n")
-    finally:
-        os.close(lock)
     try:
         yield
     finally:

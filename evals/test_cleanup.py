@@ -7,6 +7,7 @@ it is unpushed or unmerged. A guard that cannot be verified keeps the tree.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
@@ -163,6 +164,29 @@ class CleanupTest(unittest.TestCase):
         _, out = self.run_cleanup("--remove")
         self.assertIn("one-shot", self.kept(out)["done"])
         self.assertTrue(pidfile.is_file())
+
+    def test_a_claim_made_after_the_checks_but_before_the_delete_keeps_the_tree(self) -> None:
+        # A one-shot launch writes its pid file under the Worktrees dir's lock: once cleanup holds that lock, the
+        # launch has either claimed the tree already, and the re-check sees it, or waits until the tree is gone.
+        pidfile = self.trees / "done" / ".chief-of-stuff" / "one-shot.pid"
+        real = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def launch_then_lock(trees: Path):
+            self.assertEqual(trees, self.trees)
+            pidfile.parent.mkdir(exist_ok=True)
+            pidfile.write_text(f"{os.getpid()} {KEY}\n")
+            with real(trees):
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", launch_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("one-shot", self.kept(out)["done"])
+        self.assertTrue(pidfile.is_file())
+
+    def test_removal_holds_the_lock_one_shot_launches_take(self) -> None:
+        import one_shot
+        self.assertIs(cleanup.trees_lock, one_shot.trees_lock)
 
     def test_an_open_item_keeps_the_tree(self) -> None:
         self.finish("done", state="open")

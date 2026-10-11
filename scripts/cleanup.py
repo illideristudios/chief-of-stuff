@@ -30,6 +30,7 @@ from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
 import git_view  # noqa: E402
 from git_trees import audit_env, clean, discover, git, read_state  # noqa: E402
+from one_shot import trees_lock  # noqa: E402
 from process_status import check, one_shot_runs, registrations  # noqa: E402
 from store import Store  # noqa: E402
 from tree_state import at_risk, unsaved  # noqa: E402
@@ -82,6 +83,23 @@ def inside(path: Path, tree: Path) -> bool:
     return path == tree or path.is_relative_to(tree)
 
 
+def claims(root: Path, trees: Path, tree: Path) -> list[str]:
+    """Why a worker's claim keeps `tree`, read fresh: a registered worker that is running or cannot be verified (a
+    reused PID is gone), an unreadable registry entry, or a live one-shot pid file."""
+    regs = registrations(root)
+    out = [] if len(list((root / ".chief-of-stuff" / "sessions").glob("*.json"))) == len(regs) else [
+        "the worker registry has an unreadable entry"]
+    mine = {pid: record for pid, record in regs.items() if (root / record["worktree"]).resolve() == tree}
+    status = {row["pid"]: row["status"] for row in check(root, list(mine))} if mine else {}
+    for pid, record in mine.items():
+        state = status.get(pid, "unverified")
+        if state == "running":
+            out.append(f"live worker {record['name']} (pid {pid})")
+        elif state not in ("gone", "pid_reused"):
+            out.append(f"worker {record['name']} (pid {pid}) cannot be verified")
+    return out + [f"live one-shot (pid {pid})" for path, pid, _ in one_shot_runs(trees) if path.resolve() == tree]
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", type=Path, required=True, help="the workspace whose Worktrees dir is cleaned")
@@ -99,10 +117,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, UnicodeDecodeError, SQLAlchemyError) as exc:
         print(f"cannot read the workspace or the store ({type(exc).__name__}): nothing removed", file=sys.stderr)
         return 1
-    regs = registrations(root)
-    registry_whole = len(list((root / ".chief-of-stuff" / "sessions").glob("*.json"))) == len(regs)
-    status = {row["pid"]: row["status"] for row in check(root, list(regs))} if regs else {}
-    one_shots = {path.resolve(): pid for path, pid, _ in one_shot_runs(root / trees_dir)} if trees_dir else {}
+    trees = root / trees_dir
     mounts = containers()
     failed = False
     for tree in discover(root, trees_dir):
@@ -119,17 +134,7 @@ def main(argv: list[str] | None = None) -> int:
         if not items:
             kept.append("no store item owns it")
         kept += [f"{item.issue_key} is not finished" for item in items if item.forge_state != FINISHED]
-        if not registry_whole:
-            kept.append("the worker registry has an unreadable entry")
-        for pid, record in regs.items():
-            if (root / record["worktree"]).resolve() == tree:
-                state = status.get(pid, "unverified")
-                if state == "running":
-                    kept.append(f"live worker {record['name']} (pid {pid})")
-                elif state not in ("gone", "pid_reused"):
-                    kept.append(f"worker {record['name']} (pid {pid}) cannot be verified")
-        if tree in one_shots:
-            kept.append(f"live one-shot (pid {one_shots[tree]})")
+        kept += claims(root, trees, tree)
         if mounts is None:
             kept.append("containers cannot be checked")
         elif any(inside(mount.resolve(), tree) for mount in mounts):
@@ -138,8 +143,11 @@ def main(argv: list[str] | None = None) -> int:
             kept += git_guards(tree)
         if not kept and args.remove:
             try:
-                shutil.rmtree(tree)
-                shutil.rmtree(layout.gitdir)  # what `git worktree prune` would delete, without running git on its config
+                with trees_lock(trees):  # a one-shot claims its tree under this lock: re-check, then delete, holding it
+                    kept = claims(root, trees, tree) + git_guards(tree)
+                    if not kept:
+                        shutil.rmtree(tree)
+                        shutil.rmtree(layout.gitdir)  # what `git worktree prune` would delete, without running git on its config
             except OSError as exc:
                 failed, kept = True, [f"removal failed ({type(exc).__name__})"]
         keys = ", ".join(item.issue_key for item in items)
