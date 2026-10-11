@@ -174,7 +174,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, workflow, history, policies, room)
-    if latest.outcome == "failed":
+    if latest.outcome != "done":
         return _work(key, stage, workflow, history, policies, room)
     blocking = False
     if stage == "review":

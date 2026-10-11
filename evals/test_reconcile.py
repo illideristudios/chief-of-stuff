@@ -432,6 +432,14 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement", outcome="failed")]),
                          [reconcile.Dispatch(KEY, "implement", "builder", 2)])
 
+    def test_human_review_segment_retries_current_stage_after_hold_is_cleared(self):
+        self.assertEqual(self.plan(history=[Segment("implement", outcome="human_review")]),
+                         [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+
+    def test_segment_without_outcome_retries_current_stage_instead_of_advancing(self):
+        self.assertEqual(self.plan(history=[Segment("implement", outcome=None)]),
+                         [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+
     def test_unknown_stage_ambiguous_branch_and_terminal_stage_wait(self):
         self.assertIsInstance(self.plan(replace(Item(), stage="unknown"))[0], reconcile.Wait)
         self.p.stages["done"] = policy.Place("done")
