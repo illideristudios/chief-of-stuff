@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 
 import store
@@ -66,6 +67,40 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(self.store.items()), 1)
         self.assertEqual(len(self.store.segments(KEY)), 1)
+
+    def test_concurrent_read_then_write_sessions_wait_for_the_lock(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        for message in ("first", "second"):
+            self.store.add_log(KEY, message, at="09:00")
+        writers = [store.Store(self.path) for _ in range(8)]
+        for writer in writers:
+            self.addCleanup(writer.engine.dispose)
+        start = threading.Barrier(len(writers))
+        errors: list[BaseException] = []
+
+        def write(n: int) -> None:
+            try:
+                start.wait(timeout=5)
+                with writers[n].session() as s:
+                    rows = s.execute(select(store.LogEntry.id).execution_options(yield_per=1))
+                    rows.fetchone()
+                    # Leave a row pending: even legacy sqlite3 mode retains this WAL read snapshot.
+                    # Give another writer time to commit before trying to upgrade it to a write.
+                    time.sleep(0.05)
+                    s.add(store.LogEntry(issue_key=KEY, message=f"w{n}", at="10:00"))
+                    s.flush()
+                    rows.close()
+            except BaseException as exc:  # noqa: BLE001 - the test reports whatever a writer hit
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(len(writers))]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual({entry.message for entry in self.store.log(KEY)},
+                         {"first", "second", *(f"w{n}" for n in range(len(writers)))})
 
     def test_rework_is_more_segments_on_the_one_item_not_more_items(self) -> None:
         self.store.upsert_item(KEY, title="x")
