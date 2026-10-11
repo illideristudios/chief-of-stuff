@@ -2,14 +2,16 @@
 
 A segment with `started_at` and no `ended_at` is a running worker. Before the engine launches a
 Dispatch or Review worker it claims under an exclusive lock on the Worktrees dir (same flock
-pattern as `one_shot.slot`), re-counts inside the lock, records the new segment's start, and
-refuses when full so two concurrent claims for the last slot cannot both win.
+pattern as `one_shot.slot`), re-counts inside the lock, refuses a duplicate segment, launches the
+worker, and only then records the segment's start — so a failed spawn leaves nothing counting
+against the cap, and two concurrent claims for the last slot cannot both win.
 """
 
 from __future__ import annotations
 
 import fcntl
 import os
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -43,10 +45,13 @@ def _exclusive(path: Path) -> Iterator[None]:
 
 
 def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int, started_at: str,
-          max_concurrency: int | None) -> None:
-    """Claim one worker slot: recount and record the segment start under the Worktrees flock, or refuse."""
+          max_concurrency: int | None, launch: Callable[[], None]) -> None:
+    """Claim one worker slot: recount, refuse a duplicate, launch, then record the start — or refuse."""
     with _exclusive(trees):
         n = running(store)
         if free_slots(max_concurrency, n) <= 0:
             raise ValueError(f"{n} workers running; [workers] max_concurrency is {max_concurrency}")
+        if any(s.stage == stage and s.attempt == attempt for s in store.segments(issue_key)):
+            raise ValueError(f"segment {issue_key} {stage} attempt {attempt} already exists")
+        launch()
         store.record_segment(issue_key, stage, attempt, started_at=started_at)

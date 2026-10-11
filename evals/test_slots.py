@@ -5,6 +5,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 
@@ -45,13 +46,17 @@ class FreeSlotsTest(unittest.TestCase):
             self.assertEqual(slots.free_slots(2, slots.running(db)), 2)
 
 
+def _noop() -> None:
+    pass
+
+
 def _claim_child(barrier, out: str, db_path: str, trees: str, i: int, cap: int) -> None:
     barrier.wait(30)
     db = store.Store(db_path)
     outcome = "refused"
     try:
         slots.claim(Path(trees), db, issue_key=KEY, stage="implement", attempt=i + 1,
-                    started_at=f"t{i}", max_concurrency=cap)
+                    started_at=f"t{i}", max_concurrency=cap, launch=_noop)
         outcome = "in"
     except ValueError:
         pass
@@ -77,7 +82,7 @@ class ClaimTest(unittest.TestCase):
 
     def test_claim_records_a_running_segment_when_a_slot_is_free(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                    started_at="09:00", max_concurrency=1)
+                    started_at="09:00", max_concurrency=1, launch=_noop)
         segs = self.db.segments(KEY)
         self.assertEqual([(s.stage, s.attempt, s.started_at, s.ended_at) for s in segs],
                          [("implement", 1, "09:00", None)])
@@ -85,12 +90,71 @@ class ClaimTest(unittest.TestCase):
 
     def test_claim_refuses_when_full(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                    started_at="09:00", max_concurrency=1)
+                    started_at="09:00", max_concurrency=1, launch=_noop)
         with self.assertRaises(ValueError) as caught:
             slots.claim(self.trees, self.db, issue_key=KEY, stage="review", attempt=1,
-                        started_at="09:01", max_concurrency=1)
+                        started_at="09:01", max_concurrency=1, launch=_noop)
         self.assertIn("max_concurrency is 1", str(caught.exception))
         self.assertEqual(slots.running(self.db), 1)
+
+    def test_claim_refuses_a_duplicate_segment_even_with_spare_capacity(self) -> None:
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    started_at="09:00", max_concurrency=2, launch=_noop)
+        with self.assertRaises(ValueError):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                        started_at="09:01", max_concurrency=2, launch=_noop)
+        self.assertEqual(slots.running(self.db), 1)
+        self.db.record_segment(KEY, "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
+        with self.assertRaises(ValueError):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                        started_at="10:01", max_concurrency=2, launch=_noop)
+        self.assertEqual(self.db.segments(KEY)[0].ended_at, "10:00")
+
+    def test_failed_launch_records_nothing_and_frees_the_slot(self) -> None:
+        def boom() -> None:
+            raise RuntimeError("spawn failed")
+
+        with self.assertRaises(RuntimeError):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                        started_at="09:00", max_concurrency=1, launch=boom)
+        self.assertEqual(self.db.segments(KEY), [])
+        self.assertEqual(slots.running(self.db), 0)
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    started_at="09:00", max_concurrency=1, launch=_noop)
+        self.assertEqual(slots.running(self.db), 1)
+
+    def test_contending_claim_waits_while_launch_holds_the_lock(self) -> None:
+        in_launch = threading.Event()
+        release = threading.Event()
+
+        def slow_launch() -> None:
+            in_launch.set()
+            self.assertTrue(release.wait(5))
+
+        holder = threading.Thread(
+            target=slots.claim,
+            kwargs=dict(trees=self.trees, store=self.db, issue_key=KEY, stage="implement",
+                        attempt=1, started_at="09:00", max_concurrency=2, launch=slow_launch),
+        )
+        holder.start()
+        self.assertTrue(in_launch.wait(5))
+
+        contender = threading.Thread(
+            target=slots.claim,
+            kwargs=dict(trees=self.trees, store=self.db, issue_key=KEY, stage="review",
+                        attempt=1, started_at="09:01", max_concurrency=2, launch=_noop),
+        )
+        contender.start()
+        contender.join(0.3)
+        self.assertTrue(contender.is_alive())
+        self.assertEqual(slots.running(self.db), 0)
+
+        release.set()
+        holder.join(5)
+        contender.join(5)
+        self.assertFalse(holder.is_alive())
+        self.assertFalse(contender.is_alive())
+        self.assertEqual(slots.running(self.db), 2)
 
     def test_two_claims_for_the_last_slot_exactly_one_wins(self) -> None:
         # Cap 1, two processes: the flock + recount inside it means exactly one records a start.
