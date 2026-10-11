@@ -60,6 +60,17 @@ class CleanupTest(unittest.TestCase):
         path = mock.patch.dict(os.environ, {"PATH": f"{self.bin}:/usr/bin:/bin"})
         path.start()
         self.addCleanup(path.stop)
+        self.lsof = mock.Mock(return_value=subprocess.CompletedProcess(["lsof"], 1, "", ""))
+        real_run = subprocess.run
+
+        def run(args, *positional, **kwargs):
+            if args[0] == "lsof":
+                return self.lsof(args, *positional, **kwargs)
+            return real_run(args, *positional, **kwargs)
+
+        processes = mock.patch.object(cleanup.subprocess, "run", side_effect=run)
+        processes.start()
+        self.addCleanup(processes.stop)
 
     def finish(self, name: str, state: str = "closed") -> None:
         key = f"{KEY}-{name}"
@@ -300,6 +311,85 @@ class CleanupTest(unittest.TestCase):
         self.register(worker.pid, tree)
         _, out = self.run_cleanup("--remove")
         self.assertIn("live worker", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+
+    def test_a_live_process_with_its_cwd_at_or_inside_the_tree_keeps_it(self) -> None:
+        tree = self.trees / "done"
+        for cwd in (tree, tree / "node_modules" / "pkg"):
+            with self.subTest(cwd=cwd):
+                self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, f"p12345\nfcwd\nn{cwd}\n", "")
+                _, out = self.run_cleanup("--remove")
+                self.assertIn("live process in tree (pid 12345)", self.kept(out).get("done", out))
+                self.assertTrue(tree.is_dir())
+        self.lsof.assert_called_with(["lsof", "-a", "-d", "cwd", "-Fpn"],
+                                     capture_output=True, text=True, timeout=cleanup.TIMEOUT)
+
+    def test_a_process_in_a_sibling_with_the_same_prefix_does_not_keep_the_tree(self) -> None:
+        cwd = self.trees / "done-other"
+        self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, f"p12345\nn{cwd}\n", "")
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse((self.trees / "done").exists())
+        self.lsof.assert_called()
+
+    def test_lsof_failure_keeps_the_tree(self) -> None:
+        for failure in (subprocess.CompletedProcess(["lsof"], 2, "", "failed"),
+                        subprocess.CompletedProcess(["lsof"], 1, "p12345\nn/\n", ""),
+                        FileNotFoundError("lsof"), subprocess.TimeoutExpired("lsof", cleanup.TIMEOUT),
+                        subprocess.CompletedProcess(["lsof"], 1, "", "failed")):
+            with self.subTest(failure=failure):
+                self.lsof.side_effect = failure if isinstance(failure, Exception) else None
+                self.lsof.return_value = failure
+                _, out = self.run_cleanup("--remove")
+                self.assertIn("open processes cannot be checked", self.kept(out).get("done", out))
+                self.assertTrue((self.trees / "done").is_dir())
+
+    def test_unparseable_lsof_output_keeps_the_tree(self) -> None:
+        for output in ("garbage\n", "n/tmp\n", "pbad\nn/tmp\n", "p12345\n", "p12345\nnrelative\n"):
+            with self.subTest(output=output):
+                self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, output, "")
+                _, out = self.run_cleanup("--remove")
+                self.assertIn("open processes cannot be checked", self.kept(out).get("done", out))
+                self.assertTrue((self.trees / "done").is_dir())
+
+    def test_lsof_exit_one_with_no_output_adds_no_claim(self) -> None:
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse((self.trees / "done").exists())
+        self.assertNotIn("open processes cannot be checked", out)
+        self.lsof.assert_called()
+
+    def test_cleanup_excludes_its_own_cwd_claim(self) -> None:
+        tree = self.trees / "done"
+        self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, f"p{os.getpid()}\nn{tree}\n", "")
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+        self.lsof.assert_called()
+
+    def test_a_process_cwd_claim_appearing_in_the_final_locked_recheck_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def launch_then_lock(trees: Path):
+            with real_lock(trees):
+                def processes(*args, **kwargs):
+                    probe = os.open(trees, os.O_RDONLY)
+                    try:
+                        with self.assertRaises(BlockingIOError):
+                            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    finally:
+                        os.close(probe)
+                    return subprocess.CompletedProcess(["lsof"], 0, f"p12345\nn{tree}\n", "")
+
+                self.lsof.side_effect = processes
+                yield
+                self.lsof.side_effect = None
+
+        with mock.patch.object(cleanup, "trees_lock", launch_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("live process in tree (pid 12345)", self.kept(out).get("done", out))
         self.assertTrue(tree.is_dir())
 
     def test_a_reused_pid_is_not_a_live_worker(self) -> None:

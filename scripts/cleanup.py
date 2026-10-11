@@ -6,7 +6,8 @@ removes, and logs each removal and each refusal on the owning store items. A tre
 verified:
 
 - owner: it is a linked worktree, the store items that own it are all finished (closed on the forge), and no live
-  worker claims it. A registered worker whose PID was reused is gone; one that cannot be verified is not;
+  worker claims it or process has its cwd inside it. A registered worker whose PID was reused is gone; one that
+  cannot be verified is not;
 - `git status --porcelain --ignored` lists nothing but build output or engine metadata (`tree_state.unsaved`);
 - no initialized submodule metadata remains (submodule contents are never inspected);
 - no container binds a path inside it;
@@ -20,6 +21,7 @@ workers never remove a tree (B10).
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -83,9 +85,40 @@ def inside(path: Path, tree: Path) -> bool:
     return path == tree or path.is_relative_to(tree)
 
 
+def processes() -> list[tuple[int, Path]] | None:
+    """The resolved cwd of every live process; None when lsof cannot say."""
+    found: list[tuple[int, Path]] = []
+    try:
+        result = subprocess.run(["lsof", "-a", "-d", "cwd", "-Fpn"],
+                                capture_output=True, text=True, timeout=TIMEOUT)
+        if result.returncode == 1 and not result.stdout and not result.stderr:
+            return []
+        if result.returncode:
+            return None
+        pid = None
+        for line in result.stdout.splitlines():
+            if line.startswith("p") and pid is None:
+                pid = int(line[1:])
+                if pid <= 0:
+                    return None
+            elif line == "fcwd" and pid is not None:
+                continue  # lsof includes the descriptor even with -Fpn
+            elif line.startswith("n") and pid is not None and Path(line[1:]).is_absolute():
+                found.append((pid, Path(line[1:]).resolve()))
+                pid = None
+            else:
+                return None
+        if pid is not None:
+            return None
+    except (OSError, subprocess.SubprocessError, ValueError, RuntimeError):
+        return None
+    return found
+
+
 def claims(root: Path, trees: Path, tree: Path) -> list[str]:
     """Why a worker's claim keeps `tree`, read fresh: a registered worker that is running or cannot be verified (a
-    reused PID is gone), an unreadable registry entry, a live one-shot pid file, or one still awaiting reconciliation."""
+    reused PID is gone), an unreadable registry entry, a process in the tree, a live one-shot pid file, or one still
+    awaiting reconciliation."""
     regs = registrations(root)
     out = [] if len(list((root / ".chief-of-stuff" / "sessions").glob("*.json"))) == len(regs) else [
         "the worker registry has an unreadable entry"]
@@ -97,6 +130,11 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
             out.append(f"live worker {record['name']} (pid {pid})")
         elif state not in ("gone", "pid_reused"):
             out.append(f"worker {record['name']} (pid {pid}) cannot be verified")
+    current = processes()
+    if current is None:
+        out.append("open processes cannot be checked")
+    else:
+        out += [f"live process in tree (pid {pid})" for pid, cwd in current if pid != os.getpid() and inside(cwd, tree)]
     # Adoption reads a dead worker's dispatch, result and logs until this run's launcher report exists. Do not parse
     # the worker-written pid file here: an unreadable claim must also keep its evidence, without scanning trackers.
     pidfile = tree / PIDFILE
