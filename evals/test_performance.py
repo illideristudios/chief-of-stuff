@@ -133,6 +133,18 @@ class PerformanceReportTest(unittest.TestCase):
         self.assertRegex(out, r"\b1\b")  # runs
         self.assertIn("25", out)  # median minutes
 
+    def test_a_store_at_an_older_revision_is_brought_up_before_the_query(self) -> None:
+        old = self.root / "old"
+        old.mkdir()
+        (old / "CLAUDE.md").write_text(COORD)
+        cfg = store.Config()
+        cfg.set_main_option("script_location", str(ROOT / "scripts" / "migrations"))
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{old / 'store.db'}")
+        cfg.attributes["metadata"] = store.Base.metadata
+        store.command.upgrade(cfg, "0001")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(performance_report.main(["--root", str(old), "--since", "2026-10-09"]), 0)
+
     def test_the_router_runs_it_as_performance(self) -> None:
         sys.path.insert(0, str(ROOT))
         import chief_of_stuff
