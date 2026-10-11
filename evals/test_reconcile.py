@@ -197,6 +197,22 @@ class ReconcileTest(unittest.TestCase):
                 item = replace(Item(), stage="merge", review_state=state, merge_state="ready")
                 self.assertEqual(self.plan(item, [Segment("implement")], {}), [expected])
 
+    def test_start_merge_without_edges_merges(self):
+        self.p = policy.parse({
+            "default_workflow": "merge_only",
+            "stages": {"merge": {}},
+            "workflows": {"merge_only": {"start": "merge", "edges": []}},
+        })
+        for stage in ("", "merge"):
+            with self.subTest(stage=stage):
+                item = replace(Item(), stage=stage, review_state="approved", merge_state="ready")
+                self.assertEqual(self.plan(item, findings={}, slots=0), [reconcile.Merge(KEY)])
+
+    def test_merge_with_incoming_edges_without_a_traversed_edge_waits(self):
+        self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(policy.Edge("implement", "merge"),))
+        item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
+        self.assertEqual(self.plan(item, findings={}), [reconcile.Wait(KEY, "no unique incoming merge edge")])
+
     def test_merge_rechecks_only_the_route_taken_into_merge(self):
         self.p.stages["plan"] = policy.Place("plan", "builder", {"zach_gates": ("merge",)})
         self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(

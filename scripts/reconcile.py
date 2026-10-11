@@ -131,6 +131,8 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         return Wait(key, "blocking review findings")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
+    if workflow.start == "merge" and not any(e.target == "merge" for e in workflow.edges):
+        return Merge(key)
     if len(edges) != 1:
         return Wait(key, "no unique incoming merge edge")
     return _gate(key, edges[0], policies, room, now) or Merge(key)
