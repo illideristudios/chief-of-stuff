@@ -39,6 +39,7 @@ DRAWS_NOTHING = (
     "policy",
     "forge",
     "issue_gate",
+    "trio_gate",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
