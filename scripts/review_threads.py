@@ -63,8 +63,11 @@ def github_threads(repo: str, approver: str, gh=backlog.run_gh) -> list[Thread]:
     code, out, err = gh(["api", "graphql", "-f", f"query={QUERY}", "-F", f"owner={owner}", "-F", f"name={name}"])
     if code != 0:
         raise RuntimeError(f"gh api graphql: {err.strip() or code}")
+    answer = json.loads(out)
+    if answer.get("errors"):  # partial data beside errors is never the whole set
+        raise RuntimeError(f"gh api graphql: {answer['errors']}")
     found = []
-    for pr in _whole("open pull requests", json.loads(out)["data"]["repository"]["pullRequests"]["nodes"]):
+    for pr in _whole("open pull requests", answer["data"]["repository"]["pullRequests"]["nodes"]):
         for t in _whole(f"#{pr['number']} review threads", pr["reviewThreads"]["nodes"]):
             comments = _whole(f"#{pr['number']} thread comments", t["comments"]["nodes"])
             if t["isResolved"] or not comments:

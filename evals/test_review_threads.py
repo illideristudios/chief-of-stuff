@@ -69,6 +69,12 @@ class GitHubThreadsTest(unittest.TestCase):
             rt.github_threads("o/app", "robin", lambda args, input_text=None: (0, json.dumps(graph), ""))
 
 
+    def test_a_partial_answer_with_graphql_errors_is_an_error(self):
+        partial = {**GRAPH, "errors": [{"message": "timeout"}]}
+        with self.assertRaisesRegex(RuntimeError, "timeout"):
+            rt.github_threads("o/app", "robin", lambda args, input_text=None: (0, json.dumps(partial), ""))
+
+
 class GitLabThreadsTest(unittest.TestCase):
     def test_gitlab_discussions_follow_the_same_rule(self):
         def note(user, body, nid, **kw):
