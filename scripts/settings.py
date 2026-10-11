@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
 
+import policy
 import runtimes
 from runtimes import NAMES as RUNTIMES
 
@@ -27,6 +28,7 @@ WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HERDR_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 CLAUDE_AS_PROFILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # claude-as's valid_profile_name
 DEFAULT_WARNINGS = ("24h", "3h", "1h")
+POLICY = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"  # the shipped policy and workflow
 EFFORTS = ("high", "medium", "low")
 
 
@@ -397,3 +399,11 @@ def load(root: Path, settings_path: str | None) -> Settings:
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
                     kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos)
+
+
+def load_policy(path: Path = POLICY) -> policy.Policies:
+    """The policy and workflow file (design decisions 12 and 13), the shipped one by default."""
+    try:
+        return policy.parse(tomllib.loads(Path(path).read_text()))
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        raise policy.PolicyError(f"{path}: {e}") from None

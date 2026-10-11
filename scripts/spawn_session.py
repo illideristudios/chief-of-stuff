@@ -375,7 +375,7 @@ def launch_env(parent: dict[str, str] | None = None) -> dict[str, str]:
     return {k: v for k, v in source.items() if k in KEEP and not k.upper().startswith("CLAUDE")}
 
 
-EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
+EFFORTS = ("", *runtimes.EFFORTS)
 CHECK_TREE = Path("<worktree>")  # --check makes no tree; the one-shot assignment still names one
 
 
