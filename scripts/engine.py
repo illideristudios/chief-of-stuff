@@ -108,8 +108,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                             max_concurrency=max_concurrency, clock=clock,
                             launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona)
             elif isinstance(action, reconcile.Merge):
-                engine_merge.execute(action, forge, store, at)
-                stage = "merge"
+                if engine_merge.execute(action, forge, store, at):
+                    stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
                 record = {"kind": type(action).__name__, "reason": action.reason}

@@ -16,6 +16,7 @@ import policy
 import reconcile
 import store
 import supervisor
+from forge_port import ForgeError
 
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
@@ -110,6 +111,34 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.items()[0].forge_state, "closed")
         self.assertEqual(len(self.launched), 2)
         self.cleanup.assert_called_with(self.root, self.trees, self.db, remove=True)
+
+    def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message):
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        writes = list(self.forge.writes)
+        with mock.patch.object(self.forge, "merge", side_effect=[outcome, outcome]) as merge:
+            for attempt in range(1, 3):
+                self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+                self.assertEqual(self.db.items()[0].stage, "review")
+                self.assertEqual(self.db.items()[0].forge_state, "open")
+                self.assertEqual(self.forge.rows[0]["stage"], "review")
+                self.assertEqual(self.forge.rows[0]["forge_state"], "open")
+                self.assertEqual(self.forge.writes, writes)
+                self.assertNotIn("pending_stage", self.db.resume(KEY))
+                self.assertEqual(self.db.log(KEY)[-1].message, message)
+                self.assertEqual(merge.call_args_list, [mock.call(10, commit=True, issue_key=KEY)] * attempt)
+
+    def test_queued_merge_keeps_stage_and_is_planned_again_next_pass(self):
+        self.assert_unconfirmed_merge_keeps_review_stage("queued #10", "queued #10")
+
+    def test_unknown_merge_keeps_stage_and_is_planned_again_next_pass(self):
+        self.assert_unconfirmed_merge_keeps_review_stage("unknown #10", "unknown #10")
+
+    def test_refused_verification_keeps_stage_and_is_planned_again_next_pass(self):
+        self.assert_unconfirmed_merge_keeps_review_stage(ForgeError("head changed"), "merge refused: head changed")
 
     def test_closed_forge_snapshot_is_not_dispatched(self):
         self.db.upsert_item(KEY, forge_state="open")
