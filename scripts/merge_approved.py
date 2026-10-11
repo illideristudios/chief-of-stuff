@@ -20,6 +20,7 @@ green pipeline on the head sha is what a worker merges on. With `user` merging s
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -36,14 +37,28 @@ def blocked(r: Request) -> list[str]:
 
 def merge_head(one: Request, home, github: bool, repo: str, gh=backlog.run_gh,
                call=backlog._call, token: str | None = None) -> tuple[int, str]:
-    """Merge at the checked head; return the status code and error."""
+    """Merge at the checked head; return the status code and merged/queued, or an error."""
     if github:
         # ponytail: squash, as this plugin's own repo merges; a [workflow] merge_method when a workspace differs.
         code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, "--squash", "--match-head-commit", one.head])
-        return code, err.strip() if code else ""
-    _, _, err = call("PUT", f"{home.api(repo)}/merge_requests/{one.number}/merge", token,
-                     backlog.TIMEOUT, {"sha": one.head})
-    return (1 if err else 0), err
+        if code:
+            return code, err.strip()
+        # A successful command may only have queued the request.
+        code, out, err = gh(["pr", "view", str(one.number), "-R", repo, "--json", "state"])
+        if code:
+            return code, err.strip() or f"gh pr view exited {code}"
+        state = json.loads(out)["state"].lower()
+    else:
+        response, _, err = call("PUT", f"{home.api(repo)}/merge_requests/{one.number}/merge", token,
+                               backlog.TIMEOUT, {"sha": one.head})
+        if err:
+            return 1, err
+        state = response["state"]
+    if state == "merged":
+        return 0, "merged"
+    if state in ("open", "opened"):
+        return 0, "queued"
+    return 1, f"request state after merge: {state}"
 
 
 def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -> int:
@@ -97,11 +112,14 @@ def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -
     if blocked(one):
         print(f"merge-approved: {mark}{one.number} not merged: {'; '.join(blocked(one))}", file=sys.stderr)
         return 1
-    code, err = merge_head(one, home, github, repo, gh, call, token=None if github else secret)
+    try:
+        code, result = merge_head(one, home, github, repo, gh, call, token=None if github else secret)
+    except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        code, result = 1, str(exc)
     if code:
-        print(f"merge-approved: {mark}{one.number} not merged: {err or f'merge exited {code}'}", file=sys.stderr)
+        print(f"merge-approved: {mark}{one.number} not merged: {result or f'merge exited {code}'}", file=sys.stderr)
         return 1
-    print(f"{mark}{one.number} merged at {one.head[:12]} · {one.url}")
+    print(f"{mark}{one.number} {result} at {one.head[:12]} · {one.url}")
     return 0
 
 

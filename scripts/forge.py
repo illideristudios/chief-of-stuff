@@ -64,6 +64,14 @@ class Forge:
             raise ForgeError(f"requests: {forge_review.REQUEST_LIMIT} open or more; refusing to read a partial list as whole")
         return got
 
+    def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
+        """The newest open request closing the issue, as snapshots report for rework."""
+        found = self.requests() if requests is None else requests
+        closing = [r for r in found if any(self.key(int(ref[1:])) == issue_key for ref in r.closes)]
+        if not closing:
+            raise ForgeError(f"no open request closes {issue_key}")
+        return max(closing, key=lambda r: r.number)
+
     def threads(self) -> list[review_threads.Thread]:
         """The user's unresolved review threads: fix work for the finding burn-down."""
         if not self.approver:
@@ -104,12 +112,17 @@ class Forge:
         return next((stage for stage in self.kanban.stage_map if self.kanban.label_for(stage) in labels), "")
 
     # writes: preview unless commit
-    def merge(self, number: int, commit: bool = False) -> str:
-        """Re-read merge readiness, then preview or merge only the verified head."""
+    def merge(self, number: int, commit: bool = False, issue_key: str | None = None) -> str:
+        """Re-read readiness and the issue's closing request, then preview, merge or queue the verified head."""
         mark = "#" if self.github else "!"
-        one = next((r for r in self.requests() if r.number == number), None)
+        found = self.requests()
+        one = next((r for r in found if r.number == number), None)
         if one is None:
             raise ForgeError(f"{mark}{number} is not an open request")
+        if issue_key is not None:
+            selected = self.closing_request(issue_key, found)
+            if selected.number != number:
+                raise ForgeError(f"{mark}{number} is no longer the newest request closing {issue_key}: {mark}{selected.number}")
         if one.verdict != "ready":
             raise ForgeError(f"not merged: {merge_ready.line(one, mark)}")
         evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
@@ -117,13 +130,13 @@ class Forge:
             return f"would merge {evidence}"
         _, repo = home_of(self.home)
         try:
-            code, error = merge_approved.merge_head(one, self.home, self.github, repo, gh=self.gh,
-                                                   call=backlog._call, token=None if self.github else self._token())
+            code, result = merge_approved.merge_head(one, self.home, self.github, repo, gh=self.gh,
+                                                    call=backlog._call, token=None if self.github else self._token())
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"{mark}{number} not merged at {one.head}: {exc}") from exc
         if code:
-            raise ForgeError(f"{mark}{number} not merged at {one.head}: {error or f'merge exited {code}'}")
-        return f"merged {evidence}"
+            raise ForgeError(f"{mark}{number} not merged at {one.head}: {result or f'merge exited {code}'}")
+        return f"{result} {evidence}"
 
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:

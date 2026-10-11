@@ -55,6 +55,9 @@ class FakeGh:
             return 0, json.dumps(self.prs), ""
         if args[:2] == ["pr", "merge"]:
             return 0, "", ""
+        if args[:2] == ["pr", "view"]:
+            state = "MERGED" if any(c[2] == args[2] for c in self.merges) else "OPEN"
+            return 0, json.dumps({"state": state}), ""
         return 1, "", "unexpected"
 
     @property

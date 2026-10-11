@@ -62,9 +62,55 @@ class ExecutorTest(unittest.TestCase):
     def test_a_refusal_is_logged_once_with_no_retry_or_crash(self):
         with mock.patch.object(forge.Forge, "merge", side_effect=forge.ForgeError("head changed")) as merge:
             self.assertFalse(self.execute())
-        merge.assert_called_once_with(21, commit=True)
+        merge.assert_called_once_with(21, commit=True, issue_key=self.key)
         self.assertIn("merge refused", self.message())
         self.assertIn("head changed", self.db.log(self.key)[0].message)
+
+    def test_a_queued_github_request_is_logged_once_and_returns_false(self):
+        def queued(args, input_text=None):
+            if args[:2] == ["pr", "view"]:
+                return 0, '{"state": "OPEN"}', ""
+            return self.gh(args, input_text)
+
+        self.forge = forge.Forge(tf.GH, gh=queued)
+        self.assertFalse(self.execute())
+        self.assertEqual(len(self.gh.merges), 1)
+        self.assertTrue(self.message().startswith("queued #21 "))
+
+    def test_a_body_edited_to_close_another_issue_at_verification_is_refused(self):
+        reads = 0
+
+        def changed(args, input_text=None):
+            nonlocal reads
+            if args[:2] == ["pr", "list"]:
+                reads += 1
+                if reads == 2:
+                    self.gh.prs[0]["body"] = "Closes #4"
+            return self.gh(args, input_text)
+
+        self.forge = forge.Forge(tf.GH, gh=changed)
+        self.assertFalse(self.execute())
+        self.assertEqual(reads, 2)
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("no open request closes", self.message())
+
+    def test_a_newer_closing_request_at_verification_supersedes_the_selected_one(self):
+        reads = 0
+
+        def changed(args, input_text=None):
+            nonlocal reads
+            if args[:2] == ["api", "graphql"]:
+                reads += 1
+                if reads == 2:
+                    self.gh.prs.append({**tma.pr(22, []), "body": "Closes #3"})
+            return self.gh(args, input_text)
+
+        self.forge = forge.Forge(tf.GH, gh=changed)
+        self.assertFalse(self.execute())
+        self.assertEqual(reads, 2)
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("merge refused", self.message())
+        self.assertIn("#22", self.db.log(self.key)[0].message)
 
     def test_no_request_closing_the_issue_is_a_logged_refusal(self):
         self.gh.prs[0]["body"] = "Closes #4"
@@ -132,6 +178,28 @@ class ExecutorTest(unittest.TestCase):
             self.assertTrue(self.execute())
         self.assertEqual(calls, [{"sha": tma.HEAD}])
         self.assertIn("!5", self.message())
+
+    def test_a_queued_gitlab_request_is_logged_once_and_returns_false(self):
+        self.forge = forge.Forge(tf.GL, token="t")
+        self.key = self.forge.key(3)
+        self.action = Merge(self.key)
+        self.db.upsert_item(self.key)
+        writes = []
+        read = tmr.gitlab_fake({5: {}})
+
+        def call(method, url, token, timeout, payload=None):
+            if method == "PUT":
+                writes.append(payload)
+                return {"state": "opened", "merge_when_pipeline_succeeds": True}, {}, ""
+            row, headers, error = read(method, url, token, timeout, payload)
+            if url.endswith("/merge_requests/5"):
+                row = {**row, "description": "Closes #3"}
+            return row, headers, error
+
+        with mock.patch.object(forge.backlog, "_call", call):
+            self.assertFalse(self.execute())
+        self.assertEqual(writes, [{"sha": tma.HEAD}])
+        self.assertTrue(self.message().startswith("queued !5 "))
 
 
 if __name__ == "__main__":

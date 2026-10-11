@@ -269,6 +269,21 @@ class ThreadsTest(unittest.TestCase):
 
 
 class MergeTest(unittest.TestCase):
+    def test_a_successful_github_merge_that_leaves_the_request_open_is_queued(self):
+        gh = tmr.github_gh([21])
+        reads = []
+
+        def queued(args, input_text=None):
+            if args[:2] == ["pr", "view"]:
+                reads.append(args)
+                return 0, json.dumps({"state": "OPEN"}), ""
+            return gh(args, input_text)
+
+        got = forge.Forge(GH, gh=queued).merge(21, commit=True)
+        self.assertTrue(got.startswith("queued "), got)
+        self.assertEqual(len(gh.merges), 1)
+        self.assertEqual(reads, [["pr", "view", "21", "-R", REPO, "--json", "state"]])
+
     def test_a_ready_request_merges_pinned_to_the_verified_head(self):
         gh = tmr.github_gh([21])
         got = forge.Forge(GH, gh=gh).merge(21, commit=True)
@@ -345,6 +360,21 @@ class MergeTest(unittest.TestCase):
 
 
 class GitLabMergeTest(unittest.TestCase):
+    def test_gitlab_merge_when_pipeline_succeeds_is_queued_until_merged(self):
+        read = tmr.gitlab_fake({5: {}})
+        writes = []
+
+        def queued(method, url, token, timeout, payload=None):
+            if method == "PUT":
+                writes.append(payload)
+                return {"state": "opened", "merge_when_pipeline_succeeds": True}, {}, ""
+            return read(method, url, token, timeout, payload)
+
+        with mock.patch.object(backlog, "_call", queued):
+            got = forge.Forge(GL, token="t").merge(5, commit=True)
+        self.assertTrue(got.startswith("queued "), got)
+        self.assertEqual(writes, [{"sha": tma.HEAD}])
+
     def fake(self, options=None, moved=False):
         read = tmr.gitlab_fake({5: options or {}})
         writes, landed = [], []
