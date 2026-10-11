@@ -7,6 +7,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,8 @@ import slots  # noqa: E402
 import store  # noqa: E402
 
 KEY = "github:example/repo#12"
+PINNED = datetime(2026, 10, 11, 9, 0, 0, tzinfo=timezone.utc)
+POST_LAUNCH = datetime(2026, 10, 11, 9, 5, 0, tzinfo=timezone.utc)
 
 
 class FreeSlotsTest(unittest.TestCase):
@@ -56,7 +59,7 @@ def _claim_child(barrier, out: str, db_path: str, trees: str, i: int, cap: int) 
     outcome = "refused"
     try:
         slots.claim(Path(trees), db, issue_key=KEY, stage="implement", attempt=i + 1,
-                    started_at=f"t{i}", max_concurrency=cap, launch=_noop)
+                    max_concurrency=cap, launch=_noop)
         outcome = "in"
     except ValueError:
         pass
@@ -80,34 +83,45 @@ class ClaimTest(unittest.TestCase):
         self.out = self.root / "out"
         self.out.mkdir()
 
+    def test_claim_stamps_started_at_after_launch(self) -> None:
+        # Wait-for-lock / prior-worker launch must not charge the new segment; stamp after launch.
+        now = [PINNED]
+
+        def advancing_launch() -> None:
+            now[0] = POST_LAUNCH
+
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, launch=advancing_launch, clock=lambda: now[0])
+        self.assertEqual(self.db.segments(KEY)[0].started_at, POST_LAUNCH.isoformat())
+
     def test_claim_records_a_running_segment_when_a_slot_is_free(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                    started_at="09:00", max_concurrency=1, launch=_noop)
+                    max_concurrency=1, launch=_noop, clock=lambda: PINNED)
         segs = self.db.segments(KEY)
         self.assertEqual([(s.stage, s.attempt, s.started_at, s.ended_at) for s in segs],
-                         [("implement", 1, "09:00", None)])
+                         [("implement", 1, PINNED.isoformat(), None)])
         self.assertEqual(slots.running(self.db), 1)
 
     def test_claim_refuses_when_full(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                    started_at="09:00", max_concurrency=1, launch=_noop)
+                    max_concurrency=1, launch=_noop, clock=lambda: PINNED)
         with self.assertRaises(ValueError) as caught:
             slots.claim(self.trees, self.db, issue_key=KEY, stage="review", attempt=1,
-                        started_at="09:01", max_concurrency=1, launch=_noop)
+                        max_concurrency=1, launch=_noop, clock=lambda: PINNED)
         self.assertIn("max_concurrency is 1", str(caught.exception))
         self.assertEqual(slots.running(self.db), 1)
 
     def test_claim_refuses_a_duplicate_segment_even_with_spare_capacity(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                    started_at="09:00", max_concurrency=2, launch=_noop)
+                    max_concurrency=2, launch=_noop, clock=lambda: PINNED)
         with self.assertRaises(ValueError):
             slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                        started_at="09:01", max_concurrency=2, launch=_noop)
+                        max_concurrency=2, launch=_noop, clock=lambda: PINNED)
         self.assertEqual(slots.running(self.db), 1)
         self.db.record_segment(KEY, "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
         with self.assertRaises(ValueError):
             slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                        started_at="10:01", max_concurrency=2, launch=_noop)
+                        max_concurrency=2, launch=_noop, clock=lambda: PINNED)
         self.assertEqual(self.db.segments(KEY)[0].ended_at, "10:00")
 
     def test_failed_launch_records_nothing_and_frees_the_slot(self) -> None:
@@ -116,11 +130,11 @@ class ClaimTest(unittest.TestCase):
 
         with self.assertRaises(RuntimeError):
             slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                        started_at="09:00", max_concurrency=1, launch=boom)
+                        max_concurrency=1, launch=boom, clock=lambda: PINNED)
         self.assertEqual(self.db.segments(KEY), [])
         self.assertEqual(slots.running(self.db), 0)
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                    started_at="09:00", max_concurrency=1, launch=_noop)
+                    max_concurrency=1, launch=_noop, clock=lambda: PINNED)
         self.assertEqual(slots.running(self.db), 1)
 
     def test_contending_claim_waits_while_launch_holds_the_lock(self) -> None:
@@ -134,7 +148,7 @@ class ClaimTest(unittest.TestCase):
         holder = threading.Thread(
             target=slots.claim,
             kwargs=dict(trees=self.trees, store=self.db, issue_key=KEY, stage="implement",
-                        attempt=1, started_at="09:00", max_concurrency=2, launch=slow_launch),
+                        attempt=1, max_concurrency=2, launch=slow_launch),
         )
         holder.start()
         self.assertTrue(in_launch.wait(5))
@@ -142,7 +156,7 @@ class ClaimTest(unittest.TestCase):
         contender = threading.Thread(
             target=slots.claim,
             kwargs=dict(trees=self.trees, store=self.db, issue_key=KEY, stage="review",
-                        attempt=1, started_at="09:01", max_concurrency=2, launch=_noop),
+                        attempt=1, max_concurrency=2, launch=_noop),
         )
         contender.start()
         contender.join(0.3)

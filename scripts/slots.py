@@ -16,6 +16,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+import clock
+
 # No `[workers] max_concurrency`: treat as this many free slots so reconcile can dispatch freely.
 UNBOUNDED = 10**9
 
@@ -44,8 +46,9 @@ def _exclusive(path: Path) -> Iterator[None]:
         os.close(lock)
 
 
-def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int, started_at: str,
-          max_concurrency: int | None, launch: Callable[[], None]) -> None:
+def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
+          max_concurrency: int | None, launch: Callable[[], None],
+          clock: clock.Clock = clock.system) -> None:
     """Claim one worker slot: recount, refuse a duplicate, launch, then record the start — or refuse."""
     with _exclusive(trees):
         n = running(store)
@@ -54,4 +57,4 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int, 
         if any(s.stage == stage and s.attempt == attempt for s in store.segments(issue_key)):
             raise ValueError(f"segment {issue_key} {stage} attempt {attempt} already exists")
         launch()
-        store.record_segment(issue_key, stage, attempt, started_at=started_at)
+        store.record_segment(issue_key, stage, attempt, started_at=clock().isoformat())
