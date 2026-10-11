@@ -45,7 +45,24 @@ class GateTest(unittest.TestCase):
         # Starting the same issue again is the same row.
         issue_gate.start(f, self.store, "Add a flag", issue=101, commit=True)
         self.assertEqual(len(self.store.items()), 1)
-        self.assertEqual(len(gh.all_calls), 1, "work on an issue that exists files nothing")
+        self.assertEqual([c[:2] for c in gh.all_calls][1:], [["issue", "view"]], "work on an issue that exists files nothing")
+
+    def test_a_supplied_issue_is_confirmed_on_the_forge_and_its_title_is_the_forges(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])
+        got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "a caller's name for it", issue=3, commit=True)
+        self.assertEqual(got.issue_key, "github:example/app#3")
+        self.assertEqual([(i.issue_key, i.title) for i in self.store.items()], [("github:example/app#3", "Fix the parser")])
+
+    def test_a_supplied_issue_the_forge_does_not_confirm_is_refused_and_writes_no_row(self):
+        got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Add a flag", issue=999999, commit=True)
+        self.assertIn("#999999", got.refused)
+        self.assertEqual(self.store.items(), [])
+
+    def test_a_preview_of_work_on_an_existing_issue_writes_nothing(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])
+        got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "Fix the parser", issue=3)
+        self.assertEqual(got, issue_gate.Started(preview="would start: github:example/app#3 Fix the parser"))
+        self.assertEqual(self.store.items(), [])
 
     def test_on_gitlab_too(self):
         def call(method, url, token, timeout, payload=None):

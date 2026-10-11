@@ -50,6 +50,8 @@ class FakeGh(tma.FakeGhGraphql):
         if args[:2] == ["issue", "list"]:
             return 0, json.dumps(list(self.issues.values())), ""
         if args[:2] == ["issue", "view"]:
+            if int(args[2]) not in self.issues:
+                return 1, "", "Could not resolve to an issue"
             return 0, json.dumps(self.issues[int(args[2])]), ""
         if args[:2] == ["issue", "edit"]:
             row = self.issues[int(args[2])]
@@ -61,6 +63,7 @@ class FakeGh(tma.FakeGhGraphql):
         if args[:2] == ["label", "list"]:
             return 0, json.dumps([{"name": n} for n in (*FLOW.stages, FLOW.human_review_label)]), ""
         if args[:2] == ["issue", "create"]:
+            self.issues[101] = gh_issue(101, args[args.index("--title") + 1])
             return 0, f"https://github.com/{REPO}/issues/101\n", ""
         return super().__call__(args, input_text)
 
@@ -98,6 +101,11 @@ class GitHubTest(unittest.TestCase):
                 gh.fail = {broken}
                 with self.assertRaises(forge.ForgeError):
                     forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots()
+
+    def test_a_request_read_that_reaches_the_cap_is_an_error_never_a_whole_answer(self):
+        gh = FakeGh(issues=[gh_issue(3, "x")], prs=[tma.pr(n, []) for n in range(1, forge.forge_review.REQUEST_LIMIT + 1)])
+        with self.assertRaisesRegex(forge.ForgeError, "or more"):
+            forge.Forge(GH, gh=gh).snapshots()
 
     def test_reads_use_gh_subcommands_and_graphql_only_for_what_no_subcommand_answers(self):
         gh = github()
@@ -202,13 +210,14 @@ def gitlab_call(issues, mrs, fail=""):
     return call
 
 
-def gl_issue(iid, title, labels=()):
-    return {"iid": iid, "title": title, "state": "opened", "labels": list(labels), "web_url": "", "updated_at": "", "closed_at": ""}
+def gl_issue(iid, title, labels=(), description=""):
+    return {"iid": iid, "title": title, "state": "opened", "labels": list(labels), "web_url": "", "updated_at": "", "closed_at": "",
+            "description": description}
 
 
 class GitLabTest(unittest.TestCase):
     def setUp(self):
-        self.call = gitlab_call({3: gl_issue(3, "Fix the parser", ["stage: review"]), 4: gl_issue(4, "Add a flag")},
+        self.call = gitlab_call({3: gl_issue(3, "Fix the parser", ["stage: review"], "what to fix"), 4: gl_issue(4, "Add a flag")},
                                 {5: {"approved_by": ["robin"], "description": "Fixes #3"}})
         patcher = mock.patch.object(backlog, "_call", self.call)
         patcher.start()
@@ -228,6 +237,16 @@ class GitLabTest(unittest.TestCase):
             with self.subTest(broken=broken), mock.patch.object(backlog, "_call", gitlab_call({}, {}, fail=broken)):
                 with self.assertRaises(forge.ForgeError):
                     self.forge.snapshots()
+
+    def test_one_issue_reads_with_its_description_as_its_body(self):
+        got = self.forge.issue(3)
+        self.assertEqual((got.issue.iid, got.issue.body), (3, "what to fix"))
+
+    def test_a_request_read_that_reaches_the_cap_is_an_error_never_a_whole_answer(self):
+        mrs = {n: {"approved_by": [], "description": ""} for n in range(1, forge.forge_review.REQUEST_LIMIT + 1)}
+        with mock.patch.object(backlog, "_call", gitlab_call({}, mrs)):
+            with self.assertRaisesRegex(forge.ForgeError, "or more"):
+                self.forge.snapshots()
 
     def test_a_committed_stage_write_swaps_the_stage_label(self):
         got = self.forge.write_stage(3, "doing", expected="review", commit=True)

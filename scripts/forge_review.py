@@ -18,6 +18,7 @@ from workspace import ConfigError, read_config
 
 PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}  # a completed check that concluded anything else (STALE, "") is not a pass
 GITLAB_PIPELINE = {"success": "passed", "failed": "failed", "canceled": "failed"}
+REQUEST_LIMIT = 100  # the most open requests one read lists; a read this long may have been cut off
 CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(#\d+)")
 
 
@@ -134,7 +135,7 @@ class Request:
 
 
 def github_requests(repo: str, approver: str, gh=backlog.run_gh) -> list[Request]:
-    code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", "100", "--json",
+    code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", str(REQUEST_LIMIT), "--json",
                          "number,title,url,headRefOid,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus,body"])
     if code != 0:
         raise RuntimeError(f"gh pr list: {err.strip() or code}")
@@ -151,7 +152,7 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
     # ponytail: GitLab's approvals API names no commit, so an approval counts for the head only when the
     # project resets approvals on push. Check that project setting once; a per-note sha check if it is off.
     base = home.api(project)
-    listed, _, err = call("GET", f"{base}/merge_requests?" + urlencode({"state": "opened", "per_page": 100}), token, backlog.TIMEOUT)
+    listed, _, err = call("GET", f"{base}/merge_requests?" + urlencode({"state": "opened", "per_page": REQUEST_LIMIT}), token, backlog.TIMEOUT)
     if err:
         raise RuntimeError(f"merge requests: {err}")
     out = []

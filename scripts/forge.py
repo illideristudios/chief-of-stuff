@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import backlog
+import forge_review
 import kanban
 import merge_ready
 import review_threads
@@ -55,11 +56,14 @@ class Forge:
     def requests(self) -> list[merge_ready.Request]:
         """Open pull or merge requests with their merge verdict (#419) and the approver's approval."""
         try:
-            if self.github:
-                return merge_ready.github_ready(self.home.repo, self.gh, self.approver)
-            return merge_ready.gitlab_ready(self.home, self.home.project, self._token(), backlog._call, self.approver)
+            got = (merge_ready.github_ready(self.home.repo, self.gh, self.approver) if self.github else
+                   merge_ready.gitlab_ready(self.home, self.home.project, self._token(), backlog._call, self.approver))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}") from exc
+        if len(got) >= forge_review.REQUEST_LIMIT:
+            # shortcut: refuse rather than page; page the list and the graphql read when a repo keeps this many open
+            raise ForgeError(f"requests: {forge_review.REQUEST_LIMIT} open or more; refusing to read a partial list as whole")
+        return got
 
     def threads(self) -> list[review_threads.Thread]:
         """The user's unresolved review threads: fix work for the finding burn-down."""
