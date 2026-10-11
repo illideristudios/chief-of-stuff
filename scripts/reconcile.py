@@ -113,9 +113,16 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
            room: str | None, now: datetime, counts: Mapping[str, int] | None, edges: Sequence[Edge]) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
-    if item.review_state not in ("approved", "changes_requested"):
-        if "review" in stages:
+    if item.review_state == "changes_requested":
+        return Wait(key, "changes requested on the forge")
+    if "review" in stages:
+        completed = tuple(s for s in history if s.started_at and s.ended_at)
+        review = max((s for s in completed if s.stage == "review" and s.outcome != "failed"),
+                     key=lambda s: _time(s.started_at), default=None)
+        if review is None or any(s.stage not in ("review", "merge")
+                                 and _time(s.started_at) >= _time(review.started_at) for s in completed):
             return _work(key, "review", history, policies, room)
+    elif item.review_state != "approved":
         return Wait(key, "review has not run")
     if counts is None:
         return Wait(key, "review findings are unknown")

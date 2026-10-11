@@ -102,7 +102,7 @@ class ReconcileTest(unittest.TestCase):
     def test_shipped_workflow_reviews_all_three_fix_rounds_before_escalating(self):
         path = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"
         self.p = policy.parse(tomllib.loads(path.read_text()))
-        item = replace(Item(), stage="review", review_state="changes_requested", merge_state="ready")
+        item = replace(Item(), stage="review", review_state="none", merge_state="ready")
         history = [Segment(stage, started_at=NOW - timedelta(hours=6 - i))
                    for i, stage in enumerate(("plan", "implement", "review"))]
         for attempt in range(1, 4):
@@ -144,38 +144,77 @@ class ReconcileTest(unittest.TestCase):
         item = replace(Item(), stage="review", review_state="approved", merge_state="ready")
         self.assertEqual(self.plan(item, [Segment("review")], {}, slots=0), [reconcile.Merge(KEY)])
 
+    def test_completed_review_without_forge_approval_merges(self):
+        history = [Segment("implement"), Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
+        for stage in ("review", "merge"):
+            for order in (history, history[::-1]):
+                with self.subTest(stage=stage, history=order):
+                    item = replace(Item(), stage=stage, review_state="none", merge_state="ready")
+                    self.assertEqual(self.plan(item, order, {}, slots=0), [reconcile.Merge(KEY)])
+
+    def test_work_completed_after_review_requires_another_review_even_with_forge_approval(self):
+        item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
+        for stage in ("plan", "implement", "fix"):
+            history = [Segment("review"), Segment(stage, started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
+            for order in (history, history[::-1]):
+                with self.subTest(stage=stage, history=order):
+                    self.assertEqual(self.plan(item, order, {}), [reconcile.Review(KEY, 2)])
+
+    def test_forge_changes_requested_waits_even_after_a_clean_review(self):
+        for stage in ("review", "merge"):
+            with self.subTest(stage=stage):
+                item = replace(Item(), stage=stage, review_state="changes_requested", merge_state="ready")
+                self.assertEqual(self.plan(item, [Segment("review")], {}),
+                                 [reconcile.Wait(KEY, "changes requested on the forge")])
+
+    def test_a_failed_review_is_not_review_evidence(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        self.assertEqual(self.plan(item, [Segment("review", outcome="failed")], {}), [reconcile.Review(KEY, 2)])
+
     def test_merge_requires_ready_state_completed_review_and_known_findings(self):
         item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
-        self.assertIsInstance(self.plan(replace(item, merge_state="blocked"), findings={})[0], reconcile.Wait)
-        self.assertIsInstance(self.plan(item)[0], reconcile.Wait)
-        self.assertIsInstance(self.plan(replace(item, review_state=""), findings={})[0], reconcile.Review)
-        self.assertIsInstance(self.plan(item, findings={"critical": 1})[0], reconcile.Wait)
+        history = [Segment("review")]
+        self.assertEqual(self.plan(replace(item, merge_state="blocked"), history, {}),
+                         [reconcile.Wait(KEY, "merge is not ready")])
+        self.assertEqual(self.plan(item, history), [reconcile.Wait(KEY, "review findings are unknown")])
+        self.assertEqual(self.plan(item, findings={}), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(item, history, {"critical": 1}), [reconcile.Wait(KEY, "blocking review findings")])
 
     def test_merge_gate_is_rechecked_for_items_already_at_merge(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",)})
-        item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
+        item = replace(Item(), stage="merge", review_state="none", merge_state="ready")
         self.assertEqual(self.plan(item, [Segment("review")], {}),
                          [reconcile.Ask(KEY, "merge", "gate requires Zach's approval")])
         self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",),
                                          "approvals": (policy.Approval("merge", NOW + timedelta(hours=1)),)})
         self.assertEqual(self.plan(item, [Segment("review")], {}), [reconcile.Merge(KEY)])
 
+    def test_workflow_without_review_keeps_its_forge_review_requirement(self):
+        self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(policy.Edge("implement", "merge"),))
+        for state, expected in (("approved", reconcile.Merge(KEY)),
+                                ("none", reconcile.Wait(KEY, "review has not run"))):
+            with self.subTest(state=state):
+                item = replace(Item(), stage="merge", review_state=state, merge_state="ready")
+                self.assertEqual(self.plan(item, [Segment("implement")], {}), [expected])
+
     def test_merge_rechecks_only_the_route_taken_into_merge(self):
+        self.p.stages["plan"] = policy.Place("plan", "builder", {"zach_gates": ("merge",)})
         self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
-            policy.Edge("implement", "review"), policy.Edge("implement", "merge"),
-            policy.Edge("review", "merge", "merge")))
-        self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",)})
+            policy.Edge("implement", "plan"), policy.Edge("implement", "merge"),
+            policy.Edge("plan", "merge", "merge")))
         item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
-        history = [Segment("review"), Segment("implement", started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
+        history = [Segment("plan"), Segment("implement", started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
         for order in (history, history[::-1]):
             with self.subTest(history=order):
                 self.assertEqual(self.plan(item, order, {}), [reconcile.Merge(KEY)])
 
     def test_merge_waits_when_the_traversed_edge_cannot_be_determined(self):
         item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
-        for history in ([], [Segment("implement")]):
-            with self.subTest(history=history):
-                self.assertEqual(self.plan(item, history, {}), [reconcile.Wait(KEY, "no unique incoming merge edge")])
+        self.p.stages["plan"] = policy.Place("plan", "builder")
+        history = [Segment("implement"), Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
+        self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
+            policy.Edge("implement", "review"), policy.Edge("review", "plan"), policy.Edge("plan", "merge")))
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Wait(KEY, "no unique incoming merge edge")])
         self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
             policy.Edge("implement", "review"), policy.Edge("review", "merge"),
             policy.Edge("review", "merge", "merge")))
@@ -212,7 +251,7 @@ class ReconcileTest(unittest.TestCase):
 
     def test_blocking_threshold_comes_from_review_policy(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "important"})
-        item = replace(Item(), stage="review", review_state="changes_requested", merge_state="ready")
+        item = replace(Item(), stage="review", review_state="none", merge_state="ready")
         self.assertEqual(self.plan(item, [Segment("review")], {"minor": 2}), [reconcile.Merge(KEY)])
         for severity in ("critical", "important"):
             with self.subTest(severity=severity):
