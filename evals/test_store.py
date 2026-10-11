@@ -77,6 +77,17 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([(s.stage, s.attempt, s.outcome) for s in self.store.segments(KEY)],
                          [("implement", 1, "done"), ("review", 1, "findings"), ("implement", 2, "done")])
 
+    def test_a_retried_start_never_reopens_a_finished_segment(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        self.store.record_segment(KEY, "review", 1, started_at="10:00", ended_at="10:30", outcome="findings")
+        self.store.record_segment(KEY, "review", 1, started_at="10:00")
+        self.assertEqual([(s.ended_at, s.outcome) for s in self.store.segments(KEY)], [("10:30", "findings")])
+
+    def test_a_human_review_flag_for_an_issue_with_no_row_is_refused(self) -> None:
+        with self.assertRaises(KeyError):
+            self.store.set_human_review("github:example/repo#404", True)
+        self.assertEqual(self.store.items(), [])
+
     def test_a_segment_for_an_issue_with_no_row_is_refused(self) -> None:
         with self.assertRaises(IntegrityError):
             self.store.record_segment("github:example/repo#404", "review", 1, started_at="09:00")

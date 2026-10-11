@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, select
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -127,7 +127,11 @@ class Store:
         self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **fields, "updated_at": _now()})
 
     def set_human_review(self, issue_key: str, flag: bool) -> None:
-        self.upsert_item(issue_key, human_review=flag)
+        """Flag an existing item. The flag is engine data, so it never creates a row the forge does not know."""
+        with self.session() as s:
+            if s.execute(update(WorkItem).where(WorkItem.issue_key == issue_key)
+                         .values(human_review=flag, updated_at=_now())).rowcount == 0:
+                raise KeyError(issue_key)
 
     def items(self) -> list[WorkItem]:
         with self.session() as s:
@@ -143,9 +147,10 @@ class Store:
     # segments
     def record_segment(self, issue_key: str, stage: str, attempt: int, started_at: str,
                        ended_at: str | None = None, outcome: str | None = None) -> None:
+        # Omitted completion fields stay as stored, so a retried start never reopens a finished segment.
+        done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome)) if v is not None}
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
-                     {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at,
-                      "ended_at": ended_at, "outcome": outcome})
+                     {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
 
     def segments(self, issue_key: str) -> list[Segment]:
         return self._all(select(Segment).where(Segment.issue_key == issue_key).order_by(Segment.id))
