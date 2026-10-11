@@ -1,4 +1,4 @@
-"""The decision trio adopts only three matching recommendations (design 5a, plan M5 items 1-2)."""
+"""The decision trio adopts only three matching option choices (design 5a, plan M5 items 1-2)."""
 
 import json
 import sys
@@ -17,6 +17,7 @@ import trio_gate  # noqa: E402
 KEY = "github:example/app#7"
 DEFAULT = ("reviewer", "architect", "implementer")
 TAGGED = ("operator", "reviewer", "architect")
+OPTIONS = ("Split the parser", "Keep the parser")
 PERSONAS = {
     "reviewer": policy.Persona("reviewer", "checks correctness", "review-model", "high", ("Explain risks",)),
     "architect": policy.Persona("architect", "checks boundaries", "design-model", "max"),
@@ -25,8 +26,8 @@ PERSONAS = {
 }
 
 
-def reply(vote="adopt", recommendation="Split the parser", reasoning="Keeps parsing independent"):
-    return model_port.Reply("", {"vote": vote, "recommendation": recommendation, "reasoning": reasoning}, "", 0, 1)
+def reply(vote="adopt", choice="Split the parser", reasoning="Keeps parsing independent"):
+    return model_port.Reply("", {"vote": vote, "choice": choice, "reasoning": reasoning}, "", 0, 1)
 
 
 class FakeModel:
@@ -85,13 +86,13 @@ class GateTest(unittest.TestCase):
         self.addCleanup(self.store.engine.dispose)
         self.store.upsert_item(KEY, title="Separate parsing")
         self.policy = policy.Policy(trio=DEFAULT, trios={"operations": TAGGED})
-        self.decision = trio_gate.Decision(KEY, "architecture", "Should parsing be separate?", ("design",))
+        self.decision = trio_gate.Decision(KEY, "architecture", "Should parsing be separate?", OPTIONS, ("design",))
 
     def consult(self, replies, decision=None, resolved=None):
         self.model = FakeModel(replies)
         return trio_gate.consult(decision or self.decision, resolved or self.policy, PERSONAS, self.model, self.store)
 
-    def test_unanimous_adopt_uses_the_recommendation(self):
+    def test_three_adopts_on_the_same_option_adopt_even_with_different_reasoning(self):
         got = self.consult([reply(reasoning=f"Reason {i}") for i in range(3)])
         self.assertTrue(got.unanimous)
         self.assertFalse(got.escalated)
@@ -100,7 +101,8 @@ class GateTest(unittest.TestCase):
         self.assertEqual((row.answer, row.decided_by), ("Split the parser", "trio"))
 
     def test_each_persona_gets_a_structured_request_with_its_model_effort_and_profile(self):
-        self.consult([reply()] * 3)
+        decision = replace(self.decision, options=(*OPTIONS, "Defer the decision"))
+        self.consult([reply()] * 3, decision=decision)
         self.assertEqual(len(self.model.requests), 3)
         for request, name in zip(self.model.requests, DEFAULT):
             with self.subTest(persona=name):
@@ -109,10 +111,11 @@ class GateTest(unittest.TestCase):
                 self.assertEqual((request.model, request.effort), (persona.model, persona.effort or ""))
                 self.assertEqual((request.plugin_dirs, request.session_id, request.resume), ((), "", False))
                 self.assertEqual(request.schema["type"], "object")
-                self.assertEqual(set(request.schema["required"]), {"vote", "recommendation", "reasoning"})
+                self.assertEqual(set(request.schema["required"]), {"vote", "choice", "reasoning"})
                 self.assertEqual(request.schema["properties"]["vote"]["enum"], ["adopt", "concern"])
+                self.assertEqual(request.schema["properties"]["choice"]["enum"], list(decision.options))
                 self.assertFalse(request.schema["additionalProperties"])
-                for field in ("recommendation", "reasoning"):
+                for field in ("choice", "reasoning"):
                     self.assertEqual(request.schema["properties"][field]["type"], "string")
                 self.assertIn(persona.name, request.prompt)
                 self.assertIn(persona.role, request.prompt)
@@ -121,6 +124,9 @@ class GateTest(unittest.TestCase):
                 self.assertIn(self.decision.question, request.prompt)
                 self.assertIn(self.decision.topic, request.prompt)
                 self.assertIn("design", request.prompt)
+                for option in decision.options:
+                    self.assertIn(option, request.prompt)
+                self.assertIn("choose", request.prompt.lower())
 
     def test_the_tagged_trio_is_the_one_consulted(self):
         self.consult([reply()] * 3, decision=replace(self.decision, tags=("operations",)))
@@ -150,15 +156,15 @@ class GateTest(unittest.TestCase):
                 self.assertEqual((row.answer, row.decided_by), (None, "zach"))
                 verdict = row.record["verdicts"][0]
                 self.assertEqual(verdict["vote"], "concern")
-                self.assertIsNone(verdict["recommendation"])
+                self.assertIsNone(verdict["choice"])
                 self.assertIn(kind, verdict["reasoning"])
                 self.assertIn("No judgement available", verdict["reasoning"])
 
     def test_malformed_data_is_a_concern_even_if_the_reply_text_says_adopt(self):
         valid = reply().data
         malformed = [None, "adopt", [], {}, {**valid, "vote": "yes"}, {**valid, "vote": []},
-                     {**valid, "recommendation": None}, {**valid, "recommendation": 7},
-                     {**valid, "recommendation": "   "}, {**valid, "reasoning": False},
+                     {**valid, "choice": None}, {**valid, "choice": 7},
+                     {**valid, "choice": "   "}, {**valid, "reasoning": False},
                      {**valid, "reasoning": ""}, {**valid, "extra": "unexpected"}]
         malformed += [{k: v for k, v in valid.items() if k != missing} for missing in valid]
         for data in malformed:
@@ -173,16 +179,41 @@ class GateTest(unittest.TestCase):
                 self.assertEqual(row.record["verdicts"][1]["vote"], "concern")
                 self.assertIn("malformed", row.record["verdicts"][1]["reasoning"])
 
-    def test_three_adopt_votes_with_different_recommendations_escalate(self):
-        for recommendation in ("Keep the parser", "Split the parser "):
-            with self.subTest(recommendation=recommendation):
-                got = self.consult([reply(), reply(recommendation=recommendation), reply()])
+    def test_three_adopt_votes_split_across_options_escalate(self):
+        got = self.consult([reply(), reply(choice="Keep the parser"), reply()])
+        self.assertTrue(got.escalated)
+        self.assertFalse(got.unanimous)
+        self.assertIsNone(got.recommendation)
+        row, = self.store.decisions(KEY)
+        self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+        self.assertEqual([v["vote"] for v in row.record["verdicts"]], ["adopt"] * 3)
+        self.assertEqual([v["choice"] for v in row.record["verdicts"]], [OPTIONS[0], OPTIONS[1], OPTIONS[0]])
+
+    def test_a_choice_outside_the_options_is_a_malformed_concern(self):
+        for choice in ("Rewrite the parser", "Split the parser "):
+            with self.subTest(choice=choice):
+                got = self.consult([reply(), reply(choice=choice), reply()])
                 self.assertTrue(got.escalated)
                 self.assertFalse(got.unanimous)
                 self.assertIsNone(got.recommendation)
                 row = self.store.decisions(KEY)[-1]
                 self.assertEqual((row.answer, row.decided_by), (None, "zach"))
-                self.assertEqual(row.record["verdicts"][1]["recommendation"], recommendation)
+                verdict = row.record["verdicts"][1]
+                self.assertEqual(verdict["vote"], "concern")
+                self.assertIsNone(verdict["choice"])
+                self.assertIn("malformed", verdict["reasoning"])
+                self.assertEqual(len(self.model.requests), 3)
+
+    def test_invalid_options_raise_before_model_calls_and_write_no_decision(self):
+        for options in ((), (OPTIONS[0],), (OPTIONS[0], OPTIONS[0]), (*OPTIONS, OPTIONS[0]),
+                        (OPTIONS[0], ""), (OPTIONS[0], "   "), (OPTIONS[0], None), (OPTIONS[0], 7)):
+            with self.subTest(options=options):
+                model = FakeModel([reply()] * 3)
+                with self.assertRaises(ValueError):
+                    decision = replace(self.decision, options=options)
+                    trio_gate.consult(decision, self.policy, PERSONAS, model, self.store)
+                self.assertEqual(model.requests, [])
+                self.assertEqual(self.store.decisions(KEY), [])
 
     def test_the_full_record_round_trips_on_the_issue(self):
         reasons = ["Easy to test", "Preserves boundaries", "Small change"]
@@ -190,8 +221,8 @@ class GateTest(unittest.TestCase):
         row, = self.store.decisions(KEY)
         self.assertEqual((row.issue_key, row.topic, row.question), (KEY, self.decision.topic, self.decision.question))
         self.assertEqual(row.record, {
-            "decision": {**asdict(self.decision), "tags": list(self.decision.tags)},
-            "verdicts": [{"persona": name, "vote": "adopt", "recommendation": "Split the parser", "reasoning": reason}
+            "decision": {**asdict(self.decision), "options": list(self.decision.options), "tags": list(self.decision.tags)},
+            "verdicts": [{"persona": name, "vote": "adopt", "choice": "Split the parser", "reasoning": reason}
                          for name, reason in zip(DEFAULT, reasons)],
             "recommendation": "Split the parser", "unanimous": True,
         })
