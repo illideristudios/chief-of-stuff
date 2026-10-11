@@ -1969,10 +1969,10 @@ class RunTest(unittest.TestCase):
         self.assertFalse((self.tree / ".chief-of-stuff").exists())
         self.assertEqual(self.tracker.read_text(), TRACKER)
 
-    def test_claude_profile_runs_the_one_shot_through_claude_as(self):
+    def test_claude_as_profile_runs_the_one_shot_through_claude_as(self):
         # Zach, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `chief-of-stuff.toml`\n")
-        (self.root / "chief-of-stuff.toml").write_text('[workers]\nclaude_profile = "secondary"\n')
+        (self.root / "chief-of-stuff.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
         for runtime, program in (("claude", "claude-as"), ("codex", "codex")):
             with self.subTest(runtime=runtime):
                 out = io.StringIO()

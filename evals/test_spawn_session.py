@@ -1149,10 +1149,10 @@ print(found)
         self.assertEqual(self.calls(), [])
         self.assertFalse(self.dispatch.exists())
 
-    def test_claude_profile_launches_claude_workers_through_claude_as(self):
+    def test_claude_as_profile_launches_claude_workers_through_claude_as(self):
         # Zach, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
         claude_as = self.executable("claude-as", "")
-        (self.root / "chief-of-stuff.toml").write_text('[workers]\nlauncher = "herdr"\nclaude_profile = "secondary"\n')
+        (self.root / "chief-of-stuff.toml").write_text('[workers]\nlauncher = "herdr"\nclaude_as_profile = "secondary"\n')
         out = self.invoke(launcher=None, extra=["--dry-run"])
         self.assertEqual(out.returncode, 0, out.stderr)
         pane = shlex.split(out.stdout.splitlines()[1].removeprefix("would run: "))

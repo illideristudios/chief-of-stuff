@@ -482,7 +482,7 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
     body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
                                    runtime=runtime, one_shot=True)
     workers = load_settings(root, cfg.settings_path).workers
-    program, lead = runtimes.program(runtime, workers.claude_profile)
+    program, lead = runtimes.program(runtime, workers.claude_as_profile)
     binary = resolve(program)
     if not binary:
         raise ValueError(f"{program} is unavailable in the configured interactive login shell")

@@ -147,9 +147,9 @@ def _as_string(value: str) -> str:
 
 def worker_tokens(*, cwd: str, agent_type: str | None, binary: Path | None, title: str | None = None,
                   runtime: str = "claude", model: str = "", effort: str = "", workspace: str = ".",
-                  claude_profile: str = "") -> list[str]:
+                  claude_as_profile: str = "") -> list[str]:
     """The worker argv from `sys.executable` on, without the `env -C <root> PATH=... WORKSPACE=...` prefix."""
-    program, lead = runtimes.program(runtime, claude_profile)
+    program, lead = runtimes.program(runtime, claude_as_profile)
     if binary is None:
         raise RefusedError(f"cannot find `{program}` on PATH")
     root, dispatch = _paths(cwd)
@@ -342,10 +342,10 @@ def launch_herdr(create: list[str], pane_run: list[str]) -> None:
 
 def ghostty_script(*, cwd: str, agent_type: str | None, claude: Path | None, title: str | None = None,
                    runtime: str = "claude", model: str = "", effort: str = "", workspace: str = ".",
-                   claude_profile: str = "") -> str:
+                   claude_as_profile: str = "") -> str:
     """Build a Ghostty tab script with an absolute binary and the launching shell's PATH."""
     tokens = runtime_tokens(cwd=cwd, agent_type=agent_type, binary=claude, title=title, runtime=runtime,
-                            model=model, effort=effort, workspace=workspace, claude_profile=claude_profile)
+                            model=model, effort=effort, workspace=workspace, claude_as_profile=claude_as_profile)
     command = " ".join(shlex.quote(tok) for tok in tokens)
     # Surface configuration has no title field.
     named = (f'  perform action {_as_string("set_tab_title:" + title)} on focused terminal of tb\n'
@@ -489,8 +489,8 @@ def main(argv_in: list[str] | None = None) -> int:
         # The eval harness uses the argv override.
         worker = dict(cwd=args.cwd, agent_type=args.agent_type, title=args.title, runtime=args.runtime,
                       model=args.model, effort=args.effort, workspace=args.root,
-                      claude_profile=worker_settings.claude_profile)
-        program = runtimes.program(args.runtime, worker_settings.claude_profile)[0]
+                      claude_as_profile=worker_settings.claude_as_profile)
+        program = runtimes.program(args.runtime, worker_settings.claude_as_profile)[0]
         if override:
             command = argv(launcher(), agent_type=args.agent_type, cwd=args.cwd, title=args.title,
                            model=args.model, effort=args.effort, workspace=args.root)

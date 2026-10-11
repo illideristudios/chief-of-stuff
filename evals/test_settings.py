@@ -107,14 +107,19 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write(f"[workers]\nmax_concurrency = {bad}\n"))
 
-    def test_claude_profile_is_absent_or_a_claude_as_profile_name(self):
+    def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
         # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
-        self.assertEqual(st.load(self.root, None).workers.claude_profile, "")
-        got = st.load(self.root, self.write('[workers]\nclaude_profile = "secondary"\n')).workers
-        self.assertEqual(got.claude_profile, "secondary")
+        self.assertEqual(st.load(self.root, None).workers.claude_as_profile, "")
+        got = st.load(self.root, self.write('[workers]\nclaude_as_profile = "secondary"\n')).workers
+        self.assertEqual(got.claude_as_profile, "secondary")
         for bad in ('""', '"-x"', '".x"', '"a/b"', '"a b"', "3"):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
-                st.load(self.root, self.write(f"[workers]\nclaude_profile = {bad}\n"))
+                st.load(self.root, self.write(f"[workers]\nclaude_as_profile = {bad}\n"))
+
+    def test_the_old_claude_profile_key_is_refused_by_its_new_name(self):
+        # Ledger E12: renamed to claude_as_profile. Ignored, the old key would launch a bare `claude` without a word.
+        with self.assertRaisesRegex(st.SettingsError, "claude_as_profile"):
+            st.load(self.root, self.write('[workers]\nclaude_profile = "secondary"\n'))
 
     def test_pages_workers_defaults_to_four_and_is_a_positive_whole_number(self):
         # The user, 2026-09-26: "allow the board server to have up to 4 workers", then "well, N workers. 4 default".
