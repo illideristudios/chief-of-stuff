@@ -118,6 +118,27 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement", outcome="failed")]),
                          [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
+    def test_work_starting_at_first_review_end_counts_as_rework(self):
+        item = replace(Item(), stage="review", review_state="changes_requested")
+        history = [Segment("implement", started_at=NOW - timedelta(hours=6),
+                           ended_at=NOW - timedelta(hours=5)),
+                   Segment("review", started_at=NOW - timedelta(hours=4),
+                           ended_at=NOW - timedelta(hours=3))]
+        for round in range(1, 4):
+            self.assertEqual(self.plan(item, history, {"minor": 1}),
+                             [reconcile.Dispatch(KEY, "implement", "builder", round + 1)])
+            start = history[-1].ended_at
+            history.append(Segment("implement", round + 1, started_at=start,
+                                   ended_at=start + timedelta(minutes=30)))
+            start += timedelta(minutes=30)
+            history.append(Segment("review", round + 1, started_at=start,
+                                   ended_at=start + timedelta(minutes=30)))
+        for stage in ("review", "implement"):
+            for order in (history, history[::-1]):
+                with self.subTest(stage=stage, history=order):
+                    self.assertEqual(self.plan(replace(item, stage=stage), order, {"minor": 1}),
+                                     [reconcile.Escalate(KEY, "retry limit reached for implement")])
+
     def test_separate_fix_stage_loops_to_review_until_its_retry_limit(self):
         self.p.stages["fix"] = policy.Place("fix", "builder")
         self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(
@@ -239,6 +260,14 @@ class ReconcileTest(unittest.TestCase):
     def test_a_failed_review_is_not_review_evidence(self):
         item = replace(Item(), stage="merge", merge_state="ready")
         self.assertEqual(self.plan(item, [Segment("review", outcome="failed")], {}), [reconcile.Review(KEY, 2)])
+
+    def test_review_evidence_requires_a_done_outcome(self):
+        for outcome in (None, "", "human_review", "findings", "unknown"):
+            for stage in ("review", "merge"):
+                with self.subTest(outcome=outcome, stage=stage):
+                    item = replace(Item(), stage=stage, review_state="approved", merge_state="ready")
+                    self.assertEqual(self.plan(item, [Segment("review", outcome=outcome)], {}),
+                                     [reconcile.Review(KEY, 2)])
 
     def test_merge_requires_ready_state_completed_review_and_known_findings(self):
         item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")

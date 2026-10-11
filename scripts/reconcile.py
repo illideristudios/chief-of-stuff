@@ -107,9 +107,9 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)
         if review is not None:
-            # Only attempts started after the first completed review are rework.
+            # Attempts started at or after the first completed review are rework.
             initial = max((s.attempt for s in history if s.stage == stage
-                           and (not s.started_at or _time(s.started_at) <= review)), default=0)
+                           and (not s.started_at or _time(s.started_at) < review)), default=0)
             rounds = attempt - initial
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")
@@ -124,7 +124,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         return Wait(key, "changes requested on the forge")
     if "review" in stages:
         completed = tuple(s for s in history if s.started_at and s.ended_at)
-        review = max((s for s in completed if s.stage == "review" and s.outcome != "failed"),
+        review = max((s for s in completed if s.stage == "review" and s.outcome == "done"),
                      key=lambda s: _time(s.started_at), default=None)
         if review is None or any(s.stage not in ("review", "merge")
                                  and _time(s.started_at) >= _time(review.started_at) for s in completed):
