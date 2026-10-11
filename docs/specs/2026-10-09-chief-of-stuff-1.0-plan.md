@@ -39,7 +39,7 @@ Exit: store approved, spike note, ledger approved, open items resolved or deferr
 - Ledger: **reviewed with Zach row by row on 2026-10-10**; his decisions are in its Owner decisions section. Open: the Triage rule (M4) and why requirements checklists broke; see [`2026-10-09-chief-of-stuff-1.0-ledger.md`](2026-10-09-chief-of-stuff-1.0-ledger.md).
 - Ledger carry-ins that shape the milestones below: policy by persona, stage and room (decision 12); directed-graph workflows with one shipped (decision 13); the engine removes worktrees under the finding-27 guards (E19); launchd supervisor (E18); requirements checklists carried; the performance report kept as a store query; the install-and-pin mechanism dropped; the runtime registry kept; non-Claude hosts in 1.1.
 - Settled 2026-10-11: workers go through the adapter by default with a full session when needed; open-finding severity is set per persona and stage; the architect is consulted by policy; 3 fix rounds then a ping.
-- Still open: the shipped per-persona default policies (reviewer roles and models), the trio selection rule, why requirements checklists broke (find the cause before porting), and the datetime-inject version range. The clock hook is a plugin dependency on `datetime-inject` (Zach, 2026-10-10), not a hook shipped here. The two spikes are done (see the spike note addendum): command hooks run in `claude -p` workers, hooks fail open, and plugin dependencies install automatically but only within one marketplace unless allowed. Default limit values are no longer a 1.0 item: they are set from 1.0 measurement in 1.1.
+- Still open: the shipped per-persona default policies (reviewer roles and models), the topic tags and shipped default trios, why requirements checklists broke (find the cause before porting), and the datetime-inject version range. The clock hook is a plugin dependency on `datetime-inject` (Zach, 2026-10-10), not a hook shipped here. The two spikes are done (see the spike note addendum): command hooks run in `claude -p` workers, hooks fail open, and plugin dependencies install automatically but only within one marketplace unless allowed. Default limit values are no longer a 1.0 item: they are set from 1.0 measurement in 1.1.
 
 ### M1. Core model and store
 
@@ -83,7 +83,7 @@ Exit (S3): an eval where work meeting the policy merges with no human input, and
 Zach, 2026-10-09: "we'll revisit at m5 time." This scope is provisional; reopen it before starting M5.
 
 1. Trio gate (D5a): before any ask, consult a topic-appropriate trio through the model adapter (three calls, structured verdicts). Unanimous → adopt their recommendation and record it. Any concern → escalate to Zach.
-2. Trio selection rule and verdict record (settled in M0).
+2. Trio selection by policy (topic to three personas), the full verdict record, and board reversal (settled 2026-10-11).
 3. Interrupt set: real goal ambiguity after the trio, unrecoverable failure after retries, budget or quota about to exceed a limit.
 4. Engine config holds spend, quota and time limits, with workspace override. Ships with no hard default values: the engine records spend and time per issue through the 1.0 lifecycle, and the defaults are set from that measurement in 1.1 (Zach, 2026-10-10).
 
