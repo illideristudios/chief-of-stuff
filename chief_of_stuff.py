@@ -43,6 +43,7 @@ COMMANDS = {
     "tracker": "scripts/tracker_read.py",
     "merge-approved": "scripts/merge_approved.py",
     "merge-ready": "scripts/merge_ready.py",
+    "performance": "scripts/performance_report.py",
     "review-threads": "scripts/review_threads.py",
     "sources": "scripts/board_sources.py",
     "tick": "scripts/flow.py",

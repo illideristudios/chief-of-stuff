@@ -83,6 +83,30 @@ class StoreTest(unittest.TestCase):
         self.store.record_segment(KEY, "review", 1, started_at="10:00")
         self.assertEqual([(s.ended_at, s.outcome) for s in self.store.segments(KEY)], [("10:30", "findings")])
 
+    def test_a_segment_records_who_ran_it(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        self.store.record_segment(KEY, "implement", 1, started_at="09:00",
+                                  runtime="claude", model="opus", effort="high", agent_type="implementer")
+        got = self.store.segments(KEY)[0]
+        self.assertEqual((got.runtime, got.model, got.effort, got.agent_type),
+                         ("claude", "opus", "high", "implementer"))
+
+    def test_a_segment_defaults_who_ran_it_to_empty_strings(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        self.store.record_segment(KEY, "implement", 1, started_at="09:00")
+        got = self.store.segments(KEY)[0]
+        self.assertEqual((got.runtime, got.model, got.effort, got.agent_type), ("", "", "", ""))
+
+    def test_a_retried_start_never_clears_who_ran_it(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        self.store.record_segment(KEY, "implement", 1, started_at="09:00",
+                                  runtime="claude", model="opus", effort="high", agent_type="implementer",
+                                  ended_at="10:00", outcome="done")
+        self.store.record_segment(KEY, "implement", 1, started_at="09:00")
+        got = self.store.segments(KEY)[0]
+        self.assertEqual((got.runtime, got.model, got.effort, got.agent_type, got.ended_at, got.outcome),
+                         ("claude", "opus", "high", "implementer", "10:00", "done"))
+
     def test_a_human_review_flag_for_an_issue_with_no_row_is_refused(self) -> None:
         with self.assertRaises(KeyError):
             self.store.set_human_review("github:example/repo#404", True)
