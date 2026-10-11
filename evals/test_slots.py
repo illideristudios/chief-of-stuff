@@ -102,6 +102,14 @@ class ClaimTest(unittest.TestCase):
                          [("implement", 1, PINNED.isoformat(), None)])
         self.assertEqual(slots.running(self.db), 1)
 
+    def test_claim_persists_worker_identity(self) -> None:
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, launch=_noop, clock=lambda: PINNED,
+                    runtime="claude", model="opus", effort="high", agent_type="implementer")
+        got = self.db.segments(KEY)[0]
+        self.assertEqual((got.runtime, got.model, got.effort, got.agent_type),
+                         ("claude", "opus", "high", "implementer"))
+
     def test_claim_refuses_when_full(self) -> None:
         slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
                     max_concurrency=1, launch=_noop, clock=lambda: PINNED)
