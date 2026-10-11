@@ -9,7 +9,6 @@ it changes, and a test holds these models to what the migrations build.
 from __future__ import annotations
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -18,6 +17,8 @@ from alembic.config import Config
 from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
+
+import clock
 
 FORGE_COLUMNS = ("title", "stage", "forge_state", "review_state", "merge_state")
 
@@ -86,10 +87,6 @@ class Resume(Base):
     data: Mapped[Any] = mapped_column(JSON)
 
 
-def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()  # shortcut: wall clock, the engine's injected clock replaces it in M3
-
-
 def migrate(path: Path | str) -> None:
     """Bring the database at `path` to the latest revision. Call it once at engine start, never from concurrent writers:
     two first-time migrations race to create the same tables."""
@@ -101,13 +98,17 @@ def migrate(path: Path | str) -> None:
 
 
 class Store:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, clock: clock.Clock = clock.system) -> None:
+        self.clock = clock
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"timeout": 30})
 
         @event.listens_for(self.engine, "connect")
         def _pragmas(conn, _record) -> None:  # noqa: ANN001 - DBAPI connection
             conn.execute("PRAGMA foreign_keys=ON")
             conn.execute("PRAGMA journal_mode=WAL")
+
+    def _stamp(self) -> str:
+        return self.clock().isoformat()
 
     @contextmanager
     def session(self) -> Iterator[Session]:
@@ -124,13 +125,13 @@ class Store:
 
     # work items
     def upsert_item(self, issue_key: str, **fields: Any) -> None:
-        self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **fields, "updated_at": _now()})
+        self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **fields, "updated_at": self._stamp()})
 
     def set_human_review(self, issue_key: str, flag: bool) -> None:
         """Flag an existing item. The flag is engine data, so it never creates a row the forge does not know."""
         with self.session() as s:
             if s.execute(update(WorkItem).where(WorkItem.issue_key == issue_key)
-                         .values(human_review=flag, updated_at=_now())).rowcount == 0:
+                         .values(human_review=flag, updated_at=self._stamp())).rowcount == 0:
                 raise KeyError(issue_key)
 
     def items(self) -> list[WorkItem]:
@@ -167,7 +168,7 @@ class Store:
                      decided_by: str = "", record: Any = None) -> None:
         with self.session() as s:
             s.add(Decision(issue_key=issue_key, topic=topic, question=question, answer=answer,
-                           decided_by=decided_by, record=record, created_at=_now()))
+                           decided_by=decided_by, record=record, created_at=self._stamp()))
 
     def decisions(self, issue_key: str) -> list[Decision]:
         return self._all(select(Decision).where(Decision.issue_key == issue_key).order_by(Decision.id))
