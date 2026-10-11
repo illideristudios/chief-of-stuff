@@ -113,7 +113,7 @@ class Forge:
 
     # writes: preview unless commit
     def merge(self, number: int, commit: bool = False, issue_key: str | None = None) -> str:
-        """Re-read readiness and the issue's closing request, then preview, merge or queue the verified head."""
+        """Re-read readiness and the issue's closing request, then preview or report the verified head's merge outcome."""
         mark = "#" if self.github else "!"
         found = self.requests()
         one = next((r for r in found if r.number == number), None)
@@ -136,7 +136,8 @@ class Forge:
             raise ForgeError(f"{mark}{number} not merged at {one.head}: {exc}") from exc
         if code:
             raise ForgeError(f"{mark}{number} not merged at {one.head}: {result or f'merge exited {code}'}")
-        return f"{result} {evidence}"
+        outcome, _, error = result.partition(": ")
+        return f"{outcome} {evidence}" + (f": {error}" if error else "")
 
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:

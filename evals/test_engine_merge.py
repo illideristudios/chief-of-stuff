@@ -77,6 +77,14 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(len(self.gh.merges), 1)
         self.assertTrue(self.message().startswith("queued #21 "))
 
+    def test_a_failed_state_read_after_a_successful_merge_is_logged_as_unknown_without_retry(self):
+        self.gh.fail = {("pr", "view")}
+        self.assertFalse(self.execute())
+        self.assertEqual(len(self.gh.merges), 1)
+        self.assertEqual(sum(c[:2] == ["pr", "view"] for c in self.gh.all_calls), 1)
+        self.assertEqual(self.message(), f"unknown #21 at {tma.HEAD} · pipeline 9021 on {tma.HEAD} · "
+                                        "https://github.com/o/app/pull/21: rate limited")
+
     def test_a_body_edited_to_close_another_issue_at_verification_is_refused(self):
         reads = 0
 

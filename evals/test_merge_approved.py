@@ -179,6 +179,18 @@ class MainTest(unittest.TestCase):
         self.assertNotIn("merged", out)
         self.assertIn("not merged", err)
 
+    def test_a_failed_state_read_after_a_successful_merge_prints_unknown_and_exits_zero(self):
+        base = FakeGh(PRS)
+
+        def failed_read(args, input_text=None):
+            return (1, "", "rate limited") if args[:2] == ["pr", "view"] else base(args, input_text)
+
+        code, out, err = self.run_main(self.workspace(self.OPT_IN), "--merge", "12", gh=failed_read)
+        self.assertEqual(code, 0)
+        self.assertEqual(out, f"#12 unknown at {HEAD[:12]} · https://github.com/o/app/pull/12: rate limited\n")
+        self.assertEqual(err, "")
+        self.assertEqual(len(base.merges), 1)
+
     def test_gitlab_cli_keeps_its_head_pinned_merge_and_output(self):
         root = self.workspace(self.OPT_IN)
         config = root / "CLAUDE.md"
@@ -220,6 +232,18 @@ def request(**kw):
     base = dict(number=1, title="t", url="u", head=HEAD, approval="approved", pipeline="passed", mergeable="yes",
                 approver="robin", pipeline_id="9001", pipeline_sha=HEAD, threads=0, draft=False, merge_state="CLEAN")
     return ma.Request(**{**base, **kw})
+
+
+class MergeHeadTest(unittest.TestCase):
+    def test_failed_or_unreadable_github_state_reads_after_a_successful_write_are_unknown(self):
+        for read, error in (((1, "", "rate limited"), "rate limited"),
+                            ((2, "", ""), "gh pr view exited 2"),
+                            ((0, "{}", ""), str(KeyError("state")))):
+            with self.subTest(read=read):
+                gh = mock.Mock(side_effect=[(0, "", ""), read])
+                self.assertEqual(ma.merge_head(request(), None, True, "o/app", gh=gh),
+                                 (0, f"unknown: {error}"))
+                self.assertEqual(gh.call_count, 2)
 
 
 class RequestVerdictTest(unittest.TestCase):

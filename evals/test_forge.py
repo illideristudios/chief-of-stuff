@@ -269,6 +269,15 @@ class ThreadsTest(unittest.TestCase):
 
 
 class MergeTest(unittest.TestCase):
+    def test_a_failed_state_read_after_a_successful_github_merge_is_unknown(self):
+        gh = github()
+        gh.fail = {("pr", "view")}
+        got = forge.Forge(GH, gh=gh).merge(21, commit=True)
+        self.assertEqual(got, f"unknown #21 at {tma.HEAD} · pipeline 9021 on {tma.HEAD} · "
+                             "https://github.com/o/app/pull/21: rate limited")
+        self.assertEqual(len(gh.merges), 1)
+        self.assertEqual(sum(c[:2] == ["pr", "view"] for c in gh.all_calls), 1)
+
     def test_a_successful_github_merge_that_leaves_the_request_open_is_queued(self):
         gh = tmr.github_gh([21])
         reads = []
@@ -360,6 +369,25 @@ class MergeTest(unittest.TestCase):
 
 
 class GitLabMergeTest(unittest.TestCase):
+    def test_an_unreadable_response_after_a_successful_gitlab_merge_is_unknown(self):
+        read = tmr.gitlab_fake({5: {}})
+        for response, error in (({}, ""), (None, "GitLab did not answer with JSON")):
+            with self.subTest(response=response, error=error):
+                writes = []
+
+                def call(method, url, token, timeout, payload=None):
+                    if method == "PUT":
+                        writes.append(payload)
+                        return response, {}, error
+                    return read(method, url, token, timeout, payload)
+
+                with mock.patch.object(backlog, "_call", call):
+                    got = forge.Forge(GL, token="t").merge(5, commit=True)
+                self.assertEqual(got, f"unknown !5 at {tma.HEAD} · pipeline 7005 on {tma.HEAD} · "
+                                     "https://labs.example.test/team/app/-/merge_requests/5: "
+                                     f"{error or str(KeyError('state'))}")
+                self.assertEqual(writes, [{"sha": tma.HEAD}])
+
     def test_gitlab_merge_when_pipeline_succeeds_is_queued_until_merged(self):
         read = tmr.gitlab_fake({5: {}})
         writes = []

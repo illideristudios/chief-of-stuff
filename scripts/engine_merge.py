@@ -8,7 +8,7 @@ from forge_port import ForgeError
 
 
 def execute(action: Any, forge: Any, store: Any, at: str) -> bool:
-    """Log one merge attempt; queued requests and forge refusals return False without retrying."""
+    """Log one merge attempt; queued, unknown and refused outcomes return False without retrying."""
     try:
         request = forge.closing_request(action.issue_key)
         message = forge.merge(request.number, commit=True, issue_key=action.issue_key)

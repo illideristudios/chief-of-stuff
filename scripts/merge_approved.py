@@ -37,23 +37,30 @@ def blocked(r: Request) -> list[str]:
 
 def merge_head(one: Request, home, github: bool, repo: str, gh=backlog.run_gh,
                call=backlog._call, token: str | None = None) -> tuple[int, str]:
-    """Merge at the checked head; return the status code and merged/queued, or an error."""
+    """Merge at the checked head; return the status code and merged/queued/unknown, or an error."""
     if github:
         # ponytail: squash, as this plugin's own repo merges; a [workflow] merge_method when a workspace differs.
         code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, "--squash", "--match-head-commit", one.head])
         if code:
             return code, err.strip()
-        # A successful command may only have queued the request.
-        code, out, err = gh(["pr", "view", str(one.number), "-R", repo, "--json", "state"])
-        if code:
-            return code, err.strip() or f"gh pr view exited {code}"
-        state = json.loads(out)["state"].lower()
     else:
         response, _, err = call("PUT", f"{home.api(repo)}/merge_requests/{one.number}/merge", token,
                                backlog.TIMEOUT, {"sha": one.head})
         if err:
+            if err == "GitLab did not answer with JSON":
+                return 0, f"unknown: {err}"
             return 1, err
-        state = response["state"]
+    # The write succeeded. An unreadable state cannot tell us whether it merged or queued.
+    try:
+        if github:
+            code, out, err = gh(["pr", "view", str(one.number), "-R", repo, "--json", "state"])
+            if code:
+                return 0, f"unknown: {err.strip() or f'gh pr view exited {code}'}"
+            state = json.loads(out)["state"].lower()
+        else:
+            state = response["state"]
+    except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        return 0, f"unknown: {exc}"
     if state == "merged":
         return 0, "merged"
     if state in ("open", "opened"):
@@ -119,7 +126,8 @@ def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -
     if code:
         print(f"merge-approved: {mark}{one.number} not merged: {result or f'merge exited {code}'}", file=sys.stderr)
         return 1
-    print(f"{mark}{one.number} {result} at {one.head[:12]} · {one.url}")
+    outcome, _, error = result.partition(": ")
+    print(f"{mark}{one.number} {outcome} at {one.head[:12]} · {one.url}" + (f": {error}" if error else ""))
     return 0
 
 
