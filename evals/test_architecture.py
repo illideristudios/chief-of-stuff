@@ -38,6 +38,8 @@ DRAWS_NOTHING = (
     "claude_adapter",
     "policy",
     "forge",
+    "forge_port",
+    "engine_merge",
     "issue_gate",
     "trio_gate",
     "performance",

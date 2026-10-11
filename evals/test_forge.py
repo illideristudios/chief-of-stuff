@@ -19,6 +19,7 @@ import backlog  # noqa: E402
 import forge  # noqa: E402
 import store  # noqa: E402
 import test_merge_approved as tma  # noqa: E402  (module-qualified: don't re-collect its TestCases)
+import test_merge_ready as tmr  # noqa: E402
 from settings import GitHubProject, Kanban  # noqa: E402
 
 REPO = "example/app"
@@ -265,6 +266,194 @@ class ThreadsTest(unittest.TestCase):
     def test_threads_need_an_approver(self):
         with self.assertRaises(forge.ForgeError):
             forge.Forge(GH, gh=github()).threads()
+
+
+class MergeTest(unittest.TestCase):
+    def test_a_failed_state_read_after_a_successful_github_merge_is_unknown(self):
+        gh = github()
+        gh.fail = {("pr", "view")}
+        got = forge.Forge(GH, gh=gh).merge(21, commit=True)
+        self.assertEqual(got, f"unknown #21 at {tma.HEAD} · pipeline 9021 on {tma.HEAD} · "
+                             "https://github.com/o/app/pull/21: rate limited")
+        self.assertEqual(len(gh.merges), 1)
+        self.assertEqual(sum(c[:2] == ["pr", "view"] for c in gh.all_calls), 1)
+
+    def test_a_successful_github_merge_that_leaves_the_request_open_is_queued(self):
+        gh = tmr.github_gh([21])
+        reads = []
+
+        def queued(args, input_text=None):
+            if args[:2] == ["pr", "view"]:
+                reads.append(args)
+                return 0, json.dumps({"state": "OPEN"}), ""
+            return gh(args, input_text)
+
+        got = forge.Forge(GH, gh=queued).merge(21, commit=True)
+        self.assertTrue(got.startswith("queued "), got)
+        self.assertEqual(len(gh.merges), 1)
+        self.assertEqual(reads, [["pr", "view", "21", "-R", REPO, "--json", "state"]])
+
+    def test_a_ready_request_merges_pinned_to_the_verified_head(self):
+        gh = tmr.github_gh([21])
+        got = forge.Forge(GH, gh=gh).merge(21, commit=True)
+        self.assertEqual(gh.merges, [["pr", "merge", "21", "-R", REPO, "--squash", "--match-head-commit", tma.HEAD]])
+        for evidence in ("merged", "#21", tma.HEAD, "9021"):
+            self.assertIn(evidence, got)
+
+    def test_preview_names_the_verified_head_and_pipeline_and_writes_nothing(self):
+        gh = tmr.github_gh([21])
+        got = forge.Forge(GH, gh=gh).merge(21)
+        for evidence in ("would merge", "#21", tma.HEAD, "9021"):
+            self.assertIn(evidence, got)
+        self.assertEqual(gh.merges, [])
+
+    def test_every_not_ready_verdict_refuses_even_in_preview_and_writes_nothing(self):
+        for number, (_, _, verdict) in tmr.GITHUB.items():
+            if verdict == "ready":
+                continue
+            for commit in (False, True):
+                with self.subTest(number=number, verdict=verdict, commit=commit):
+                    gh = tmr.github_gh([number])
+                    with self.assertRaisesRegex(forge.ForgeError, verdict):
+                        forge.Forge(GH, gh=gh).merge(number, commit=commit)
+                    self.assertEqual(gh.merges, [])
+
+    def test_a_request_not_open_in_the_read_is_refused(self):
+        gh = tmr.github_gh([21])
+        with self.assertRaisesRegex(forge.ForgeError, "not an open request"):
+            forge.Forge(GH, gh=gh).merge(99, commit=True)
+        self.assertEqual(gh.merges, [])
+
+    def test_a_failed_verification_writes_nothing(self):
+        gh = github()
+        gh.fail = {("api", "graphql")}
+        with self.assertRaisesRegex(forge.ForgeError, "rate limited"):
+            forge.Forge(GH, gh=gh).merge(21, commit=True)
+        self.assertEqual(gh.merges, [])
+
+    def test_merge_reads_again_instead_of_trusting_an_earlier_ready_result(self):
+        gh = tmr.github_gh([21])
+        f = forge.Forge(GH, gh=gh)
+        self.assertEqual(f.requests()[0].verdict, "ready")
+        gh.prs[0] = {**gh.prs[0], "statusCheckRollup": tmr.RED}
+        with self.assertRaisesRegex(forge.ForgeError, "red"):
+            f.merge(21, commit=True)
+        self.assertEqual(gh.merges, [])
+
+    def test_a_head_moved_after_verification_fails_the_pinned_merge(self):
+        gh = tmr.github_gh([21])
+        landed = []
+
+        def moving(args, input_text=None):
+            if args[:2] == ["pr", "merge"]:
+                gh.calls.append(args)
+                if args[args.index("--match-head-commit") + 1] != tma.OLD:
+                    return 1, "", "head changed"
+                landed.append(args)
+                return 0, "", ""
+            return gh(args, input_text)
+
+        with self.assertRaisesRegex(forge.ForgeError, "head changed"):
+            forge.Forge(GH, gh=moving).merge(21, commit=True)
+        self.assertEqual(len(gh.merges), 1)
+        self.assertEqual(landed, [])
+
+    def test_a_failed_merge_with_no_stderr_is_still_a_refusal(self):
+        gh = tmr.github_gh([21])
+
+        def failing(args, input_text=None):
+            return (1, "", "") if args[:2] == ["pr", "merge"] else gh(args, input_text)
+
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=failing).merge(21, commit=True)
+
+
+class GitLabMergeTest(unittest.TestCase):
+    def test_an_unreadable_response_after_a_successful_gitlab_merge_is_unknown(self):
+        read = tmr.gitlab_fake({5: {}})
+        for response, error in (({}, ""), (None, "GitLab did not answer with JSON")):
+            with self.subTest(response=response, error=error):
+                writes = []
+
+                def call(method, url, token, timeout, payload=None):
+                    if method == "PUT":
+                        writes.append(payload)
+                        return response, {}, error
+                    return read(method, url, token, timeout, payload)
+
+                with mock.patch.object(backlog, "_call", call):
+                    got = forge.Forge(GL, token="t").merge(5, commit=True)
+                self.assertEqual(got, f"unknown !5 at {tma.HEAD} · pipeline 7005 on {tma.HEAD} · "
+                                     "https://labs.example.test/team/app/-/merge_requests/5: "
+                                     f"{error or str(KeyError('state'))}")
+                self.assertEqual(writes, [{"sha": tma.HEAD}])
+
+    def test_gitlab_merge_when_pipeline_succeeds_is_queued_until_merged(self):
+        read = tmr.gitlab_fake({5: {}})
+        writes = []
+
+        def queued(method, url, token, timeout, payload=None):
+            if method == "PUT":
+                writes.append(payload)
+                return {"state": "opened", "merge_when_pipeline_succeeds": True}, {}, ""
+            return read(method, url, token, timeout, payload)
+
+        with mock.patch.object(backlog, "_call", queued):
+            got = forge.Forge(GL, token="t").merge(5, commit=True)
+        self.assertTrue(got.startswith("queued "), got)
+        self.assertEqual(writes, [{"sha": tma.HEAD}])
+
+    def fake(self, options=None, moved=False):
+        read = tmr.gitlab_fake({5: options or {}})
+        writes, landed = [], []
+
+        def call(method, url, token, timeout, payload=None):
+            if method == "PUT":
+                writes.append((method, url, payload))
+                if payload != {"sha": tma.OLD if moved else tma.HEAD}:
+                    return None, {}, "HTTP 409: head changed"
+                landed.append(payload)
+                return {"state": "merged"}, {}, ""
+            return read(method, url, token, timeout, payload)
+        return call, writes, landed
+
+    def test_ready_merges_pinned_to_the_verified_sha(self):
+        call, writes, landed = self.fake()
+        with mock.patch.object(backlog, "_call", call):
+            got = forge.Forge(GL, token="t").merge(5, commit=True)
+        self.assertEqual(writes, [("PUT", f"{GL.api(GL.project)}/merge_requests/5/merge", {"sha": tma.HEAD})])
+        self.assertEqual(landed, [{"sha": tma.HEAD}])
+        for evidence in ("merged", "!5", tma.HEAD, "7005"):
+            self.assertIn(evidence, got)
+
+    def test_preview_writes_nothing(self):
+        call, writes, landed = self.fake()
+        with mock.patch.object(backlog, "_call", call):
+            got = forge.Forge(GL, token="t").merge(5)
+        self.assertIn("would merge", got)
+        self.assertIn(tma.HEAD, got)
+        self.assertEqual((writes, landed), ([], []))
+
+    def test_each_not_ready_gitlab_verdict_refuses_and_writes_nothing(self):
+        for options, verdict in tmr.GITLAB.values():
+            if verdict == "ready":
+                continue
+            for commit in (False, True):
+                with self.subTest(verdict=verdict, commit=commit):
+                    call, writes, landed = self.fake(options)
+                    with mock.patch.object(backlog, "_call", call):
+                        with self.assertRaisesRegex(forge.ForgeError, verdict):
+                            forge.Forge(GL, token="t").merge(5, commit=commit)
+                    self.assertEqual((writes, landed), ([], []))
+
+    def test_a_head_moved_after_verification_fails_without_landing(self):
+        call, writes, landed = self.fake(moved=True)
+        with mock.patch.object(backlog, "_call", call):
+            with self.assertRaisesRegex(forge.ForgeError, "head changed"):
+                forge.Forge(GL, token="t").merge(5, commit=True)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(writes[0][2], {"sha": tma.HEAD})
+        self.assertEqual(landed, [])
 
 
 if __name__ == "__main__":

@@ -2,7 +2,8 @@
 
 The forge is the source of truth and the store a cache rebuilt from `snapshots`. It reads issues (backlog.py), open pull or merge
 requests with their CI and review state (merge_ready.py over forge_review.py), and the user's review threads (review_threads.py);
-it creates issues (backlog.py) and writes stage back as labels (kanban.py). Writes preview unless `commit=True`. A read that fails
+it creates issues (backlog.py), writes stage back as labels (kanban.py), and merges verified heads (merge_approved.py).
+Writes preview unless `commit=True`. A read that fails
 raises ForgeError: an empty answer would read as an empty forge.
 """
 
@@ -16,14 +17,12 @@ from typing import Any, Callable
 import backlog
 import forge_review
 import kanban
+import merge_approved
 import merge_ready
 import review_threads
 from backlog_ref import Backlog, GitHubBacklog, IssueRef, backlog_from_config, home_of
+from forge_port import ForgeError
 from settings import Kanban
-
-
-class ForgeError(RuntimeError):
-    """The forge did not answer in full, so nothing it said can stand for the whole."""
 
 
 @dataclass(frozen=True)
@@ -65,6 +64,14 @@ class Forge:
             raise ForgeError(f"requests: {forge_review.REQUEST_LIMIT} open or more; refusing to read a partial list as whole")
         return got
 
+    def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
+        """The newest open request closing the issue, as snapshots report for rework."""
+        found = self.requests() if requests is None else requests
+        closing = [r for r in found if any(self.key(int(ref[1:])) == issue_key for ref in r.closes)]
+        if not closing:
+            raise ForgeError(f"no open request closes {issue_key}")
+        return max(closing, key=lambda r: r.number)
+
     def threads(self) -> list[review_threads.Thread]:
         """The user's unresolved review threads: fix work for the finding burn-down."""
         if not self.approver:
@@ -105,6 +112,33 @@ class Forge:
         return next((stage for stage in self.kanban.stage_map if self.kanban.label_for(stage) in labels), "")
 
     # writes: preview unless commit
+    def merge(self, number: int, commit: bool = False, issue_key: str | None = None) -> str:
+        """Re-read readiness and the issue's closing request, then preview or report the verified head's merge outcome."""
+        mark = "#" if self.github else "!"
+        found = self.requests()
+        one = next((r for r in found if r.number == number), None)
+        if one is None:
+            raise ForgeError(f"{mark}{number} is not an open request")
+        if issue_key is not None:
+            selected = self.closing_request(issue_key, found)
+            if selected.number != number:
+                raise ForgeError(f"{mark}{number} is no longer the newest request closing {issue_key}: {mark}{selected.number}")
+        if one.verdict != "ready":
+            raise ForgeError(f"not merged: {merge_ready.line(one, mark)}")
+        evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
+        if not commit:
+            return f"would merge {evidence}"
+        _, repo = home_of(self.home)
+        try:
+            code, result = merge_approved.merge_head(one, self.home, self.github, repo, gh=self.gh,
+                                                    call=backlog._call, token=None if self.github else self._token())
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"{mark}{number} not merged at {one.head}: {exc}") from exc
+        if code:
+            raise ForgeError(f"{mark}{number} not merged at {one.head}: {result or f'merge exited {code}'}")
+        outcome, _, error = result.partition(": ")
+        return f"{outcome} {evidence}" + (f": {error}" if error else "")
+
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:
         return backlog.create(self.home, title, body=body, labels=labels, token=self.token, commit=commit, gh=self.gh,
