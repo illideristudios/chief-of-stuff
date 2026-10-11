@@ -100,10 +100,12 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
 
 def _work(key: str, stage: str, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
-    if attempt > _policy(policies, stage, room).retry_limit:
-        return Escalate(key, f"retry limit reached for {stage}")
     if stage == "review":
         return Review(key, attempt)
+    # Every fix is rework; other stages get an initial attempt before their retries.
+    rounds = attempt if stage == "fix" else attempt - 1
+    if rounds > _policy(policies, stage, room).retry_limit:
+        return Escalate(key, f"retry limit reached for {stage}")
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
@@ -122,10 +124,9 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         return Wait(key, "blocking review findings")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
-    for edge in edges:
-        if ask := _gate(key, edge, policies, room, now):
-            return ask
-    return Merge(key)
+    if len(edges) != 1:
+        return Wait(key, "no unique incoming merge edge")
+    return _gate(key, edges[0], policies, room, now) or Merge(key)
 
 
 def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
@@ -147,11 +148,11 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
         return Wait(key, "stage is outside the workflow")
-    if stage == "merge":
-        incoming = tuple(e for e in workflow.edges if e.target == stage)
-        return _merge(item, workflow, history, policies, room, now, counts, incoming)
-    latest = max((s for s in history if s.started_at and s.ended_at),
+    latest = max((s for s in history if s.started_at and s.ended_at and (stage != "merge" or s.stage != "merge")),
                  key=lambda s: (_time(s.started_at), s.attempt, s.stage), default=None)
+    if stage == "merge":
+        incoming = tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage)
+        return _merge(item, workflow, history, policies, room, now, counts, incoming)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, history, policies, room)
@@ -180,7 +181,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
-    Gates use their source stage's policy; retry limits use the destination stage's policy.
+    Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
     Without creation times, issue numbers order work within each forge namespace.
     """
     _time(now)
