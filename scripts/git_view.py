@@ -128,7 +128,7 @@ _READ_OPTIONS = {
     "diff": (r"--(?:name-only|no-color|no-ext-diff|no-renames|no-textconv|numstat|stat)", None, None, "revision"),
     "show": (r"--format=(?!.*%G).+|--stat", None, None, "mixed"),
     "for-each-ref": (r"--format=.+|(?P<operand>--format)", None, None, None),
-    "ls-files": (r"--stage|-z", None, None, "path"),
+    "ls-files": (r"--stage|-z|-v", None, None, "path"),
     "ls-tree": (r"-r", None, None, "mixed"),
     "cat-file": (r"--batch-check|-[ept]", None, None, None),
     "rev-list": (r"--(?:count|left-right)", None, None, "mixed"),

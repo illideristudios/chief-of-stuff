@@ -113,12 +113,14 @@ class CleanupTest(unittest.TestCase):
     # removal
 
     def test_remove_deletes_the_clean_finished_tree_and_its_build_output_and_logs_it(self) -> None:
+        admin = cleanup.git_view.locate(self.trees / "done").gitdir
         (self.trees / "done" / "node_modules" / "pkg").mkdir(parents=True)
         (self.trees / "done" / "node_modules" / "pkg" / "index.js").write_text("x\n")
         code, out = self.run_cleanup("--remove")
         self.assertEqual(code, 0, out)
         self.assertEqual(self.removable(out), ["done"])
         self.assertFalse((self.trees / "done").exists())
+        self.assertFalse(admin.exists())
         self.assertNotIn(str(self.trees / "done"), self.worktrees())
         self.assertTrue((self.trees / "unpushed").is_dir() and (self.trees / "dirty").is_dir())
         self.assertIn("removed", self.store.log(f"{KEY}-done")[0].message)
@@ -261,6 +263,107 @@ class CleanupTest(unittest.TestCase):
         _, out = self.run_cleanup("--remove")
         self.assertIn("snapshot.db", self.kept(out)["done"])
         self.assertTrue((self.trees / "done" / "snapshot.db").is_file())
+
+    def test_a_clean_tree_mid_bisect_keeps_its_operation_state(self) -> None:
+        tree = self.trees / "done"
+        make_repo.git(["bisect", "start"], tree)
+        admin = cleanup.git_view.locate(tree).gitdir
+        self.assertEqual(make_repo.git(["status", "--porcelain", "--ignored"], tree), "")
+        self.assertEqual(cleanup.git_guards(tree), [])
+        code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("git operation in progress (BISECT_LOG)", self.kept(out).get("done", out))
+        self.assertTrue(tree.is_dir() and (admin / "BISECT_LOG").is_file())
+
+    def test_each_git_operation_marker_keeps_the_layout(self) -> None:
+        tree = self.trees / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+        for name in ("BISECT_LOG", "rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+            with self.subTest(name=name):
+                marker = admin / name
+                if name.startswith("rebase-"):
+                    marker.mkdir()
+                else:
+                    marker.write_text(make_repo.git(["rev-parse", "HEAD"], tree) + "\n")
+                try:
+                    _, kept = cleanup.layout_guards(tree)
+                    self.assertEqual(kept, [f"git operation in progress ({name})"])
+                finally:
+                    if marker.is_dir():
+                        marker.rmdir()
+                    else:
+                        marker.unlink()
+
+    def test_an_edited_assume_unchanged_file_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        make_repo.git(["update-index", "--assume-unchanged", "README.md"], tree)
+        (tree / "README.md").write_text("only copy\n")
+        self.assertEqual(make_repo.git(["status", "--porcelain", "--ignored"], tree), "")
+        code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 files hidden from git status by index flags", self.kept(out).get("done", out))
+        self.assertEqual((tree / "README.md").read_text(), "only copy\n")
+
+    def test_a_skip_worktree_file_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        make_repo.git(["update-index", "--skip-worktree", "README.md"], tree)
+        self.assertEqual(make_repo.git(["status", "--porcelain", "--ignored"], tree), "")
+        code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("1 files hidden from git status by index flags", self.kept(out).get("done", out))
+        self.assertTrue(tree.is_dir())
+
+    def test_unreadable_index_flags_keep_the_tree(self) -> None:
+        tree = self.trees / "done"
+        real = cleanup.git
+
+        def git(args, cwd, view=None):
+            if args == ["ls-files", "-v"]:
+                self.assertIsNotNone(view)
+                return 128, "unreadable index"
+            return real(args, cwd, view)
+
+        with mock.patch.object(cleanup, "git", side_effect=git):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("git ls-files -v is unreadable", self.kept(out).get("done", out))
+        self.assertTrue(tree.is_dir())
+
+    def test_a_git_operation_started_in_the_final_locked_recheck_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def bisect_then_check(trees: Path):
+            with real_lock(trees):
+                make_repo.git(["bisect", "start"], tree)
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", bisect_then_check):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("git operation in progress (BISECT_LOG)", self.kept(out).get("done", out))
+        self.assertTrue(tree.is_dir() and (admin / "BISECT_LOG").is_file())
+
+    def test_index_flags_added_in_the_final_locked_recheck_keep_hidden_edits(self) -> None:
+        tree = self.trees / "done"
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def hide_edits_then_check(trees: Path):
+            with real_lock(trees):
+                make_repo.git(["update-index", "--skip-worktree", "README.md"], tree)
+                make_repo.git(["update-index", "--assume-unchanged", "README.md"], tree)
+                make_repo.git(["update-index", "--assume-unchanged", ".gitignore"], tree)
+                (tree / "README.md").write_text("only copy\n")
+                self.assertIn("s README.md", make_repo.git(["ls-files", "-v"], tree))
+                self.assertEqual(make_repo.git(["status", "--porcelain", "--ignored"], tree), "")
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", hide_edits_then_check):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("2 files hidden from git status by index flags", self.kept(out).get("done", out))
+        self.assertEqual((tree / "README.md").read_text(), "only copy\n")
 
     def test_initialized_submodule_metadata_keeps_ignored_evidence_without_a_gitlink(self) -> None:
         tree = self.trees / "done"

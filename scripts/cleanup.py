@@ -9,7 +9,8 @@ verified:
   worker claims it or process has its cwd inside it. A registered worker whose PID was reused is gone; one that
   cannot be verified is not;
 - `git status --porcelain --ignored` lists nothing but build output or engine metadata (`tree_state.unsaved`);
-- no initialized submodule metadata remains (submodule contents are never inspected);
+- no index flags hide tracked files from git status;
+- no in-progress Git operation or initialized submodule metadata remains (submodule contents are never inspected);
 - no container binds a path inside it;
 - nothing on it is unpushed or unmerged (`tree_state.at_risk`).
 
@@ -67,17 +68,23 @@ def containers() -> list[Path] | None:
 
 
 def git_guards(tree: Path) -> list[str]:
-    """What `git status --ignored` and the unlanded-work rule say losing this tree loses, read through one view."""
+    """What git status, index flags and the unlanded-work rule say losing this tree loses, read through one view."""
     try:
         with git_view.opened(tree, audit_env()) as view:
             code, status = git(["status", "--porcelain", "--ignored"], tree, view)
+            flags_code, files = git(["ls-files", "-v"], tree, view)
             state = read_state(tree, view)
     except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
         return ["git cannot read this tree"]
     if code:
         return ["git status --ignored is unreadable"]
+    if flags_code:
+        return ["git ls-files -v is unreadable"]
     lost = unsaved(status)
     out = [f"{len(lost)} unsaved by git status --ignored ({', '.join(lost[:3])})"] if lost else []
+    hidden = sum(line[0].islower() or line[0] == "S" for line in files.splitlines() if line)
+    if hidden:
+        out.append(f"{hidden} files hidden from git status by index flags")
     return out + list(at_risk(state))
 
 
@@ -168,6 +175,12 @@ def layout_guards(tree: Path) -> tuple[git_view.Layout | None, list[str]]:
         return layout, ["not a linked worktree"]
     if (layout.gitdir / "locked").exists():
         return layout, ["locked"]
+    try:
+        for entry in layout.gitdir.iterdir():
+            if entry.name in ("BISECT_LOG", "rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD"):
+                return layout, [f"git operation in progress ({entry.name})"]
+    except OSError:
+        return layout, ["git operations cannot be checked"]
     try:
         if next((layout.gitdir / "modules").iterdir(), None) is not None:
             return layout, ["initialized submodules"]
