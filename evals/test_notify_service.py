@@ -17,6 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import notify
 import notify_service as service
+import supervisor
 from evals.test_notify import Workspace, NOW, TOML, tracker
 
 
@@ -196,7 +197,7 @@ class LifecycleTest(WorkspaceTest):
     def test_ensure_reuses_job_and_replaces_release_then_stop_removes_it(self):
         jobs = self.root / "agents"
         with mock.patch.object(service.sys, "platform", "darwin"), \
-             mock.patch.object(service, "launchctl", side_effect=[False, True, True, True,
+             mock.patch.object(supervisor, "launchctl", side_effect=[False, True, True, True,
                                                                   True, True, True, True, True,
                                                                   True, True]) as control:
             self.assertEqual(service.ensure(self.root, jobs_dir=jobs), "notify: started")
@@ -216,7 +217,7 @@ class LifecycleTest(WorkspaceTest):
 
     def test_off_ensure_has_no_service_side_effects(self):
         (self.root / "chief-of-stuff.toml").write_text('[notify]\nadapter = "off"\n')
-        with mock.patch.object(service, "launchctl") as control:
+        with mock.patch.object(supervisor, "launchctl") as control:
             self.assertEqual(service.ensure(self.root), "notify: off")
         control.assert_not_called()
         self.assertFalse((self.root / ".chief-of-stuff").exists())

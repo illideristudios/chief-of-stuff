@@ -31,6 +31,11 @@ class InstallTest(unittest.TestCase):
         self.assertFalse(self.share.exists())
         self.assertFalse((self.bin / "chief-of-stuff").exists())
 
+    def test_installed_release_includes_requirements(self):
+        release = Path(self.install()["release"])
+        self.assertTrue((release / "requirements.txt").is_file())
+        self.assertEqual((release / "requirements.txt").read_bytes(), (ROOT / "requirements.txt").read_bytes())
+
     def test_one_wrapper_routes_init_and_models_from_versioned_release(self):
         first = self.install()
         command = self.bin / "chief-of-stuff"
