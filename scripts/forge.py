@@ -2,7 +2,8 @@
 
 The forge is the source of truth and the store a cache rebuilt from `snapshots`. It reads issues (backlog.py), open pull or merge
 requests with their CI and review state (merge_ready.py over forge_review.py), and the user's review threads (review_threads.py);
-it creates issues (backlog.py) and writes stage back as labels (kanban.py). Writes preview unless `commit=True`. A read that fails
+it creates issues (backlog.py), writes stage back as labels (kanban.py), and merges verified heads (merge_approved.py).
+Writes preview unless `commit=True`. A read that fails
 raises ForgeError: an empty answer would read as an empty forge.
 """
 
@@ -16,14 +17,12 @@ from typing import Any, Callable
 import backlog
 import forge_review
 import kanban
+import merge_approved
 import merge_ready
 import review_threads
 from backlog_ref import Backlog, GitHubBacklog, IssueRef, backlog_from_config, home_of
+from forge_port import ForgeError
 from settings import Kanban
-
-
-class ForgeError(RuntimeError):
-    """The forge did not answer in full, so nothing it said can stand for the whole."""
 
 
 @dataclass(frozen=True)
@@ -105,6 +104,27 @@ class Forge:
         return next((stage for stage in self.kanban.stage_map if self.kanban.label_for(stage) in labels), "")
 
     # writes: preview unless commit
+    def merge(self, number: int, commit: bool = False) -> str:
+        """Re-read merge readiness, then preview or merge only the verified head."""
+        mark = "#" if self.github else "!"
+        one = next((r for r in self.requests() if r.number == number), None)
+        if one is None:
+            raise ForgeError(f"{mark}{number} is not an open request")
+        if one.verdict != "ready":
+            raise ForgeError(f"not merged: {merge_ready.line(one, mark)}")
+        evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
+        if not commit:
+            return f"would merge {evidence}"
+        _, repo = home_of(self.home)
+        try:
+            code, error = merge_approved.merge_head(one, self.home, self.github, repo, gh=self.gh,
+                                                   call=backlog._call, token=None if self.github else self._token())
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"{mark}{number} not merged at {one.head}: {exc}") from exc
+        if code:
+            raise ForgeError(f"{mark}{number} not merged at {one.head}: {error or f'merge exited {code}'}")
+        return f"merged {evidence}"
+
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:
         return backlog.create(self.home, title, body=body, labels=labels, token=self.token, commit=commit, gh=self.gh,

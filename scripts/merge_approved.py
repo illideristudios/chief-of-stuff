@@ -34,6 +34,18 @@ def blocked(r: Request) -> list[str]:
     return [b for b in r.blockers if b != NO_PIPELINE]
 
 
+def merge_head(one: Request, home, github: bool, repo: str, gh=backlog.run_gh,
+               call=backlog._call, token: str | None = None) -> tuple[int, str]:
+    """Merge at the checked head; return the status code and error."""
+    if github:
+        # ponytail: squash, as this plugin's own repo merges; a [workflow] merge_method when a workspace differs.
+        code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, "--squash", "--match-head-commit", one.head])
+        return code, err.strip() if code else ""
+    _, _, err = call("PUT", f"{home.api(repo)}/merge_requests/{one.number}/merge", token,
+                     backlog.TIMEOUT, {"sha": one.head})
+    return (1 if err else 0), err
+
+
 def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", type=Path, required=True, help="workspace holding CLAUDE.md")
@@ -85,15 +97,9 @@ def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -
     if blocked(one):
         print(f"merge-approved: {mark}{one.number} not merged: {'; '.join(blocked(one))}", file=sys.stderr)
         return 1
-    if github:
-        # ponytail: squash, as this plugin's own repo merges; a [workflow] merge_method when a workspace differs.
-        code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, "--squash", "--match-head-commit", one.head])
-        err = err.strip() if code else ""
-    else:
-        _, _, err = call("PUT", f"{home.api(repo)}/merge_requests/{one.number}/merge", secret,
-                         backlog.TIMEOUT, {"sha": one.head})
-    if err:
-        print(f"merge-approved: {mark}{one.number} not merged: {err}", file=sys.stderr)
+    code, err = merge_head(one, home, github, repo, gh, call, token=None if github else secret)
+    if code:
+        print(f"merge-approved: {mark}{one.number} not merged: {err or f'merge exited {code}'}", file=sys.stderr)
         return 1
     print(f"{mark}{one.number} merged at {one.head[:12]} · {one.url}")
     return 0

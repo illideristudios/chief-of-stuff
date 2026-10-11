@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -163,6 +164,31 @@ class MainTest(unittest.TestCase):
         self.assertIn("12", gh.merges[0])
         self.assertEqual(gh.merges[0][gh.merges[0].index("--match-head-commit") + 1], HEAD)
         self.assertIn("merged", out)
+
+    def test_a_failed_merge_with_no_stderr_is_not_reported_as_merged(self):
+        base = FakeGh(PRS)
+
+        def silent_failure(args, input_text=None):
+            return (1, "", "") if args[:2] == ["pr", "merge"] else base(args, input_text)
+
+        code, out, err = self.run_main(self.workspace(self.OPT_IN), "--merge", "12", gh=silent_failure)
+        self.assertEqual(code, 1)
+        self.assertNotIn("merged", out)
+        self.assertIn("not merged", err)
+
+    def test_gitlab_cli_keeps_its_head_pinned_merge_and_output(self):
+        root = self.workspace(self.OPT_IN)
+        config = root / "CLAUDE.md"
+        config.write_text(config.read_text().replace("GitHub issues; repo o/app",
+                                                   "GitLab; host https://labs.example.test; project team/app"))
+        call, calls = GitLabReadinessTest().fake([{"iid": 5, "approved_by": ["robin"]}])
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(ma.backlog, "token", return_value="t"), redirect_stdout(out), redirect_stderr(err):
+            code = ma.main(["--root", str(root), "--merge", "5"], call=call)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual([c for c in calls if c[0] == "PUT"],
+                         [("PUT", "https://labs.example.test/api/v4/projects/team%2Fapp/merge_requests/5/merge", {"sha": HEAD})])
+        self.assertEqual(out.getvalue(), f"!5 merged at {HEAD[:12]} · u\n")
 
     def test_merge_refuses_a_peer_approval_and_says_why(self):
         gh = FakeGh(PRS)
