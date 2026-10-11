@@ -44,6 +44,7 @@ DRAWS_NOTHING = (
     "trio_gate",
     "performance",
     "performance_report",
+    "supervisor",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
