@@ -50,6 +50,10 @@ class Segment(Base):
     started_at: Mapped[str] = mapped_column(String)
     ended_at: Mapped[str | None] = mapped_column(String, nullable=True)
     outcome: Mapped[str | None] = mapped_column(String, nullable=True)
+    runtime: Mapped[str] = mapped_column(String, default="", server_default="")
+    model: Mapped[str] = mapped_column(String, default="", server_default="")
+    effort: Mapped[str] = mapped_column(String, default="", server_default="")
+    agent_type: Mapped[str] = mapped_column(String, default="", server_default="")
 
 
 class Decision(Base):
@@ -147,14 +151,21 @@ class Store:
 
     # segments
     def record_segment(self, issue_key: str, stage: str, attempt: int, started_at: str,
-                       ended_at: str | None = None, outcome: str | None = None) -> None:
-        # Omitted completion fields stay as stored, so a retried start never reopens a finished segment.
-        done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome)) if v is not None}
+                       ended_at: str | None = None, outcome: str | None = None,
+                       runtime: str | None = None, model: str | None = None,
+                       effort: str | None = None, agent_type: str | None = None) -> None:
+        # Omitted fields stay as stored, so a retried start never clears completion or who ran it.
+        done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome), ("runtime", runtime),
+                                  ("model", model), ("effort", effort), ("agent_type", agent_type))
+                if v is not None}
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
 
-    def segments(self, issue_key: str) -> list[Segment]:
-        return self._all(select(Segment).where(Segment.issue_key == issue_key).order_by(Segment.id))
+    def segments(self, issue_key: str | None = None) -> list[Segment]:
+        stmt = select(Segment).order_by(Segment.id)
+        if issue_key is not None:
+            stmt = stmt.where(Segment.issue_key == issue_key)
+        return self._all(stmt)
 
     # ownership
     def set_ownership(self, issue_key: str, path: str, mode: str = "write") -> None:
