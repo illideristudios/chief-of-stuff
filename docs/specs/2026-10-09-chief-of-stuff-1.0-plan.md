@@ -96,7 +96,7 @@ Zach, 2026-10-09: revisit at M6 time. This scope is provisional; reopen it befor
 2. Decisions that pass the gate are board items, answered on the board. No separate decision pages.
 3. Notify sends exception pings only, linking to the board item.
 4. Agent performance report as a store query over stage segments (A3, kept).
-5. Requirements checklists (H10/V24, carried): done tasks tick one item with evidence, and the board shows done counts. M0 first finds why this feature broke; nothing is ported until that cause is written down.
+5. Requirements checklists (H10/V24, carried): done tasks tick one item with evidence, and the board shows done counts. The feature is: Zach feeds in a PRD, the engine distils a checklist from [a template](2026-10-10-requirements-checklist-template.md), and done tasks tick items with evidence (Zach, 2026-10-10: "we need a template requirements checklist"). M0 still finds why the old feature broke; the known suspects are the board parser silently skipping non-canonical checkbox lines, the syntax moving into an optional skill (#510), and ticking depending on a model reading that skill. Nothing is ported until that cause is written down. Distilling, matching a done task to an item, and ticking stay model judgement, made in collaboration with Zach; the engine only parses and counts (Zach, 2026-10-10).
 
 Exit (S2): a board render test over a day with rework on one issue shows exactly one line with several segments.
 
