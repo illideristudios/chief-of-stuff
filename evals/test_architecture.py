@@ -48,6 +48,7 @@ DRAWS_NOTHING = (
     "slots",
     "reconcile",
     "cleanup",
+    "engine",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"

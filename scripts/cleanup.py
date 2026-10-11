@@ -191,24 +191,11 @@ def layout_guards(tree: Path) -> tuple[git_view.Layout | None, list[str]]:
     return layout, []
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--root", type=Path, required=True, help="the workspace whose Worktrees dir is cleaned")
-    ap.add_argument("--store", type=Path, required=True, help="the engine's store")
-    ap.add_argument("--remove", action="store_true", help="remove the trees the preview marks; without it nothing is removed")
-    args = ap.parse_args(argv)
-    root = args.root.resolve()
-    if not args.store.is_file():  # Store() would create an empty one
-        print(f"no store at {args.store}: nothing removed", file=sys.stderr)
-        return 1
-    try:
-        trees_dir = worktrees_dir((root / "CLAUDE.md").read_text())
-        db = Store(args.store)
-        owned = owned_items(root, db)
-    except (OSError, UnicodeDecodeError, SQLAlchemyError) as exc:
-        print(f"cannot read the workspace or the store ({type(exc).__name__}): nothing removed", file=sys.stderr)
-        return 1
-    trees = root / trees_dir
+def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) -> int:
+    """Clean with the engine's open store, using exactly the CLI's guards and removal. None means no Worktrees dir."""
+    trees_dir = str(trees) if trees is not None else ""
+    trees = trees if trees is not None else root
+    owned = owned_items(root, db)
     mounts = containers()
     failed = False
     for tree in discover(root, trees_dir):
@@ -223,7 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             kept.append("a container binds a path in it")
         if layout is not None and layout.tree is not None:
             kept += git_guards(tree)
-        if not kept and args.remove:
+        if not kept and remove:
             removal_started, tree_removed = False, False
             try:
                 with trees_lock(trees):  # workers register under this lock: re-check, then delete, holding it
@@ -254,11 +241,11 @@ def main(argv: list[str] | None = None) -> int:
                         partial.append(f"tree remains ({tree})")
                     partial.append(f"admin dir remains ({layout.gitdir})")
         keys = ", ".join(item.issue_key for item in items)
-        verb = "keep" if kept else "removed" if args.remove else "remove"
+        verb = "keep" if kept else "removed" if remove else "remove"
         line = clean(f"partially removed {tree.name}: {'; '.join(partial + kept)}" if partial else
                      f"{verb} {tree.name} — {'; '.join(kept) if kept else keys}")
         print(line)
-        if args.remove:
+        if remove:
             at = db.clock().isoformat()
             for item in items:
                 try:
@@ -266,10 +253,32 @@ def main(argv: list[str] | None = None) -> int:
                 except SQLAlchemyError as exc:
                     failed = True
                     print(f"cannot log cleanup result for {item.issue_key} ({type(exc).__name__})", file=sys.stderr)
-    if not args.remove:
+    if not remove:
         print("preview: nothing removed; --remove removes the trees marked remove")
-    db.engine.dispose()
     return 1 if failed else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--root", type=Path, required=True, help="the workspace whose Worktrees dir is cleaned")
+    ap.add_argument("--store", type=Path, required=True, help="the engine's store")
+    ap.add_argument("--remove", action="store_true", help="remove the trees the preview marks; without it nothing is removed")
+    args = ap.parse_args(argv)
+    root = args.root.resolve()
+    if not args.store.is_file():  # Store() would create an empty one
+        print(f"no store at {args.store}: nothing removed", file=sys.stderr)
+        return 1
+    db = None
+    try:
+        trees_dir = worktrees_dir((root / "CLAUDE.md").read_text())
+        db = Store(args.store)
+        return execute(root, root / trees_dir if trees_dir else None, db, remove=args.remove)
+    except (OSError, UnicodeDecodeError, SQLAlchemyError) as exc:
+        print(f"cannot read the workspace or the store ({type(exc).__name__}): nothing removed", file=sys.stderr)
+        return 1
+    finally:
+        if db is not None:
+            db.engine.dispose()
 
 
 if __name__ == "__main__":
