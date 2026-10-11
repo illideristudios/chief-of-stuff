@@ -46,6 +46,7 @@ DRAWS_NOTHING = (
     "performance_report",
     "supervisor",
     "slots",
+    "reconcile",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
@@ -169,6 +170,11 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
 
 
 class DependencyRuleTest(unittest.TestCase):
+    def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "reconcile",
+                         {"store", "forge", "claude_adapter", "settings", "trio_gate"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
+
     def test_every_script_is_classified(self) -> None:
         scripts = {p.stem for p in SCRIPTS.glob("*.py")}
         self.assertEqual(sorted(scripts - PAGES - set(DRAWS_NOTHING)), [])
