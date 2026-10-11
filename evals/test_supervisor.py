@@ -27,6 +27,9 @@ class SupervisorTest(unittest.TestCase):
         self.publish("1.0.0", "SQLAlchemy==2.0.54\n")
         self.calls = []
         self.pip_fails = False
+        self.python_version, self.cache_tag = "3.13.0", "cpython-313"
+        self.identity_call = ["/login/bin/python3", "-c",
+                              "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"]
         for patch in (mock.patch.object(supervisor, "RELEASE", self.release),
                       mock.patch.object(supervisor.sys, "platform", "darwin"),
                       mock.patch.dict(supervisor.os.environ, {"CLAUDE_PLUGIN_DATA": str(self.data)}),
@@ -45,6 +48,8 @@ class SupervisorTest(unittest.TestCase):
 
     def fake_run(self, argv, **_):
         self.calls.append(argv)
+        if argv == self.identity_call:
+            return subprocess.CompletedProcess(argv, 0, json.dumps([self.python_version, self.cache_tag]), "")
         if argv[1:3] == ["-m", "venv"]:
             (Path(argv[-1]) / "bin").mkdir(parents=True)
             (Path(argv[-1]) / "bin/python").touch()
@@ -69,16 +74,29 @@ class SupervisorTest(unittest.TestCase):
 
 
 class VenvTest(SupervisorTest):
+    def test_changed_base_python_identity_builds_a_new_venv_beside_the_old(self):
+        old = supervisor.ensure_venv(self.data)
+        for version, tag in (("3.13.1", "cpython-313"), ("3.13.1", "cpython-314")):
+            with self.subTest(version=version, cache_tag=tag):
+                self.python_version, self.cache_tag = version, tag
+                new = supervisor.ensure_venv(self.data)
+                self.assertNotEqual(new, old)
+                self.assertTrue(old.is_file(), "the running engine's venv must stay intact")
+                self.assertTrue((old.parent.parent / ".installed").exists())
+                self.assertIn(["/login/bin/python3", "-m", "venv", str(new.parent.parent)], self.calls)
+                self.assertEqual(supervisor.ensure_venv(self.data), new)
+                old = new
+
     def test_builds_once_from_the_login_shell_python_and_reuses_it(self):
         python = supervisor.ensure_venv(self.data)
         venv = python.parent.parent
         self.assertEqual(python, venv / "bin/python")
-        self.assertEqual(self.calls, [["/login/bin/python3", "-m", "venv", str(venv)],
+        self.assertEqual(self.calls, [self.identity_call, ["/login/bin/python3", "-m", "venv", str(venv)],
                                       [str(python), "-m", "pip", "install", "--disable-pip-version-check",
                                        "-r", str(self.release / "requirements.txt")]])
         self.assertEqual(supervisor.ensure_venv(self.data), python)
-        # Reuse probes the cached interpreter once; it must not rebuild.
-        self.assertEqual(self.calls[2:], [[str(python), "-c", ""]])
+        # Reuse checks the base identity and probes the cached interpreter; it must not rebuild.
+        self.assertEqual(self.calls[3:], [self.identity_call, [str(python), "-c", ""]])
 
     def test_changed_requirements_build_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
@@ -86,7 +104,7 @@ class VenvTest(SupervisorTest):
         new = supervisor.ensure_venv(self.data)
         self.assertNotEqual(new, old)
         self.assertTrue(old.exists(), "the running engine's venv must stay intact")
-        self.assertEqual(len(self.calls), 4)
+        self.assertEqual(len(self.calls), 6)
 
     def test_a_failed_install_is_reported_and_never_reused(self):
         self.pip_fails = True
@@ -94,7 +112,7 @@ class VenvTest(SupervisorTest):
             supervisor.ensure_venv(self.data)
         self.pip_fails = False
         supervisor.ensure_venv(self.data)
-        self.assertEqual(len(self.calls), 4, "the half-built venv is rebuilt, not reused")
+        self.assertEqual(len(self.calls), 6, "the half-built venv is rebuilt, not reused")
 
     def test_no_login_shell_python_is_reported(self):
         with mock.patch.object(supervisor.shell_setup, "resolve", return_value=None), \
@@ -106,12 +124,12 @@ class VenvTest(SupervisorTest):
         python.unlink()
         self.assertEqual(supervisor.ensure_venv(self.data), python)
         self.assertTrue(python.is_file())
-        self.assertEqual(len(self.calls), 4, "marker alone must not reuse a missing interpreter")
+        self.assertEqual(len(self.calls), 6, "marker alone must not reuse a missing interpreter")
         python.unlink()
         python.symlink_to("/nonexistent/chief-of-stuff-venv-python")
         self.assertEqual(supervisor.ensure_venv(self.data), python)
         self.assertTrue(python.is_file() and not python.is_symlink())
-        self.assertEqual(len(self.calls), 6)
+        self.assertEqual(len(self.calls), 9)
 
     def test_data_dir_falls_back_to_the_plugin_data_dir_when_unset(self):
         with mock.patch.dict(supervisor.os.environ, {"CLAUDE_PLUGIN_DATA": ""}):

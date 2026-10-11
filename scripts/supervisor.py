@@ -142,17 +142,26 @@ def _venv_python_runs(python: Path) -> bool:
 
 
 def ensure_venv(data: Path) -> Path:
-    """The venv python for the pinned requirements.txt, built when missing or when the pins changed."""
+    """The venv python for the pinned requirements.txt and the login shell's base Python identity."""
     requirements = RELEASE / "requirements.txt"
-    # Keyed by the pins, so a rebuild never touches the venv a running engine uses.
-    # shortcut: superseded venvs are never removed, prune them once an engine per workspace is common.
-    venv = data / f"venv-{hashlib.sha256(requirements.read_bytes()).hexdigest()[:16]}"
-    python, done = venv / "bin/python", venv / ".installed"
-    if done.exists() and _venv_python_runs(python):
-        return python
     base = shell_setup.resolve("python3")
     if base is None:
         raise ServiceError("no python3 on the login shell's PATH to build the engine venv")
+    try:
+        identity = subprocess.run(
+            [base, "-c", "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"],
+            capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise ServiceError(f"could not identify the engine's base Python: {exc}") from exc
+    if identity.returncode:
+        raise ServiceError(f"could not identify the engine's base Python: {(identity.stderr or identity.stdout).strip()[-2000:]}")
+    # Keyed by the pins and Python identity, so a rebuild never touches the venv a running engine uses.
+    # shortcut: superseded venvs are never removed, prune them once an engine per workspace is common.
+    key = hashlib.sha256(requirements.read_bytes() + b"\0" + identity.stdout.encode()).hexdigest()[:16]
+    venv = data / f"venv-{key}"
+    python, done = venv / "bin/python", venv / ".installed"
+    if done.exists() and _venv_python_runs(python):
+        return python
     shutil.rmtree(venv, ignore_errors=True)
     for argv in ([base, "-m", "venv", str(venv)],
                  [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
