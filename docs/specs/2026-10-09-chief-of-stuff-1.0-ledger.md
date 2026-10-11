@@ -1,6 +1,6 @@
 # chief-of-stuff 1.0: carry/drop ledger (draft)
 
-Status: reviewed row by row with Zach on 2026-10-10; his decisions are in the Owner decisions section and override the per-row proposals below. Still open: F13 (Triage rule, M4) and the requirements-checklist root cause (H10/V24). Written 2026-10-09 as a draft for Zach's review. Written 2026-10-09 against the 1.0-design worktree (repo at v0.128.x). It is the M0 deliverable "carry/drop ledger" in [the plan](2026-10-09-chief-of-stuff-1.0-plan.md), and applies the decisions in [the design](2026-10-09-chief-of-stuff-1.0-design.md).
+Status: reviewed row by row with Zach on 2026-10-10; his decisions are in the Owner decisions section and override the per-row proposals below. Still open: the requirements-checklist root cause (H10/V24). F13 was settled 2026-10-11 (plan M4 item 3). Written 2026-10-09 as a draft for Zach's review. Written 2026-10-09 against the 1.0-design worktree (repo at v0.128.x). It is the M0 deliverable "carry/drop ledger" in [the plan](2026-10-09-chief-of-stuff-1.0-plan.md), and applies the decisions in [the design](2026-10-09-chief-of-stuff-1.0-design.md).
 
 Every disposition below is a **proposal** for the owner to approve. Nothing is dropped or carried until Zach says so. All evidence paths are relative to the worktree root.
 
@@ -19,11 +19,11 @@ Resolved from the 14 "unknown, needs owner" rows, one at a time. These override 
 | H10, V24 Requirements checklists and deadlines | **Keep.** Feature as Zach describes it: feed in a PRD, distil a checklist from a template, tick items on done tasks with evidence (see [the template](2026-10-10-requirements-checklist-template.md)). **Keep.** It is a primary feature that broke, which is why Zach stopped using it. Carry the behaviour, but find the root cause of why it broke before porting anything (M0 behaviour-spec work). |
 | V8 Interactive dispatch proposal | **Defer past 1.0.** The engine dispatches; no standing interactive sessions in 1.0. |
 | V18b Share redaction | **Drop.** Zach: "no idea where that came from and it's not part of the intended scope." Origin: it has been in the agent file (`agents/chief-of-stuff.md:224`) and the `share-redaction` golden case since the first commit, 3c43cfa (0.1.0, 2026-09-16). Not touched in the current repo; out of 1.0 scope. |
-| F13 Triage rule | **Revisit in M4** (unchanged). |
+| F13 Triage rule | **Settled 2026-10-11 by Zach's existing definition:** clear fixes dispatch automatically; the architect disposes of each finding (fix, file, keep, discard); burn down to no open findings; ping after 3 fix rounds. The old ask rule is not carried (plan M4 item 3). |
 | Source of truth | **The forge is the truth; the store is a rebuildable cache** (Zach: "the source of truth must be the forge"). Design decision 1 rewritten; plan M1 and M2 updated. |
 | G1, G2 Mailbox and TOON | **Replace** with the MCP report/ask channel (design 10) and JSON. Preserve: a worker's ask or stop must reach the engine and never be dropped. |
 | E9, E10, E11 Terminal launchers and launch verification | **Drop** the launchers and `session_exec.py`; **rewrite launch verification** (the engine confirms a worker is alive before recording `running`, #551). |
-| F11 Kanban label sync | **Flipped from the proposal: keep as stage write-back.** With the forge as truth, stage must reach the forge. Labels vs Project Status is Open. The human-review hold stays as a flag. Supersedes the earlier drop. |
+| F11 Kanban label sync | **Flipped from the proposal: keep as stage write-back.** With the forge as truth, stage must reach the forge. Stage is written to GitHub Project Status (Zach, 2026-10-11); GitLab uses labels. The human-review hold stays as a flag. Supersedes the earlier drop. |
 | B7, B13, V3 Resume block, cron checks, resume/tracker evals | **Drop.** Resume state lives in the store; restart evals (S4) replace them. Quiet-when-unchanged carries (V21). |
 | B14, C1, V17, V20 Session roster, relay, permission relay, peer polling | **Drop.** Peer text stays untrusted data in the assignment composer. V20 returns in some form only if interactive sessions return (V8 deferred). |
 | B15, C5 Tracker grammar and `tracker-rows` skill | **Drop.** The issue key replaces row identity. |

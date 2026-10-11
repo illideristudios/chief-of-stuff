@@ -39,6 +39,7 @@ Exit: store approved, spike note, ledger approved, open items resolved or deferr
 - Ledger: **reviewed with Zach row by row on 2026-10-10**; his decisions are in its Owner decisions section. Open: the Triage rule (M4) and why requirements checklists broke; see [`2026-10-09-chief-of-stuff-1.0-ledger.md`](2026-10-09-chief-of-stuff-1.0-ledger.md).
 - Ledger carry-ins that shape the milestones below: policy by persona, stage and room (decision 12); directed-graph workflows with one shipped (decision 13); the engine removes worktrees under the finding-27 guards (E19); launchd supervisor (E18); requirements checklists carried; the performance report kept as a store query; the install-and-pin mechanism dropped; the runtime registry kept; non-Claude hosts in 1.1.
 - Settled 2026-10-11: workers go through the adapter by default with a full session when needed; open-finding severity is set per persona and stage; the architect is consulted by policy; 3 fix rounds then a ping.
+- Settled 2026-10-11 (Zach): stage write-back uses GitHub Project Status; the worker channel uses the MCP Python SDK (`mcp`, pinned); M5 and M6 proceed as written; the Triage rule is his existing definition (M4 item 3).
 - Still open: the shipped per-persona default policies (reviewer roles and models), the topic tags and shipped default trios, why requirements checklists broke (find the cause before porting), and the datetime-inject version range. The clock hook is a plugin dependency on `datetime-inject` (Zach, 2026-10-10), not a hook shipped here. The two spikes are done (see the spike note addendum): command hooks run in `claude -p` workers, hooks fail open, and plugin dependencies install automatically but only within one marketplace unless allowed. Default limit values are no longer a 1.0 item: they are set from 1.0 measurement in 1.1.
 
 ### M1. Core model and store
@@ -51,7 +52,7 @@ Exit (S2 at the data layer): a test that tries to create a duplicate gantt row f
 
 ### M2. Forge adapter and the issue-first gate
 
-1. GitHub and GitLab adapter: read issues and MRs/PRs, create an issue, read CI and review state, **write stage/status back to the forge** (labels or Project Status; choice Open), and rebuild the store from the forge.
+1. GitHub and GitLab adapter: read issues and MRs/PRs, create an issue, read CI and review state, **write stage/status back to the forge** (GitHub Project Status, Zach 2026-10-11; GitLab uses labels), and rebuild the store from the forge.
 2. Issue-first gate: starting work with no issue creates it first. A workspace with no `Backlog:` line is refused, and the setup helper walks Zach through configuring one (D3, Decided).
 3. Forge calls prefer `gh` subcommands over `gh api` where they cover the call.
 
@@ -74,13 +75,17 @@ Exit (S1, S4): an eval that kills the engine mid-run and a fake quota hit, and t
 
 1. Policy and workflow as data (decisions 12 and 13): personas (role, model, effort, rules), rooms (a board section and a persona's space), stages, and one shipped directed-graph workflow with gate policy on its edges. Default policies ship per persona and are overridable per stage and room. Reviewer roles and models, what counts as an open finding, retry limits and when the architect is consulted live here. Content settled in M0. Standing approvals are policy exceptions that must carry an expiry; one without is refused.
 2. Engine enforces the gates (burn down to no open findings, architect consult) and merges when the policy is satisfied. Merging under policy is not an interrupt; this overturns the `merge_owner = "user"` default (D6).
-3. **Revisit the Triage rule in this phase** (Zach, 2026-10-09: "make a note to visit this during this phase"; no direction chosen yet). Today it asks about any non-trivial or security finding (`skills/review-pipeline/SKILL.md`, Triage), which conflicts with consulting Zach only on exceptions. Options raised: route every would-be ask through the trio gate; the same except security and Critical findings, which always go to Zach; or widen the automatic-fix rule and trio the rest. Decide with Zach during M4, before the rule is carried.
+3. **Triage rule: settled** by Zach's own definition (2026-10-06 to 2026-10-09; confirmed 2026-10-11). The old rule (`skills/review-pipeline/SKILL.md`, ask about any non-trivial or security finding) is not carried. Instead:
+   - A clear fix is dispatched as a fix automatically, never put to Zach as a decision ("This should have automatically been a fix").
+   - The architect disposes of each finding as fix, file, keep or discard ("why aren't you passing that to the architect").
+   - Review burns down to no open findings. Open-finding severity is set per persona and stage, and the architect is consulted by policy.
+   - After 3 fix rounds, the engine pings.
 
 Exit (S3): an eval where work meeting the policy merges with no human input, and one where a policy gate fails and it does not. Also: a gate turned on for one stage or room holds only there, and an exception with no expiry is refused.
 
 ### M5. Decision gate and interrupts
 
-Zach, 2026-10-09: "we'll revisit at m5 time." This scope is provisional; reopen it before starting M5.
+Zach, 2026-10-11: proceed with this scope as written.
 
 1. Trio gate (D5a): before any ask, consult a topic-appropriate trio through the model adapter (three calls, structured verdicts). Unanimous → adopt their recommendation and record it. Any concern → escalate to Zach.
 2. Trio selection by policy (topic to three personas), the full verdict record, and board reversal (settled 2026-10-11).
@@ -91,7 +96,7 @@ Exit (S1): evals showing a routine question resolved by a unanimous trio with no
 
 ### M6. Board and pings
 
-Zach, 2026-10-09: revisit at M6 time. This scope is provisional; reopen it before starting M6.
+Zach, 2026-10-11: proceed with this scope as written.
 
 1. Board reads from the store. Gantt shows one line per issue with segments by (issue, stage, attempt). Adjust the existing UI only where the model needs it (D8).
 2. Decisions that pass the gate are board items, answered on the board. No separate decision pages.
