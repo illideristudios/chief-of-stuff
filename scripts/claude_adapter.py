@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import uuid
 
 import runtimes
 from model_port import Failure, Reply, Request, quota_reset
@@ -20,6 +21,8 @@ RUNTIME = runtimes.get("claude")
 
 def call(request: Request, *, claude_as_profile: str = "") -> Reply | Failure:
     """The model port for Claude. Bind the profile with `functools.partial` to get a `model_port.Model`."""
+    if request.session_id and not request.resume and not _is_uuid(request.session_id):
+        return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
     program, lead = runtimes.program(RUNTIME.name, claude_as_profile)
     try:
         binary = resolve(program)
@@ -34,6 +37,8 @@ def call(request: Request, *, claude_as_profile: str = "") -> Reply | Failure:
                               capture_output=True, text=True, timeout=request.timeout_s)
     except subprocess.TimeoutExpired:
         return Failure("unknown", f"no answer within {request.timeout_s}s")
+    except OSError as exc:  # e.g. the worktree in cwd was removed; the caller's retry policy decides
+        return Failure("unknown", f"could not launch: {exc}")
     return classify(done.returncode, done.stdout, done.stderr)
 
 
@@ -52,6 +57,14 @@ def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
     if not request.plugin_dirs:  # design 9: a judgement call runs without tools, hooks, plugins or CLAUDE.md
         out += ["--tools", "", "--safe-mode"]
     return out + ["--", request.prompt]
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:

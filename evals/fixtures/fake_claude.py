@@ -27,6 +27,12 @@ def one_answer(args):
     if "QUOTA" in prompt:
         print('API Error: 429 {"error":{"status":"RESOURCE_EXHAUSTED"}} resets at 5pm.', file=sys.stderr)
         sys.exit(1)
+    if "--session-id" in flag:
+        try:
+            uuid.UUID(session)
+        except ValueError:
+            print("Error: Invalid session ID. Must be a valid UUID.", file=sys.stderr)
+            sys.exit(1)
     if "--resume" in flag and not (sessions / session).exists():
         print(f"No conversation found with session ID: {session}", file=sys.stderr)
         sys.exit(1)

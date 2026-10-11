@@ -8,11 +8,13 @@ import os
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 FAKE = ROOT / "evals" / "fixtures" / "fake_claude.py"
+SID = "6f1c2a3e-8a4b-4c1d-9e2f-0a1b2c3d4e5f"
 sys.path.insert(0, str(ROOT / "scripts"))
 import claude_adapter  # noqa: E402
 import model_port  # noqa: E402
@@ -68,12 +70,12 @@ class ArgvTest(unittest.TestCase):
                           "--tools", "", "--safe-mode", "--", "-starts with a dash"])
 
     def test_model_effort_schema_session_and_launch_profile(self):
-        request = Request(prompt="p", model="opus", effort="high", schema={"type": "object"}, session_id="u1",
+        request = Request(prompt="p", model="opus", effort="high", schema={"type": "object"}, session_id=SID,
                           plugin_dirs=("/guard",))
         self.assertEqual(claude_adapter.argv(request, "/bin/claude-as", ["run", "secondary"]),
                          ["/bin/claude-as", "run", "secondary", "-p", "--output-format", "json",
                           "--model", "opus", "--effort", "high", "--json-schema", '{"type": "object"}',
-                          "--session-id", "u1", "--plugin-dir", "/guard", "--", "p"])
+                          "--session-id", SID, "--plugin-dir", "/guard", "--", "p"])
 
     def test_a_resume_names_the_session(self):
         got = claude_adapter.argv(Request(prompt="p", session_id="u1", resume=True), "/bin/claude", [])
@@ -154,10 +156,20 @@ class CallTest(unittest.TestCase):
         self.assertEqual(self.resolved, ["claude"])
 
     def test_a_session_minted_then_resumed_recalls_the_first_call(self):
-        self.call("the code word is heron", session_id="u1")
-        self.assertIn("heron", self.call("what was it?", session_id="u1", resume=True).text)
-        missing = self.call("again", session_id="u2", resume=True)
+        self.call("the code word is heron", session_id=SID)
+        self.assertIn("heron", self.call("what was it?", session_id=SID, resume=True).text)
+        missing = self.call("again", session_id=str(uuid.uuid4()), resume=True)
         self.assertEqual(missing.kind, "session_missing")
+
+    def test_a_new_session_needs_a_uuid_and_is_refused_before_launch(self):
+        # The CLI refuses a non-UUID --session-id; the port says so without spending a launch.
+        got = self.call("p", session_id="u1")
+        self.assertEqual((got.kind, got.retryable), ("error", False))
+        self.assertEqual(self.resolved, [])
+
+    def test_a_working_directory_gone_at_launch_is_a_retryable_unknown(self):
+        got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir / "removed")))
+        self.assertEqual((got.kind, got.retryable), ("unknown", True))
 
     def test_a_quota_stop_is_quota(self):
         self.assertEqual(self.call("QUOTA").kind, "quota")
