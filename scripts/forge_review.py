@@ -6,6 +6,7 @@ verdict, review_threads.py replies on it, and board_sources.py caches it for the
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode
@@ -17,6 +18,13 @@ from workspace import ConfigError, read_config
 
 PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}  # a completed check that concluded anything else (STALE, "") is not a pass
 GITLAB_PIPELINE = {"success": "passed", "failed": "failed", "canceled": "failed"}
+REQUEST_LIMIT = 100  # the most open requests one read lists; a read this long may have been cut off
+CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(#\d+)")
+
+
+def closes(body: str | None) -> tuple[str, ...]:
+    """The issue refs a request's body closes (`Closes #3`), in order, once each."""
+    return tuple(dict.fromkeys(CLOSES.findall(body or "")))
 
 
 def github_approval(reviews: list[dict], approver: str, head: str) -> str:
@@ -69,6 +77,7 @@ class Request:
     threads_cut_at: int = 0          # the count read when more threads lay behind it (a cut-off read is not a whole one)
     draft: bool = False
     merge_state: str = ""            # GitHub's mergeStateStatus; "" (GitLab) has none
+    closes: tuple[str, ...] = ()     # the issue refs its body closes, e.g. ("#3",)
 
     @property
     def unverified(self) -> str:
@@ -126,15 +135,16 @@ class Request:
 
 
 def github_requests(repo: str, approver: str, gh=backlog.run_gh) -> list[Request]:
-    code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", "100", "--json",
-                         "number,title,url,headRefOid,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus"])
+    code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", str(REQUEST_LIMIT), "--json",
+                         "number,title,url,headRefOid,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus,body"])
     if code != 0:
         raise RuntimeError(f"gh pr list: {err.strip() or code}")
     return [Request(p["number"], p["title"], p["url"], p["headRefOid"],
                     github_approval(p.get("reviews") or [], approver, p["headRefOid"]),
                     github_pipeline(p.get("statusCheckRollup") or []),
                     {"MERGEABLE": "yes", "CONFLICTING": "conflict"}.get(p.get("mergeable"), "unknown"), approver,
-                    draft=bool(p.get("isDraft")), merge_state=p.get("mergeStateStatus") or "UNKNOWN")
+                    draft=bool(p.get("isDraft")), merge_state=p.get("mergeStateStatus") or "UNKNOWN",
+                    closes=closes(p.get("body")))
             for p in json.loads(out)]
 
 
@@ -142,7 +152,7 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
     # ponytail: GitLab's approvals API names no commit, so an approval counts for the head only when the
     # project resets approvals on push. Check that project setting once; a per-note sha check if it is off.
     base = home.api(project)
-    listed, _, err = call("GET", f"{base}/merge_requests?" + urlencode({"state": "opened", "per_page": 100}), token, backlog.TIMEOUT)
+    listed, _, err = call("GET", f"{base}/merge_requests?" + urlencode({"state": "opened", "per_page": REQUEST_LIMIT}), token, backlog.TIMEOUT)
     if err:
         raise RuntimeError(f"merge requests: {err}")
     out = []
@@ -161,5 +171,5 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
                            "none" if pipeline is None else GITLAB_PIPELINE.get(pipeline, "running"),
                            "conflict" if mr.get("has_conflicts") else ("yes" if status == "mergeable" else status),
                            approver, str(head.get("id") or ""), (head.get("sha") or None) if head else "",
-                           draft=bool(mr.get("draft"))))
+                           draft=bool(mr.get("draft")), closes=closes(mr.get("description"))))
     return out

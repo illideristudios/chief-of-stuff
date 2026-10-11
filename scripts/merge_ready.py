@@ -37,7 +37,7 @@ QUERY = """query($owner: String!, $name: String!) { repository(owner: $owner, na
       __typename ... on CheckRun { checkSuite { workflowRun { databaseId } } } } } } } } } } } } }""" % THREAD_LIMIT
 
 
-def github_ready(repo: str, gh=backlog.run_gh) -> list[Request]:
+def github_ready(repo: str, gh=backlog.run_gh, approver: str = "") -> list[Request]:
     owner, name = repo.split("/", 1)
     # -f, not -F: -F types its value (digits become a number, `@path` reads a file)
     code, out, err = gh(["api", "graphql", "-f", f"query={QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"])
@@ -48,7 +48,7 @@ def github_ready(repo: str, gh=backlog.run_gh) -> list[Request]:
         raise RuntimeError(f"gh api graphql: {answer['errors']}")
     nodes = {n["number"]: n for n in answer["data"]["repository"]["pullRequests"]["nodes"]}
     found = []
-    for r in github_requests(repo, "", gh):
+    for r in github_requests(repo, approver, gh):
         n = nodes.get(r.number)
         if n is None:
             raise RuntimeError(f"#{r.number}: not in the graphql read")
@@ -66,10 +66,10 @@ def github_ready(repo: str, gh=backlog.run_gh) -> list[Request]:
     return found
 
 
-def gitlab_ready(home: backlog.Backlog, project: str, token: str, call=backlog._call) -> list[Request]:
+def gitlab_ready(home: backlog.Backlog, project: str, token: str, call=backlog._call, approver: str = "") -> list[Request]:
     base = home.api(project)
     found = []
-    for r in gitlab_requests(home, project, "", token, call):
+    for r in gitlab_requests(home, project, approver, token, call):
         threads = 0
         for page in range(1, backlog.MAX_PAGES + 1):  # until a short page; x-next-page is not relied on
             discussions, _, err = call("GET", f"{base}/merge_requests/{r.number}/discussions?"

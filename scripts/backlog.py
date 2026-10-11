@@ -284,7 +284,7 @@ def read_one(cfg: Backlog | GitHubBacklog, iid: int, token: str | None = None,
         return Read(error=error)
     if not isinstance(body, dict):
         return Read(error="GitLab answered with something that is not an issue")
-    return Read(issue=replace(_issue(body), body=str(body.get("body") or "")))
+    return Read(issue=replace(_issue(body), body=str(body.get("description") or "")))  # GitLab's issue text is `description`
 
 
 def comments(cfg: Backlog | GitHubBacklog, iid: int, token: str | None = None,

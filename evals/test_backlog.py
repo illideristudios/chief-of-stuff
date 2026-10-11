@@ -904,7 +904,7 @@ class ReadOneTest(unittest.TestCase):
     """#63: `--view` reads one issue's title, state, body and labels through the same port as the list."""
 
     def test_view_reads_title_state_body_and_labels(self):
-        row = {**issue(12, "the design gate"), "body": "gate the design before build"}
+        row = {**issue(12, "the design gate"), "description": "gate the design before build"}
         row["labels"] = ["design-gate", "board"]
         server, base = serve({("GET", f"{ISSUES}/12", "", "1"): (200, json.dumps(row), {})})
         try:
@@ -1047,7 +1047,7 @@ class ViewMainTest(unittest.TestCase):
     def run_view(self, *extra: str, plan: dict | None = None) -> tuple[int, str, str, ThreadingHTTPServer]:
         planned = plan if plan is not None else {
             ("GET", f"{ISSUES}/12", "", "1"):
-                (200, json.dumps({**issue(12, "the design gate"), "body": "gate it"}), {}),
+                (200, json.dumps({**issue(12, "the design gate"), "description": "gate it"}), {}),
         }
         server, base = serve(planned)
         self.addCleanup(stop, server)
@@ -1069,7 +1069,7 @@ class ViewMainTest(unittest.TestCase):
     def test_view_with_comments_prints_the_notes_in_order(self):
         plan = {
             ("GET", f"{ISSUES}/12", "", "1"):
-                (200, json.dumps({**issue(12, "the design gate"), "body": "gate it"}), {}),
+                (200, json.dumps({**issue(12, "the design gate"), "description": "gate it"}), {}),
             ("GET", f"{ISSUES}/12/notes", "", "1"): (200, json.dumps([
                 {"body": "the design gate passes", "author": {"username": "zach"},
                  "created_at": "2026-09-25T21:48:00Z", "system": False},
