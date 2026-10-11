@@ -9,6 +9,7 @@ import threading
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -47,6 +48,34 @@ class FreeSlotsTest(unittest.TestCase):
             self.assertEqual(slots.free_slots(2, slots.running(db)), 1)
             db.record_segment(KEY, "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
             self.assertEqual(slots.free_slots(2, slots.running(db)), 2)
+
+    def test_running_counts_open_segments_in_one_store_query(self) -> None:
+        # Many items must not N+1: items() plus segments(key) per item under the claim flock.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            keys = [f"github:example/repo#{n}" for n in range(3)]
+            for k in keys:
+                db.upsert_item(k, title="x")
+                db.record_segment(k, "implement", 1, started_at="09:00")
+            db.record_segment(keys[0], "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
+            db.record_segment(keys[0], "review", 1, started_at="10:00")
+            calls: list[tuple[str, object]] = []
+            real_segments, real_items = db.segments, db.items
+
+            def spy_segments(issue_key: str | None = None):
+                calls.append(("segments", issue_key))
+                return real_segments(issue_key)
+
+            def spy_items():
+                calls.append(("items", None))
+                return real_items()
+
+            with mock.patch.object(db, "segments", spy_segments), mock.patch.object(db, "items", spy_items):
+                self.assertEqual(slots.running(db), 3)
+            self.assertEqual(calls, [("segments", None)])
 
 
 def _noop() -> None:

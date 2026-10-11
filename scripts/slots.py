@@ -30,9 +30,7 @@ def free_slots(max_concurrency: int | None, running: int) -> int:
 
 def running(store: Any) -> int:
     """Open segments in the store: started, not ended."""
-    return sum(1 for item in store.items()
-               for seg in store.segments(item.issue_key)
-               if seg.ended_at is None)
+    return sum(1 for seg in store.segments() if seg.ended_at is None)
 
 
 @contextmanager
