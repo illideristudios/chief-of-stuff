@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
+from math import isfinite
 
 from runtimes import EFFORTS
 
@@ -135,8 +136,8 @@ def _text(where: str, value, required: bool = True) -> str | None:
 
 
 def _limit(where: str, value) -> float:
-    if type(value) not in (int, float) or value < 0:
-        raise PolicyError(f"{where} must be a number of at least 0")
+    if type(value) not in (int, float) or not isfinite(value) or value < 0:
+        raise PolicyError(f"{where} must be a finite number of at least 0")
     return value
 
 
@@ -216,9 +217,9 @@ def _place(kind: str, name: str, value, personas: set[str], gates: set[str]) -> 
 def _workflow(name: str, value, stages: set[str]) -> Workflow:
     where = f"[workflows.{name}]"
     t = _table(where, value, {"start", "edges", "issue_types"})
-    start = t.get("start")
-    if start is None:
-        raise PolicyError(f"{where} needs a start stage")
+    start = _text(f"{where} start", t.get("start"))
+    if not isinstance(t.get("edges", []), list):
+        raise PolicyError(f"{where} edges must be a list of tables")
     edges = []
     for i, e in enumerate(t.get("edges", [])):
         at = f"{where} edges[{i}]"

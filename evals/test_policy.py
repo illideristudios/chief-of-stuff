@@ -198,6 +198,11 @@ class FieldTest(unittest.TestCase):
             with self.subTest(line=line):
                 refused(self, BASE.replace("[policy]\n", f"[policy]\n{line}\n"), words)
 
+    def test_a_limit_must_be_finite(self):
+        for value in ("nan", "inf", "-inf"):
+            with self.subTest(value=value):
+                refused(self, BASE.replace("[policy]\n", f"[policy]\nspend_usd = {value}\n"), "spend_usd")
+
     def test_limits_are_fields_with_no_default_value(self):
         got = parse(BASE.replace("[policy]\n", "[policy]\nspend_usd = 20\nquota_percent = 80.5\ntime_minutes = 90\n")).resolve()
         self.assertEqual((got.spend_usd, got.quota_percent, got.time_minutes), (20, 80.5, 90))
@@ -269,6 +274,14 @@ class WorkflowTest(unittest.TestCase):
         refused(self, flow('start = "design"\n'), "design")
         refused(self, flow('start = "implement"\nedges = [{ from = "implement", to = "deploy" }]\n'), "deploy")
         refused(self, flow('start = "implement"\nedges = [{ from = "qa", to = "merge" }]\n'), "qa")
+
+    def test_edges_that_are_not_a_list_are_refused(self):
+        for edges in ("{}", '"implement"'):
+            with self.subTest(edges=edges):
+                refused(self, flow(f'start = "implement"\nedges = {edges}\n'), "edges")
+
+    def test_a_start_that_is_not_a_name_is_refused(self):
+        refused(self, flow('start = []\n'), "start")
 
     def test_an_edge_to_nowhere_is_refused(self):
         refused(self, flow('start = "implement"\nedges = [{ from = "implement" }]\n'), "to")
