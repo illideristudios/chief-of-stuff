@@ -61,6 +61,14 @@ class GitHubThreadsTest(unittest.TestCase):
         self.assertEqual(one.where, "src/app.py:4")
 
 
+    def test_a_read_that_reaches_the_cap_is_an_error_never_a_whole_answer(self):
+        full = [thread([comment("robin", "x", n)]) for n in range(rt.LIMIT)]
+        graph = {"data": {"repository": {"pullRequests": {"nodes": [
+            {"number": 12, "title": "t", "url": "u", "reviewThreads": {"nodes": full}}]}}}}
+        with self.assertRaisesRegex(RuntimeError, "#12 review threads"):
+            rt.github_threads("o/app", "robin", lambda args, input_text=None: (0, json.dumps(graph), ""))
+
+
 class GitLabThreadsTest(unittest.TestCase):
     def test_gitlab_discussions_follow_the_same_rule(self):
         def note(user, body, nid, **kw):
@@ -87,6 +95,13 @@ class GitLabThreadsTest(unittest.TestCase):
             "!5/d1": ("needs work", "https://labs.example.test/team/app/-/merge_requests/5#note_1"),
             "!5/d2": ("awaiting you", "https://labs.example.test/team/app/-/merge_requests/5#note_3"),
         })
+
+
+    def test_a_merge_request_list_that_reaches_the_cap_is_an_error(self):
+        listed = [{"iid": n, "title": "MR", "web_url": "u"} for n in range(rt.LIMIT)]
+        home = rt.backlog.Backlog("https://labs.example.test", "team/app")
+        with self.assertRaisesRegex(RuntimeError, "merge requests"):
+            rt.gitlab_threads(home, "team/app", "robin", "t", lambda *a, **k: (listed, {}, ""))
 
 
 class MainTest(unittest.TestCase):
