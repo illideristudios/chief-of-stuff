@@ -38,6 +38,7 @@ RUNTIMES = (
             effort_argv=("--effort", "{effort}")),
 )
 NAMES = tuple(runtime.name for runtime in RUNTIMES)
+EFFORTS = ("low", "medium", "high", "xhigh", "max")  # the levels a worker launch and a persona take
 _BY_NAME = {runtime.name: runtime for runtime in RUNTIMES}
 
 
