@@ -119,7 +119,7 @@ _OBJECT_ONLY = frozenset(("branch", "cat-file", "for-each-ref", "log", "ls-files
 # Exact option spellings, restricted operand count, required read option, operand policy.
 # A named operand group consumes a separate option value, not a revision/path.
 _READ_OPTIONS = {
-    "status": (r"--(?:porcelain|short)", None, None, "path"),
+    "status": (r"--(?:ignored|porcelain|short)", None, None, "path"),
     "rev-parse": (r"--(?:abbrev-ref|absolute-git-dir|git-common-dir|is-shallow-repository|quiet|short|show-toplevel|verify)"
                   r"|-q|--path-format=(?:absolute|relative)|--disambiguate=[0-9a-f]{1,64}"
                   r"|--git-path=.+|(?P<operand>--git-path)", None, None, "mixed"),
@@ -128,7 +128,7 @@ _READ_OPTIONS = {
     "diff": (r"--(?:name-only|no-color|no-ext-diff|no-renames|no-textconv|numstat|stat)", None, None, "revision"),
     "show": (r"--format=(?!.*%G).+|--stat", None, None, "mixed"),
     "for-each-ref": (r"--format=.+|(?P<operand>--format)", None, None, None),
-    "ls-files": (r"--stage|-z", None, None, "path"),
+    "ls-files": (r"--stage|-z|-v", None, None, "path"),
     "ls-tree": (r"-r", None, None, "mixed"),
     "cat-file": (r"--batch-check|-[ept]", None, None, None),
     "rev-list": (r"--(?:count|left-right)", None, None, "mixed"),

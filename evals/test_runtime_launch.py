@@ -254,7 +254,7 @@ class CoordinatorLaunchTest(unittest.TestCase):
             with self.subTest(what):
                 if register:
                     session_exec.register(self.root / ".chief-of-stuff" / "sessions" / "worker.json", runtime="cursor",
-                                          name="impl01", worktree="/tmp/impl01-tree", pid=os.getpid())
+                                          name="impl01", worktree=str(pidfile.parents[1]), pid=os.getpid())
                 out = io.StringIO()
                 with contextlib.redirect_stdout(out), mock.patch.object(
                         process_status.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=f" {os.getpid()} /bin/agent\n")):
@@ -326,16 +326,41 @@ class WorkerRuntimeTest(unittest.TestCase):
 
     def test_registration_and_liveness_use_the_assigned_identity(self):
         path = self.root / ".chief-of-stuff" / "sessions" / "impl01.json"
-        session_exec.register(path, runtime="cursor", name="impl01", worktree="/tmp/wt", pid=123)
+        tree = self.root / "trees" / "wt"
+        tree.mkdir(parents=True)
+        session_exec.register(path, runtime="cursor", name="impl01", worktree=str(tree), pid=123)
         record = json.loads(path.read_text())
         self.assertEqual((record["name"], record["runtime"], record["worktree"]),
-                         ("impl01", "cursor", "/tmp/wt"))
+                         ("impl01", "cursor", str(tree)))
         with mock.patch.object(session_exec.os, "kill") as kill, \
-             mock.patch.object(session_exec.subprocess, "run", return_value=mock.Mock(returncode=0, stdout="/bin/agent --workspace /tmp/wt")):
+             mock.patch.object(session_exec.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=f"/bin/agent --workspace {tree}")):
             self.assertTrue(session_exec.alive(path))
             kill.assert_called_once_with(123, 0)
         with mock.patch.object(session_exec.os, "kill", side_effect=ProcessLookupError):
             self.assertFalse(session_exec.alive(path))
+
+    def test_missing_worktree_stops_every_login_launch_before_registration_or_exec(self):
+        tree = self.root / "trees" / "gone"
+        registry = self.root / ".chief-of-stuff" / "sessions" / "impl01.json"
+        commands = [
+            ["exec-login", "--registry", str(registry), "--name", "impl01", "--worktree", str(tree),
+             "--", "/bin/fake-claude"],
+            ["resume-codex", "--root", str(self.root), "--name", "impl01", "--worktree", str(tree),
+             "--session-id", "sid-1"],
+            ["--registry", str(registry), "--runtime", "cursor", "--name", "impl01", "--worktree", str(tree),
+             "--login-shell", "--", "/bin/fake-agent"],
+        ]
+        for argv in commands:
+            with self.subTest(argv=argv), \
+                    mock.patch.object(session_exec, "resolve", return_value="/bin/fake-codex"), \
+                    mock.patch.object(session_exec, "exec_login", side_effect=AssertionError("worker launched")) as login, \
+                    mock.patch.object(session_exec.os, "execve", side_effect=AssertionError("worker launched")) as launch, \
+                    self.assertRaisesRegex(FileNotFoundError, "worktree"):
+                session_exec.main(argv)
+            login.assert_not_called()
+            launch.assert_not_called()
+            self.assertFalse(registry.exists())
+            self.assertFalse(registry.with_suffix(".tmp").exists())
 
     def test_wrapper_registers_before_exec_of_fake_cursor(self):
         fake = self.root / "fake-agent"

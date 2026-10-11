@@ -1775,7 +1775,7 @@ class SignalsTest(FixtureCase):
 # and --is-shallow-repository probes. Internal config/index preflights are not
 # public commands. Preserve the existing reserved output/repository-token rule.
 OPTION_VOCABULARY = {
-    "status": {"--short", "--porcelain"},
+    "status": {"--short", "--porcelain", "--ignored"},
     "rev-parse": {"--git-common-dir", "--abbrev-ref", "--is-shallow-repository",
                   "--verify", "--quiet", "-q", "--short", "--path-format",
                   "--disambiguate", "--git-path", "--show-toplevel", "--absolute-git-dir"},
@@ -1903,7 +1903,7 @@ for _form in ("branch_delete", "branch_create", "branch_force", "branch_descript
 def inventory_calls(fx, command):
     """A concrete, nonempty operand for every public vocabulary entry."""
     calls = {
-        "status": [["--short"], ["--porcelain"]],
+        "status": [["--short"], ["--porcelain"], ["--porcelain", "--ignored"]],
         "rev-parse": [["HEAD"], ["--git-common-dir"], ["--abbrev-ref", "HEAD"],
                       ["--is-shallow-repository"], ["--verify", "HEAD"],
                       ["--verify", "--quiet", "HEAD"], ["--verify", "-q", "HEAD"],
