@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
@@ -172,6 +172,28 @@ class CleanupTest(unittest.TestCase):
         for name in ("done", "unpushed", "dirty"):
             self.assertEqual(self.store.log(f"{KEY}-{name}")[0].at, instant.isoformat())
 
+    def test_a_failed_removal_log_prints_the_result_and_continues_with_other_trees(self) -> None:
+        real = store.Store.add_log
+        err = io.StringIO()
+
+        def log(db, key: str, message: str, at: str) -> None:
+            if key == f"{KEY}-done":
+                raise cleanup.SQLAlchemyError("store is locked")
+            real(db, key, message, at)
+
+        # Put the removed tree first so the failure must not skip the remaining trees' results or logs.
+        with mock.patch.object(cleanup, "discover", return_value=[self.trees / name for name in
+                                                                ("done", "unpushed", "dirty")]), \
+                mock.patch.object(store.Store, "add_log", log), redirect_stderr(err):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse((self.trees / "done").exists())
+        self.assertIn(f"{KEY}-done", err.getvalue())
+        self.assertIn("SQLAlchemyError", err.getvalue())
+        for name in ("unpushed", "dirty"):
+            self.assertEqual(self.store.log(f"{KEY}-{name}")[0].message, self.kept(out)[name])
+
     def test_a_finished_one_shot_without_a_launcher_report_keeps_its_evidence(self) -> None:
         tree = self.trees / "done"
         dispatch_prompt.write_dispatch(tree, "orphaned assignment")
@@ -192,6 +214,24 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(self.removable(out), ["done"])
         self.assertFalse(tree.exists())
         self.assertTrue(one_shot.launcher_copy(self.root, tree).is_file())
+
+    def test_a_launcher_report_not_newer_than_the_pid_file_keeps_the_current_runs_evidence(self) -> None:
+        tree = self.trees / "done"
+        dispatch = dispatch_prompt.write_dispatch(tree, "new orphaned assignment")
+        one_shot.write_report(self.root, tree, {"status": "done", "task": KEY, "worker": "worker-1",
+                                              "reason": "earlier run", "changes": "checked", "errors": []})
+        report = one_shot.launcher_copy(self.root, tree)
+        pidfile = tree / one_shot.PIDFILE
+        pidfile.write_text(f"2147483647 {KEY}\n")
+        result = tree / one_shot.RESULT
+        result.write_text("status: done\nreason: current run\nchanges: checked\n")
+        stamp = pidfile.stat().st_mtime_ns
+        for report_stamp in (stamp - 1_000_000_000, stamp):
+            with self.subTest(report_stamp=report_stamp):
+                os.utime(report, ns=(report_stamp, report_stamp))
+                _, out = self.run_cleanup("--remove")
+                self.assertIn("one-shot awaiting reconciliation", self.kept(out)["done"])
+                self.assertTrue(dispatch.is_file() and result.is_file())
 
     # each guard keeps the tree
 
@@ -305,6 +345,40 @@ class CleanupTest(unittest.TestCase):
         self.finish("done", state="open")
         _, out = self.run_cleanup("--remove")
         self.assertIn("not finished", self.kept(out)["done"])
+        self.assertTrue((self.trees / "done").is_dir())
+
+    def test_an_open_owner_added_during_the_final_checks_keeps_the_tree_and_gets_the_log(self) -> None:
+        tree = self.trees / "done"
+        key = f"{KEY}-new"
+        calls = 0
+
+        def mounts() -> list[Path]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:  # the last container check, while cleanup holds the tree lock
+                self.store.upsert_item(key, forge_state="open")
+                self.store.set_ownership(key, "trees/done/new.txt")
+            return []
+
+        with mock.patch.object(cleanup, "containers", side_effect=mounts):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn(f"{key} is not finished", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+        self.assertEqual(self.store.log(key)[0].message, self.kept(out)["done"])
+
+    def test_an_owner_reopened_during_the_final_checks_keeps_the_tree(self) -> None:
+        calls = 0
+
+        def mounts() -> list[Path]:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                self.finish("done", state="open")
+            return []
+
+        with mock.patch.object(cleanup, "containers", side_effect=mounts):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn(f"{KEY}-done is not finished", self.kept(out)["done"])
         self.assertTrue((self.trees / "done").is_dir())
 
     def test_a_tree_no_store_item_owns_is_kept(self) -> None:

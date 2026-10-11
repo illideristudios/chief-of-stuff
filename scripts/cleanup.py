@@ -31,7 +31,7 @@ import git_view  # noqa: E402
 from git_trees import audit_env, clean, discover, git, read_state  # noqa: E402
 from one_shot import launcher_copy, trees_lock  # noqa: E402
 from process_status import PIDFILE, check, one_shot_runs, registrations  # noqa: E402
-from store import Store  # noqa: E402
+from store import Store, WorkItem  # noqa: E402
 from tree_state import at_risk, unsaved  # noqa: E402
 from workspace import worktrees_dir  # noqa: E402
 
@@ -96,11 +96,27 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
             out.append(f"live worker {record['name']} (pid {pid})")
         elif state not in ("gone", "pid_reused"):
             out.append(f"worker {record['name']} (pid {pid}) cannot be verified")
-    # Adoption reads a dead worker's dispatch, result and logs until the launcher's report copy exists. Do not parse
+    # Adoption reads a dead worker's dispatch, result and logs until this run's launcher report exists. Do not parse
     # the worker-written pid file here: an unreadable claim must also keep its evidence, without scanning trackers.
-    if (tree / PIDFILE).exists() and not launcher_copy(root, tree).exists():
-        out.append("one-shot awaiting reconciliation")
+    pidfile = tree / PIDFILE
+    if pidfile.exists():
+        try:
+            reconciled = launcher_copy(root, tree).stat().st_mtime_ns > pidfile.stat().st_mtime_ns
+        except OSError:
+            reconciled = False
+        if not reconciled:
+            out.append("one-shot awaiting reconciliation")
     return out + [f"live one-shot (pid {pid})" for path, pid, _ in one_shot_runs(trees) if path.resolve() == tree]
+
+
+def owned_items(root: Path, db: Store) -> list[tuple[Path, WorkItem]]:
+    return [((root / row.path).resolve(), item) for item in db.items() for row in db.ownership(item.issue_key)]
+
+
+def owner_guards(tree: Path, owned: list[tuple[Path, WorkItem]]) -> tuple[list[WorkItem], list[str]]:
+    items = list({item.issue_key: item for path, item in owned if inside(path, tree)}.values())
+    kept = [] if items else ["no store item owns it"]
+    return items, kept + [f"{item.issue_key} is not finished" for item in items if item.forge_state != FINISHED]
 
 
 def layout_guards(tree: Path) -> tuple[git_view.Layout | None, list[str]]:
@@ -129,7 +145,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         trees_dir = worktrees_dir((root / "CLAUDE.md").read_text())
         db = Store(args.store)
-        owned = [((root / row.path).resolve(), item) for item in db.items() for row in db.ownership(item.issue_key)]
+        owned = owned_items(root, db)
     except (OSError, UnicodeDecodeError, SQLAlchemyError) as exc:
         print(f"cannot read the workspace or the store ({type(exc).__name__}): nothing removed", file=sys.stderr)
         return 1
@@ -139,10 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     for tree in discover(root, trees_dir):
         layout, kept = layout_guards(tree)
         partial: list[str] = []
-        items = list({item.issue_key: item for path, item in owned if inside(path, tree)}.values())
-        if not items:
-            kept.append("no store item owns it")
-        kept += [f"{item.issue_key} is not finished" for item in items if item.forge_state != FINISHED]
+        items, owners_kept = owner_guards(tree, owned)
+        kept += owners_kept
         kept += claims(root, trees, tree)
         if mounts is None:
             kept.append("containers cannot be checked")
@@ -163,6 +177,12 @@ def main(argv: list[str] | None = None) -> int:
                         kept.append("containers cannot be checked")
                     elif any(inside(mount.resolve(), tree) for mount in current_mounts):
                         kept.append("a container binds a path in it")
+                    try:
+                        items, owners_kept = owner_guards(tree, owned_items(root, db))
+                        kept += owners_kept
+                    except SQLAlchemyError as exc:
+                        failed = True
+                        kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
                     if not kept:
                         removal_started = True
                         shutil.rmtree(tree)
@@ -182,7 +202,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.remove:
             at = db.clock().isoformat()
             for item in items:
-                db.add_log(item.issue_key, line, at)
+                try:
+                    db.add_log(item.issue_key, line, at)
+                except SQLAlchemyError as exc:
+                    failed = True
+                    print(f"cannot log cleanup result for {item.issue_key} ({type(exc).__name__})", file=sys.stderr)
     if not args.remove:
         print("preview: nothing removed; --remove removes the trees marked remove")
     db.engine.dispose()
