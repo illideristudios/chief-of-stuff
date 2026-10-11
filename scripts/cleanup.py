@@ -7,7 +7,7 @@ verified:
 
 - owner: it is a linked worktree, the store items that own it are all finished (closed on the forge), and no live
   worker claims it. A registered worker whose PID was reused is gone; one that cannot be verified is not;
-- `git status --porcelain --ignored` lists nothing but build output (`tree_state.unsaved`);
+- `git status --porcelain --ignored` lists nothing but build output or engine metadata (`tree_state.unsaved`);
 - no container binds a path inside it;
 - nothing on it is unpushed or unmerged (`tree_state.at_risk`).
 
@@ -30,8 +30,8 @@ from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
 import git_view  # noqa: E402
 from git_trees import audit_env, clean, discover, git, read_state  # noqa: E402
-from one_shot import trees_lock  # noqa: E402
-from process_status import check, one_shot_runs, registrations  # noqa: E402
+from one_shot import launcher_copy, trees_lock  # noqa: E402
+from process_status import PIDFILE, check, one_shot_runs, registrations  # noqa: E402
 from store import Store  # noqa: E402
 from tree_state import at_risk, unsaved  # noqa: E402
 from workspace import worktrees_dir  # noqa: E402
@@ -85,7 +85,7 @@ def inside(path: Path, tree: Path) -> bool:
 
 def claims(root: Path, trees: Path, tree: Path) -> list[str]:
     """Why a worker's claim keeps `tree`, read fresh: a registered worker that is running or cannot be verified (a
-    reused PID is gone), an unreadable registry entry, or a live one-shot pid file."""
+    reused PID is gone), an unreadable registry entry, a live one-shot pid file, or one still awaiting reconciliation."""
     regs = registrations(root)
     out = [] if len(list((root / ".chief-of-stuff" / "sessions").glob("*.json"))) == len(regs) else [
         "the worker registry has an unreadable entry"]
@@ -97,6 +97,10 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
             out.append(f"live worker {record['name']} (pid {pid})")
         elif state not in ("gone", "pid_reused"):
             out.append(f"worker {record['name']} (pid {pid}) cannot be verified")
+    # Adoption reads a dead worker's dispatch, result and logs until the launcher's report copy exists. Do not parse
+    # the worker-written pid file here: an unreadable claim must also keep its evidence, without scanning trackers.
+    if (tree / PIDFILE).exists() and not launcher_copy(root, tree).exists():
+        out.append("one-shot awaiting reconciliation")
     return out + [f"live one-shot (pid {pid})" for path, pid, _ in one_shot_runs(trees) if path.resolve() == tree]
 
 
@@ -145,6 +149,11 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 with trees_lock(trees):  # a one-shot claims its tree under this lock: re-check, then delete, holding it
                     kept = claims(root, trees, tree) + git_guards(tree)
+                    current_mounts = containers()
+                    if current_mounts is None:
+                        kept.append("containers cannot be checked")
+                    elif any(inside(mount.resolve(), tree) for mount in current_mounts):
+                        kept.append("a container binds a path in it")
                     if not kept:
                         shutil.rmtree(tree)
                         shutil.rmtree(layout.gitdir)  # what `git worktree prune` would delete, without running git on its config

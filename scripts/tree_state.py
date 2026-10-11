@@ -42,6 +42,8 @@ BUILD_OUTPUT = frozenset({"node_modules", "__pycache__", ".pytest_cache", ".mypy
 
 def unsaved(porcelain: str) -> tuple[str, ...]:
     """Each path `git status --porcelain --ignored` lists that losing the tree would lose: every line but an ignored
-    directory named in BUILD_OUTPUT. A quoted (unusual) path never matches, so it counts as unsaved."""
+    directory named in BUILD_OUTPUT or the root engine metadata directory (cleanup's claims protect pending evidence).
+    A quoted (unusual) path never matches, so it counts as unsaved."""
     return tuple(line.split(maxsplit=1)[-1] for line in porcelain.splitlines() if line.strip()
-                 and not (line.startswith("!! ") and line.endswith("/") and line[3:-1].rsplit("/", 1)[-1] in BUILD_OUTPUT))
+                 and not (line.startswith("!! ") and line.endswith("/")
+                          and (line[3:] == ".chief-of-stuff/" or line[3:-1].rsplit("/", 1)[-1] in BUILD_OUTPUT)))

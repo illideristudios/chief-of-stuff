@@ -1,8 +1,8 @@
 """Engine-owned worktree cleanup (1.0 plan M3 item 5, ledger E19) past every finding-27 guard.
 
 Each test builds a real origin, clone and linked worktrees. A tree is removed only when it is a finished store item's,
-no live worker claims it, `git status --ignored` lists nothing but build output, no container binds it, and nothing on
-it is unpushed or unmerged. A guard that cannot be verified keeps the tree.
+no worker claims it or awaits reconciliation, `git status --ignored` lists nothing but build output or engine metadata,
+no container binds it, and nothing on it is unpushed or unmerged. A guard that cannot be verified keeps the tree.
 """
 
 from __future__ import annotations
@@ -24,7 +24,9 @@ sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "evals"))
 
 import cleanup  # noqa: E402
+import dispatch_prompt  # noqa: E402
 import make_repo  # noqa: E402
+import one_shot  # noqa: E402
 import store  # noqa: E402
 from tree_state import unsaved  # noqa: E402
 
@@ -107,6 +109,37 @@ class CleanupTest(unittest.TestCase):
         self.assertTrue((self.trees / "unpushed").is_dir() and (self.trees / "dirty").is_dir())
         self.assertIn("removed", self.store.log(f"{KEY}-done")[0].message)
         self.assertTrue(self.store.log(f"{KEY}-unpushed")[0].message.startswith("keep unpushed"))
+
+    def test_finished_worker_metadata_and_build_output_are_removable(self) -> None:
+        tree = self.trees / "done"
+        dispatch_prompt.write_dispatch(tree, "finished assignment")
+        (tree / ".chief-of-stuff" / "worker-stderr.log").write_text("finished\n")
+        (tree / "node_modules").mkdir()
+        (tree / "node_modules" / "index.js").write_text("generated\n")
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+
+    def test_a_finished_one_shot_without_a_launcher_report_keeps_its_evidence(self) -> None:
+        tree = self.trees / "done"
+        dispatch_prompt.write_dispatch(tree, "orphaned assignment")
+        (tree / one_shot.PIDFILE).write_text(f"2147483647 {KEY}\n")  # the worker is gone
+        result = tree / one_shot.RESULT
+        result.write_text("status: done\nreason: finished\nchanges: checked\n")
+        _, out = self.run_cleanup("--remove")
+        self.assertIn("one-shot awaiting reconciliation", self.kept(out)["done"])
+        self.assertTrue(result.is_file())
+
+    def test_a_finished_one_shot_with_a_launcher_report_is_removable(self) -> None:
+        tree = self.trees / "done"
+        dispatch_prompt.write_dispatch(tree, "adopted assignment")
+        (tree / one_shot.PIDFILE).write_text(f"2147483647 {KEY}\n")
+        one_shot.write_report(self.root, tree, {"status": "done", "task": KEY, "worker": "worker-1",
+                                              "reason": "finished", "changes": "checked", "errors": []})
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+        self.assertTrue(one_shot.launcher_copy(self.root, tree).is_file())
 
     # each guard keeps the tree
 
@@ -212,6 +245,38 @@ class CleanupTest(unittest.TestCase):
         _, out = self.run_cleanup("--remove")
         self.assertIn("containers cannot be checked", self.kept(out)["done"])
         self.assertTrue((self.trees / "done").is_dir())
+
+    def test_a_container_mount_that_appears_before_the_delete_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        real = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def mount_then_lock(trees: Path):
+            mounts.return_value = [tree / "data"]
+            with real(trees):
+                yield
+
+        with mock.patch.object(cleanup, "containers", return_value=[]) as mounts, \
+                mock.patch.object(cleanup, "trees_lock", mount_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("a container binds a path in it", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+
+    def test_a_failing_final_container_query_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        real = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def runtime_fails_then_lock(trees: Path):
+            mounts.return_value = None
+            with real(trees):
+                yield
+
+        with mock.patch.object(cleanup, "containers", return_value=[]) as mounts, \
+                mock.patch.object(cleanup, "trees_lock", runtime_fails_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("containers cannot be checked", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
 
     def test_a_tree_git_cannot_read_is_kept(self) -> None:
         (self.trees / "done" / ".git").write_text("gitdir: /nowhere\n")
