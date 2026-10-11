@@ -1,15 +1,19 @@
 """The one installed command routes fixed operations and preserves release pinning."""
 
+import io
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import supervisor  # noqa: E402
 
 
 class InstallTest(unittest.TestCase):
@@ -145,6 +149,55 @@ class TrackerCommandTest(unittest.TestCase):
                                    "--date", "2026-09-25", "section", "Resume"], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertIn("- Next: read the reply", done.stdout)
+
+
+class StoreBackedVenvRoutingTest(unittest.TestCase):
+    """#622: store-backed commands exec the pinned venv; plain commands keep sys.executable."""
+
+    def test_store_backed_command_execs_venv_python(self):
+        venv_python = Path("/pin/venv/bin/python")
+        data = Path("/pin/data")
+        with mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["performance", "--help"])
+        ensure.assert_called_once_with(data)
+        execv.assert_called_once_with(
+            str(venv_python),
+            [str(venv_python), str(ROOT / "scripts/performance_report.py"), "--help"],
+        )
+
+    def test_plain_command_keeps_sys_executable(self):
+        with mock.patch.object(supervisor, "ensure_venv") as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["models", "--help"])
+        ensure.assert_not_called()
+        execv.assert_called_once_with(
+            sys.executable,
+            [sys.executable, str(ROOT / "scripts/install_model_guidance.py"), "--help"],
+        )
+
+    def test_venv_failure_refuses_without_falling_back(self):
+        buf = io.StringIO()
+        with mock.patch.object(supervisor, "ensure_venv",
+                               side_effect=supervisor.ServiceError("no python3 on the login shell's PATH")), \
+             mock.patch.object(cli.os, "execv") as execv, \
+             mock.patch.object(sys, "stderr", buf):
+            code = cli.main(["performance"])
+        self.assertEqual(code, 1)
+        self.assertIn("refused:", buf.getvalue())
+        self.assertIn("no python3", buf.getvalue())
+        execv.assert_not_called()
+
+    def test_every_command_reaching_sqlalchemy_is_store_backed(self):
+        from evals.test_architecture import forbidden_reach
+        scripts = ROOT / "scripts"
+        reaching = {name for name, target in cli.COMMANDS.items()
+                    if target.startswith("scripts/") and target.count("/") == 1
+                    and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
+        self.assertEqual(reaching, set(cli.STORE_BACKED))
 
 
 if __name__ == "__main__":
