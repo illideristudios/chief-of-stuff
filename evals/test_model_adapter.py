@@ -1,0 +1,182 @@
+"""The model port and its `claude -p --output-format json` adapter (design 7, 7a; ledger E5, E12, E13, E14, E17, E20).
+
+Every call runs `evals/fixtures/fake_claude.py`; no test here reaches a real model.
+"""
+
+import json
+import os
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+ROOT = Path(__file__).resolve().parent.parent
+FAKE = ROOT / "evals" / "fixtures" / "fake_claude.py"
+sys.path.insert(0, str(ROOT / "scripts"))
+import claude_adapter  # noqa: E402
+import model_port  # noqa: E402
+from model_port import Failure, Reply, Request  # noqa: E402
+
+
+class QuotaDetectorTest(unittest.TestCase):
+    def test_a_standalone_429_with_resource_exhausted_or_quota_is_a_quota_stop_with_its_reset_text(self):
+        self.assertEqual(model_port.quota_reset("Error: code 429 RESOURCE_EXHAUSTED: resets in about four hours."),
+                         "resets in about four hours.")
+        self.assertEqual(model_port.quota_reset("status=429 quota exceeded"), "")
+
+    def test_anything_else_is_no_quota_stop(self):
+        for text in ("", "RESOURCE_EXHAUSTED without the code", "error 4290 quota", "429 too many requests"):
+            with self.subTest(text=text):
+                self.assertIsNone(model_port.quota_reset(text))
+
+
+class RotationTest(unittest.TestCase):
+    """E20: Claude models only; a quota stop falls back to the next model, anything else is the answer."""
+
+    def calls(self, outcomes):
+        seen = []
+
+        def call(request):
+            seen.append((request.model, request.effort))
+            return outcomes[request.model]
+        return seen, call
+
+    def test_a_quota_stop_moves_to_the_next_model_with_its_effort(self):
+        ok = Reply(text="done", data=None, session_id="s", cost_usd=0.0, num_turns=1)
+        seen, call = self.calls({"opus": Failure("quota", "q"), "sonnet": ok})
+        got = model_port.rotate(call, Request(prompt="p"), [("opus", "high"), ("sonnet", "medium")])
+        self.assertIs(got, ok)
+        self.assertEqual(seen, [("opus", "high"), ("sonnet", "medium")])
+
+    def test_any_other_failure_stops_the_rotation(self):
+        seen, call = self.calls({"opus": Failure("error", "bad"), "sonnet": Failure("quota", "q")})
+        self.assertEqual(model_port.rotate(call, Request(prompt="p"), [("opus", ""), ("sonnet", "")]).kind, "error")
+        self.assertEqual(seen, [("opus", "")])
+
+    def test_every_model_out_of_quota_is_the_last_quota_stop_never_a_failure(self):
+        # #422: a quota stop is never reported as a worker failure.
+        seen, call = self.calls({"opus": Failure("quota", "q1"), "sonnet": Failure("quota", "q2")})
+        got = model_port.rotate(call, Request(prompt="p"), [("opus", ""), ("sonnet", "")])
+        self.assertEqual((got.kind, got.message, got.retryable), ("quota", "q2", True))
+
+
+class ArgvTest(unittest.TestCase):
+    def test_a_judgement_call_is_stateless_tool_free_and_in_safe_mode(self):
+        self.assertEqual(claude_adapter.argv(Request(prompt="-starts with a dash"), "/bin/claude", []),
+                         ["/bin/claude", "-p", "--output-format", "json", "--no-session-persistence",
+                          "--tools", "", "--safe-mode", "--", "-starts with a dash"])
+
+    def test_model_effort_schema_session_and_launch_profile(self):
+        request = Request(prompt="p", model="opus", effort="high", schema={"type": "object"}, session_id="u1",
+                          plugin_dirs=("/guard",))
+        self.assertEqual(claude_adapter.argv(request, "/bin/claude-as", ["run", "secondary"]),
+                         ["/bin/claude-as", "run", "secondary", "-p", "--output-format", "json",
+                          "--model", "opus", "--effort", "high", "--json-schema", '{"type": "object"}',
+                          "--session-id", "u1", "--plugin-dir", "/guard", "--", "p"])
+
+    def test_a_resume_names_the_session(self):
+        got = claude_adapter.argv(Request(prompt="p", session_id="u1", resume=True), "/bin/claude", [])
+        self.assertIn(["--resume", "u1"], [got[i:i + 2] for i in range(len(got))])
+        self.assertNotIn("--session-id", got)
+
+
+class ClassifyTest(unittest.TestCase):
+    """The spike: judge by exit code, `is_error` and parseability together, never by `subtype`."""
+
+    def envelope(self, **fields):
+        return json.dumps({"type": "result", "subtype": "success", "is_error": False, "result": "hi",
+                           "session_id": "u1", "num_turns": 1, "total_cost_usd": 0.01, **fields})
+
+    def test_exit_zero_parseable_and_not_an_error_is_a_reply(self):
+        got = claude_adapter.classify(0, self.envelope(structured_output={"a": 1}), "")
+        self.assertEqual(got, Reply(text="hi", data={"a": 1}, session_id="u1", cost_usd=0.01, num_turns=1))
+
+    def test_an_error_flag_with_subtype_success_is_an_error(self):
+        got = claude_adapter.classify(1, self.envelope(is_error=True, result="model not found"), "")
+        self.assertEqual((got.kind, got.message, got.retryable), ("error", "model not found", False))
+
+    def test_exit_zero_with_the_error_flag_or_a_nonzero_exit_without_it_is_still_an_error(self):
+        self.assertEqual(claude_adapter.classify(0, self.envelope(is_error=True), "").kind, "error")
+        self.assertEqual(claude_adapter.classify(2, self.envelope(), "").kind, "error")
+
+    def test_unparseable_or_empty_stdout_is_a_retryable_unknown_carrying_stderr(self):
+        for out in ("", "not json", "[1]"):
+            with self.subTest(out=out):
+                got = claude_adapter.classify(0 if out else 1, out, "boom")
+                self.assertEqual((got.kind, got.retryable), ("unknown", True))
+                self.assertIn("boom", got.message)
+
+    def test_the_observed_failures_have_their_own_kinds(self):
+        self.assertEqual(claude_adapter.classify(1, "", "No conversation found with session ID: u9").kind,
+                         "session_missing")
+        self.assertEqual(claude_adapter.classify(1, self.envelope(is_error=True, result="Not logged in"), "").kind,
+                         "auth")
+        self.assertEqual(claude_adapter.classify(1, self.envelope(is_error=True, subtype="error_max_budget_usd"), "").kind,
+                         "budget")
+
+    def test_a_quota_stop_in_stderr_or_the_envelope_is_quota_never_an_error(self):
+        # Ledger E5, #422.
+        stderr = claude_adapter.classify(1, "", "API Error: 429 RESOURCE_EXHAUSTED, resets at 5pm.")
+        envelope = claude_adapter.classify(1, self.envelope(is_error=True, result="429: quota exceeded"), "")
+        for got in (stderr, envelope):
+            self.assertEqual((got.kind, got.retryable), ("quota", True))
+        self.assertEqual(stderr.message, "resets at 5pm.")
+
+
+class CallTest(unittest.TestCase):
+    """End to end through the login shell against the fake CLI."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.cli = self.dir / "claude"  # a Python shim: no shell scripts
+        self.cli.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+        self.cli.chmod(0o755)
+        patches = (mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}),
+                   mock.patch.object(claude_adapter, "resolve", side_effect=self.resolve))
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.resolved = []
+
+    def resolve(self, program):
+        self.resolved.append(program)
+        return str(self.cli)
+
+    def call(self, prompt, **fields):
+        return claude_adapter.call(Request(prompt=prompt, cwd=str(self.dir), **fields))
+
+    def test_a_reply_and_its_structured_output(self):
+        got = self.call("hello", schema={"type": "object"})
+        self.assertEqual((got.text, got.data), ("reply: hello", {"answer": "hello"}))
+        self.assertEqual(self.resolved, ["claude"])
+
+    def test_a_session_minted_then_resumed_recalls_the_first_call(self):
+        self.call("the code word is heron", session_id="u1")
+        self.assertIn("heron", self.call("what was it?", session_id="u1", resume=True).text)
+        missing = self.call("again", session_id="u2", resume=True)
+        self.assertEqual(missing.kind, "session_missing")
+
+    def test_a_quota_stop_is_quota(self):
+        self.assertEqual(self.call("QUOTA").kind, "quota")
+
+    def test_a_call_past_its_timeout_is_a_retryable_unknown(self):
+        got = self.call("SLEEP", timeout_s=1)
+        self.assertEqual((got.kind, got.retryable), ("unknown", True))
+
+    def test_a_profile_launches_through_claude_as_and_reports_it_missing_never_falling_back(self):
+        # Ledger E12: no silent fallback to a bare `claude`.
+        self.assertEqual(claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary").text,
+                         "reply: p")
+        self.assertEqual(self.resolved, ["claude-as"])
+        self.resolved.clear()
+        with mock.patch.object(claude_adapter, "resolve", side_effect=lambda p: self.resolved.append(p)):
+            got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary")
+        self.assertEqual((got.kind, self.resolved), ("missing_program", ["claude-as"]))
+        self.assertIn("claude_as_profile", got.message)
+
+
+if __name__ == "__main__":
+    unittest.main()

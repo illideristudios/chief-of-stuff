@@ -34,6 +34,8 @@ DRAWS_NOTHING = (
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
     "one_shot_report", "flow", "sync_page_theme", "store",
+    "model_port",
+    "claude_adapter",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"

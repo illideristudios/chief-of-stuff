@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Stand-in for `claude -p --input-format stream-json` in runner unit tests.
+"""Stand-in for `claude -p --input-format stream-json` in runner unit tests, and for `claude -p --output-format json`
+behind the model adapter (`one_answer`).
 
 Emits init, one assistant text, and a result per user line on stdin. Turn 2 writes `turn2.txt` in
 cwd so tests can check per-turn fixture snapshots. A user message containing SLEEP hangs; one containing
@@ -9,8 +10,43 @@ BACKGROUND is followed by an unprompted notification turn; INLINE carries the no
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 
+
+def one_answer(args):
+    """`claude -p --output-format json ... -- <prompt>`, as the M0 spike measured it. A `claude-as run <profile>` lead is
+    skipped. Sessions live in `.fake-claude-sessions/` in cwd. The prompt picks the outcome: QUOTA is a 429 quota stop on
+    stderr, FAIL an error envelope with subtype success, SLEEP hangs; anything else is answered."""
+    prompt = args[args.index("--") + 1]
+    flag = {key: value for key, value in zip(args, args[1:]) if key.startswith("--")}
+    sessions = Path(".fake-claude-sessions")
+    session = flag.get("--resume") or flag.get("--session-id") or str(uuid.uuid4())
+    if "SLEEP" in prompt:
+        time.sleep(30)
+    if "QUOTA" in prompt:
+        print('API Error: 429 {"error":{"status":"RESOURCE_EXHAUSTED"}} resets at 5pm.', file=sys.stderr)
+        sys.exit(1)
+    if "--resume" in flag and not (sessions / session).exists():
+        print(f"No conversation found with session ID: {session}", file=sys.stderr)
+        sys.exit(1)
+    text = f"reply: {prompt}"
+    if "--resume" in flag:
+        text += f" (recalls: {(sessions / session).read_text()})"
+    elif "--session-id" in flag:
+        sessions.mkdir(exist_ok=True)
+        (sessions / session).write_text(prompt)
+    failed = "FAIL" in prompt
+    envelope = {"type": "result", "subtype": "success", "is_error": failed, "result": text, "session_id": session,
+                "num_turns": 2 if "--json-schema" in flag else 1, "total_cost_usd": 0.0}
+    if "--json-schema" in flag:
+        envelope["structured_output"] = {"answer": prompt}
+    print(json.dumps(envelope))
+    sys.exit(1 if failed else 0)
+
+
+if "--output-format" in sys.argv and sys.argv[sys.argv.index("--output-format") + 1] == "json":
+    one_answer(sys.argv[1:])
 
 
 def turn(text):
