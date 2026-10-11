@@ -1,0 +1,113 @@
+"""Worker concurrency cap (E21): free-slot count and a claim that cannot race for the last slot."""
+
+from __future__ import annotations
+
+import multiprocessing as mp
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import slots  # noqa: E402
+import store  # noqa: E402
+
+KEY = "github:example/repo#12"
+
+
+class FreeSlotsTest(unittest.TestCase):
+    def test_free_slots_are_the_cap_minus_running(self) -> None:
+        self.assertEqual(slots.free_slots(5, 2), 3)
+        self.assertEqual(slots.free_slots(1, 0), 1)
+        self.assertEqual(slots.free_slots(1, 1), 0)
+
+    def test_no_cap_means_a_large_number(self) -> None:
+        self.assertEqual(slots.free_slots(None, 0), slots.UNBOUNDED)
+        self.assertEqual(slots.free_slots(None, 12), slots.UNBOUNDED - 12)
+
+    def test_free_slots_never_negative(self) -> None:
+        self.assertEqual(slots.free_slots(2, 5), 0)
+        self.assertEqual(slots.free_slots(0, 1), 0)
+        self.assertEqual(slots.free_slots(None, slots.UNBOUNDED + 1), 0)
+
+    def test_a_closed_segment_frees_its_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            db.upsert_item(KEY, title="x")
+            db.record_segment(KEY, "implement", 1, started_at="09:00")
+            self.assertEqual(slots.free_slots(2, slots.running(db)), 1)
+            db.record_segment(KEY, "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
+            self.assertEqual(slots.free_slots(2, slots.running(db)), 2)
+
+
+def _claim_child(barrier, out: str, db_path: str, trees: str, i: int, cap: int) -> None:
+    barrier.wait(30)
+    db = store.Store(db_path)
+    outcome = "refused"
+    try:
+        slots.claim(Path(trees), db, issue_key=KEY, stage="implement", attempt=i + 1,
+                    started_at=f"t{i}", max_concurrency=cap)
+        outcome = "in"
+    except ValueError:
+        pass
+    finally:
+        db.engine.dispose()
+    (Path(out) / str(i)).write_text(outcome)
+
+
+class ClaimTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.trees = self.root / "trees"
+        self.trees.mkdir()
+        self.db_path = self.root / "store.db"
+        store.migrate(self.db_path)
+        self.db = store.Store(self.db_path)
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, title="x")
+        self.out = self.root / "out"
+        self.out.mkdir()
+
+    def test_claim_records_a_running_segment_when_a_slot_is_free(self) -> None:
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    started_at="09:00", max_concurrency=1)
+        segs = self.db.segments(KEY)
+        self.assertEqual([(s.stage, s.attempt, s.started_at, s.ended_at) for s in segs],
+                         [("implement", 1, "09:00", None)])
+        self.assertEqual(slots.running(self.db), 1)
+
+    def test_claim_refuses_when_full(self) -> None:
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    started_at="09:00", max_concurrency=1)
+        with self.assertRaises(ValueError) as caught:
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="review", attempt=1,
+                        started_at="09:01", max_concurrency=1)
+        self.assertIn("max_concurrency is 1", str(caught.exception))
+        self.assertEqual(slots.running(self.db), 1)
+
+    def test_two_claims_for_the_last_slot_exactly_one_wins(self) -> None:
+        # Cap 1, two processes: the flock + recount inside it means exactly one records a start.
+        cap, claimants = 1, 2
+        barrier = mp.Barrier(claimants)
+        procs = [mp.Process(target=_claim_child,
+                            args=(barrier, str(self.out), str(self.db_path), str(self.trees), i, cap))
+                 for i in range(claimants)]
+        for p in procs:
+            p.start()
+        for p in procs:
+            p.join(timeout=60)
+            self.assertEqual(p.exitcode, 0, f"claim {p.pid} exited {p.exitcode}")
+        outcomes = [f.read_text() for f in self.out.iterdir()]
+        self.assertEqual((outcomes.count("in"), outcomes.count("refused")), (1, 1), outcomes)
+        self.assertEqual(slots.running(self.db), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()
