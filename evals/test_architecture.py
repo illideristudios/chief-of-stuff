@@ -37,6 +37,7 @@ DRAWS_NOTHING = (
     "model_port",
     "claude_adapter",
     "policy",
+    "forge",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
