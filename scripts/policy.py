@@ -253,7 +253,7 @@ def parse(data: dict) -> Policies:
     claimed = Counter(kind for w in workflows.values() for kind in w.issue_types)
     if twice := sorted(kind for kind, n in claimed.items() if n > 1):
         raise PolicyError(f"[workflows]: issue type {', '.join(twice)} selects more than one workflow")
-    default = data.get("default_workflow")
+    default = _text("default_workflow", data.get("default_workflow"))
     if default not in workflows:
         raise PolicyError("default_workflow must name one of the [workflows]")
     return Policies(

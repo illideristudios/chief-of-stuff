@@ -311,6 +311,8 @@ class WorkflowTest(unittest.TestCase):
     def test_the_default_workflow_must_exist(self):
         refused(self, BASE.replace('default_workflow = "standard"', 'default_workflow = "fast"'), "default_workflow")
         refused(self, BASE.replace('default_workflow = "standard"\n', ""), "default_workflow")
+        for bad in ("[]", "{}"):
+            refused(self, BASE.replace('default_workflow = "standard"', f"default_workflow = {bad}"), "default_workflow")
 
 
 if __name__ == "__main__":
