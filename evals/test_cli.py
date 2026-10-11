@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -13,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
 
 
@@ -154,10 +156,16 @@ class TrackerCommandTest(unittest.TestCase):
 class StoreBackedVenvRoutingTest(unittest.TestCase):
     """#622: store-backed commands exec the pinned venv; plain commands keep sys.executable."""
 
+    @staticmethod
+    @contextmanager
+    def _passthrough_lock(path, wait=False):
+        yield
+
     def test_store_backed_command_execs_venv_python(self):
         venv_python = Path("/pin/venv/bin/python")
         data = Path("/pin/data")
-        with mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
              mock.patch.object(supervisor, "data_dir", return_value=data), \
              mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
             with self.assertRaises(SystemExit):
@@ -181,7 +189,8 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
 
     def test_venv_failure_refuses_without_falling_back(self):
         buf = io.StringIO()
-        with mock.patch.object(supervisor, "ensure_venv",
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv",
                                side_effect=supervisor.ServiceError("no python3 on the login shell's PATH")), \
              mock.patch.object(cli.os, "execv") as execv, \
              mock.patch.object(sys, "stderr", buf):
@@ -190,6 +199,57 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
         self.assertIn("refused:", buf.getvalue())
         self.assertIn("no python3", buf.getvalue())
         execv.assert_not_called()
+
+    def test_shell_error_from_setup_refuses(self):
+        buf = io.StringIO()
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv",
+                               side_effect=shell_setup.ShellError("configured login shell '/missing' is not executable")), \
+             mock.patch.object(cli.os, "execv") as execv, \
+             mock.patch.object(sys, "stderr", buf):
+            code = cli.main(["performance"])
+        self.assertEqual(code, 1)
+        self.assertIn("refused:", buf.getvalue())
+        self.assertIn("not executable", buf.getvalue())
+        execv.assert_not_called()
+
+    def test_os_error_from_setup_refuses(self):
+        buf = io.StringIO()
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=OSError("permission denied")), \
+             mock.patch.object(cli.os, "execv") as execv, \
+             mock.patch.object(sys, "stderr", buf):
+            code = cli.main(["performance"])
+        self.assertEqual(code, 1)
+        self.assertIn("refused:", buf.getvalue())
+        self.assertIn("permission denied", buf.getvalue())
+        execv.assert_not_called()
+
+    def test_venv_setup_runs_under_supervisor_lock(self):
+        data = Path("/pin/data")
+        order = []
+
+        @contextmanager
+        def fake_lock(path, wait=False):
+            order.append(("lock", path, wait))
+            yield
+            order.append(("unlock", path))
+
+        def fake_ensure(d):
+            order.append(("ensure", d))
+            return Path("/pin/venv/bin/python")
+
+        with mock.patch.object(supervisor, "lock", fake_lock), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=fake_ensure), \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)):
+            with self.assertRaises(SystemExit):
+                cli.main(["performance"])
+        self.assertEqual(order, [
+            ("lock", data / "supervisor.lock", True),
+            ("ensure", data),
+            ("unlock", data / "supervisor.lock"),
+        ])
 
     def test_every_command_reaching_sqlalchemy_is_store_backed(self):
         from evals.test_architecture import forbidden_reach

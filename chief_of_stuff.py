@@ -150,10 +150,14 @@ def main(argv: list[str] | None = None) -> int:
         scripts_dir = str(SOURCE / "scripts")
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)
+        import subprocess
+        import shell_setup
         import supervisor
         try:
-            python = str(supervisor.ensure_venv(supervisor.data_dir()))
-        except supervisor.ServiceError as exc:
+            data = supervisor.data_dir()
+            with supervisor.lock(data / "supervisor.lock", wait=True):  # install holds it briefly; wait, do not refuse
+                python = str(supervisor.ensure_venv(data))
+        except (supervisor.ServiceError, shell_setup.ShellError, OSError, subprocess.SubprocessError) as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 1
     else:
