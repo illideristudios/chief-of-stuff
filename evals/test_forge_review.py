@@ -66,6 +66,17 @@ class ClosesTest(unittest.TestCase):
                 self.assertEqual(fr.closes(f"Closes {ref}", gitlab=True, project="team/app",
                                            host="https://gitlab.example.test"), want)
 
+    def test_gitlab_closing_urls_require_the_configured_host_and_path_prefix(self):
+        for host in ("https://example.test/gitlab", "https://example.test/gitlab/"):
+            for ref, want in (("https://example.test/gitlab/team/app/-/issues/3", ("#3",)),
+                              ("https://example.test/team/app/-/issues/3", ()),
+                              ("https://example.test/gitlab-other/team/app/-/issues/3", ()),
+                              ("https://other.test/gitlab/team/app/-/issues/3", ()),
+                              ("http://example.test/gitlab/team/app/-/issues/3", ()),
+                              ("https://example.test/gitlab/team/other/-/issues/3", ())):
+                with self.subTest(host=host, ref=ref):
+                    self.assertEqual(fr.closes(f"Closes {ref}", gitlab=True, project="team/app", host=host), want)
+
 
 class GitLabPipelineEvidenceTest(unittest.TestCase):
     def test_merged_results_keeps_the_pipeline_commit_and_records_the_source_head(self):

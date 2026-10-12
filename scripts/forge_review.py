@@ -58,9 +58,13 @@ def closes(body: str | None, gitlab: bool = False, *, project: str = "", host: s
                 found.append(ref)
             elif "://" in ref:
                 url = urlsplit(ref)
-                path, number = url.path.lstrip("/").rsplit("/-/issues/", 1)
-                if host and url.netloc.casefold() == urlsplit(host).netloc.casefold() and path.casefold() == project.casefold():
-                    found.append(f"#{number}")
+                configured = urlsplit(host)
+                prefix = configured.path.rstrip("/") + "/"
+                if (host and url.scheme.casefold() == configured.scheme.casefold()
+                        and url.netloc.casefold() == configured.netloc.casefold() and url.path.startswith(prefix)):
+                    path, number = url.path[len(prefix):].rsplit("/-/issues/", 1)
+                    if path.casefold() == project.casefold():
+                        found.append(f"#{number}")
             else:
                 path, number = ref.rsplit("#", 1)
                 if path.casefold() == project.casefold():
