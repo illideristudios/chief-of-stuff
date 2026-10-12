@@ -148,7 +148,8 @@ def sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, sta
         return Sync(ref, stage, delta, error=error)
     missing = set(delta.add) - have
     if missing:
-        return Sync(ref, stage, delta, error=f"missing label in GitLab: {', '.join(sorted(missing))}")
+        return Sync(ref, stage, delta, error=f"missing label in GitLab: {', '.join(sorted(missing))}; "
+                    f"create the label(s) {', '.join(sorted(missing))} before syncing")
     payload = {}
     if delta.add:
         payload["add_labels"] = ",".join(delta.add)
@@ -251,7 +252,7 @@ def _project_option_ids(gh, project, value: str | None):
                         if option_id is None:
                             return None, None, "GitHub Project option has no readable node ID"
                         return field_id, option_id, ""
-            return None, None, f"missing GitHub Project option: {value}"
+            return None, None, f"missing GitHub Project option: {value}; create the {project.field} option {value} before syncing"
     return None, None, f"missing GitHub Project field: {project.field}"
 
 
@@ -265,7 +266,8 @@ def _github_labels_exist(gh, ref: backlog.IssueRef, names: tuple[str, ...]) -> s
         return "GitHub labels could not be parsed"
     have = {x.get("name") for x in row if isinstance(x, dict)}
     missing = set(names) - have
-    return f"missing label in GitHub: {', '.join(sorted(missing))}" if missing else ""
+    return (f"missing label in GitHub: {', '.join(sorted(missing))}; "
+            f"create the label(s) {', '.join(sorted(missing))} before syncing") if missing else ""
 
 
 def add_human_hold(ref: backlog.IssueRef, home: backlog.Backlog | backlog.GitHubBacklog,

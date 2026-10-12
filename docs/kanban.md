@@ -49,7 +49,18 @@ field = "Status"
 options = ["Planning", "Plan Review", "Testing", "Implementation", "Code Review", "Fixes"]
 ```
 
-The options correspond to `[kanban].stages` in order. In Project mode, the numbered stage lives in Status and `!!` remains an issue label. The updater adds the issue to the configured Project if it is absent. These labels and Status options must already exist; the updater does not create a misspelled one.
+The options correspond to `[kanban].stages` in order. Terminal stages are additional marks named exactly like the tracker stage: the example needs a literal `main` label in label mode, or a `main` Status option in Project mode. Keep `main` in `terminal_stages`; it is additional to the numbered `stages` and their corresponding `options`.
+
+In label mode, create every label listed under `stages`, every name under `terminal_stages`, and `human_review_label`. For the example's terminal label:
+
+```sh
+# GitHub
+gh label create main --repo your-org/your-repo
+# GitLab
+glab label create --name main --color '#428bca' --repo your-group/your-repo
+```
+
+In Project mode, create the Status options `Planning`, `Plan Review`, `Testing`, `Implementation`, `Code Review`, `Fixes`, and `main` in the Project's field settings. The numbered stage lives in Status and `!!` remains an issue label. The updater adds the issue to the configured Project if it is absent. These labels and Status options must already exist; the updater reports missing marks and tells you to create them. Workspace initialization provisions the configured stage, terminal, and hold labels in label mode; in Project mode it provisions the hold label and checks all configured Status options, including terminal stages.
 
 Preview all active tracker issues:
 
@@ -63,4 +74,4 @@ Sync a single transition after recording the new tracker stage:
 python3 scripts/kanban.py --root /path/to/workspace --date YYYY-MM-DD --issue '#42' --from-stage implement --commit
 ```
 
-For an issue that has no stage yet, preview it and replace `--from-stage` with `--initialize`. A commit always names one issue. A completed task is excluded from the bulk preview, but can be selected by `--issue` to clear its final board stage. If a board stage changed after the coordinator last observed it, the updater refuses the write and the coordinator reconciles it with the user. Existing `kind::`, `severity::`, and other unrelated labels survive every move.
+For an issue that has no stage yet, preview it and replace `--from-stage` with `--initialize`. A commit always names one issue. A completed task is excluded from the bulk preview, but can be selected by `--issue` to replace its numbered board stage with its terminal mark, such as `main`. If a board stage changed after the coordinator last observed it, the updater refuses the write and the coordinator reconciles it with the user. Existing `kind::`, `severity::`, and other unrelated labels survive every move.

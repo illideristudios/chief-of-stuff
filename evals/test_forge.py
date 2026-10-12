@@ -67,7 +67,10 @@ class FakeGh(tma.FakeGhGraphql):
             rows = [i for i in self.issues.values()
                     if state == "all" or (state == "open" and i["state"] == "OPEN")
                     or (state == "closed" and i["state"] == "CLOSED")]
-            return 0, json.dumps(rows), ""
+            if "--search" in args:
+                assert args[args.index("--search") + 1] == "sort:updated-desc"
+                rows.sort(key=lambda i: i["updatedAt"], reverse=True)
+            return 0, json.dumps(rows[:int(args[args.index("--limit") + 1])]), ""
         if args[:2] == ["issue", "view"]:
             if int(args[2]) not in self.issues:
                 return 1, "", "Could not resolve to an issue"
@@ -142,6 +145,23 @@ class GitHubTest(unittest.TestCase):
                             gh_issue(2, "free", ["stage: review", "other hold"])])
         snapshots = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
         self.assertEqual([row.get("human_review") for row in snapshots], [True, False])
+    def test_snapshot_bounds_closed_history_by_update_recency(self):
+        limit = forge.forge_review.REQUEST_LIMIT
+        closed = [gh_issue(n, "Old", state="CLOSED") for n in range(1, backlog.GH_LIMIT + 2)]
+        recent = closed[-1]["number"]
+        closed[-1]["updatedAt"] = "2026-10-11"
+        gh = FakeGh(issues=[*closed, gh_issue(6000, "Open")],
+                    merged=[{"number": 7000, "body": f"Closes #{recent}"}])
+        got = forge.Forge(GH, gh=gh).snapshots()
+        self.assertEqual(len(got), limit + 1)
+        self.assertEqual(got[-2]["issue_key"], f"github:example/app#{recent}")
+        self.assertEqual(got[-2]["merge_state"], "merged")
+        self.assertEqual(got[-1]["forge_state"], "open")
+        lists = [a for a in gh.all_calls if a[:2] == ["issue", "list"]]
+        self.assertEqual([a[a.index("--state") + 1] for a in lists], ["open", "closed"])
+        self.assertEqual(lists[1][lists[1].index("--limit") + 1], str(limit))
+        self.assertEqual(lists[1][lists[1].index("--search") + 1], "sort:updated-desc")
+
     def test_merged_window_includes_a_recently_updated_long_lived_pr(self):
         limit = forge.forge_review.REQUEST_LIMIT
         merged = [{"number": n, "createdAt": "2025-01-01", "updatedAt": "2025-06-01"}
@@ -379,7 +399,13 @@ def gitlab_call(issues, mrs, fail="", merged=None):
             state = (query.get("state") or ["opened"])[0]
             rows = [issues[n] for n in sorted(issues)
                     if state == "all" or issues[n]["state"] == state]
-            return rows, {}, ""
+            if query.get("order_by") == ["updated_at"]:
+                assert query.get("sort") == ["desc"]
+                rows.sort(key=lambda i: i["updated_at"], reverse=True)
+            size = int(query["per_page"][0])
+            page = int(query.get("page", ["1"])[0])
+            start = (page - 1) * size
+            return rows[start:start + size], {"x-next-page": str(page + 1) if start + size < len(rows) else ""}, ""
         if path.startswith("/issues/"):
             row = issues[int(path.split("/")[2])]
             if method == "PUT":
@@ -421,6 +447,26 @@ def gl_issue(iid, title, labels=(), description="", state="opened"):
 
 
 class GitLabTest(unittest.TestCase):
+    def test_snapshot_bounds_closed_history_without_following_all_pages(self):
+        limit = forge.forge_review.REQUEST_LIMIT
+        issues = {n: gl_issue(n, "Old", state="closed") for n in range(1, backlog.GH_LIMIT + 2)}
+        recent = max(issues)
+        issues[recent]["updated_at"] = "2026-10-11"
+        issues[6000] = gl_issue(6000, "Open")
+        call = gitlab_call(issues, {}, merged={7000: {"description": f"Closes #{recent}"}})
+        with mock.patch.object(backlog, "_call", call):
+            got = forge.Forge(GL, token="t").snapshots()
+        self.assertEqual(len(got), limit + 1)
+        self.assertEqual(got[-2]["issue_key"], f"gitlab:gitlab.example.test/team/app#{recent}")
+        self.assertEqual(got[-2]["merge_state"], "merged")
+        self.assertEqual(got[-1]["forge_state"], "open")
+        queries = [parse_qs(urlsplit(url).query) for _, url, _ in call.calls
+                   if urlsplit(url).path.endswith("/issues")]
+        self.assertEqual([q["state"] for q in queries], [["opened"], ["closed"]])
+        self.assertEqual(queries[1]["order_by"], ["updated_at"])
+        self.assertEqual(queries[1]["sort"], ["desc"])
+        self.assertEqual(queries[1]["per_page"], [str(limit)])
+
     def test_merged_window_includes_a_recently_updated_long_lived_mr(self):
         limit = forge.forge_review.REQUEST_LIMIT
         merged = {n: {"created_at": "2025-01-01", "updated_at": "2025-06-01"}

@@ -200,6 +200,28 @@ class GitLabUpdaterTest(unittest.TestCase):
         self.assertIn("missing label", got.error)
         write.assert_not_called()
 
+    def test_missing_terminal_label_names_the_label_to_create(self):
+        before = dict(self.before, labels=["04 - REVIEW", "kind::code"])
+        with mock.patch.object(kanban.backlog, "_get", return_value=(before, {}, "")), \
+             mock.patch.object(kanban.backlog, "existing_labels", return_value=(set(FLOW.stages), "")), \
+             mock.patch.object(kanban.backlog, "_call") as write:
+            got = kanban.sync_gitlab(self.cfg, self.ref, FLOW, "main", token="test", commit=True,
+                                     expected_stage="review")
+        self.assertIn("create", got.error)
+        self.assertIn("main", got.error)
+        write.assert_not_called()
+
+    def test_terminal_label_transition_preserves_unrelated_labels(self):
+        before = dict(self.before, labels=["04 - REVIEW", "kind::code"])
+        after = dict(before, labels=["main", "kind::code"])
+        with mock.patch.object(kanban.backlog, "_get", side_effect=[(before, {}, ""), (after, {}, "")]), \
+             mock.patch.object(kanban.backlog, "existing_labels", return_value=(set(FLOW.stages) | {"main"}, "")), \
+             mock.patch.object(kanban.backlog, "_call", return_value=(after, {}, "")) as write:
+            got = kanban.sync_gitlab(self.cfg, self.ref, FLOW, "main", token="test", commit=True,
+                                     expected_stage="review")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(write.call_args.args[4], {"add_labels": "main", "remove_labels": "04 - REVIEW"})
+
     def test_manual_move_is_reported_before_write(self):
         moved = dict(self.before, labels=["05 - FIX", "kind::code"])
         with mock.patch.object(kanban.backlog, "_get", return_value=(moved, {}, "")), \
@@ -325,6 +347,40 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.assertTrue(got.done, got.error)
         self.assertEqual(self.status, "main")
         self.assertTrue(any(a[:2] == ["project", "item-edit"] for a in self.calls))
+
+    def test_missing_terminal_project_option_says_to_create_it_without_writing(self):
+        self.status = "Review"
+
+        def gh(args):
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"id": "PVTSSF_status", "name": "Status", "options": []}]}), ""
+            return self.gh(args)
+
+        got = kanban.sync_github(self.ref, self.config, "main", gh=gh, commit=True, expected_stage="review")
+        self.assertIn("create", got.error)
+        self.assertIn("main", got.error)
+        self.assertFalse(any(a[:2] in (["project", "item-edit"], ["issue", "edit"]) for a in self.calls))
+
+    def test_missing_terminal_issue_label_says_to_create_it_without_writing(self):
+        self.config = FLOW
+        self.labels = ["04 - REVIEW", "kind::code"]
+        got = kanban.sync_github(self.ref, self.config, "main", gh=self.gh, commit=True, expected_stage="review")
+        self.assertIn("create", got.error)
+        self.assertIn("main", got.error)
+        self.assertFalse(any(a[:2] == ["issue", "edit"] for a in self.calls))
+
+    def test_terminal_issue_label_transition_when_provisioned(self):
+        self.config = FLOW
+        self.labels = ["04 - REVIEW", "kind::code"]
+
+        def gh(args):
+            if args[:2] == ["label", "list"]:
+                return 0, json.dumps([{"name": x} for x in (*FLOW.stages, *FLOW.terminal_stages)]), ""
+            return self.gh(args)
+
+        got = kanban.sync_github(self.ref, self.config, "main", gh=gh, commit=True, expected_stage="review")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(set(self.labels), {"main", "kind::code"})
 
     def test_a_launcher_hold_moves_with_its_project_status(self):
         self.labels = ["kind::code", FLOW.human_review_label]

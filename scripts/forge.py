@@ -46,8 +46,8 @@ class Forge:
         return self.token if self.token is not None else backlog.token(self.home)
 
     # reads
-    def issues(self, state: str = backlog.OPEN) -> backlog.Fetch:
-        return backlog.issues(self.home, token=self.token, state=state, gh=self.gh)
+    def issues(self, state: str = backlog.OPEN, *, limit: int | None = None) -> backlog.Fetch:
+        return backlog.issues(self.home, token=self.token, state=state, gh=self.gh, limit=limit)
 
     def issue(self, number: int) -> backlog.Read:
         return backlog.read_one(self.home, number, token=self.token, gh=self.gh)
@@ -112,12 +112,17 @@ class Forge:
             raise ForgeError(f"review threads: {exc}") from exc
 
     def snapshots(self) -> list[dict[str, Any]]:
-        """One `store.Store.sync_from_forge` row per open or closed issue. Stage and human hold are left out without kanban,
-        and review state without an approver, so a sync never blanks what was not read. Closed issues and recently merged
-        requests are included so a dropped store can rebuild completed work (#627)."""
-        got = self.issues(state="all")
+        """One `store.Store.sync_from_forge` row per open or recently updated closed issue. Stage and human hold are left out
+        without kanban, and review state without an approver, so a sync never blanks what was not read. Recent completed
+        work is included so a dropped store can rebuild it (#627)."""
+        got = self.issues()
         if not got.ok:
             raise ForgeError(f"issues: {got.error}")
+        # shortcut: only the REQUEST_LIMIT most recently updated closed issues join the open operational set,
+        # matching _merged_closes's bounded window. Page closed history if a rebuild needs every completed issue.
+        closed = self.issues(state=backlog.CLOSED, limit=forge_review.REQUEST_LIMIT)
+        if not closed.ok:
+            raise ForgeError(f"closed issues: {closed.error}")
         latest: dict[int, merge_ready.Request] = {}
         # shortcut: several requests closing one issue (rework) report the newest; key by (issue, attempt) when M3 segments need each
         for r in sorted(self.requests(), key=lambda r: r.number):
@@ -130,7 +135,7 @@ class Forge:
             if error:
                 raise ForgeError(f"project status: {error}")
         out = []
-        for one in sorted(got.issues, key=lambda i: i.iid):
+        for one in sorted((*got.issues, *closed.issues), key=lambda i: i.iid):
             r = latest.get(one.iid)
             snap = {"issue_key": self.key(one.iid), "title": one.title,
                     "forge_state": "open" if one.state == backlog.OPEN else "closed"}
