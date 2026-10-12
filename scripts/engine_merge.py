@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+import backlog
 import reconcile
 from forge_port import ForgeError
 from policy import Policies, PolicyError
@@ -20,9 +21,18 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
         item = next((i for i in store.items() if i.issue_key == action.issue_key), None)
         if item is None:
             raise ForgeError("no stored work item")
+        # The issue itself can close or leave its stage after planning: re-read it, not only the request.
+        got = forge.issue(int(action.issue_key.rsplit("#", 1)[1]))
+        if not got.ok or got.issue is None:
+            raise ForgeError(f"issue: {got.error or 'not found'}")
+        if got.issue.state != backlog.OPEN:
+            raise ForgeError("the issue is no longer open on the forge")
+        board = forge.kanban
+        # A shared board mark cannot name a precise stage; only a move off the stored stage's mark replaces it.
+        if board and item.stage in board.stage_map and board.label_for(item.stage) not in got.issue.labels:
+            item.stage = next((s for s in board.stage_map if board.label_for(s) in got.issue.labels), "")
         item.merge_state = request.verdict
-        if forge.approver:
-            item.review_state = request.approval
+        item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
         state = store.resume(action.issue_key) or {}
         planned = reconcile.plan([item], {item.issue_key: store.segments(item.issue_key)}, policies,
                                  {item.issue_key: state.get("issue_type")}, 1, datetime.fromisoformat(at),

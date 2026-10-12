@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "evals"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
+import backlog  # noqa: E402
 import engine_merge  # noqa: E402
 import forge  # noqa: E402
 import policy  # noqa: E402
@@ -132,6 +133,25 @@ class ExecutorTest(unittest.TestCase):
         self.planned()
         self.at = (now + timedelta(seconds=1)).isoformat()
         self.refused("gate requires Zach's approval")
+
+    def test_an_issue_closed_after_planning_refuses(self):
+        self.planned()
+        self.gh.issues[3]["state"] = "CLOSED"
+        self.refused("no longer open")
+
+    def test_an_issue_moved_off_its_stage_mark_after_planning_refuses(self):
+        board = tf.Kanban(stages=("stage: doing", "stage: merge"), human_review_label="needs human",
+                          stage_map={"implement": 0, "review": 0, "merge": 1})
+        self.forge = forge.Forge(tf.GH, kanban=board, gh=self.gh)
+        self.planned()
+        self.gh.issues[3]["labels"] = [{"name": "stage: doing"}]
+        self.refused("dispatch required")
+
+    def test_a_stale_cached_approval_is_replaced_by_the_fresh_request(self):
+        no_review = policy.parse({"default_workflow": "direct", "personas": {}, "stages": {"merge": {}},
+                                  "workflows": {"direct": {"start": "merge", "edges": []}}})
+        self.p = no_review
+        self.refused("review has not run")
 
     def test_a_human_review_hold_added_after_planning_refuses(self):
         self.planned()
@@ -281,6 +301,8 @@ class ExecutorTest(unittest.TestCase):
         self.action = Merge(self.key)
         self.db.upsert_item(self.key)
         self.ready()
+        self.enterContext(mock.patch.object(forge.Forge, "issue", return_value=backlog.Read(
+            backlog.Issue(3, "Fix the parser", backlog.OPEN))))  # the request fake serves no issue rows
         calls = []
         read = tmr.gitlab_fake({5: {}})
 
@@ -304,6 +326,8 @@ class ExecutorTest(unittest.TestCase):
         self.action = Merge(self.key)
         self.db.upsert_item(self.key)
         self.ready()
+        self.enterContext(mock.patch.object(forge.Forge, "issue", return_value=backlog.Read(
+            backlog.Issue(3, "Fix the parser", backlog.OPEN))))  # the request fake serves no issue rows
         writes = []
         read = tmr.gitlab_fake({5: {}})
 
