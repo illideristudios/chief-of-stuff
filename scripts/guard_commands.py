@@ -168,6 +168,33 @@ def _global_args(args: list[str], values: set[str], flags: set[str]) -> list[str
     return args
 
 
+def _config_denied(args: list[str]) -> bool:
+    action = args[0] if args and args[0] in {"get", "list"} else None
+    if action:
+        args = args[1:]
+    flags = {"--global", "--system", "--local", "--worktree", "--includes", "--no-includes",
+             "--show-origin", "--show-scope", "--name-only", "--null", "-z", "--all", "--regexp",
+             "--fixed-value", "--bool", "--int", "--bool-or-int", "--path", "--expiry-date"}
+    values = {"--file", "-f", "--blob", "--type", "-t", "--default", "--value", "--url"}
+    # Git stops parsing legacy options at the first positional name. Consume option values too:
+    # a file named --get is not a read action.
+    while args and args[0].startswith("-"):
+        flag = args[0]
+        if flag in {"--get", "--get-all", "--get-regexp", "--list", "-l"} and action is None:
+            action = flag
+            args = args[1:]
+        elif flag in flags or any(flag.startswith(f"{v}=") for v in values if v.startswith("--")):
+            args = args[1:]
+        elif flag in values and len(args) > 1:
+            args = args[2:]
+        else:
+            return True
+    if action in {"--list", "-l", "list"}:
+        return bool(args)
+    return (action is None or len(args) not in ({1} if action == "get" else {1, 2})
+            or any(arg.startswith("-") for arg in args))
+
+
 def _push_denied(args: list[str], protected: tuple[str, ...]) -> bool:
     # Explicit destination refspecs only. The repo's push.default, remote config and current branch can change.
     positional = []
@@ -371,7 +398,7 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
             raise Opaque()  # core.sshCommand and friends run during the clone itself
         if args[0] == "config":
             # Values such as core.sshCommand, alias.* and *.helper run later inside allowed verbs. Reads only.
-            return not any(a in {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"} for a in args[1:])
+            return _config_denied(args[1:])
         # An unknown subcommand can be an alias containing an engine-owned verb.
         if args[0] not in {"status", "diff", "log", "show", "rev-parse", "symbolic-ref", "branch", "checkout", "switch",
                            "add", "commit", "restore", "reset", "fetch", "pull", "rebase", "cherry-pick", "stash", "tag",

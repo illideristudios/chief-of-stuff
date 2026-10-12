@@ -245,6 +245,27 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
+    def test_git_config_read_actions_must_precede_positionals(self):
+        for command in ("git config core.sshCommand \"sh -c 'gh pr merge 12'\" --list",
+                        'git config core.x y --get', 'git config core.x get',
+                        'git config core.x list', 'git config --get core.x --list',
+                        'git config get core.x --global', 'git config --unknown --get core.x',
+                        'git config get --unknown core.x', 'git config --file --get core.x y',
+                        'git config --get --unset core.x'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
+    def test_git_config_read_actions_remain_available(self):
+        for command in ('git config --get user.email', 'git config --list', 'git config -l',
+                        'git config --get-all remote.origin.fetch',
+                        'git config --global --get-regexp ^remote\\.',
+                        'git config --file settings --get core.x',
+                        'git config --file=--get --list',
+                        'git config get user.email', 'git config list',
+                        'git config get --global user.email', 'git config list --local'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
     def test_unparsed_guarded_commands_fail_closed(self):
         for command in ('sh -c "gh pr merge 3"', 'git push origin $BRANCH',
                         "bash -lc 'cd x && git push origin HEAD:main'",
