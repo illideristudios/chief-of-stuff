@@ -74,10 +74,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     now = clock()
     at = now.isoformat()
-    # A launched worker must not lose its destination stage if the forge label write failed last pass.
+    # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         pending = _resume(store, item.issue_key).get("pending_stage")
-        if pending and item.forge_state != "closed":
+        if pending:
             try:
                 if item.stage == pending["stage"]:
                     data = _resume(store, item.issue_key)

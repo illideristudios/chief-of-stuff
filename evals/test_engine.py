@@ -16,7 +16,9 @@ import policy
 import reconcile
 import store
 import supervisor
+from evals import test_forge as tf
 from forge_port import ForgeError
+from settings import Kanban
 
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
@@ -245,6 +247,49 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.forge.writes[0], (1, "review", "implement", True))
         self.assertEqual(self.forge.writes[-1], (1, "merge", "review", True))
+
+    def test_merge_stage_write_is_retried_after_closed_issue_disappears(self):
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "merge", "expected": "review"})
+        self.assertEqual(self.forge.rows[0]["forge_state"], "closed")
+        # Production snapshots contain only open issues; label writes still address the closed issue.
+        with mock.patch.object(self.forge, "snapshots", return_value=[]):
+            self.assertEqual(self.run_pass(), [])
+            self.assertEqual(self.db.items()[0].stage, "merge")
+            self.assertNotIn("pending_stage", self.db.resume(KEY))
+            self.assertEqual(self.run_pass(), [])
+        self.assertEqual(self.db.items()[0].forge_state, "closed")
+        self.assertEqual(self.forge.writes[-1], (1, "merge", "review", True))
+        self.assertEqual(len(self.forge.merges), 1)
+        self.assertEqual(len(self.launched), 2)
+
+    def test_stage_write_human_hold_prevents_merge_after_worker_finishes(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held review", ["stage: doing"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
+                       hold_stages=("review",))
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.run_pass()
+        self.finish("implement")
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
+        self.finish("review")
+        self.findings()
+        self.assertEqual(self.forge.snapshots()[0]["merge_state"], "ready")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertTrue(self.db.items()[0].human_review)
+        self.findings(counts={"minor": 1})
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(len(self.launched), 2)
+        gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        self.assertFalse(self.db.items()[0].human_review)
 
     def test_unresolved_stage_write_cannot_dispatch_work_from_the_old_stage(self):
         self.run_pass()
