@@ -2,7 +2,7 @@
 """Create a checked worktree and branch for a dispatch.
 
 Branch and path are validated before Git writes. The branch is cut from a freshly fetched origin/main, or from local
-main with --from-local. A failed or refused build after creating anything removes exactly what it created.
+main with --from-local. A failed build removes only resources it can establish ownership of, and reports anything left.
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ import argparse
 import fcntl
 import os
 import re
-import shutil
 import subprocess
 import sys
 from contextlib import contextmanager
@@ -31,7 +30,7 @@ GIT_TIMEOUT = 30  # writes and check-ref-format; reads use git_trees.GIT_TIMEOUT
 
 
 class RefusedError(ValueError):
-    """Invalid worktree request; no worktree or branch created (a fetch may already have moved origin/main)."""
+    """Invalid worktree request or failed build; resources cleanup could not safely remove are reported."""
 
 
 @dataclass(frozen=True)
@@ -140,21 +139,46 @@ def _owns_worktree(clone: Path, path: Path) -> bool:
         return False
 
 
-def discard(clone: Path, path: Path, branch: str | None) -> str:
+def discard(clone: Path, path: Path, branch: str | None, base: str | None = None) -> str:
     """Best-effort cleanup after add, whose path was checked absent under the clone lock (#448/#376).
     Another clone can win the path race: only remove a registered tree of this clone, or an empty directory.
-    `branch` is set only when the pre-add probe confirmed it was missing. Report anything left behind."""
+    Pre-add absence alone cannot authorize deleting a branch: require an owned tree on that branch at the base.
+    If Git cannot remove an owned tree, retain its directory and registration. Report anything left behind."""
+    expected = None
+    warnings = []
     if _owns_worktree(clone, path):
-        git_trusted(["worktree", "remove", "--force", "--", str(path)], clone)
-        if _owns_worktree(clone, path):  # recheck before the recursive fallback: remove may have changed the metadata
-            shutil.rmtree(path, ignore_errors=True)
-    try:
-        path.rmdir()  # safe for an unregistered partial add: never recursively remove unowned contents
-    except OSError:
-        pass
+        if branch is not None and base is not None:
+            head_code, head = git(["symbolic-ref", "HEAD"], path)
+            tip_code, tip = git(["rev-parse", "--verify", f"refs/heads/{branch}"], clone)
+            base_code, base_tip = git(["rev-parse", "--verify", base], clone)
+            if head_code == tip_code == base_code == 0 and head == f"refs/heads/{branch}" and tip == base_tip:
+                expected = tip
+        code, detail = git_trusted(["worktree", "remove", "--force", "--", str(path)], clone)
+        if code != 0:
+            warnings.append(f"git worktree remove failed: {detail or f'git exited {code}'}")
+            expected = None
+    if _owns_worktree(clone, path):
+        expected = None
+    else:
+        try:
+            path.rmdir()  # safe for an unregistered partial add: never recursively remove unowned contents
+        except OSError:
+            pass
     if branch is not None:
-        git_trusted(["branch", "-D", "--", branch], clone)
-    return f"; left {path}: cleanup could not safely remove it" if os.path.lexists(path) else ""
+        reason = "creation or exclusive ownership could not be established"
+        if expected is not None:
+            # The sanitised view omits registrations; use pinned Git to inspect the real checkout claims.
+            code, trees = git_trusted(["worktree", "list", "--porcelain", "-z"], clone)
+            if code == 0 and f"branch refs/heads/{branch}" not in trees.split("\0"):
+                # Compare-and-delete protects a branch moved by another process after the ownership checks.
+                code, detail = git_trusted(["update-ref", "-d", f"refs/heads/{branch}", expected], clone)
+                reason = f"cleanup failed: {detail or f'git exited {code}'}" if code else "cleanup could not remove it"
+        probe = _run(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], clone, git_trees.audit_env())
+        if isinstance(probe, git_trees.ReadFailure) or probe[0] != 1:
+            warnings.append(f"left branch {branch}: {reason}")
+    if os.path.lexists(path):
+        warnings.append(f"left {path}: cleanup could not safely remove it")
+    return "".join(f"; {warning}" for warning in warnings)
 
 
 def base_ref(fetch_error: str, from_local: bool) -> str:
@@ -185,9 +209,9 @@ def clone_lock(clone: Path):
 
 def build(root: Path, clone: Path, trees: str, name: str, branch: str, agent_type: str, from_local: bool = False,
           from_branch: str = "") -> Made:
-    """Check everything that came out of a file, then make the tree. A refusal creates no worktree or branch (a fetch may
-    already have moved origin/main). `from_branch` (#62) checks an existing remote branch out into the tree instead of
-    cutting one: it fetches first, and a branch the remote lacks is refused."""
+    """Check everything that came out of a file, then make the tree. A failed add reports resources it cannot safely
+    remove (a fetch may already have moved origin/main). `from_branch` (#62) checks an existing remote branch out into
+    the tree instead of cutting one: it fetches first, and a branch the remote lacks is refused."""
     check_type((root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else "", agent_type)
     if not clone.is_dir():
         raise RefusedError(f"{clone} is not a directory; --clone names a [repos] entry or the repository's path")
@@ -222,7 +246,7 @@ def build(root: Path, clone: Path, trees: str, name: str, branch: str, agent_typ
             except RefusedError as exc:
                 raise RefusedError(f"{exc}; no local main" if no_main else f"{exc}; --from-local cuts from local main ({local}) instead") from None
             base = "local main" if from_local else "origin/main"
-        # Only scrub a branch this call cuts: from_branch creates none; a pre-existing -b name is not ours (#448).
+        # Pre-add absence is necessary, but post-failure ownership evidence must also authorize cleanup.
         cut = None
         if not from_branch:
             probe = _run(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], clone, git_trees.audit_env())
@@ -235,7 +259,7 @@ def build(root: Path, clone: Path, trees: str, name: str, branch: str, agent_typ
         add = ["worktree", "add"] + (["--detach"] if from_branch else ["--no-track", "-b", branch]) + ["--", str(path), ref]
         code, detail = git_trusted(add, clone)
         if code != 0:
-            cleanup = discard(clone, path, cut)
+            cleanup = discard(clone, path, cut, ref)
             raise RefusedError(f"git worktree add failed: {detail}{cleanup}")
         sha = r[1] if (r := git(["rev-parse", "--short", "HEAD"], path, expected_common=common))[0] == 0 else "?"  # not git's error text
     return Made(path, branch, agent_type, base, sha, clone)
