@@ -48,6 +48,10 @@ class Unparsed(ValueError):
     pass
 
 
+class Opaque(Unparsed):
+    """A program the gate cannot read, such as an inline interpreter program: denied even when no guarded word shows."""
+
+
 def _tokens(command: str) -> list[tuple[str, bool]]:
     # Expansion can construct an executable, verb, refspec or a nested command unknown to the gate.
     if not isinstance(command, str) or "$" in command or "`" in command or "\x00" in command:
@@ -80,7 +84,9 @@ def _assignment(token: str) -> bool:
     if not ASSIGNMENT.match(token):
         return False
     # GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_CONFIG_PARAMETERS and the like run their value inside allowed verbs.
-    value = token.split("=", 1)[1]
+    name, value = token.split("=", 1)
+    if name in {"GIT_ALLOW_PROTOCOL", "GIT_PROTOCOL_FROM_USER"}:
+        raise Opaque()
     if re.search(r"\s", value) and NESTED_WORD.search(value):
         raise Unparsed()
     return True
@@ -251,12 +257,14 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if name in {"eval", "source", ".", "xargs", "parallel", "if", "then", "else", "fi", "for", "while", "until",
                 "do", "done", "case", "function", "{"}:
         raise Unparsed()
-    # Versioned names too: python3.14, pypy3, perl5.36, nodejs.
+    # Versioned names too: python3.14, pypy3, perl5.36, nodejs. A program can assemble `gh` at runtime, so no word check.
     if (re.fullmatch(r"(?:python|pypy|perl|ruby|node(?:js)?)[\d.]*", name)
             # Attached and bundled forms too: python3 -c'...', perl -ne, node -p.
             and any(a.split("=", 1)[0] in {"--eval", "--print"}
                     or a.startswith("-") and not a.startswith("--") and re.search(r"[cep]", a) for a in args)):
-        raise Unparsed()
+        raise Opaque()
+    if re.fullmatch(r"[gmn]?awk", name) and not any(a == "-f" or a.startswith(("-f", "--file")) for a in args):
+        raise Opaque()  # the first operand is an inline program with system()
     if name in {"gh", "glab"}:
         return _forge_denied(args, name)
     if name == "git":
@@ -267,6 +275,8 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
             return True
         if args[0] == "push":
             return _push_denied(args[1:], protected)
+        if any(re.match(r"(?i)(?:ext|fd)::", a) for a in args):
+            raise Opaque()  # ext:: transports run a command (git-remote-ext)
         if args[0] == "config":
             # Values such as core.sshCommand, alias.* and *.helper run later inside allowed verbs. Reads only.
             return not any(a in {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"} for a in args[1:])
@@ -322,5 +332,7 @@ def _denied(command: str, protected: tuple[str, ...], depth: int) -> bool:
 def denial_reason(command: str, protected_branches: tuple[str, ...]) -> str | None:
     try:
         return OWNED if _denied(command, protected_branches, 0) else None
+    except Opaque:
+        return UNPARSED
     except (ValueError, TypeError, RecursionError):
         return UNPARSED if not isinstance(command, str) or GUARDED_TEXT.search(command) else None

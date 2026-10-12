@@ -122,7 +122,7 @@ class CommandTest(unittest.TestCase):
 
     def test_ordinary_worker_shell_commands_are_available(self):
         for command in ('echo $HOME', 'for f in *.py; do wc -l $f; done',
-                        'pytest -k "a or b" 2>&1 | tail', 'python -c "print(1)"',
+                        'pytest -k "a or b" 2>&1 | tail', 'awk -f count.awk data.txt',
                         'sh -c "echo hello"', 'bash -lc "echo $HOME"',
                         'eval "echo hello"', 'find . | xargs wc -l', "ssh host 'ls -la'",
                         'grep -rn "a b" scripts', 'git commit -m "say gh pr merge is denied"',
@@ -149,13 +149,18 @@ class CommandTest(unittest.TestCase):
                         "git config core.sshCommand \"sh -c 'gh pr merge 12'\" && git fetch ssh://github.com/o/r",
                         'git config alias.ship "!gh pr merge 12"', 'git config --global credential.helper x',
                         "GIT_SSH_COMMAND=\"sh -c 'gh pr merge 12; exit 1' --\" git fetch ssh://github.com/o/r",
-                        "env GIT_SSH_COMMAND=\"sh -c 'gh pr merge 12'\" git fetch origin"):
+                        "env GIT_SSH_COMMAND=\"sh -c 'gh pr merge 12'\" git fetch origin",
+                        "GIT_ALLOW_PROTOCOL=ext git fetch 'ext::sh -c gh% pr% merge% 12'",
+                        "git fetch 'ext::sh -c x'", "git clone fd::3 dest",
+                        "awk 'BEGIN{system(sprintf(\"%c%c\",103,104)\" pr merge 12\")}' /dev/null",
+                        "python3 -c 'import os; os.system(chr(103)+chr(104)+\" pr merge 12\")'",
+                        'python -c "print(1)"'):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 
     def test_fallback_matches_guarded_program_words(self):
         for command in ('echo $github $gitlab $legit $hubcap',
-                        'python -c "print(\'github\')"'):
+                        'cat $(ls github*.txt)'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
