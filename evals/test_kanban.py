@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -483,6 +484,20 @@ class GitHubUpdaterTest(unittest.TestCase):
             with self.subTest(wanted=wanted, present=present):
                 gh = mock.Mock(return_value=(0, json.dumps([{"name": present}]), ""))
                 self.assertEqual(kanban._github_labels_exist(gh, self.ref, (wanted,)), "")
+
+    def test_a_differently_cased_managed_label_is_the_configured_one(self):
+        self.labels = ["Main", "kind::code"]
+
+        def gh(args):
+            if args[:2] == ["label", "list"]:
+                return 0, json.dumps([{"name": "Main"}]), ""
+            return self.gh(args)
+
+        labels_only = replace(self.config, github_project=None)
+        got = kanban.sync_github(self.ref, labels_only, "main", gh=gh, commit=True, expected_stage="main")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(set(self.labels), {"Main", "kind::code"})
+        self.assertEqual(kanban.drift(labels_only, ("Main",), "main"), "")
 
     def test_missing_github_label_preserves_configured_name(self):
         gh = mock.Mock(return_value=(0, json.dumps([{"name": "Main"}]), ""))

@@ -47,6 +47,12 @@ def _managed(config: Kanban) -> set[str]:
     return set(config.stages) | set(config.terminal_stages) | {config.human_review_label}
 
 
+def _canonical(config: Kanban, labels: tuple[str, ...]) -> tuple[str, ...]:
+    """Forge label names are case-insensitive: read a managed label in its configured spelling."""
+    names = {name.casefold(): name for name in _managed(config)}
+    return tuple(names.get(label.casefold(), label) for label in labels)
+
+
 def label_delta(config: Kanban, current: tuple[str, ...], stage: str, keep_hold: bool = False) -> Delta:
     """Exactly one numbered stage and an independent hold, preserving every other label."""
     desired = config.label_for(stage)
@@ -66,6 +72,7 @@ def after(current: tuple[str, ...], delta: Delta) -> tuple[str, ...]:
 def drift(config: Kanban, labels: tuple[str, ...], stage: str,
           *, project_status: str | None = None, allow_extra_hold: bool = False) -> str:
     """Describe a board disagreement; the audit never repairs one silently."""
+    labels = _canonical(config, labels)
     try:
         target = config.label_for(stage)
     except KeyError:
@@ -284,7 +291,7 @@ def add_human_hold(ref: backlog.IssueRef, home: backlog.Backlog | backlog.GitHub
     if ref.host == backlog.GITHUB:
         gh = gh or backlog.run_gh
         current, error = _github_issue(gh, ref)
-        if error or label in current:
+        if error or label in _canonical(config, current):
             return error
         # #566: the hold is the point — a label the repo has never seen is created, not refused.
         for made in backlog.ensure_labels(backlog.GitHubBacklog(ref.repo), (label,), commit=True, gh=gh):
@@ -294,7 +301,7 @@ def add_human_hold(ref: backlog.IssueRef, home: backlog.Backlog | backlog.GitHub
         if code:
             return stderr.strip() or f"gh exited {code}"
         updated, error = _github_issue(gh, ref)
-        return error or ("GitHub review hold was not applied" if label not in updated else "")
+        return error or ("GitHub review hold was not applied" if label not in _canonical(config, updated) else "")
     if not isinstance(home, backlog.Backlog) or ref.host != backlog.home_of(home)[0]:
         return "issue host does not match the configured backlog"
     project = home if home.project == ref.repo else home.sibling(ref.repo)
@@ -352,6 +359,7 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     current, error = _github_issue(gh, ref)
     if error:
         return Sync(ref, stage, error=error)
+    current = _canonical(config, current)
     delta = _github_label_delta(config, current, stage, keep_hold=extra_hold(config, current, expected_stage))
     managed = _managed(config)
     current_labels = frozenset(current) & managed
@@ -459,7 +467,7 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
             return Sync(ref, stage, delta, error=error, current_status=old_status,
                         project_status=wanted, project_add=project_add)
     verified_labels, error = _github_issue(gh, ref)
-    if error or set(verified_labels) != set(after(current, delta)):
+    if error or set(_canonical(config, verified_labels)) != set(after(current, delta)):
         return Sync(ref, stage, delta, error=error or "GitHub labels differ after update")
     if project:
         item, status, error = _project_item(gh, project, ref)
