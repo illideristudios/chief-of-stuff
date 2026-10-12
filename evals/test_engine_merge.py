@@ -128,7 +128,7 @@ class ExecutorTest(unittest.TestCase):
         self.p.stages["review"] = policy.Place("review", "critic", {
             "zach_gates": ("merge",), "approvals": (policy.Approval("merge", now + timedelta(seconds=1)),)})
         self.planned()
-        self.at = (now + timedelta(seconds=1)).isoformat()
+        self.db.clock = lambda: now + timedelta(seconds=1)  # the pass's `at` is still the planning time
         self.refused("gate requires Zach's approval")
 
     def test_an_issue_closed_after_planning_refuses(self):

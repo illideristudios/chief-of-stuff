@@ -67,7 +67,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
             item.human_review = True  # a forge-side hold counts even before the store hears of it
         item.merge_state = request.verdict
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
-        planned = reconcile.plan([item], policies=policies, free_slots=1, now=datetime.fromisoformat(at),
+        planned = reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(),  # not `at`: a gate may expire mid-pass
                                  **planning_inputs(store, [item]))
         if not planned or not isinstance(planned[0], reconcile.Merge):
             reason = (getattr(planned[0], "reason", f"{type(planned[0]).__name__.lower()} required")
