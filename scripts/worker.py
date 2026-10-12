@@ -35,9 +35,12 @@ def compose(row: Any, title: str, body: str, stage: str, persona: Any) -> str:
     """Pure assignment from a store row and forge issue, never a peer session's instructions (E3)."""
     key = dispatch_prompt._clean("issue key", row.issue_key)
     name = dispatch_prompt._clean("store title", row.title)
+    delivery = (f"{dispatch_prompt.COMMITS}\nPut `Closes #{key.rpartition('#')[2]}` in the pull/merge request body "
+                "before reporting done.\n" if stage == "implement" else "")
     return (f"{HEADER}\nIssue: {key}\nStore title: {name}\nStage: {stage}\n"
             f"Job: {JOBS.get(stage, persona.role)}\nPersona: {persona.role}\n"
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
+            + delivery
             + f"\n## Forge issue\n\n{title}\n\n{body}\n")
 
 
@@ -51,6 +54,13 @@ def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
     if not number.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_-]+", stage) or attempt < 1:
         raise ValueError("invalid worker issue, stage or attempt")
     return supervisor.state_dir(root) / "runs" / f"{int(number)}-{stage}-{attempt}"
+
+
+def _exit_code(run_dir: Path) -> int:
+    code = json.loads((run_dir / "exit.json").read_text())["exit_code"]
+    if type(code) is not int:
+        raise ValueError("invalid adapter exit code")
+    return code
 
 
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
@@ -72,6 +82,8 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                       started_at=clock().isoformat())
     else:
         record = dict(record)
+    if stage == "review":
+        record.setdefault("reviewed_head", data.get("review_trees", {}).get(str(attempt), {}).get("head"))
     if (any(type(record.get(field)) is not int or record[field] <= 0 for field in ("pid", "runner_pid"))
             or not isinstance(record.get("session_id"), str) or not record["session_id"]
             or not isinstance(record.get("tree"), str) or not record["tree"]
@@ -79,6 +91,13 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
             or not Path(record["tree"]).resolve().is_relative_to(trees.resolve())
             or run_dir.resolve().is_relative_to(Path(record["tree"]).resolve())):
         raise RuntimeError("existing worker identity is incomplete; preserving its evidence")
+    try:
+        _exit_code(run_dir)
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    else:
+        # The adapter's atomic exit write survives both processes and a missing slot claim.
+        return record
     host = process_status.identity(record["pid"], record["session_id"], host=True)
     runner = process_status.identity(record["runner_pid"], record["session_id"])
     host_live = host is not None and ("identity" not in record or host == record["identity"])
@@ -103,7 +122,7 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
-    """The Launch port, bound to a workspace. Verify a live identity before slots records a start."""
+    """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
@@ -194,6 +213,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
                   "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
+        if stage == "review":
+            record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
     except Exception:
         claude_adapter.cancel(runner)
@@ -244,7 +265,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 raise ValueError("missing run record")
             if (type(record.get("pid")) is not int or record["pid"] <= 0
                     or any(not isinstance(record.get(field), str) or not record[field]
-                           for field in ("session_id", "identity", "run_dir", "tree"))):
+                           for field in ("session_id", "run_dir", "tree"))):
                 raise ValueError("incomplete run identity")
             run_dir = _run_dir(root, key, segment.stage, segment.attempt)
             if Path(record["run_dir"]).resolve() != run_dir or run_dir.is_relative_to(Path(record["tree"]).resolve()):
@@ -252,19 +273,21 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))
-            try:
-                alive = process_status.identity(record["pid"], record["session_id"], host=True)
-            except (OSError, RuntimeError) as exc:
-                store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
-                continue
-            if alive == record["identity"]:
-                continue
             if not (run_dir / "exit.json").exists():
+                if not isinstance(record.get("identity"), str) or not record["identity"]:
+                    raise ValueError("incomplete run identity")
+                try:
+                    alive = process_status.identity(record["pid"], record["session_id"], host=True)
+                except (OSError, RuntimeError) as exc:
+                    store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
+                    continue
+                if alive == record["identity"]:
+                    continue
                 # The runner may be between wait() and its atomic exit write.
                 if process_status.identity(record["runner_pid"], record["session_id"]) == record["runner_identity"]:
                     continue
                 raise ValueError("missing adapter exit record")
-            code = json.loads((run_dir / "exit.json").read_text())["exit_code"]
+            code = _exit_code(run_dir)
             reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
             if isinstance(reply, Failure):
                 outcome = "quota" if reply.kind == "quota" else "failed"
@@ -275,6 +298,11 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     store.set_resume(key, data)
             else:
                 outcome = "done"
+            if segment.stage == "review":
+                # This attempt's collected result always names the SHA pinned at launch.
+                record["result"] = {"reviewed_head": record.get("reviewed_head"),
+                                    "outcome": outcome, "ended_at": now.isoformat()}
+                store.set_resume(key, data)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)

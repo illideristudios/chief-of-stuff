@@ -91,6 +91,14 @@ class WorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "via"):
             worker.compose(self.db.items()[0], "title", "body", "implement", self.persona)
 
+    def test_implement_assignment_requires_delivery_before_reporting_done(self):
+        prompt = worker.compose(self.db.items()[0], "title", "body", "implement", self.persona)
+        self.assertIn(worker.dispatch_prompt.COMMITS, prompt)
+        self.assertIn("Closes #1", prompt)
+        self.assertIn("before reporting done", prompt)
+        review = worker.compose(self.db.items()[0], "title", "body", "review", self.persona)
+        self.assertNotIn(worker.dispatch_prompt.COMMITS, review)
+
     def test_verification_failure_records_no_segment_or_run(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
@@ -119,6 +127,27 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             self.launch("review")
         self.assertEqual(build.call_args.kwargs["from_branch"], "feature/existing")
+
+    def test_reviewed_head_round_trips_through_run_and_collected_result(self):
+        run = self.launched("review")
+        record = self.db.resume(KEY)["runs"]["review-1"]
+        self.assertEqual(record.get("reviewed_head"), "head")
+        # Completion must use the launch's pinned SHA, even after the request moves.
+        self.forge.closing_request = mock.Mock(return_value=SimpleNamespace(branch="feature/existing", head="new-head"))
+        data = self.db.resume(KEY)
+        data["review_trees"]["1"]["head"] = "new-head"
+        self.db.set_resume(KEY, data)
+        (run / "stdout").write_text('{"is_error": false, "result": "reviewed"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        reopened = store.Store(self.root / "store.db")
+        self.addCleanup(reopened.engine.dispose)
+        self.assertEqual(reopened.resume(KEY)["runs"]["review-1"]["result"], {
+            "reviewed_head": "head", "outcome": "done", "ended_at": (NOW + timedelta(minutes=1)).isoformat()})
+        self.assertEqual(reopened.segments(KEY)[0].outcome, "done")
+        self.forge.closing_request.assert_not_called()
 
     def test_generated_trees_have_cleanup_ownership_even_after_refused_start(self):
         for stage in ("implement", "review"):
@@ -189,7 +218,7 @@ class WorkerTest(unittest.TestCase):
                     data = self.db.resume(KEY)
                     data.pop("runs")
                     self.db.set_resume(KEY, data)
-                (run / "exit.json").write_text('{"exit_code": 1}')
+                (run / "exit.json").write_text('{"exit_code": "unknown"}')
                 with mock.patch.object(worker.make_worktree, "git", return_value=(0, old["branch"])), \
                      mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
                      mock.patch.object(worker.process_status, "identity", side_effect=[old_identity, old_identity,
@@ -199,6 +228,47 @@ class WorkerTest(unittest.TestCase):
                 refused, = run.parent.glob(f"{run.name}-refused-*")
                 self.assertTrue((refused / "exit.json").exists())
                 self.assertNotEqual(self.db.resume(KEY)["runs"]["implement-1"]["session_id"], old["session_id"])
+
+    def test_restart_adopts_completed_run_before_slot_record(self):
+        for stage in ("implement", "review"):
+            for recorded, outcome in ((True, "done"), (False, "done"), (False, "failed"), (False, "quota")):
+                with self.subTest(stage=stage, recorded=recorded, outcome=outcome):
+                    if self.db.resume(KEY):
+                        self.db.engine.dispose()
+                        self.setUp()
+                    with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+                         mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+                         mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+                        self.launch(stage)
+                    data = self.db.resume(KEY)
+                    record = data["runs"][f"{stage}-1"]
+                    run = Path(record["run_dir"])
+                    if not recorded:
+                        data.pop("runs")
+                        self.db.set_resume(KEY, data)
+                    worker._runners.pop(str(run), None)
+                    text = "429 quota exceeded; resets in 2 hours" if outcome == "quota" else outcome
+                    (run / "stdout").write_text(json.dumps({"is_error": outcome != "done", "result": text}))
+                    (run / "stderr").write_text("")
+                    (run / "exit.json").write_text(json.dumps({"exit_code": 0 if outcome == "done" else 1}))
+                    with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+                         mock.patch.object(worker.make_worktree, "git", return_value=(0, "head" if stage == "review" else record["branch"])) as git, \
+                         mock.patch.object(worker.claude_adapter, "start", side_effect=AssertionError("completed worker must not be relaunched")) as start, \
+                         mock.patch.object(worker.process_status, "identity", return_value=None):
+                        slots.claim(self.trees, self.db, issue_key=KEY, stage=stage, attempt=1,
+                                    max_concurrency=1, clock=lambda: NOW, launch=lambda: self.launch(stage))
+                        start.assert_not_called()
+                        build.assert_not_called()
+                        git.assert_not_called()
+                        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+                    self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
+                    self.assertEqual(self.db.resume(KEY)["runs"][f"{stage}-1"]["session_id"], record["session_id"])
+                    self.assertEqual(self.db.segments(KEY)[0].outcome, outcome)
+                    if outcome == "quota":
+                        self.assertEqual(self.db.resume(KEY)["quota"]["retry_at"],
+                                         (NOW + timedelta(hours=2, minutes=1)).isoformat())
+                    if stage == "review":
+                        self.assertEqual(self.db.resume(KEY)["runs"]["review-1"]["result"]["reviewed_head"], "head")
 
     def test_unverified_existing_run_keeps_evidence_and_refuses_second_worker(self):
         run = self.launched()
@@ -448,6 +518,8 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("--agent", args)
         self.assertIn("specialist", args)
         self.assertNotIn("--safe-mode", args)
+        self.assertEqual(args[args.index("--setting-sources") + 1], "user")
+        self.assertIn("--strict-mcp-config", args)
 
     def test_forge_retains_request_head_branch(self):
         payload = [{"number": 1, "title": "Request", "url": "url", "headRefOid": "sha",

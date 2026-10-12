@@ -111,6 +111,8 @@ def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
         out += ["--agent", request.agent]
     if not request.plugin_dirs and not request.worker:  # judgement calls have no tools or workspace context
         out += ["--tools", "", "--safe-mode"]
+    if request.worker:  # a PR branch's own settings, hooks and MCP servers would run as this user
+        out += ["--setting-sources", "user", "--strict-mcp-config"]
     return out + ["--", request.prompt]
 
 
