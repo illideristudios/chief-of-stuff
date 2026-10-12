@@ -226,7 +226,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
             self.send_error(403, "Host is not this machine")
             return False
-        path = self.path.split("?")[0]
+        path = re.split(r"[?#]", self.path, maxsplit=1)[0]
         decoded = unquote(path)
         if "\0" in decoded or (decoded != "/" and decoded.endswith("/")):  # #340: null or a directory URL, `%2F` too
             self.send_error(404)
@@ -274,7 +274,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # A rendered page is a route only. casefold: long s and a case-insensitive disk reach it too (#335).
             self.send_error(404)
             return False
-        name = self.path.split("?")[0].lstrip("/")
+        name = re.split(r"[?#]", self.path, maxsplit=1)[0].lstrip("/")
         if root is not None and RENDERED.fullmatch(name):
             # A look is recorded before `fresh`, so the board counts from the look before, and taken back when the
             # board cannot render; one lock around it all, so two tabs loading at once cannot interleave it.
@@ -361,7 +361,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if self.headers.get("Host", "") not in own or (origin is not None and origin not in [f"http://{h}" for h in own]):
             return self.send_error(403, "not a page of this server")
-        m = ROUTE.fullmatch(self.path.split("?")[0])
+        m = ROUTE.fullmatch(re.split(r"[?#]", self.path, maxsplit=1)[0])
         source = Path(self.directory) / f"decision-{m[1]}.json" if m else None
         if source is None or not source.is_file():
             return self.send_error(404, "no such decision")

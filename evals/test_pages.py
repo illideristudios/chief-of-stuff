@@ -285,7 +285,7 @@ class ReloadSnippetTest(unittest.TestCase):
         # #340: %00 closed with no response; /sub/ listed without the snippet; /dir.html/ was an empty 200.
         (self.dir / "sub").mkdir()
         (self.dir / "dir.html").mkdir()
-        for path in ("/%00", "/sub/", "/dir.html/", "/sub/%2F", "/dir.html%2F", "/%2F"):
+        for path in ("/%00", "/sub/", "/dir.html/", "/sub/%2F", "/dir.html%2F", "/%2F", "/sub/#x", "/dir.html/#x"):
             for method in ("GET", "HEAD"):
                 with self.subTest(path=path, method=method):
                     self.assertEqual(get(self.port, path, method=method).status, 404)
