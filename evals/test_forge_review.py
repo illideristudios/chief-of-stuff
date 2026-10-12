@@ -15,6 +15,15 @@ import forge_review as fr  # noqa: E402
 import test_merge_ready as tmr  # noqa: E402
 
 
+class ClosesTest(unittest.TestCase):
+    def test_native_closing_forms_name_every_issue_once(self):
+        for body, want in (("Closes #3", ("#3",)), ("Closes: #3", ("#3",)), ("fixes:  #7", ("#7",)),
+                           ("Closes #3, #4 and #5", ("#3", "#4", "#5")), ("Resolves #3 and #4", ("#3", "#4")),
+                           ("Closes #3. Fixes #3", ("#3",)), ("closing #3", ()), ("See #3, #4", ())):
+            with self.subTest(body=body):
+                self.assertEqual(fr.closes(body), want)
+
+
 class GitLabPipelineEvidenceTest(unittest.TestCase):
     def test_merged_results_keeps_the_pipeline_commit_and_records_the_source_head(self):
         call = tmr.gitlab_fake({26: tmr.GITLAB[26][0]})

@@ -25,7 +25,9 @@ GITLAB_WAITING = frozenset({"skipped", "pending", "created", "waiting_for_resour
 # Forge mergeability still being computed — not a settled blocker (#430).
 SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown", "approvals_syncing", "preparing"})
 REQUEST_LIMIT = backlog.PER_PAGE  # one page; readers page until short, and refuse a full MAX_PAGES read as whole
-CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(#\d+)")
+# `Closes: #3` (GitHub) and `Closes #3, #4 and #5` (GitLab). shortcut: GitHub closes only the first of a list, so a
+# listed extra reads as closed there too; query closingIssuesReferences if that matters.
+CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(#\d+(?:(?:\s*,\s*|\s*,?\s+and\s+)#\d+)*)")
 
 
 def gitlab_pipeline_status(status: str | None) -> str:
@@ -43,7 +45,7 @@ def scrub(text: str) -> str:
 
 def closes(body: str | None) -> tuple[str, ...]:
     """The issue refs a request's body closes (`Closes #3`), in order, once each."""
-    return tuple(dict.fromkeys(CLOSES.findall(body or "")))
+    return tuple(dict.fromkeys(ref for refs in CLOSES.findall(body or "") for ref in re.findall(r"#\d+", refs)))
 
 
 def github_approval(reviews: list[dict], approver: str, head: str) -> str:
