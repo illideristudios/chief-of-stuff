@@ -187,7 +187,8 @@ def main(argv: list[str] | None = None) -> int:
         new_settings = settings_text(args.launcher, args.worker_mode)
         # Provision the workspace's configured labels before its first stage or hold write.
         forge = (backlog.GitHubBacklog(args.github_repo) if args.github_repo else
-                 backlog.Backlog(args.gitlab_host, args.gitlab_project) if args.gitlab_host else None)
+                 backlog.Backlog(args.gitlab_host, args.gitlab_project, args.gitlab_token_env)
+                 if args.gitlab_host else None)
         label_out, label_err = provision_labels(
             forge, _configured_labels(settings, new_settings), args.dry_run)
         if args.dry_run:

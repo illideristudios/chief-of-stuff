@@ -3,6 +3,7 @@
 import contextlib
 import io
 import json
+import os
 import shlex
 import sys
 import tempfile
@@ -197,9 +198,11 @@ class InitWorkspaceTest(unittest.TestCase):
             labels.append(payload["name"])
             return {}, {}, ""
 
-        with mock.patch.dict("os.environ", {"CHIEF_OF_STUFF_GITLAB_TOKEN": "fixture-token"}), \
-             mock.patch.object(init.backlog, "_call", call):
-            code, _, err = self.run_init("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app")
+        with mock.patch.dict("os.environ", {"TEAM_GITLAB_TOKEN": "fixture-token"}), \
+             mock.patch.object(init.backlog, "_call", call):  # the configured token env, not the default name
+            os.environ.pop("CHIEF_OF_STUFF_GITLAB_TOKEN", None)  # restored by patch.dict
+            code, _, err = self.run_init("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app",
+                                         "--gitlab-token-env", "TEAM_GITLAB_TOKEN")
         self.assertEqual(code, 0, err)
         self.assertEqual(created, ["PLAN", "main", "HOLD"])
 
