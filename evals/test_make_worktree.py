@@ -1417,6 +1417,28 @@ class ArgvTest(unittest.TestCase):
 class CloneRootTest(CloneCase):
     """#311: the clone path must be the repository root git would report, and the report names that clone."""
 
+    def test_a_bare_clone_creates_a_worktree(self):
+        bare = self.root / "origin.git"
+        self.assertEqual(make_repo.git(["rev-parse", "--is-bare-repository"], bare), "true")
+        code, out, err = self.invoke("--clone", str(bare), "--from-local")
+        self.assertEqual((code, err), (0, ""))
+        self.assertTrue((self.tree / ".git").is_file())
+        self.assertEqual(rev(self.tree), rev(bare, "refs/heads/main"))
+        self.assertEqual(make_repo.git(["branch", "--show-current"], self.tree), "feat/new")
+        self.assertIn(f" from {bare}", out)
+
+    def test_a_subdirectory_of_a_bare_repository_is_refused(self):
+        bare = self.root / "origin.git"
+        notes = bare / "notes"
+        notes.mkdir()
+        self.assertEqual(make_repo.git(["rev-parse", "--is-bare-repository"], notes), "true")
+        self.assertEqual(Path(make_repo.git(["rev-parse", "--absolute-git-dir"], notes)).resolve(), bare.resolve())
+        with self.assertRaises(mw.RefusedError) as e:
+            self.build(clone=notes, from_local=True)
+        self.assertIn("not a repository root", str(e.exception))
+        self.assertFalse(self.tree.exists())
+        self.assertEqual(make_repo.git(["branch", "--list", "feat/new"], bare), "")
+
     def test_a_plain_directory_inside_another_repository_is_refused(self):
         notes = self.root / "notes"
         notes.mkdir()

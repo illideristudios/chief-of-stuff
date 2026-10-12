@@ -119,6 +119,10 @@ def resolve(root: Path, trees: str, name: str) -> Path:
 def require_root(clone: Path) -> None:
     """Refuse a path that is not itself the repository root git would report (#311)."""
     code, top = _run(["rev-parse", "--show-toplevel"], clone, git_trees.audit_env())
+    if code != 0:
+        bare_code, bare = _run(["rev-parse", "--is-bare-repository"], clone, git_trees.audit_env())
+        if bare_code == 0 and bare == "true":
+            code, top = _run(["rev-parse", "--absolute-git-dir"], clone, git_trees.audit_env())
     try:
         resolved = clone.resolve()
         root = Path(top).resolve() if code == 0 and top else None
