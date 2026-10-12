@@ -3434,6 +3434,21 @@ class AuditThroughTheViewTest(unittest.TestCase):
         code = f"from pathlib import Path; import sys; Path({str(self.canary)!r}).write_text('fired'); sys.exit(1)"
         return shlex.join([sys.executable, "-c", code])
 
+    def test_bad_cache_is_one_configuration_error_not_per_tree_unknowns(self) -> None:
+        # Bypass the test module's explicit trusted base to exercise launcher configuration.
+        real_base = git_view._base
+        cache = self.root / "bad-cache"
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": str(cache)}), \
+                patch.object(git_view, "_base", side_effect=lambda layout, base: real_base(layout, None)) as bases, \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = al.main(["--root", str(self.root), "--date", "2026-09-17"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(bases.call_count, 1)
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
+        self.assertIn(str(cache), err.getvalue())
+        self.assertIn("cache", err.getvalue())
+
     def plant(self, how: str) -> None:
         if how == "fsmonitor":
             git("config", "--file", str(self.config), "core.fsmonitor", self.command(), cwd=self.root)
@@ -3685,9 +3700,8 @@ class UnreadableTreeTest(unittest.TestCase):
         self.assertTrue(report.lines)
 
     # R6
-    def test_a_home_python_cannot_find_costs_one_tree_not_the_pass(self) -> None:
-        """R6: `Path.home()` raises `RuntimeError` out of the view's default base. The pass finishes, and the trees whose reads
-        did not hit it are reported as they were."""
+    def test_a_home_python_cannot_find_is_a_cache_configuration_error(self) -> None:
+        """An unavailable launcher home is a configuration error, never a per-tree unknown."""
         real = git_view._base
 
         def homeless_for_wt_dirty(layout, base):
@@ -3698,8 +3712,5 @@ class UnreadableTreeTest(unittest.TestCase):
             return real(layout, base)
 
         with patch.object(git_view, "_base", homeless_for_wt_dirty):
-            report = al.audit(self.root, "2026-09-17")
-        self.assertIn("wt-unmerged (feat/open): not on main", report.lines)
-        self.assertIn("wt-merged (landed): on main, committed", report.lines)
-        [line] = [ln for ln in report.lines if ln.startswith("wt-dirty")]
-        self.assertIn(tree_state.UNCOMMITTED_UNKNOWN, line)
+            with self.assertRaisesRegex(git_view.CacheError, "cache"):
+                al.audit(self.root, "2026-09-17")

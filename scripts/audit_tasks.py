@@ -1021,7 +1021,11 @@ def main(argv: list[str] | None = None, gh=None) -> int:
             return 2
         answers = []
         for name, tree in asked:
-            code, line, held = git_trees.check_sha(args.sha, tree)
+            try:
+                code, line, held = git_trees.check_sha(args.sha, tree)
+            except git_view.CacheError as e:
+                print(f"audit_tasks: {e}", file=sys.stderr)
+                return 2
             print(git_trees.clean(f"{line} [{name}]"))  # escaped: neither a name nor a remote's error can forge or split a line
             answers.append((code, held))
         code = git_trees.sha_exit(answers)
@@ -1035,7 +1039,7 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         return 2
     try:
         report = audit(root, day, gh=gh, check_issues=not args.no_issues)
-    except SettingsError as e:
+    except (SettingsError, git_view.CacheError) as e:
         print(f"audit_tasks: {e}", file=sys.stderr)
         return 2
     for line in report.lines:

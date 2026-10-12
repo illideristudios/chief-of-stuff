@@ -1779,9 +1779,8 @@ class GitViewFunnelTest(unittest.TestCase):
         self.assertEqual([c.args[0] for c in viewed.call_args_list], list(argvs))
         self.assertEqual([c for c in calls if unsanitised(c)], [])
 
-    def test_a_home_python_cannot_find_is_an_unreadable_read_not_a_crash(self) -> None:
-        """R6: the view's default base asks for the home directory, and `Path.home()` raises `RuntimeError` when HOME is unset
-        and the uid has no passwd entry (a container run `--user`). That is one more tree git cannot be asked in."""
+    def test_a_home_python_cannot_find_is_a_cache_configuration_error(self) -> None:
+        """An unavailable launcher home must escape the per-tree unreadable handler."""
         fx = self.fixture()
         real = git_view._base
 
@@ -1791,9 +1790,8 @@ class GitViewFunnelTest(unittest.TestCase):
         with patch.dict(os.environ), patch.object(git_view, "_base", homeless), \
                 patch.object(Path, "home", side_effect=RuntimeError("Could not determine home directory.")):
             os.environ.pop("XDG_CACHE_HOME", None)
-            code, text = git_trees.git(["rev-parse", "HEAD"], fx.tree)
-        self.assertEqual(code, 128)
-        self.assertTrue(text.startswith("unreadable:"), text)
+            with self.assertRaisesRegex(git_view.CacheError, "cache"):
+                git_trees.git(["rev-parse", "HEAD"], fx.tree)
 
     def test_a_value_or_runtime_error_out_of_the_view_is_an_unreadable_read(self) -> None:
         """R6, `ValueError` (a non-UTF-8 object path written into the view on Linux; macOS refuses to create one, so this

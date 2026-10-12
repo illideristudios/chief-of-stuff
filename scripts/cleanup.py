@@ -72,7 +72,7 @@ def git_guards(tree: Path) -> list[str]:
     try:
         with git_view.opened(tree, audit_env()) as view:
             code, status = git(["status", "--porcelain", "--ignored"], tree, view)
-            flags_code, files = git(["ls-files", "-v"], tree, view)
+            flags_code, _ = git(["ls-files", "-v"], tree, view)
             state = read_state(tree, view)
     except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
         return ["git cannot read this tree"]
@@ -82,7 +82,7 @@ def git_guards(tree: Path) -> list[str]:
         return ["git ls-files -v is unreadable"]
     lost = unsaved(status)
     out = [f"{len(lost)} unsaved by git status --ignored ({', '.join(lost[:3])})"] if lost else []
-    hidden = sum(line[0].islower() or line[0] == "S" for line in files.splitlines() if line)
+    hidden = view.hidden_index_entries
     if hidden:
         out.append(f"{hidden} files hidden from git status by index flags")
     return out + list(at_risk(state))

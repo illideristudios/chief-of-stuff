@@ -589,10 +589,11 @@ class ContentsTest(FixtureCase):
         self.assertEqual(len(parsing), 1)
         argv = parsing[0].args[0]
         self.assertIn("--file", argv)
-        self.assertIn(str(fx.common / "config"), argv)
+        self.assertNotIn(str(fx.common / "config"), argv)
+        self.assertTrue(Path(argv[argv.index("--file") + 1]).is_relative_to(self.base))
         self.assertIn("-z", argv)
         self.assertIn("--list", argv)
-        self.assertNotIn("--includes", argv)
+        self.assertIn("--no-includes", argv)
         command = started.call_args_list[-1]
         self.assertEqual(command.args[0], ["git", "rev-parse", "HEAD"])
         self.assertEqual(Path(command.kwargs["cwd"]), fx.tree)
@@ -763,7 +764,7 @@ class PrivacyAndCleanupTest(FixtureCase):
         view = self.view
         for parent in (fx.tree, fx.common, fx.gitdir):
             for base in (parent, parent / "views"):
-                with self.subTest(base=base), self.assertRaises(view.Unviewable):
+                with self.subTest(base=base), self.assertRaises(view.CacheError):
                     view.run(["rev-parse", "HEAD"], fx.tree, env=git_trees.audit_env(), base=base)
 
     def test_default_base_inside_worker_roots_or_system_temp_is_refused(self):
@@ -771,7 +772,7 @@ class PrivacyAndCleanupTest(FixtureCase):
         view = self.view
         for cache in (fx.tree, fx.common, fx.gitdir, Path(tempfile.gettempdir())):
             with self.subTest(cache=cache), patch.dict(os.environ, {"XDG_CACHE_HOME": str(cache)}):
-                with self.assertRaises(view.Unviewable):
+                with self.assertRaises(view.CacheError):
                     view.run(["rev-parse", "HEAD"], fx.tree, env=git_trees.audit_env())
 
     def test_default_base_uses_launcher_home_and_private_cache(self):
@@ -1149,7 +1150,12 @@ class TruthTest(FixtureCase):
         self.assertFalse((fx.tree / "omitted").exists())
         sparse = taint.git(["ls-files", "--sparse", "--stage"], fx.tree).stdout
         self.assertIn("040000 ", sparse)
-        self.compare_truth(fx)
+        # The view cannot trust sparse skip-worktree bits to hide absent tracked files.
+        status = self.run_view(fx, ["status", "--short"])
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn(" D omitted/file.txt\n", status.stdout)
+        for args in commands(fx)[1:]:
+            self.assertEqual(answer(self.run_view(fx, args)), answer(raw(fx, args)))
 
     def test_detached_and_unborn_heads_equal_truth_including_nonzero_codes(self):
         for shape in ("detached", "unborn"):
@@ -1640,7 +1646,7 @@ class ReviewBaseTest(FixtureCase):
             self.assertEqual(view._base(layout, candidate), candidate)
             mkdir.assert_called_once()
             mkdir.reset_mock()
-            with self.assertRaises(view.Unviewable):
+            with self.assertRaises(view.CacheError):
                 view._base(layout, None)
             mkdir.assert_not_called()
 
@@ -1664,7 +1670,7 @@ class ReviewBaseTest(FixtureCase):
             alias.symlink_to(parent, target_is_directory=True)
             for base in (parent, parent / "views", alias, alias / "views"):
                 with self.subTest(base=base), patch.object(subprocess, "run", wraps=subprocess.run) as started:
-                    with self.assertRaises(self.view.Unviewable):
+                    with self.assertRaises(self.view.CacheError):
                         self.view.run(["rev-parse", "HEAD"], fx.tree, env=git_trees.audit_env(), base=base)
                     started.assert_not_called()
         self.assertEqual(self.leftovers(), [])
@@ -2529,6 +2535,133 @@ RoundThreeStdinTest.test_r19_batch_check_leaves_launcher_pipe_unread = stdin_pip
     hold_open=False, guarded=True)
 RoundThreeStdinTest.test_r19_batch_check_returns_with_launcher_pipe_still_open = stdin_pipe_test(
     hold_open=True, guarded=True)
+
+
+class ViewDefectsTest(FixtureCase):
+    def test_index_flags_cannot_hide_edits_in_plain_or_split_index(self):
+        for split in (False, True):
+            for flag in ("--assume-unchanged", "--skip-worktree"):
+                with self.subTest(split=split, flag=flag):
+                    fx = self.fixture()
+                    name = "-odd\né.txt"
+                    (fx.tree / name).write_text("original\n")
+                    taint.git(["add", "--", name], fx.tree)
+                    taint.git(["commit", "-qm", "odd path"], fx.tree)
+                    taint.git(["update-index", flag, "--", name], fx.tree)
+                    if split:
+                        taint.git(["update-index", "--split-index"], fx.tree)
+                    before = (fx.gitdir / "index").read_bytes(), (fx.gitdir / "index").stat().st_mtime_ns
+                    (fx.tree / name).write_text("changed\n")
+                    self.assertEqual(raw(fx, ["status", "--short", "--", name]).stdout, "")
+                    with self.view.opened(fx.tree, git_trees.audit_env(), base=self.base) as v:
+                        out = self.view.in_view(v, ["status", "--short", "--", name], timeout=5)
+                        self.assertEqual(out.returncode, 0, out.stderr)
+                        self.assertIn(" M ", out.stdout)
+                        flags = self.view.in_view(v, ["ls-files", "-v", "-z"], timeout=5)
+                        self.assertTrue(all(entry[:1] == b"H" for entry in flags.stdout.encode().split(b"\0") if entry))
+                    self.assertEqual(((fx.gitdir / "index").read_bytes(), (fx.gitdir / "index").stat().st_mtime_ns), before)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_config_parse_uses_the_bounded_snapshot_even_after_worker_swap(self):
+        for replacement in ("large", "fifo"):
+            with self.subTest(replacement=replacement):
+                fx = self.fixture("include")
+                source = fx.common / "config"
+                original = source.read_bytes()
+                real_read = self.view._read
+
+                def swap(path, limit):
+                    data = real_read(path, limit)
+                    if path == source:
+                        source.unlink()
+                        if replacement == "fifo":
+                            os.mkfifo(source)
+                        else:
+                            source.write_bytes(b"x" * (1024 * 1024 + 1))
+                    return data
+
+                with patch.object(self.view, "_read", side_effect=swap), deadline():
+                    result = self.run_view(fx, ["rev-parse", "HEAD"])
+                self.assertEqual(answer(result), (0, fx.sha["D"] + "\n"))
+                self.assertEqual(fx.fired(), [])
+                source.unlink()
+                source.write_bytes(original)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_oversize_and_fifo_config_are_refused_before_git(self):
+        for shape in ("large", "fifo"):
+            fx = self.fixture()
+            config = fx.common / "config"
+            config.unlink()
+            if shape == "fifo":
+                os.mkfifo(config)
+            else:
+                config.write_bytes(b"x" * (1024 * 1024 + 1))
+            with self.subTest(shape=shape), deadline(), patch.object(subprocess, "run") as started:
+                with self.assertRaises(self.view.Unviewable):
+                    self.run_view(fx, ["rev-parse", "HEAD"])
+                started.assert_not_called()
+
+    def test_captured_stdout_and_stderr_are_bounded_in_text_and_binary_mode(self):
+        fx = self.fixture()
+        binary = self.root / "bin"
+        binary.mkdir()
+        git = binary / "git"
+        for stream in (1, 2):
+            git.write_text(f"#!{sys.executable}\nimport os\nos.write({stream}, b'x' * 8192)\n")
+            git.chmod(0o755)
+            for text_mode in (False, True):
+                with self.subTest(stream=stream, text=text_mode), patch.object(self.view, "_OUTPUT_LIMIT", 4096, create=True):
+                    with self.assertRaisesRegex(self.view.Unviewable, "output"):
+                        self.view._run(["status"], cwd=fx.tree, env={"PATH": str(binary)}, timeout=2, text=text_mode)
+        # Exercise an actual public read and cleanup on refusal.
+        with self.view.opened(fx.tree, git_trees.audit_env(), base=self.base) as v:
+            with patch.object(self.view, "_OUTPUT_LIMIT", 16, create=True):
+                with self.assertRaisesRegex(self.view.Unviewable, "output"):
+                    self.view.in_view(v, ["log", "--format=%H"], timeout=5)
+        self.assertEqual(self.leftovers(), [])
+
+    def test_bounded_capture_drains_both_streams_and_preserves_bytes_and_newlines(self):
+        binary = self.root / "bin"
+        binary.mkdir()
+        git = binary / "git"
+        git.write_text(f"#!{sys.executable}\nimport os\nos.write(1, b'a' * 65536 + b'\\r\\n')\nos.write(2, b'b' * 65536 + b'\\xff')\n")
+        git.chmod(0o755)
+        for text_mode in (False, True):
+            out = self.view._run(["status"], cwd=self.root, env={"PATH": str(binary)}, timeout=2, text=text_mode)
+            self.assertEqual(out.returncode, 0)
+            self.assertEqual(out.stdout, "a" * 65536 + "\n" if text_mode else b"a" * 65536 + b"\r\n")
+            self.assertEqual(out.stderr, "b" * 65536 + "\\xff" if text_mode else b"b" * 65536 + b"\xff")
+
+    def test_expected_common_is_checked_for_every_layout_and_public_entry(self):
+        fx = self.fixture()
+        for path, common in ((fx.tree, fx.common), (fx.clone, fx.common), (fx.common, fx.common)):
+            with self.subTest(path=path):
+                self.assertEqual(self.view.locate(path, expected_common=common).common, common)
+                with self.view.opened(path, git_trees.audit_env(), base=self.base, expected_common=common):
+                    pass
+                self.assertEqual(self.view.run(["rev-parse", "HEAD"], path, env=git_trees.audit_env(),
+                                              base=self.base, expected_common=common).returncode, 0)
+                with patch.object(subprocess, "run") as started:
+                    with self.assertRaises(self.view.Unviewable):
+                        self.view.locate(path, expected_common=self.root / "other")
+                    with self.assertRaises(self.view.Unviewable):
+                        with self.view.opened(path, git_trees.audit_env(), base=self.base, expected_common=self.root / "other"):
+                            pass
+                    with self.assertRaises(self.view.Unviewable):
+                        self.view.run(["status", "--short"], path, env=git_trees.audit_env(), base=self.base,
+                                      expected_common=self.root / "other")
+                    started.assert_not_called()
+        # A self-consistent forgery outside the tree passed the old layout guards.
+        decoy = self.root / "decoy"
+        shutil.copytree(fx.common, decoy)
+        forged = decoy / "worktrees" / fx.gitdir.name
+        (forged / "commondir").write_text("../..\n")
+        (forged / "gitdir").write_text(str(fx.tree / ".git") + "\n")
+        (fx.tree / ".git").write_text(f"gitdir: {forged}\n")
+        self.assertEqual(self.view.locate(fx.tree).common, decoy)
+        with self.assertRaises(self.view.Unviewable):
+            self.run_view(fx, ["merge-base", "--is-ancestor", "HEAD", "main"], expected_common=fx.common)
 
 
 if __name__ == "__main__":
