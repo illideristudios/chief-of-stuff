@@ -27,9 +27,11 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
         if not got.issue.is_open:
             raise ForgeError("the issue is no longer open on the forge")
         board = forge.kanban
+        stage_mark = board.label_for(item.stage) if board and item.stage in board.stage_map else None
         # A shared board mark cannot name a precise stage; only a move off the stored stage's mark replaces it.
-        if board and item.stage in board.stage_map and board.label_for(item.stage) not in got.issue.labels:
+        if stage_mark is not None and stage_mark not in got.issue.labels:
             item.stage = next((s for s in board.stage_map if board.label_for(s) in got.issue.labels), "")
+            stage_mark = board.label_for(item.stage) if item.stage else None
         item.merge_state = request.verdict
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
         state = store.resume(action.issue_key) or {}
@@ -44,7 +46,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
             mark = "#" if forge.github else "!"
             raise ForgeError(f"engine policy: {reason} ({mark}{request.number}: {request.verdict})")
         message = forge.merge(request.number, commit=True, issue_key=action.issue_key, approval=request.approval,
-                              head=request.head)
+                              head=request.head, stage_mark=stage_mark)
     except (ForgeError, PolicyError) as exc:
         store.add_log(action.issue_key, f"merge refused: {exc}", at)
         return False

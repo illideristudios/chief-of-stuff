@@ -109,9 +109,10 @@ class Forge:
 
     # writes: preview unless commit
     def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None,
-              head: str | None = None) -> str:
+              head: str | None = None, stage_mark: str | None = None) -> str:
         """Re-read readiness and the issue's closing request, then preview or report the verified head's merge outcome.
-        `approval` and `head` are what a policy check relied on; the final read must still report them."""
+        `approval`, `head` and the issue's `stage_mark` are what a policy check relied on; the final read must still
+        report them, and the issue must still be open."""
         mark = "#" if self.github else "!"
         found = self.requests()
         one = next((r for r in found if r.number == number), None)
@@ -127,6 +128,14 @@ class Forge:
             raise ForgeError(f"{mark}{number} approval changed since the policy check: {approval} -> {one.approval}")
         if head is not None and one.head != head:  # a push after the check is unreviewed code
             raise ForgeError(f"{mark}{number} head changed since the policy check: {head[:7]} -> {one.head[:7]}")
+        if issue_key is not None:  # a close or stage move during the policy check is a forge-side hold
+            got = self.issue(int(issue_key.rsplit("#", 1)[1]))
+            if not got.ok or got.issue is None:
+                raise ForgeError(f"issue: {got.error or 'not found'}")
+            if not got.issue.is_open:
+                raise ForgeError(f"{issue_key} is no longer open on the forge")
+            if stage_mark is not None and stage_mark not in got.issue.labels:
+                raise ForgeError(f"{issue_key} left its stage since the policy check: {stage_mark} is gone")
         evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
         if not commit:
             return f"would merge {evidence}"

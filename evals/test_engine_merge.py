@@ -147,6 +147,33 @@ class ExecutorTest(unittest.TestCase):
         self.gh.issues[3]["labels"] = [{"name": "stage: doing"}]
         self.refused("dispatch required")
 
+    def during_policy_check(self, change):
+        real = reconcile.plan
+
+        def plan(*args, **kwargs):
+            found = real(*args, **kwargs)
+            change()  # the forge changes after the issue read, before the merge's final read
+            return found
+        return mock.patch.object(reconcile, "plan", plan)
+
+    def test_an_issue_closed_during_the_policy_check_refuses(self):
+        self.planned()
+        with self.during_policy_check(lambda: self.gh.issues[3].update(state="CLOSED")):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("no longer open", self.message())
+
+    def test_an_issue_moved_off_its_stage_during_the_policy_check_refuses(self):
+        board = tf.Kanban(stages=("stage: doing", "stage: merge"), human_review_label="needs human",
+                          stage_map={"implement": 0, "review": 0, "merge": 1})
+        self.forge = forge.Forge(tf.GH, kanban=board, gh=self.gh)
+        self.gh.issues[3]["labels"] = [{"name": "stage: merge"}]
+        self.planned()
+        with self.during_policy_check(lambda: self.gh.issues[3].update(labels=[{"name": "stage: doing"}])):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("left its stage", self.message())
+
     def test_a_stale_cached_approval_is_replaced_by_the_fresh_request(self):
         no_review = policy.parse({"default_workflow": "direct", "personas": {}, "stages": {"merge": {}},
                                   "workflows": {"direct": {"start": "merge", "edges": []}}})
@@ -224,7 +251,8 @@ class ExecutorTest(unittest.TestCase):
     def test_a_refusal_is_logged_once_with_no_retry_or_crash(self):
         with mock.patch.object(forge.Forge, "merge", side_effect=forge.ForgeError("head changed")) as merge:
             self.assertFalse(self.execute())
-        merge.assert_called_once_with(21, commit=True, issue_key=self.key, approval=mock.ANY, head=tma.HEAD)
+        merge.assert_called_once_with(21, commit=True, issue_key=self.key, approval=mock.ANY, head=tma.HEAD,
+                                      stage_mark=None)
         self.assertIn("merge refused", self.message())
         self.assertIn("head changed", self.db.log(self.key)[0].message)
 
