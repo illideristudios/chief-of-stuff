@@ -180,7 +180,12 @@ def stop_pages(work: Path) -> None:
     try:
         server_pid = int(pid.read_text())
         if server_pid > 1 and server_pid != os.getpid():  # an unprepared {{live_pid}} fixture names the harness itself
-            os.kill(server_pid, signal.SIGTERM)
+            scripts = str(PLUGIN_ROOT / "scripts")
+            if scripts not in sys.path:
+                sys.path.insert(0, scripts)
+            import pages as pg  # noqa: E402
+            if pg.is_pages_serve(server_pid):  # same cmdline check as pages._stop (#482)
+                os.kill(server_pid, signal.SIGTERM)
     except (OSError, ValueError, OverflowError):
         pass
 

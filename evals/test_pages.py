@@ -381,6 +381,26 @@ class EnsureTest(unittest.TestCase):
                 pg.ensure(self.dir, self.port, self.log)
         self.assertFalse((self.dir / ".pid").exists())
 
+    def test_a_server_that_never_came_up_is_terminated(self):
+        """#493: ensure must kill the detached child before raising, or nothing can stop it."""
+        started: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def popen(*_a, **_k):
+            proc = real_popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                              start_new_session=True)
+            started.append(proc)
+            return proc
+
+        with mock.patch.object(pg.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(pg, "_who", return_value=None), \
+                mock.patch.object(pg.time, "sleep"):
+            with self.assertRaisesRegex(pg.PagesError, "did not come up"):
+                pg.ensure(self.dir, self.port, self.log)
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll(), "failed ensure left its detached server running")
+        self.assertFalse((self.dir / ".pid").exists())
+
     def test_a_foreign_server_on_the_port_is_an_error(self):
         other = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), http.server.SimpleHTTPRequestHandler)
         threading.Thread(target=other.serve_forever, daemon=True).start()

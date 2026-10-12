@@ -468,6 +468,17 @@ def _who(port: int) -> str | None:
         return None
 
 
+def is_pages_serve(pid: int, port: int | None = None) -> bool:
+    """True when `pid`'s command line is `pages.py serve`, and on `port` when given. A reused pid is someone else's."""
+    try:
+        command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
+    except OSError:
+        return False  # cannot verify identity: do not signal
+    if "pages.py serve" not in command:
+        return False
+    return port is None or bool(re.search(rf"--port {port}(\s|$)", command))
+
+
 def _stop(pages_dir: Path, port: int) -> None:
     """Stop the older pages server on the port. Only the pid file's process, and only when it runs
     `pages.py serve` on this port: a reused pid is someone else's."""
@@ -475,8 +486,7 @@ def _stop(pages_dir: Path, port: int) -> None:
         pid = int((pages_dir / PID).read_text())
     except (OSError, ValueError):
         raise PagesError(f"an older pages server answers on port {port}, and no pid file names it; stop it by hand") from None
-    command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-    if "pages.py serve" not in command or not re.search(rf"--port {port}(\s|$)", command):
+    if not is_pages_serve(pid, port):
         raise PagesError(f"an older pages server answers on port {port}, but pid {pid} is not it; stop it by hand")
     os.kill(pid, signal.SIGTERM)
     for _ in range(30):
@@ -511,6 +521,14 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> s
         if proc.poll() is not None:
             break
         time.sleep(0.1)
+    if proc.poll() is None:  # failed start must not leave a detached server with no pid file (#493)
+        with contextlib.suppress(OSError):
+            proc.terminate()
+        try:
+            proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(OSError):
+                proc.kill()
     raise PagesError(f"the pages server did not come up on port {port}; see {log}")
 
 

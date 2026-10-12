@@ -39,6 +39,22 @@ class SettingsTest(unittest.TestCase):
     def test_a_named_file_that_is_absent_is_off(self):
         self.assertEqual(st.load(self.root, "chief-of-stuff.toml").notify.adapter, "off")
 
+    def test_a_directory_at_the_settings_path_is_refused(self):
+        """#347: a Settings path that is a directory is a refusal, never silent defaults."""
+        (self.root / "chief-of-stuff.toml").mkdir()
+        with self.assertRaises(st.SettingsError) as raised:
+            st.load(self.root, "chief-of-stuff.toml")
+        self.assertIn("not a file", str(raised.exception))
+
+    def test_an_unreadable_settings_file_is_refused(self):
+        """#285: a settings file the loader cannot read is an error, not defaults."""
+        path = self.root / "chief-of-stuff.toml"
+        path.write_text("[notify]\n")
+        path.chmod(0)
+        self.addCleanup(path.chmod, 0o644)
+        with self.assertRaises(st.SettingsError):
+            st.load(self.root, "chief-of-stuff.toml")
+
     def test_no_notify_section_is_off(self):
         self.assertEqual(st.load(self.root, self.write("[other]\nx = 1\n")).notify.adapter, "off")
 
