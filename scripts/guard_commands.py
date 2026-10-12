@@ -303,11 +303,14 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
                 "do", "done", "case", "function", "{"}:
         raise Unparsed()
     # Versioned names too: python3.14, pypy3, perl5.36, nodejs. A program can assemble `gh` at runtime, so no word check.
-    if (re.fullmatch(r"(?:python|pypy|perl|ruby|node(?:js)?)[\d.]*", name)
-            # Attached and bundled forms too: python3 -c'...', perl -ne, node -p.
-            and any(a.split("=", 1)[0] in {"--eval", "--print"}
-                    or a.startswith("-") and not a.startswith("--") and re.search(r"[cep]", a) for a in args)):
-        raise Opaque()
+    # Attached and bundled forms too: python3 -c'...', perl -ne, node -p. Each entry: names, inline-code short flags.
+    for names, letters in ((r"(?:python|pypy|perl|ruby|node(?:js)?)[\d.]*", "cep"), (r"php[\d.]*", "rBRE"),
+                           (r"(?:lua(?:jit)?|julia|swift|Rscript|osascript|deno|bun)[\d.]*", "e"),
+                           (r"pwsh|powershell", "cC")):
+        if re.fullmatch(names, name) and any(
+                a.split("=", 1)[0] in {"--eval", "--print"} or a == "eval"  # deno eval, bun eval
+                or a.startswith("-") and not a.startswith("--") and re.search(f"[{letters}]", a) for a in args):
+            raise Opaque()
     if re.fullmatch(r"[gmn]?awk", name) and not any(a == "-f" or a.startswith(("-f", "--file")) for a in args):
         raise Opaque()  # the first operand is an inline program with system()
     if name in {"gh", "glab"}:
