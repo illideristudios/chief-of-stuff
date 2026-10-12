@@ -130,7 +130,7 @@ def _git(args: list[str], tree: Path) -> tuple[subprocess.CompletedProcess[str] 
     unreadable one is never quietly replaced with another tree's view."""
     try:
         return git_view.run(args, tree, env=git_trees.audit_env(), timeout=15), None
-    except (git_view.Unviewable, OSError, subprocess.TimeoutExpired) as exc:
+    except (git_view.Unviewable, git_view.CacheError, OSError, subprocess.TimeoutExpired) as exc:
         if not isinstance(exc, git_view.NotARepository):
             return None, exc
         root = _enclosing_repository(tree)
@@ -138,7 +138,7 @@ def _git(args: list[str], tree: Path) -> tuple[subprocess.CompletedProcess[str] 
             return None, exc
         try:
             return git_view.run(args, root, env=git_trees.audit_env(), timeout=15), None
-        except (git_view.Unviewable, OSError, subprocess.TimeoutExpired) as enclosed:
+        except (git_view.Unviewable, git_view.CacheError, OSError, subprocess.TimeoutExpired) as enclosed:
             return None, enclosed
 
 
@@ -160,11 +160,13 @@ def git_head(cwd: Path, *, strict: bool = False) -> str | None:
             return None
         # A missing symbolic branch is unborn; other failures cannot authorize a launch.
         if out is not None:
-            ref, _ = _git(["symbolic-ref", "-q", "HEAD"], cwd)
+            ref, error = _git(["symbolic-ref", "-q", "HEAD"], cwd)
             if ref is not None and ref.returncode == 0 and ref.stdout.strip():
-                refs, _ = _git(["for-each-ref", "--format=%(refname)", ref.stdout.strip()], cwd)
+                refs, error = _git(["for-each-ref", "--format=%(refname)", ref.stdout.strip()], cwd)
                 if refs is not None and refs.returncode == 0 and not refs.stdout.strip():
                     return None
+        if isinstance(error, git_view.CacheError):
+            raise ValueError(f"git view cache configuration error: {error}") from None
         raise ValueError("tree is unreadable")
     return None
 
@@ -224,6 +226,8 @@ def _tree_note(root: Path, cwd: Path) -> str:
     except ValueError:
         tree = str(cwd.resolve())
     out, error = _git(["branch", "--show-current"], cwd)
+    if isinstance(error, git_view.CacheError):
+        raise ValueError(f"git view cache configuration error: {error}") from None
     if isinstance(error, git_view.NotARepository):
         branch = ""
     elif out is None or out.returncode:

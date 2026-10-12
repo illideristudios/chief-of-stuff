@@ -236,6 +236,10 @@ class GitHelperErrorPathTest(unittest.TestCase):
         self.assertEqual(self.failing(git_view.Unviewable("metadata is not a bounded regular file")),
                          (1, "Unviewable: metadata is not a bounded regular file"))
 
+    def test_a_cache_error_is_code_1_naming_the_configuration_problem(self):
+        reason = "cannot prepare view cache base '/unusable-cache'"
+        self.assertEqual(self.failing(git_view.CacheError(reason)), (1, f"CacheError: {reason}"))
+
     def test_every_failure_is_code_1_with_class_and_message(self):
         for exc in (OSError("no git"), subprocess.TimeoutExpired("git", 1), git_view.Unviewable("why"),
                     RuntimeError("no home"), ValueError("embedded null"), subprocess.SubprocessError("odd")):
@@ -1020,6 +1024,22 @@ class UnviewableMainTest(CloneCase):
         for from_local in (False, True):
             with self.subTest(from_local=from_local):
                 self.assert_names_clone_and_reason(self.refused(git_view.Unviewable("boom"), from_local=from_local), "Unviewable: boom")
+
+    def test_relative_default_cache_is_reported_without_creating_a_worktree(self):
+        real_base = git_view._base
+        for from_local in (False, True):
+            with self.subTest(from_local=from_local), mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "relative-cache"}), \
+                    mock.patch.object(git_view, "_base", side_effect=lambda layout, base: real_base(layout, None)), \
+                    mock.patch.object(mw.git_trees, "fetch_base") as fetch, mock.patch.object(mw, "git_trusted") as trusted:
+                code, out, err = self.run_main(*(["--from-local"] if from_local else []))
+                self.assertEqual(code, 1)
+                self.assertEqual(out, "")
+                self.assert_names_clone_and_reason(err, "CacheError: view cache base 'relative-cache' is relative")
+                self.assertNotIn("Traceback", err)
+                fetch.assert_not_called()
+                trusted.assert_not_called()
+                self.assertFalse(self.tree.exists())
+                self.assertEqual(self.branches(), "")
 
     def test_an_oserror_from_the_view_refuses_naming_the_clone_and_the_reason(self):
         for from_local in (False, True):

@@ -1886,11 +1886,13 @@ class RunTest(unittest.TestCase):
             "(root / 'worker-result.toon').write_text",
             f"for _ in range(600):\n    if Path({str(release)!r}).exists(): break\n"
             "    __import__('time').sleep(0.05)\n(root / 'worker-result.toon').write_text", 1))
-        driver = ("import sys; from pathlib import Path; sys.path.insert(0, %r); import one_shot; "
+        driver = ("import sys; from functools import partial; from pathlib import Path; sys.path.insert(0, %r); import one_shot; "
+                  "one_shot.git_view.run = partial(one_shot.git_view.run, base=Path(%r)); "
                   "one_shot.resolve = lambda name: %r; one_shot.login_argv = lambda argv: argv; "
                   "one_shot.run(root=Path(%r), day='2026-09-18', task='Security audit', cwd=Path(%r), "
                   "name='worker01', runtime='codex', agent_type=None, model='', effort='', dry_run=False)"
-                  % (str(Path(one_shot.__file__).resolve().parent), str(fake), str(self.root), str(self.tree)))
+                  % (str(Path(one_shot.__file__).resolve().parent), str(self.root / "private-views"),
+                     str(fake), str(self.root), str(self.tree)))
         launcher = subprocess.Popen([sys.executable, "-c", driver], start_new_session=True)
         try:
             deadline = time.monotonic() + 30
@@ -2222,6 +2224,72 @@ class SanitisedTreeReadTest(unittest.TestCase):
 
     def test_git_read_env_is_deleted(self):
         self.assertFalse(hasattr(one_shot, "git_read_env"))
+
+    def test_cache_error_is_returned_separately_from_git_exit_status(self):
+        fx = self.fixture()
+        error = git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+        with mock.patch.object(git_view, "run", side_effect=error), \
+                mock.patch.object(one_shot, "_enclosing_repository") as enclosing:
+            out, failure = one_shot._git(["status", "--short"], fx.tree)
+        self.assertIsNone(out)
+        self.assertIs(failure, error)
+        enclosing.assert_not_called()
+        self.assertNotIsInstance(failure, git_view.Unviewable)
+
+    def test_relative_default_cache_is_reported_for_tree_and_enclosing_repository(self):
+        fx = self.fixture()
+        sub = fx.tree / "subfolder"
+        sub.mkdir()
+        real_base = git_view._base
+        for tree in (fx.tree, sub):
+            with self.subTest(tree=tree), mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "relative-cache"}), \
+                    mock.patch.object(git_view, "_base", side_effect=lambda layout, base: real_base(layout, None)):
+                out, error = one_shot._git(["status", "--short"], tree)
+                self.assertIsNone(out)
+                self.assertIsInstance(error, git_view.CacheError)
+                self.assertEqual(str(error), "view cache base 'relative-cache' is relative")
+                self.assertEqual(one_shot.changed_files(tree), "git status failed: view cache base 'relative-cache' is relative")
+                self.assertIsNone(one_shot.git_head(tree))
+                with self.assertRaisesRegex(ValueError, "view cache base 'relative-cache' is relative"):
+                    one_shot.git_head(tree, strict=True)
+                with self.assertRaisesRegex(ValueError, "view cache base 'relative-cache' is relative"):
+                    one_shot._tree_note(fx.root, tree)
+
+    def test_cache_failure_refuses_launch_before_writing_or_starting_a_worker(self):
+        fx = self.fixture()
+        day, tracker, copy, cfg = self.launch_fixture(fx)
+        before, previous = tracker.read_bytes(), copy.read_bytes()
+        real_view_run = git_view.run
+        for command in ("branch", "rev-parse"):
+            def view_read(args, tree, **kwargs):
+                if args[0] == command:
+                    raise git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+                return real_view_run(args, tree, **kwargs)
+
+            with self.subTest(command=command), \
+                    mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
+                    mock.patch.object(git_view, "run", side_effect=view_read), \
+                    mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as process, \
+                    mock.patch.object(one_shot, "record_launch") as row, \
+                    mock.patch.object(dispatch_prompt, "write_dispatch") as dispatch:
+                with self.assertRaisesRegex(ValueError, "cannot prepare view cache base '/unusable-cache'"):
+                    self.launch(fx, cfg, day)
+                row.assert_not_called()
+                dispatch.assert_not_called()
+                self.assertTrue(all(call.args[0][0] == "git" for call in process.call_args_list))
+                self.assertEqual(tracker.read_bytes(), before)
+                self.assertEqual(copy.read_bytes(), previous)
+                self.assertFalse((fx.tree / dispatch_prompt.DISPATCH_FILE).exists())
+
+    def test_cache_failure_during_unborn_head_checks_names_the_configuration_problem(self):
+        fx = self.fixture()
+        missing = subprocess.CompletedProcess([], 128, "", "HEAD is missing")
+        symbolic = subprocess.CompletedProcess([], 0, "refs/heads/unborn\n", "")
+        error = git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+        for replies in ([missing, error], [missing, symbolic, error]):
+            with self.subTest(reads=len(replies)), mock.patch.object(git_view, "run", side_effect=replies):
+                with self.assertRaisesRegex(ValueError, "cannot prepare view cache base '/unusable-cache'"):
+                    one_shot.git_head(fx.tree, strict=True)
 
     def test_r6_four_public_reads_reach_git_view_only_through_git_helper(self):
         helper = getattr(one_shot, "_git", None)

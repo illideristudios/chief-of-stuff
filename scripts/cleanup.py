@@ -74,6 +74,8 @@ def git_guards(tree: Path) -> list[str]:
             code, status = git(["status", "--porcelain", "--ignored"], tree, view)
             flags_code, _ = git(["ls-files", "-v"], tree, view)
             state = read_state(tree, view)
+    except git_view.CacheError as exc:
+        return [f"git view cache configuration error: {exc}"]
     except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
         return ["git cannot read this tree"]
     if code:

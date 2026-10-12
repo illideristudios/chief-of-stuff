@@ -54,7 +54,7 @@ def git(args: list[str], cwd: Path) -> tuple[int, str]:
     """Run a bounded Git read through the sanitised view (#443), without a shell, on the audit env. Any failure to view or run is (1, reason)."""
     try:
         out = git_view.run(args, cwd, env=git_trees.audit_env(), timeout=GIT_TIMEOUT)
-    except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+    except (git_view.Unviewable, git_view.CacheError, RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
         return 1, f"{type(exc).__name__}: {exc}"
     return out.returncode, (out.stdout or out.stderr).strip()
 
