@@ -23,6 +23,8 @@ class Request:
     # The worker launch profile: plugin dirs (the guard plugin, D9). Empty is a judgement call: no tools, no plugins.
     plugin_dirs: tuple[str, ...] = ()
     timeout_s: float | None = None
+    worker: bool = False  # workers have tools and workspace context even before the guard plugin is installed
+    agent: str = ""
 
 
 @dataclass(frozen=True)

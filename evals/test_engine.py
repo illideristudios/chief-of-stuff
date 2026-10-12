@@ -76,9 +76,20 @@ class EngineTest(unittest.TestCase):
         cleanup = mock.patch.object(engine.cleanup, "execute", return_value=0)
         self.cleanup = cleanup.start()
         self.addCleanup(cleanup.stop)
+        identity = mock.patch.object(engine.worker.process_status, "identity", return_value="fake-start")
+        identity.start()
+        self.addCleanup(identity.stop)
 
     def launch(self, key, stage, attempt, persona):
         self.launched.append((key, stage, attempt, persona))
+        # A live fake worker must supply the run record the production Launch port now promises.
+        data = self.db.resume(key) or {}
+        data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": {
+            "pid": 123, "session_id": "fake-session", "identity": "fake-start",
+            "run_dir": str(supervisor.state_dir(self.root) / "runs" / f"{key.rpartition('#')[2]}-{stage}-{attempt}"),
+            "tree": str(self.trees / "fake"),
+        }}
+        self.db.set_resume(key, data)
         return "used-model", "high"
 
     def run_pass(self, **kwargs):
@@ -501,11 +512,8 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         sleep.assert_called_once_with(60)
 
-    def test_the_supervisor_does_not_start_the_engine_until_worker_launch_is_wired(self):
-        # #631 sets supervisor.ENGINE to the engine driver when engine.launch starts real workers.
-        self.assertEqual(supervisor.ENGINE, ())
-        with self.assertRaises(supervisor.ServiceError):
-            supervisor.install(self.root)
+    def test_the_supervisor_starts_the_engine_driver(self):
+        self.assertEqual(supervisor.ENGINE, (str(Path(engine.__file__).resolve()),))
 
 
 if __name__ == "__main__":

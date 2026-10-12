@@ -166,6 +166,13 @@ class Store:
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
 
+    def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
+        """Complete only an existing open segment, without altering its start or actor."""
+        with self.session() as s:
+            s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                           Segment.attempt == attempt, Segment.ended_at.is_(None))
+                      .values(ended_at=ended_at, outcome=outcome))
+
     def segments(self, issue_key: str | None = None) -> list[Segment]:
         stmt = select(Segment).order_by(Segment.id)
         if issue_key is not None:

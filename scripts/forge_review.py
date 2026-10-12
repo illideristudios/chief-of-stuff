@@ -98,6 +98,7 @@ class Request:
     merge_state: str = ""            # GitHub's mergeStateStatus; "" (GitLab) has none
     closes: tuple[str, ...] = ()     # the issue refs its body closes, e.g. ("#3",)
     pipeline_head: str | None = None  # source head covered by a merged-results pipeline; None compares pipeline_sha
+    branch: str = ""                # the request's source/head branch for review worktrees
 
     @property
     def unverified(self) -> str:
@@ -173,7 +174,7 @@ class Request:
 def github_requests(repo: str, approver: str, gh=backlog.run_gh) -> list[Request]:
     # gh paginates under --limit; refuse a full GH_LIMIT answer as a partial list (#425).
     code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", str(backlog.GH_LIMIT), "--json",
-                         "number,title,url,headRefOid,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus,body"])
+                         "number,title,url,headRefOid,headRefName,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus,body"])
     if code != 0:
         raise RuntimeError(f"gh pr list: {err.strip() or code}")
     rows = json.loads(out)
@@ -184,7 +185,7 @@ def github_requests(repo: str, approver: str, gh=backlog.run_gh) -> list[Request
                     github_pipeline(p.get("statusCheckRollup") or []),
                     {"MERGEABLE": "yes", "CONFLICTING": "conflict"}.get(p.get("mergeable"), "unknown"), approver,
                     draft=bool(p.get("isDraft")), merge_state=p.get("mergeStateStatus") or "UNKNOWN",
-                    closes=closes(p.get("body")))
+                    closes=closes(p.get("body")), branch=p.get("headRefName") or "")
             for p in rows]
 
 
@@ -225,5 +226,6 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
                            gitlab_pipeline_status(None if not head else head.get("status")),
                            "conflict" if mr.get("has_conflicts") else ("yes" if status == "mergeable" else status),
                            approver, str(head.get("id") or ""), pipe_sha,
-                           draft=bool(mr.get("draft")), closes=closes(mr.get("description")), pipeline_head=pipe_head))
+                           draft=bool(mr.get("draft")), closes=closes(mr.get("description")), pipeline_head=pipe_head,
+                           branch=mr.get("source_branch") or ""))
     return out
