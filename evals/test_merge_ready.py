@@ -449,12 +449,15 @@ class GitLabReadyTest(unittest.TestCase):
         self.assertEqual(r.verdict, "blocked")
         self.assertEqual(LINE.match(mr.line(r, "!"))["why"], "discussions_not_resolved")
 
-    def test_a_merged_results_pipeline_sha_is_not_stale(self):
+    def test_a_merged_results_pipeline_reports_its_own_sha_and_is_not_stale(self):
         # An opened MR has no merge_commit_sha; its merged-results pipeline runs on the temporary merge ref.
         (r,) = mr.gitlab_ready(self.HOME, "team/app", "t", gitlab_fake({26: GITLAB[26][0]}))
-        self.assertEqual((r.pipeline, r.pipeline_sha, r.verdict), ("passed", HEAD, "ready"))
+        self.assertEqual((r.pipeline, r.pipeline_sha, r.verdict), ("passed", "c" * 40, "ready"))
+        self.assertEqual(mr.line(r, "!"),
+                         f"!26 ready · head {HEAD[:7]} · pipeline 7026 passed on ccccccc · "
+                         "conflicts no · unresolved threads 0 · https://labs.example.test/team/app/-/merge_requests/26")
 
-    def test_only_this_merge_requests_merge_ref_can_normalize_a_pipeline_sha(self):
+    def test_only_this_merge_requests_merge_ref_can_cover_the_source_head(self):
         for ref in (None, "feature", "refs/merge-requests/26/head", "refs/merge-requests/27/merge"):
             with self.subTest(ref=ref):
                 spec = {"pipeline_sha": OLD, "pipeline_ref": ref, "merge_commit_sha": OLD}

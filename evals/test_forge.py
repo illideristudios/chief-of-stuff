@@ -486,6 +486,19 @@ class GitLabMergeTest(unittest.TestCase):
         self.assertIn(tma.HEAD, got)
         self.assertEqual((writes, landed), ([], []))
 
+    def test_merged_results_evidence_names_the_pipeline_commit_and_merges_the_source_head(self):
+        for commit in (False, True):
+            with self.subTest(commit=commit):
+                call, writes, landed = self.fake({"pipeline_sha": "c" * 40,
+                                                  "pipeline_ref": "refs/merge-requests/5/merge"})
+                with mock.patch.object(backlog, "_call", call):
+                    got = forge.Forge(GL, token="t").merge(5, commit=commit)
+                outcome = "merged" if commit else "would merge"
+                self.assertEqual(got, f"{outcome} !5 at {tma.HEAD} · pipeline 7005 on {'c' * 40} · "
+                                     "https://labs.example.test/team/app/-/merge_requests/5")
+                self.assertEqual(landed, [{"sha": tma.HEAD}] if commit else [])
+                self.assertEqual(len(writes), int(commit))
+
     def test_each_not_ready_gitlab_verdict_refuses_and_writes_nothing(self):
         for options, verdict in tmr.GITLAB.values():
             if verdict == "ready":

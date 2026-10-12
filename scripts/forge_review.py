@@ -97,6 +97,7 @@ class Request:
     draft: bool = False
     merge_state: str = ""            # GitHub's mergeStateStatus; "" (GitLab) has none
     closes: tuple[str, ...] = ()     # the issue refs its body closes, e.g. ("#3",)
+    pipeline_head: str | None = None  # source head covered by a merged-results pipeline; None compares pipeline_sha
 
     @property
     def unverified(self) -> str:
@@ -117,7 +118,8 @@ class Request:
             return "draft"
         if self.pipeline == "failed":
             return "red"
-        if self.pipeline != "none" and self.pipeline_sha is not None and self.pipeline_sha != self.head:
+        pipeline_head = self.pipeline_sha if self.pipeline_head is None else self.pipeline_head
+        if self.pipeline != "none" and self.pipeline_sha is not None and pipeline_head != self.head:
             return "stale pipeline"
         if self.pipeline not in ("passed", "none"):
             return "running"
@@ -214,12 +216,14 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
         head_sha = mr.get("sha", "")
         # Merged-results pipelines run on a temporary merge ref; opened MRs have no merge_commit_sha (#430).
         pipe_sha = (head.get("sha") or None) if head else ""
+        pipe_head = None
         if pipe_sha and head.get("ref") == f"refs/merge-requests/{iid}/merge":
-            pipe_sha = head_sha
+            # The MR's head_pipeline covers this source head, but its SHA names the synthetic commit that ran.
+            pipe_head = head_sha
         out.append(Request(iid, mr.get("title", ""), mr.get("web_url", ""), head_sha,
                            "approved" if approver in names else "none",
                            gitlab_pipeline_status(None if not head else head.get("status")),
                            "conflict" if mr.get("has_conflicts") else ("yes" if status == "mergeable" else status),
                            approver, str(head.get("id") or ""), pipe_sha,
-                           draft=bool(mr.get("draft")), closes=closes(mr.get("description"))))
+                           draft=bool(mr.get("draft")), closes=closes(mr.get("description")), pipeline_head=pipe_head))
     return out
