@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -13,6 +14,28 @@ sys.path.insert(0, str(ROOT / "evals"))
 
 import forge_review as fr  # noqa: E402
 import test_merge_ready as tmr  # noqa: E402
+
+
+def closing_issue(number, repo="example/app"):
+    owner, name = repo.split("/", 1)
+    return {"number": number, "url": f"https://github.com/{repo}/issues/{number}",
+            "repository": {"name": name, "owner": {"login": owner}}}
+
+
+class GitHubClosingTest(unittest.TestCase):
+    def test_open_requests_union_sidebar_links_with_body_and_filter_other_repositories(self):
+        rows = [{**tmr.tma.pr(21, []), "body": "Closes #3; fixes #4",
+                 "closingIssuesReferences": [closing_issue(3), closing_issue(5, "Example/App"),
+                                             closing_issue(6, "other/app"), closing_issue(7, "example/other")]},
+                {**tmr.tma.pr(22, []), "body": "", "closingIssuesReferences": [closing_issue(8)]},
+                {**tmr.tma.pr(23, []), "body": "Closes #9"}]
+
+        def gh(args):
+            fields = args[args.index("--json") + 1].split(",")
+            return 0, json.dumps([{k: v for k, v in row.items() if k in fields} for row in rows]), ""
+
+        got = fr.github_requests("example/app", "", gh)
+        self.assertEqual([r.closes for r in got], [("#3", "#4", "#5"), ("#8",), ("#9",)])
 
 
 class ClosesTest(unittest.TestCase):
@@ -30,6 +53,18 @@ class ClosesTest(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual(fr.closes(body, gitlab=True), want)
         self.assertEqual(fr.closes("Implements #3"), ())  # GitHub does not close on it
+
+    def test_gitlab_scopes_url_and_project_references_to_the_configured_project(self):
+        for ref, want in (("https://gitlab.example.test/Team/App/-/issues/3", ("#3",)),
+                          ("https://gitlab.example.test/team/other/-/issues/3", ()),
+                          ("https://other.example.test/team/app/-/issues/3", ()),
+                          ("Team/App#3", ("#3",)), ("other/app#3", ()), ("team/other#3", ()),
+                          ("#3", ("#3",)),
+                          ("team/other#3, #4 and https://gitlab.example.test/team/app/-/issues/5", ("#4", "#5")),
+                          ("team/app#3, #3 and https://gitlab.example.test/team/app/-/issues/3", ("#3",))):
+            with self.subTest(ref=ref):
+                self.assertEqual(fr.closes(f"Closes {ref}", gitlab=True, project="team/app",
+                                           host="https://gitlab.example.test"), want)
 
 
 class GitLabPipelineEvidenceTest(unittest.TestCase):

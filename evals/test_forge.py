@@ -90,13 +90,16 @@ class FakeGh(tma.FakeGhGraphql):
             return 0, f"https://github.com/{REPO}/issues/101\n", ""
         if args[:2] == ["pr", "list"]:
             state = args[args.index("--state") + 1] if "--state" in args else "open"
+            fields = args[args.index("--json") + 1].split(",")
             if state == "merged":
                 assert "--search" in args, "merged PRs need search ordering by update recency"
                 assert args[args.index("--search") + 1] == "sort:updated-desc"
                 assert args[args.index("--limit") + 1] == str(forge.forge_review.REQUEST_LIMIT)
                 rows = sorted(self.merged, key=lambda p: p.get("updatedAt", ""), reverse=True)
-                return 0, json.dumps(rows[:forge.forge_review.REQUEST_LIMIT]), ""
-            return super().__call__(args, input_text)
+                rows = rows[:forge.forge_review.REQUEST_LIMIT]
+            else:
+                rows = self.prs
+            return 0, json.dumps([{k: v for k, v in row.items() if k in fields} for row in rows]), ""
         if args[:2] == ["project", "field-list"]:
             opts = [*self.project.options, *FLOW.terminal_stages]
             return 0, json.dumps({"fields": [{"id": "PVTSSF_status", "name": self.project.field,
@@ -140,6 +143,16 @@ class KeyTest(unittest.TestCase):
 
 
 class GitHubTest(unittest.TestCase):
+    def test_merged_requests_union_sidebar_links_with_body_and_filter_other_repositories(self):
+        from evals.test_forge_review import closing_issue
+        gh = FakeGh(issues=[gh_issue(n, "Closed", state="CLOSED") for n in range(3, 9)],
+                    merged=[{"number": 21, "body": "Closes #3; fixes #4",
+                             "closingIssuesReferences": [closing_issue(3), closing_issue(5, "Example/App"),
+                                                         closing_issue(6, "other/app"), closing_issue(7, "example/other")]},
+                            {"number": 22, "body": "", "closingIssuesReferences": [closing_issue(8)]}])
+        got = forge.Forge(GH, gh=gh).snapshots()
+        self.assertEqual([s["merge_state"] for s in got], ["merged", "merged", "merged", "", "", "merged"])
+
     def test_snapshots_report_configured_human_review_label(self):
         gh = FakeGh(issues=[gh_issue(1, "held", ["stage: review", "needs human"]),
                             gh_issue(2, "free", ["stage: review", "other hold"])])
@@ -499,6 +512,19 @@ def gl_issue(iid, title, labels=(), description="", state="opened"):
 
 
 class GitLabTest(unittest.TestCase):
+    def test_open_and_merged_requests_scope_url_and_project_closing_references(self):
+        for ref, expected in (("https://gitlab.example.test/Team/App/-/issues/3", True),
+                              ("https://gitlab.example.test/team/other/-/issues/3", False),
+                              ("https://other.example.test/team/app/-/issues/3", False),
+                              ("Team/App#3", True), ("other/app#3", False), ("#3", True)):
+            with self.subTest(ref=ref):
+                call = gitlab_call({3: gl_issue(3, "Closed", state="closed")},
+                                   {5: {"approved_by": [], "description": f"Closes {ref}"}},
+                                   merged={6: {"description": f"Closes {ref}"}})
+                with mock.patch.object(backlog, "_call", call):
+                    self.assertEqual(self.forge.requests()[0].closes, ("#3",) if expected else ())
+                    self.assertEqual(self.forge.snapshots()[0]["merge_state"], "merged" if expected else "")
+
     def test_snapshot_bounds_closed_history_without_following_all_pages(self):
         limit = forge.forge_review.REQUEST_LIMIT
         issues = {n: gl_issue(n, "Old", state="closed") for n in range(1, backlog.GH_LIMIT + 2)}

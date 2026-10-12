@@ -67,7 +67,8 @@ class Forge:
             if self.github:
                 code, out, err = self.gh(
                     ["pr", "list", "-R", self.home.repo, "--state", "merged",
-                     "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json", "number,body"])
+                     "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json",
+                     "number,body,closingIssuesReferences"])
                 if code:
                     raise ForgeError(f"merged requests: {err.strip() or code}")
                 rows = json.loads(out)
@@ -88,8 +89,9 @@ class Forge:
                 raise TypeError(f"expected a list, got {type(rows).__name__}")
             closed: set[int] = set()
             for row in rows:  # inside the guard: a malformed row is a forge read error, not a crash
-                body = row.get("body") if self.github else row.get("description")
-                for ref in forge_review.closes(body, gitlab=not self.github):
+                refs = (forge_review.github_closes(row, self.home.repo) if self.github else
+                        forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
+                for ref in refs:
                     closed.add(int(ref[1:]))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
