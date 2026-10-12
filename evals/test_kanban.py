@@ -481,15 +481,18 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.assertEqual(call, ["project", "item-edit", "--id", "PVTI_issue", "--project-id", "PVT_board",
                                 "--field-id", "PVTSSF_status", "--single-select-option-id", "option_Build"])
 
-    def test_project_item_list_at_limit_is_refused_even_without_total_count(self):
+    def test_project_item_list_at_limit_is_refused_unless_total_count_says_it_is_whole(self):
         for total in (None, 5000, 5001):
             row = {"items": [{"content": {"url": self.ref.url}, "status": "Plan"}] * 5000}
             if total is not None:
                 row["totalCount"] = total
             with self.subTest(total=total):
                 items, error = kanban._project_items(lambda args: (0, json.dumps(row), ""), self.config.github_project)
-                self.assertEqual(items, {})
-                self.assertIn("truncated", error)
+                if total == 5000:
+                    self.assertEqual((error, items), ("", {self.ref.url: "Plan"}))
+                else:
+                    self.assertEqual(items, {})
+                    self.assertIn("truncated", error)
 
     def test_issue_label_mode_uses_add_remove_without_project(self):
         self.config = FLOW

@@ -193,7 +193,10 @@ def _project_rows(gh, project):
         return {}, error
     if not isinstance(row, dict) or not isinstance(row.get("items"), list):
         return {}, "GitHub Project items could not be parsed"
-    if len(row["items"]) >= 5000 or row.get("totalCount", len(row["items"])) > len(row["items"]):
+    # totalCount says whether a full page is the whole Project. shortcut: a Project over 5,000 items is refused, not
+    # paged; query the issue's projectItems instead when one exists (#662).
+    total = row.get("totalCount")
+    if total > len(row["items"]) if isinstance(total, int) else len(row["items"]) >= 5000:
         return {}, "GitHub Project item list was truncated"
     items = {}
     for item in row["items"]:
