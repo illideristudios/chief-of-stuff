@@ -125,7 +125,8 @@ class CommandTest(unittest.TestCase):
                         'pytest -k "a or b" 2>&1 | tail', 'python -c "print(1)"',
                         'sh -c "echo hello"', 'bash -lc "echo $HOME"',
                         'eval "echo hello"', 'find . | xargs wc -l', "ssh host 'ls -la'",
-                        'grep -rn "a b" scripts', 'git commit -m "say gh pr merge is denied"'):
+                        'grep -rn "a b" scripts', 'git commit -m "say gh pr merge is denied"',
+                        'git config --get user.email', 'git config --list'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
@@ -144,7 +145,9 @@ class CommandTest(unittest.TestCase):
                         "python3 -c'import os; os.system(\"gh pr merge 12\")'",
                         "perl -e'system(\"gh pr merge 12\")'", "ruby -we'system(\"gh pr merge 12\")'",
                         "node -p 'require(\"child_process\").execSync(\"gh pr merge 12\")'",
-                        "ssh host 'gh pr merge 12'", "ssh host 'cd repo && git push origin HEAD:main'"):
+                        "ssh host 'gh pr merge 12'", "ssh host 'cd repo && git push origin HEAD:main'",
+                        "git config core.sshCommand \"sh -c 'gh pr merge 12'\" && git fetch ssh://github.com/o/r",
+                        'git config alias.ship "!gh pr merge 12"', 'git config --global credential.helper x'):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 

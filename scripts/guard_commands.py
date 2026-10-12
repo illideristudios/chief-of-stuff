@@ -257,6 +257,9 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
             return True
         if args[0] == "push":
             return _push_denied(args[1:], protected)
+        if args[0] == "config":
+            # Values such as core.sshCommand, alias.* and *.helper run later inside allowed verbs. Reads only.
+            return not any(a in {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"} for a in args[1:])
         # An unknown subcommand can be an alias containing an engine-owned verb.
         if args[0] not in {"status", "diff", "log", "show", "rev-parse", "symbolic-ref", "branch", "checkout", "switch",
                            "add", "commit", "restore", "reset", "fetch", "pull", "rebase", "cherry-pick", "stash", "tag",
