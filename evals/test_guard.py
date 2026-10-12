@@ -157,6 +157,10 @@ class GuardTest(unittest.TestCase):
     def test_plugin_uses_engine_python_and_exposes_launch_contract(self):
         import guard_binding
         self.assertEqual(guard_binding.guard_plugin_dir(), ROOT / "guard")
+        import start_coordinator
+        shipped = start_coordinator.files(ROOT)
+        for name in ("guard/.mcp.json", "guard/hooks/hooks.json", "guard/.claude-plugin/plugin.json"):
+            self.assertIn(ROOT / name, shipped)  # installed releases carry the plugin guard_plugin_dir names
         env = guard_binding.guard_env(KEY, "implement", 2, "session-two", self.root)
         self.assertEqual(env["CHIEF_PYTHON"], sys.executable)
         self.assertEqual(guard_binding.Binding.from_env(env).issue_key, KEY)

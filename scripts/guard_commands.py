@@ -237,7 +237,9 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if name in {"eval", "source", ".", "xargs", "parallel", "if", "then", "else", "fi", "for", "while", "until",
                 "do", "done", "case", "function", "{"}:
         raise Unparsed()
-    if name in {"python", "python3", "perl", "ruby", "node"} and any(a in {"-c", "-e", "--eval"} for a in args):
+    # Versioned names too: python3.14, pypy3, perl5.36, nodejs.
+    if (re.fullmatch(r"(?:python|pypy|perl|ruby|node(?:js)?)[\d.]*", name)
+            and any(a in {"-c", "-e", "--eval"} for a in args)):
         raise Unparsed()
     if name in {"gh", "glab"}:
         return _forge_denied(args, name)

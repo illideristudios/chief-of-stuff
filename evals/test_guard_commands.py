@@ -113,6 +113,8 @@ class CommandTest(unittest.TestCase):
                         "bash -lc 'cd x && git push origin HEAD:main'",
                         '$(printf gh) pr merge 3', '$(printf git) push origin HEAD:main',
                         'python -c "import os; os.system(\'gh pr merge 3\')"',
+                        'python3.14 -c "import os; os.system(\'gh pr merge 3\')"',
+                        '/usr/bin/pypy3 -c "import os; os.system(\'gh pr merge 3\')"',
                         'echo gh | xargs', 'echo glab | xargs', 'eval "hub merge 3"',
                         'sh -c "git status"',
                         'curl -X PATCH https://api.github.com/repos/$REPO/issues/3',
