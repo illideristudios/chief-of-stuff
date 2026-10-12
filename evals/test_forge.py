@@ -383,6 +383,19 @@ class StageWriteBackTest(unittest.TestCase):
                     prs=[tma.pr(22, [])], merged=[tma.pr(21, [])], bodies={21: "Closes #3", 22: "Closes #3"})
         self.assertEqual(forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()[0]["merge_state"], "merged")
 
+    def test_malformed_merged_request_json_is_a_forge_error(self):
+        for out in ('{"number": 1}', '[1, 2]', '[{"number": 1, "body": 5}]'):
+            with self.subTest(out=out):
+                gh = FakeGh(issues=[gh_issue(3, "x", ["stage: doing"])], prs=[])
+
+                def call(args, input_text=None, gh=gh, out=out):
+                    if args[:2] == ["pr", "list"] and "merged" in args:
+                        return 0, out, ""
+                    return gh(args, input_text)
+
+                with self.assertRaisesRegex(forge.ForgeError, "merged requests"):
+                    forge.Forge(GH, kanban=FLOW, gh=call).snapshots()
+
     def test_a_long_merged_history_does_not_refuse_the_snapshot(self):
         # Merged requests only annotate closed issues; a busy repo has far more than one read lists.
         many = [tma.pr(n, []) for n in range(1, forge.forge_review.REQUEST_LIMIT + 1)]

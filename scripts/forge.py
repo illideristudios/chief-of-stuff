@@ -84,13 +84,15 @@ class Forge:
             # shortcut: only the REQUEST_LIMIT most recently updated merged requests annotate closed issues (merging
             # updates a request; later edits can shift the window). Other closed issues keep their terminal stage mark
             # and read merge_state "". Page the list if a rebuild needs every merge.
+            if not isinstance(rows, list):
+                raise TypeError(f"expected a list, got {type(rows).__name__}")
+            closed: set[int] = set()
+            for row in rows:  # inside the guard: a malformed row is a forge read error, not a crash
+                body = row.get("body") if self.github else row.get("description")
+                for ref in forge_review.closes(body):
+                    closed.add(int(ref[1:]))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
-        closed: set[int] = set()
-        for row in rows:
-            body = row.get("body") if self.github else row.get("description")
-            for ref in forge_review.closes(body):
-                closed.add(int(ref[1:]))
         return closed
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
