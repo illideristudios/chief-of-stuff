@@ -219,6 +219,9 @@ def _forge_denied(args: list[str], client: str) -> bool:
     return False
 
 
+NESTED_WORD = re.compile(r"(?<![\w.-])(?:gh|glab|git|hub|sh|bash|zsh|dash|eval)(?![\w.])")
+
+
 def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if depth > 8:
         raise Unparsed()
@@ -240,7 +243,9 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
         raise Unparsed()
     # Versioned names too: python3.14, pypy3, perl5.36, nodejs.
     if (re.fullmatch(r"(?:python|pypy|perl|ruby|node(?:js)?)[\d.]*", name)
-            and any(a in {"-c", "-e", "--eval"} for a in args)):
+            # Attached and bundled forms too: python3 -c'...', perl -ne, node -p.
+            and any(a.split("=", 1)[0] in {"--eval", "--print"}
+                    or a.startswith("-") and not a.startswith("--") and re.search(r"[cep]", a) for a in args)):
         raise Unparsed()
     if name in {"gh", "glab"}:
         return _forge_denied(args, name)
@@ -260,6 +265,11 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
             raise Unparsed()
     # Unrecognised launchers may execute the remainder (e.g. docker exec). Inspect visible nested
     # commands, but never treat an unknown wrapper as proof that a sensitive write is safe.
+    if name not in {"echo", "printf", "git"}:
+        for token in args:
+            # A launcher can take the whole command as one argument: ssh host 'gh pr merge 12'.
+            if re.search(r"\s", token) and NESTED_WORD.search(token) and _denied(token, protected, depth + 1):
+                raise Unparsed()
     if name not in {"echo", "printf"}:
         for i, token in enumerate(args):
             nested_name = PurePosixPath(token).name
