@@ -282,6 +282,17 @@ class ReconcileTest(unittest.TestCase):
                 architect = Segment("architect", started_at=started_at, ended_at=NOW)
                 self.assertEqual(self.plan(item, [implement, review, architect], {}), [reconcile.Merge(KEY)])
 
+    def test_an_architect_workflow_stage_follows_its_edge_after_a_done_segment(self):
+        self.p = policy.parse({
+            "default_workflow": "designed",
+            "personas": {"builder": {"role": "implements", "model": "example"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"architect": {"persona": "critic"}, "implement": {"persona": "builder"}},
+            "workflows": {"designed": {"start": "architect", "edges": [{"from": "architect", "to": "implement"}]}},
+        })
+        item = replace(Item(), stage="architect")
+        self.assertEqual(self.plan(item, [Segment("architect")], {}), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
     def test_architect_requirement_obeys_room_policy(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         self.p.rooms["lab"] = policy.Place("lab", policy={"architect": False})

@@ -184,7 +184,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
         return Wait(key, "stage is outside the workflow")
-    completed = tuple(s for s in history if s.started_at and s.ended_at and s.stage != "architect"
+    # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
+    completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
                       and (stage != "merge" or s.stage != "merge"))
     latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
     if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
