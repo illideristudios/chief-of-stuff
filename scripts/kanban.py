@@ -366,7 +366,8 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         present = item is not None
         item_id = _node_id(item)
         # Forge used stage labels before it honored github_project. Migrate only a single stage mark.
-        legacy = old_status is None and len(current_labels & (set(config.stages) | set(config.terminal_stages))) == 1
+        single_mark = len(current_labels & (set(config.stages) | set(config.terminal_stages))) == 1
+        legacy = old_status is None and single_mark
         wanted = config.status_for(stage)
         if wanted:
             field_id, option_id, error = _project_option_ids(gh, project, wanted)
@@ -385,11 +386,13 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         current_state = (old_status if present else None, frozenset(current_labels))
         desired_state = (wanted, frozenset(desired_labels))
         prior_state = (prior_status, frozenset(prior_labels))
-        priors = (prior_state, (prior_status, prior_labels | hold))
+        # Status is written before labels when leaving a hold or migrating; a retry after a failed label edit
+        # finds that half-written state.
+        priors = (prior_state, (prior_status, prior_labels | hold), (wanted, prior_labels), (wanted, prior_labels | hold))
         blanks = ((None, frozenset()), (None, hold))
-        if legacy:
+        if legacy or (single_mark and present and old_status == wanted):
             legacy_prior = frozenset(label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
-            priors += ((None, legacy_prior), (None, legacy_prior | hold))
+            priors += tuple((status, labels) for status in (None, wanted) for labels in (legacy_prior, legacy_prior | hold))
             if expected_stage is None:
                 blanks += (current_state,)
         error = _guard(current_state, desired_state, priors,

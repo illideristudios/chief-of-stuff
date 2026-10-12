@@ -392,6 +392,28 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.assertIn("00 - PLAN", self.labels)
         self.assertFalse(any(a[:2] == ["issue", "edit"] for a in self.calls))
 
+    def test_a_retry_finishes_labels_after_status_was_written(self):
+        for status, labels, expected in (("Plan Review", [FLOW.human_review_label], "plan review"),
+                                         (None, ["00 - PLAN"], "plan")):
+            with self.subTest(expected=expected):
+                self.status, self.labels, self.calls = status, ["kind::code", *labels], []
+                failed = []
+
+                def gh(args):
+                    if args[:2] == ["issue", "edit"] and not failed:
+                        failed.append(args)
+                        return 1, "", "label edit failed"
+                    return self.gh(args)
+
+                first = kanban.sync_github(self.ref, self.config, "implement", gh=gh, commit=True,
+                                           expected_stage=expected)
+                self.assertEqual(first.error, "label edit failed")
+                self.assertEqual(self.status, "Build")
+                got = kanban.sync_github(self.ref, self.config, "implement", gh=gh, commit=True,
+                                         expected_stage=expected)
+                self.assertTrue(got.done, got.error)
+                self.assertEqual(self.labels, ["kind::code"])
+
     def test_terminal_stage_sets_status_named_like_the_stage(self):
         # Cleared Status before #627; terminal must round-trip through Project Status.
         self.status = "Review"
