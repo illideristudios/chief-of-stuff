@@ -23,6 +23,14 @@ class ClosesTest(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual(fr.closes(body), want)
 
+    def test_gitlab_closing_forms_include_its_ing_and_implement_keywords(self):
+        for body, want in (("Closing #3", ("#3",)), ("Fixing #3", ("#3",)), ("Resolving: #3", ("#3",)),
+                           ("Implements #3 and #4", ("#3", "#4")), ("Implemented issue #5", ("#5",)),
+                           ("Closes #3", ("#3",)), ("See #3", ())):
+            with self.subTest(body=body):
+                self.assertEqual(fr.closes(body, gitlab=True), want)
+        self.assertEqual(fr.closes("Implements #3"), ())  # GitHub does not close on it
+
 
 class GitLabPipelineEvidenceTest(unittest.TestCase):
     def test_merged_results_keeps_the_pipeline_commit_and_records_the_source_head(self):

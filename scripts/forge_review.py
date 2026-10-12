@@ -27,7 +27,10 @@ SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown", "a
 REQUEST_LIMIT = backlog.PER_PAGE  # one page; readers page until short, and refuse a full MAX_PAGES read as whole
 # `Closes: #3` (GitHub) and `Closes #3, #4 and #5` (GitLab). shortcut: GitHub closes only the first of a list, so a
 # listed extra reads as closed there too; query closingIssuesReferences if that matters.
-CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+(#\d+(?:(?:\s*,\s*|\s*,?\s+and\s+)#\d+)*)")
+_REFS = r":?\s+(?:issues?\s+)?(#\d+(?:(?:\s*,\s*|\s*,?\s+and\s+)#\d+)*)"
+CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)" + _REFS)
+# GitLab's default closing pattern adds the -ing forms and implement; GitHub does not close on them.
+GITLAB_CLOSES = re.compile(r"(?i)\b(?:clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing)|implement(?:s|ed|ing)?)" + _REFS)
 
 
 def gitlab_pipeline_status(status: str | None) -> str:
@@ -43,9 +46,10 @@ def scrub(text: str) -> str:
     return "".join(c for c in text if c.isprintable())
 
 
-def closes(body: str | None) -> tuple[str, ...]:
+def closes(body: str | None, gitlab: bool = False) -> tuple[str, ...]:
     """The issue refs a request's body closes (`Closes #3`), in order, once each."""
-    return tuple(dict.fromkeys(ref for refs in CLOSES.findall(body or "") for ref in re.findall(r"#\d+", refs)))
+    pattern = GITLAB_CLOSES if gitlab else CLOSES
+    return tuple(dict.fromkeys(ref for refs in pattern.findall(body or "") for ref in re.findall(r"#\d+", refs)))
 
 
 def github_approval(reviews: list[dict], approver: str, head: str) -> str:
@@ -227,5 +231,5 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
                            gitlab_pipeline_status(None if not head else head.get("status")),
                            "conflict" if mr.get("has_conflicts") else ("yes" if status == "mergeable" else status),
                            approver, str(head.get("id") or ""), pipe_sha,
-                           draft=bool(mr.get("draft")), closes=closes(mr.get("description")), pipeline_head=pipe_head))
+                           draft=bool(mr.get("draft")), closes=closes(mr.get("description"), gitlab=True), pipeline_head=pipe_head))
     return out

@@ -89,7 +89,7 @@ class Forge:
             closed: set[int] = set()
             for row in rows:  # inside the guard: a malformed row is a forge read error, not a crash
                 body = row.get("body") if self.github else row.get("description")
-                for ref in forge_review.closes(body):
+                for ref in forge_review.closes(body, gitlab=not self.github):
                     closed.add(int(ref[1:]))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
