@@ -4,10 +4,100 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from guard_commands import denial_reason
+from guard_commands import OWNED, denial_reason
 
 
 class CommandTest(unittest.TestCase):
+    def test_unlisted_forge_commands_are_denied_as_writes(self):
+        for command in ('gh label delete stage:done --yes', 'gh label edit stage:done --name x',
+                        'gh project item-archive 1 --owner owner --id item',
+                        'gh project item-add 1 --owner owner --url https://github.com/o/r/issues/12',
+                        'gh repo sync owner/repo --branch main --force', 'gh pr frobnicate',
+                        'gh custom-merge-alias 12', 'gh alias set merge "pr merge"',
+                        'gh extension exec custom-write', 'glab mr frobnicate',
+                        'glab label delete stage:done', 'glab repo delete owner/repo',
+                        'gh mr create', 'glab pr create', 'glab project item-add 1'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
+    def test_allowlisted_forge_reads_are_available(self):
+        reads = {
+            'gh': {'pr': ('view', 'list', 'diff', 'checks', 'status'),
+                   'issue': ('view', 'list', 'status'), 'run': ('view', 'list', 'watch'),
+                   'workflow': ('view', 'list'), 'repo': ('view', 'clone'),
+                   'release': ('view', 'list'), 'label': ('list',),
+                   'project': ('view', 'list', 'item-list', 'field-list'), 'auth': ('status',)},
+            'glab': {'mr': ('view', 'list', 'diff'), 'issue': ('view', 'list'),
+                     'ci': ('view', 'list', 'status', 'trace'), 'repo': ('view', 'clone'),
+                     'label': ('list',), 'auth': ('status',)},
+        }
+        for client, groups in reads.items():
+            for group, verbs in groups.items():
+                for verb in verbs:
+                    command = f'{client} {group} {verb}'
+                    with self.subTest(command=command):
+                        self.assertIsNone(denial_reason(command, ("main", "develop")))
+        for command in ('gh search prs widget', 'gh search anything widget', 'gh status',
+                        'gh help', 'gh help pr create', 'gh version',
+                        'gh -R owner/repo pr view 12', 'glab mr --repo owner/repo view 12'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_allowlisted_worker_writes_are_available(self):
+        for command in ('gh pr create --title widget --body details', 'gh pr comment 12 --body feedback',
+                        'gh issue comment 12 --body feedback', 'gh pr review 12 --comment --body feedback',
+                        'gh pr review 12 --request-changes --body feedback', 'gh pr checkout 12',
+                        'glab mr create --title widget --description details', 'glab mr note 12 --message feedback',
+                        'glab issue note 12 --message feedback', 'glab mr checkout 12'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_allowed_issue_and_pr_verbs_still_protect_flags_and_approval(self):
+        for command in ('gh pr create --draft', 'gh pr create --ready', 'gh pr create --label stage:done',
+                        'glab mr create --draft', 'glab mr create --ready', 'glab mr create --wip',
+                        'glab mr create --label stage:done', 'gh pr review 12 --approve', 'gh pr review 12 -a',
+                        'gh pr review 12', 'gh pr review 12 --comment --approve',
+                        'gh pr review 12 --request-changes -a', 'gh issue view 12 --state closed',
+                        'gh pr comment 12 --add-label stage:done', 'glab issue note 12 --close',
+                        'gh pr create -lstage:done', 'glab mr create --labels=stage:done'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
+    def test_forge_api_preserves_read_only_method_rules(self):
+        for client in ('gh', 'glab'):
+            for arguments in ('repos/o/r/issues/12', '-X GET repos/o/r/issues/12',
+                              '--method=GET repos/o/r/issues/12 -f page=1'):
+                command = f'{client} api {arguments}'
+                with self.subTest(command=command):
+                    self.assertIsNone(denial_reason(command, ("main", "develop")))
+            for arguments in ('-X POST repos/o/r/issues/12', '--method=PATCH repos/o/r/issues/12',
+                              'repos/o/r/issues/12 -f state=closed',
+                              "graphql -X GET -f query='mutation { write }'"):
+                command = f'{client} api {arguments}'
+                with self.subTest(command=command):
+                    self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
+    def test_forge_help_remains_available(self):
+        for command in ('gh --help', 'glab --help', 'gh --version', 'glab --version',
+                        'gh pr merge --help', 'glab mr merge --help', 'gh pr frobnicate --help'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_dashed_git_executables_use_git_checks(self):
+        for command in ('/usr/lib/git-core/git-push origin HEAD:main', 'git-merge topic',
+                        'git-push origin HEAD:refs/heads/develop', 'git-push', 'git-push --all',
+                        'git-pull origin main', 'env FLAG=yes /usr/lib/git-core/git-merge topic'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+        for command in ('git-status', '/usr/lib/git-core/git-diff',
+                        'git-push -u origin HEAD:feat/widget', 'git-push origin feat/widget'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+        for command in ('git-custom-merge-alias', 'docker exec container git-merge topic',
+                        'docker exec container /usr/lib/git-core/git-push origin HEAD:main'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(denial_reason(command, ("main", "develop")))
+
     def test_ordinary_worker_shell_commands_are_available(self):
         for command in ('echo $HOME', 'for f in *.py; do wc -l $f; done',
                         'pytest -k "a or b" 2>&1 | tail', 'python -c "print(1)"',

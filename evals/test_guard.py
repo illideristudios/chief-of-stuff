@@ -67,10 +67,31 @@ class GuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.denied(command)
 
+    def test_review_findings_and_unknown_forge_verbs_cannot_pass(self):
+        from guard_commands import OWNED
+        for command in ('gh label delete stage:done --yes', 'gh label edit stage:done --name x',
+                        'gh project item-archive 1 --owner owner --id item',
+                        'gh project item-add 1 --owner owner --url https://github.com/o/r/issues/12',
+                        'gh repo sync owner/repo --branch main --force',
+                        '/usr/lib/git-core/git-push origin HEAD:main', 'git-merge topic',
+                        'gh pr frobnicate', 'gh pr review 12 --approve', 'gh pr review 12 -a'):
+            with self.subTest(command=command):
+                result = self.hook("PreToolUse", tool_name="Bash", tool_input={"command": command})
+                output = result["hookSpecificOutput"]
+                self.assertEqual(output["permissionDecision"], "deny", command)
+                self.assertEqual(output["permissionDecisionReason"], OWNED, command)
+
     def test_read_and_feature_work_remain_available(self):
         for command in ("gh pr view 12", "glab issue view 12", "git status && git diff",
                         "git push -u origin HEAD:feat/widget", "git push origin feat/widget",
-                        "python -m unittest evals.test_store", "gh api repos/example/repo/issues/12"):
+                        "python -m unittest evals.test_store", "gh api repos/example/repo/issues/12",
+                        "gh label list", "gh project item-list 1 --owner owner",
+                        "gh pr create --title widget --body details", "gh pr comment 12 --body feedback",
+                        "gh issue comment 12 --body feedback", "gh pr review 12 --comment --body feedback",
+                        "gh pr review 12 --request-changes --body feedback", "gh pr checkout 12",
+                        "glab mr create --title widget", "glab mr note 12 --message feedback",
+                        "glab issue note 12 --message feedback", "glab mr checkout 12",
+                        "git-push origin HEAD:feat/widget", "gh pr merge --help"):
             with self.subTest(command=command):
                 self.assertEqual(self.hook("PreToolUse", tool_name="Bash", tool_input={"command": command}), {})
 

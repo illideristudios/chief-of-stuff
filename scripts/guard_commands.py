@@ -20,6 +20,28 @@ FORGE_API = re.compile(r"\b(?:api|uploads)\.github\.com\b|/api/(?:graphql|v3|v4)
 GUARDED_TEXT = re.compile(r"\b(?:gh|glab|git|hub)\b|\bgitlab\.com\b|" + FORGE_API.pattern, re.I)
 # Keep operators separate from quoted/escaped words: shlex alone discards that distinction.
 SHELL_TOKEN = re.compile(r'''(?P<operator>[;&|()<>\n]+)|(?P<word>(?:[^\s;&|()<>'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*")+)''')
+# Only known reads and worker writes may reach a forge. New CLI verbs fail closed.
+FORGE_ALLOWED = {
+    "gh": {
+        "pr": {"view", "list", "diff", "checks", "status", "create", "comment", "review", "checkout"},
+        "issue": {"view", "list", "status", "comment"},
+        "run": {"view", "list", "watch"},
+        "workflow": {"view", "list"},
+        "repo": {"view", "clone"},
+        "release": {"view", "list"},
+        "label": {"list"},
+        "project": {"view", "list", "item-list", "field-list"},
+        "auth": {"status"},
+    },
+    "glab": {
+        "mr": {"view", "list", "diff", "create", "note", "checkout"},
+        "issue": {"view", "list", "note"},
+        "ci": {"view", "list", "status", "trace"},
+        "repo": {"view", "clone"},
+        "label": {"list"},
+        "auth": {"status"},
+    },
+}
 
 
 class Unparsed(ValueError):
@@ -146,7 +168,9 @@ def _push_denied(args: list[str], protected: tuple[str, ...]) -> bool:
     return False
 
 
-def _forge_denied(args: list[str]) -> bool:
+def _forge_denied(args: list[str], client: str) -> bool:
+    if "--help" in args:
+        return False
     args = _global_args(args, {"-R", "--repo", "--hostname"}, {"--help", "--version"})
     if not args:
         return False
@@ -168,21 +192,23 @@ def _forge_denied(args: list[str]) -> bool:
                 fields = True
         return (method not in {None, "GET", "HEAD"} or fields and method != "GET"
                 or any(re.search(r"\bmutation\b", arg, re.I) for arg in rest))
-    if group in {"alias", "extension"}:
-        raise Unparsed()
-    if group not in {"pr", "mr", "issue", "issues", "project", "auth", "repo", "search", "status", "run",
-                     "workflow", "release", "label", "help", "version"}:
-        raise Unparsed()
+    if client == "gh" and group in {"search", "status", "help", "version"}:
+        return False
+    allowed = FORGE_ALLOWED[client].get(group, set())
+    if not allowed:
+        return True
     rest = _global_args(rest, {"-R", "--repo"}, set())
     if not rest:
-        return False
+        return True
     verb, flags = rest[0], rest[1:]
-    if group in {"pr", "mr"} and verb in {"merge", "ready"}:
+    if verb not in allowed:
         return True
-    if group in {"issue", "issues"} and verb in {"close", "delete"}:
-        return True
-    if group == "project" and verb in {"item-edit", "item-delete", "field-delete", "delete", "close"}:
-        return True
+    if group == "pr" and verb == "review":
+        # Approval belongs to the user; a review without a mode could prompt for it.
+        if any(flag.split("=", 1)[0] == "--approve" or flag.startswith("-a") for flag in flags):
+            return True
+        if not any(flag in {"--comment", "--request-changes"} for flag in flags):
+            return True
     if group in {"issue", "issues", "pr", "mr"}:
         # Stage label names are configurable. Protect all label writes rather than guessing from a prefix.
         return any(flag.split("=", 1)[0] in {"--add-label", "--remove-label", "--label", "--labels", "--unlabel",
@@ -198,6 +224,8 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if not tokens:
         return False
     name, args = PurePosixPath(tokens[0]).name, tokens[1:]
+    if name.startswith("git-"):
+        name, args = "git", [name[4:], *args]
     # Plain clients bypass the forge CLI gates. Workers must use gh/glab for forge reads too.
     if name not in {"echo", "printf"} and any(FORGE_API.search(arg) for arg in args):
         return True
@@ -209,7 +237,7 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if name in {"python", "python3", "perl", "ruby", "node"} and any(a in {"-c", "-e", "--eval"} for a in args):
         raise Unparsed()
     if name in {"gh", "glab"}:
-        return _forge_denied(args)
+        return _forge_denied(args, name)
     if name == "git":
         args = _global_args(args, {"-C", "--git-dir", "--work-tree"}, {"--no-pager", "--paginate"})
         if not args:
@@ -228,7 +256,9 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     # commands, but never treat an unknown wrapper as proof that a sensitive write is safe.
     if name not in {"echo", "printf"}:
         for i, token in enumerate(args):
-            if PurePosixPath(token).name in {"gh", "glab", "git", "sh", "bash", "zsh", "dash", "eval"}:
+            nested_name = PurePosixPath(token).name
+            if (nested_name in {"gh", "glab", "git", "sh", "bash", "zsh", "dash", "eval"}
+                    or nested_name.startswith("git-")):
                 if _one(args[i:], protected, depth + 1):
                     raise Unparsed()
     return False
