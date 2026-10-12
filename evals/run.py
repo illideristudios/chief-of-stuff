@@ -174,7 +174,7 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-def stop_pages(work: Path) -> None:
+def stop_pages(work: Path, port: int | None = None) -> None:
     """End the pages server a case started with `pages.py --ensure`: it is detached and would outlive the run."""
     pid = work / "pages" / ".pid"
     try:
@@ -184,7 +184,7 @@ def stop_pages(work: Path) -> None:
             if scripts not in sys.path:
                 sys.path.insert(0, scripts)
             import pages as pg  # noqa: E402
-            if pg.is_pages_serve(server_pid):  # same cmdline check as pages._stop (#482)
+            if pg.is_pages_serve(server_pid, port):  # same cmdline and port check as pages._stop (#482)
                 os.kill(server_pid, signal.SIGTERM)
     except (OSError, ValueError, OverflowError):
         pass
@@ -1643,7 +1643,7 @@ def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = Non
         (out / "stderr.txt").write_text(proc.stderr)
         shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
     finally:
-        stop_pages(work)
+        stop_pages(work, int(ctx["pages_port"]))
         shutil.rmtree(work, ignore_errors=True)
         stop_server(health)
         stop_server(taken)  # a daemon thread would otherwise outlive this case and serve the next one

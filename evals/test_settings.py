@@ -7,6 +7,7 @@ guessed at.
 
 import sys
 import tempfile
+import os
 import unittest
 from datetime import timedelta
 from pathlib import Path
@@ -46,6 +47,7 @@ class SettingsTest(unittest.TestCase):
             st.load(self.root, "chief-of-stuff.toml")
         self.assertIn("not a file", str(raised.exception))
 
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root reads a mode-0 file")
     def test_an_unreadable_settings_file_is_refused(self):
         """#285: a settings file the loader cannot read is an error, not defaults."""
         path = self.root / "chief-of-stuff.toml"

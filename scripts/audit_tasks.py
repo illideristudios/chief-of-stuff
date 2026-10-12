@@ -759,7 +759,7 @@ def _pass_push_gap(order: list[Path], view_of, names: dict[Path, str]) -> str:
     """Gap line for the pass: first readable tree's fact, else name the first tree that could not be read (#537)."""
     for path in order:
         line = _push_gap(path, view_of(path))
-        if line != UNREADABLE_GAP:
+        if not line.endswith(UNREADABLE_GAP.removeprefix("main ")):  # `main abc123 vs origin/main unknown` too
             return line
     return f"{names[order[0]]}: {UNREADABLE_GAP}"
 

@@ -578,6 +578,9 @@ class PushGapTest(unittest.TestCase):
             answers[b] = al.UNREADABLE_GAP
             self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
                              "wt-a: main vs origin/main unknown")
+            answers.update({a: "main abc123 vs origin/main unknown", b: "main abc even with origin/main"})
+            self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
+                             "main abc even with origin/main")
 
 
 class ArgvTest(unittest.TestCase):

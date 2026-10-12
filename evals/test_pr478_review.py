@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import ANY, call, patch
 
 import run
 
@@ -69,7 +69,7 @@ class PagesLifecycleTest(unittest.TestCase):
             with patch.object(run.os, "kill") as kill, \
                  patch.object(pg, "is_pages_serve", return_value=True) as identified:
                 run.stop_pages(self.work)
-                identified.assert_called_once_with(child.pid)
+                identified.assert_called_once_with(child.pid, None)
                 kill.assert_called_once_with(child.pid, signal.SIGTERM)
         finally:
             child.terminate()
@@ -88,7 +88,7 @@ class PagesLifecycleTest(unittest.TestCase):
             with patch.object(run.os, "kill") as kill, \
                  patch.object(pg, "is_pages_serve", return_value=False) as identified:
                 run.stop_pages(self.work)
-                identified.assert_called_once_with(child.pid)
+                identified.assert_called_once_with(child.pid, None)
                 kill.assert_not_called()
         finally:
             child.terminate()
@@ -125,9 +125,9 @@ class PagesLifecycleTest(unittest.TestCase):
             events.append("turn")
             raise RuntimeError("first turn failed")
 
-        def stop(work):
+        def stop(work, port=None):
             events.append("stop")
-            real_stop_pages(work)
+            real_stop_pages(work, port)
 
         def kill(pid, sig):
             events.append("kill")
@@ -147,7 +147,7 @@ class PagesLifecycleTest(unittest.TestCase):
             started.assert_called_once()
             self.assertEqual(started.call_args.args[0], self.work)
             turns.assert_called_once()
-            stopped.assert_called_once_with(self.work)
+            stopped.assert_called_once_with(self.work, ANY)  # the case's own Board port
             signalled.assert_called_once_with(server_pid, signal.SIGTERM)
         self.assertFalse(self.work.exists())
 
