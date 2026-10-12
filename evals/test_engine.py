@@ -12,6 +12,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import engine
+import issue_gate
 import policy
 import reconcile
 import store
@@ -454,11 +455,23 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 1)
 
     def test_no_backlog_refuses_without_creating_a_store(self):
+        path = self.root / "CLAUDE.md"
+        path.write_text(path.read_text().replace("- Backlog: https://github.com/example/project/issues", ""))
         errors = io.StringIO()
-        with mock.patch.object(engine.forge, "for_workspace", return_value=None), contextlib.redirect_stderr(errors):
+        with mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
+        passed.assert_not_called()
         self.assertFalse((self.root / "store.db").exists())
         self.assertIn("Backlog:", errors.getvalue())
+        self.assertIn(issue_gate.SETUP, errors.getvalue())
+
+    def test_workspace_without_claude_md_offers_setup(self):
+        (self.root / "CLAUDE.md").unlink()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
+        self.assertIn(issue_gate.SETUP, errors.getvalue())
+        self.assertFalse((self.root / "store.db").exists())
 
     def test_no_kanban_refuses_without_creating_a_store_or_running_a_pass(self):
         (self.root / "settings.toml").write_text("[workers]\nmax_concurrency = 1\n")

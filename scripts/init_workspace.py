@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add a minimal chief-of-stuff Coordinator block to a workspace."""
+"""Configure a workspace's forge, Coordinator block and engine settings."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
+import issue_gate  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
@@ -52,6 +53,8 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
             parse_backlog(backlog)
         except BacklogError as exc:
             raise InitError(str(exc)) from None
+    # Tracker paths and calendars remain inputs to current readers during the engine migration.
+    # Naming a tracker here creates no tracker tables, mailbox or TOON files.
     lines = ["## Coordinator", "", f"- User: {user.strip()}", f"- Daily log dir: `{daily_dir}`",
              f"- Tracker: `{daily_dir}<date>-tracker.md`", f"- Timezone: {timezone}",
              "- Calendars: none", "- Deadlines: none", f"- Worktrees: `{worktrees}`",
@@ -75,6 +78,11 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
 
 def settings_text(launcher: str, mode: str = "interactive") -> str:
     text = f'[notify]\nadapter = "off"\n\n[workers]\nlauncher = "{launcher}"\nmode = "{mode}"\n\n# [repos]\n# alder = "<path>"  # #54: name -> path, relative to the workspace root; `worktree --clone alder`\n'
+    # The engine needs a label for every stage in the shipped workflow before it can start.
+    text += ('\n[kanban]\n'
+             'stages = ["stage: plan", "stage: implement", "stage: review", "stage: fix", "stage: merge"]\n'
+             'human_review_label = "needs human"\n'
+             '\n[kanban.map]\nplan = 0\nimplement = 1\nreview = 2\nfix = 3\nmerge = 4\n')
     # #111: uncomment to pick models from the TOML; without [models], chief-of-stuff-models.md applies.
     text += ('\n# [models.deep]\n# rotation = ["claude:opus@high", "codex:<model-id>@high"]\n'
              '# [models.implement]\n# rotation = ["claude:sonnet@medium", "codex:<model-id>@medium"]\n'
@@ -144,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
             raise InitError("--gitlab-host requires --gitlab-project")
         if args.gitlab_project and not args.gitlab_host:
             raise InitError("--gitlab-project requires --gitlab-host")
+        if not args.github_repo and not args.gitlab_host:
+            raise InitError(f"choose --github-repo or --gitlab-host with --gitlab-project\n{issue_gate.SETUP}")
         if not ENV_NAME.fullmatch(args.gitlab_token_env):
             raise InitError("--gitlab-token-env must be an environment variable name")
         backlog_spec = (f"GitHub issues; repo {args.github_repo}" if args.github_repo else

@@ -15,6 +15,7 @@ import cleanup
 import clock as engine_clock
 import engine_merge
 import forge
+import issue_gate
 import policy
 import reconcile
 import settings
@@ -173,11 +174,13 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     try:
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
-            text = (root / "CLAUDE.md").read_text()
+            claude = root / "CLAUDE.md"
+            text = claude.read_text() if claude.is_file() else ""
             config = settings.load(root, settings_path(text))
             source = forge.for_workspace(root, approver=config.workflow.approver or "", kanban=config.kanban)
             if source is None:
-                raise ValueError("no Backlog: line; configure the workspace backlog before running the engine")
+                refused = issue_gate.start(None, None, "")
+                raise ValueError(f"{refused.refused}\n{refused.setup}")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
             if config.kanban.github_project is not None:

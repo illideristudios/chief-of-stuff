@@ -4,6 +4,9 @@ exactly one store row keyed by it; a workspace with no `Backlog:` line is refuse
 from __future__ import annotations
 
 import sys
+import contextlib
+import importlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -102,6 +105,108 @@ class GateTest(unittest.TestCase):
                 self.assertIn("- Backlog: GitHub issues; repo OWNER/NAME", got.setup)
                 self.assertIn("chief-of-stuff init", got.setup)
                 self.assertEqual(self.store.items(), [])
+
+
+class WorkMainTest(unittest.TestCase):
+    """The registered work driver's real main builds the forge and the engine store."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "CLAUDE.md").write_text(BLOCK.format(backlog="- Backlog: GitHub issues; repo example/app") +
+                                             "\n")
+        self.gh = tf.FakeGh()
+
+    def run_work(self, *args):
+        work = importlib.import_module("work")
+        real_factory = forge.for_workspace
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(forge, "for_workspace", side_effect=lambda root, **opts:
+                               real_factory(root, gh=self.gh, **opts)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = work.main(["--root", str(self.root), "Add a flag", *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def items(self):
+        if not (self.root / "store.db").exists():
+            return []
+        db = store.Store(self.root / "store.db")
+        try:
+            return [(i.issue_key, i.title) for i in db.items()]
+        finally:
+            db.engine.dispose()
+
+    def test_commit_files_before_writing_one_row_and_reuses_the_engine_store(self):
+        create = self.gh
+        def gh(args, input_text=None):
+            if args[:2] == ["issue", "create"]:
+                self.assertEqual(self.items(), [], "the store row must follow issue creation")
+                self.assertEqual(input_text, "why")
+            return create(args, input_text)
+        self.gh = gh
+        code, out, err = self.run_work("--body", "why", "--commit")
+        self.assertEqual(code, 0, err)
+        self.assertIn("github:example/app#101", out)
+        self.assertEqual(self.items(), [("github:example/app#101", "Add a flag")])
+        self.assertIn("--body-file", create.all_calls[0])
+        self.assertEqual(self.run_work("--issue", "101", "--commit")[0], 0)
+        self.assertEqual(len(self.items()), 1)
+        self.assertEqual([c[:2] for c in create.all_calls], [["issue", "create"], ["issue", "view"]])
+
+    def test_default_preview_files_nothing_and_writes_no_row(self):
+        code, out, err = self.run_work("--body", "why")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would create: Add a flag", out)
+        self.assertEqual((self.gh.all_calls, self.items()), ([], []))
+
+    def test_existing_issue_is_confirmed_and_uses_the_forge_title(self):
+        self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])
+        code, out, err = self.run_work("--issue", "3")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would start: github:example/app#3 Fix the parser", out)
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.run_work("--issue", "3", "--commit")[0], 0)
+        self.assertEqual(self.items(), [("github:example/app#3", "Fix the parser")])
+        self.assertEqual([c[:2] for c in self.gh.all_calls], [["issue", "view"], ["issue", "view"]])
+
+    def test_missing_issue_and_failed_create_refuse_without_a_row(self):
+        for args in (("--issue", "999", "--commit"), ("--commit",)):
+            with self.subTest(args=args):
+                self.gh = tf.FakeGh(fail={("issue", "create")})
+                code, _, err = self.run_work(*args)
+                self.assertNotEqual(code, 0)
+                self.assertIn("refused:", err)
+                self.assertEqual(self.items(), [])
+
+    def test_no_backlog_offers_setup_and_creates_no_store(self):
+        (self.root / "CLAUDE.md").write_text(BLOCK.format(backlog=""))
+        for args in ((), ("--commit",)):
+            with self.subTest(args=args):
+                code, _, err = self.run_work(*args)
+                self.assertNotEqual(code, 0)
+                self.assertIn("no `Backlog:` line", err)
+                self.assertIn(issue_gate.SETUP, err)
+                self.assertFalse((self.root / "store.db").exists())
+                self.assertEqual(self.gh.all_calls, [])
+
+    def test_workspace_without_claude_md_offers_setup(self):
+        (self.root / "CLAUDE.md").unlink()
+        code, _, err = self.run_work("--commit")
+        self.assertNotEqual(code, 0)
+        self.assertIn(issue_gate.SETUP, err)
+        self.assertFalse((self.root / "store.db").exists())
+
+    def test_gitlab_main_uses_the_configured_forge(self):
+        (self.root / "CLAUDE.md").write_text(BLOCK.format(backlog=
+            "- Backlog: GitLab; host https://gitlab.example.test; project team/app; token env SOME_TOKEN"))
+        with mock.patch.dict("os.environ", {"SOME_TOKEN": "fixture-token"}), \
+             mock.patch.object(backlog, "_call", return_value=({"iid": 7}, {}, "")) as call:
+            code, out, err = self.run_work("--commit")
+        self.assertEqual(code, 0, err)
+        self.assertIn("gitlab:gitlab.example.test/team/app#7", out)
+        self.assertEqual(self.items(), [("gitlab:gitlab.example.test/team/app#7", "Add a flag")])
+        self.assertEqual(call.call_args.args[0], "POST")
 
 
 if __name__ == "__main__":

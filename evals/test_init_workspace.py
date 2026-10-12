@@ -14,6 +14,8 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import init_workspace as init  # noqa: E402
 import install_model_guidance as guidance  # noqa: E402
+import engine  # noqa: E402
+import issue_gate  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 from settings import _models, load as load_settings  # noqa: E402
 
@@ -24,12 +26,39 @@ class InitWorkspaceTest(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         self.args = ["--root", str(self.root), "--user", "Robin", "--timezone", "America/Chicago"]
+        fake = mock.patch.object(init.backlog, "run_gh", return_value=(0, "[]", ""))
+        fake.start()
+        self.addCleanup(fake.stop)
 
     def run_init(self, *extra):
         out, err = io.StringIO(), io.StringIO()
+        forge_args = [] if "--gitlab-host" in extra or "--github-repo" in extra else ["--github-repo", "owner/repo"]
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = init.main([*self.args, *extra])
+            code = init.main([*self.args, *forge_args, *extra])
         return code, out.getvalue(), err.getvalue()
+
+    def test_no_forge_choice_refuses_with_setup_and_writes_nothing(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            code = init.main(self.args)
+        self.assertNotEqual(code, 0)
+        self.assertIn(issue_gate.SETUP, err.getvalue())
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_generated_settings_let_the_real_engine_start(self):
+        self.assertEqual(self.run_init()[0], 0)
+        err = io.StringIO()
+        with mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(err):
+            code = engine.main(["--root", str(self.root), "--once"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(passed.call_count, 1)
+        self.assertEqual(passed.call_args.kwargs["forge"].home.repo, "owner/repo")
+        self.assertEqual(passed.call_args.kwargs["trees"], self.root.resolve() / "worktrees")
+        self.assertTrue((self.root / "store.db").is_file())
+        self.assertFalse((self.root / "daily").exists(), "init creates no tracker tables")
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        self.assertIsNotNone(settings.kanban)
+        self.assertEqual(set(settings.kanban.stage_map), {"plan", "implement", "review", "fix", "merge"})
 
     def test_fresh_workspace_has_parseable_block_and_explicit_off_settings(self):
         code, _, err = self.run_init("--agent", "implementer:task", "--launcher", "tmux", "--board-port", "8765",

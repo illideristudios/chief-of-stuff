@@ -24,6 +24,7 @@ DEFAULT_BIN_DIR = Path("/usr/local/bin")
 COMMANDS = {
     "start": "start_coordinator.py",
     "init": "scripts/init_workspace.py",
+    "work": "scripts/work.py",
     "models": "scripts/install_model_guidance.py",
     "worktree": "scripts/make_worktree.py",
     "worker": "scripts/spawn_session.py",
@@ -49,7 +50,7 @@ COMMANDS = {
     "tick": "scripts/flow.py",
 }
 # Commands whose scripts import store (SQLAlchemy/Alembic). Add cleanup/engine when they join COMMANDS.
-STORE_BACKED = frozenset({"performance"})
+STORE_BACKED = frozenset({"performance", "work"})
 
 
 def wrapper_text(current: Path) -> str:
