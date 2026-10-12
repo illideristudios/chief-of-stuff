@@ -310,6 +310,30 @@ class ReconcileTest(unittest.TestCase):
                    Segment("architect")]
         self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
 
+    def test_review_architect_merge_reaches_merge_after_the_post_architect_review(self):
+        self.p.stages["architect"] = policy.Place("architect", "builder")
+        self.p.workflows["standard"] = policy.Workflow("standard", "review", (
+            policy.Edge("review", "architect"), policy.Edge("architect", "merge", "merge")))
+        item = replace(Item(), stage="review", review_state="none", merge_state="ready")
+        self.assertEqual(self.plan(item), [reconcile.Review(KEY, 1)])
+        history = [Segment("review", started_at=NOW - timedelta(hours=4),
+                           ended_at=NOW - timedelta(hours=3))]
+        self.assertEqual(self.plan(item, history, {"minor": 1}),
+                         [reconcile.Dispatch(KEY, "architect", "builder", 1)])
+        item = replace(item, stage="architect")
+        history.append(Segment("architect"))
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+        item = replace(item, stage="review")  # The engine records the dispatched review's stage.
+        history.append(Segment("review", 2, started_at=NOW - timedelta(minutes=30), ended_at=NOW))
+        for stage in ("review", "merge"):
+            for order in (history, history[::-1]):
+                with self.subTest(stage=stage, history=order):
+                    self.assertEqual(self.plan(replace(item, stage=stage), order, {}, slots=0),
+                                     [reconcile.Merge(KEY)])
+        self.p.stages["architect"] = policy.Place("architect", "builder", {"zach_gates": ("merge",)})
+        self.assertEqual(self.plan(item, history, {}),
+                         [reconcile.Ask(KEY, "merge", "gate requires Zach's approval")])
+
     def test_architect_requirement_obeys_room_policy(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         self.p.rooms["lab"] = policy.Place("lab", policy={"architect": False})

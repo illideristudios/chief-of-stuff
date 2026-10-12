@@ -192,8 +192,19 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
     if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
         return Wait(key, "segments tie at the latest start")
+    return_edge = None
+    if latest and latest.stage == "review":
+        work = tuple(s for s in completed if s.stage not in ("review", "merge"))
+        prior = max(work, key=lambda s: (_time(s.started_at), s.attempt), default=None)
+        # The review injected before architect -> merge must return to that same gated route.
+        if (prior and prior.stage == "architect" and prior.outcome == "done"
+                and len({s.stage for s in work if _time(s.started_at) == _time(prior.started_at)}) == 1):
+            edge = _next(workflow, prior.stage, False)
+            if edge and edge.target == "merge":
+                return_edge = edge
     if stage == "merge":
-        incoming = tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage)
+        incoming = ((return_edge,) if return_edge else
+                    tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage))
         return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
@@ -205,7 +216,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
         if counts is None:
             return Wait(key, "review findings are unknown")
         blocking = _blocking(counts, _policy(policies, stage, room))
-    edge = _next(workflow, stage, blocking)
+    edge = return_edge if stage == "review" and not blocking and return_edge else _next(workflow, stage, blocking)
     if edge is None:
         return Wait(key, "no unique workflow edge")
     if edge.target == "merge":
