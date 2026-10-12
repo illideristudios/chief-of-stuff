@@ -145,6 +145,7 @@ class GitHubTest(unittest.TestCase):
                             gh_issue(2, "free", ["stage: review", "other hold"])])
         snapshots = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
         self.assertEqual([row.get("human_review") for row in snapshots], [True, False])
+
     def test_snapshot_bounds_closed_history_by_update_recency(self):
         limit = forge.forge_review.REQUEST_LIMIT
         closed = [gh_issue(n, "Old", state="CLOSED") for n in range(1, backlog.GH_LIMIT + 2)]
@@ -315,7 +316,7 @@ class StageWriteBackTest(unittest.TestCase):
         gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={url: "Doing"})
         got = forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
         self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
-                                "stage": "doing", "merge_state": ""}])
+                                "stage": "doing", "human_review": False, "merge_state": ""}])
 
     def test_project_snapshots_match_issue_urls_case_insensitively(self):
         for repo, item_repo in (("Example/App", "example/app"), ("example/app", "Example/App")):
