@@ -178,9 +178,10 @@ class ReloadSnippetTest(unittest.TestCase):
         snip = snippet()
         self.assertTrue(snip.lstrip().startswith("<script") and snip.rstrip().endswith("</script>"))
         for needle in ("HEAD", "no-store", "location.pathname", "visibilitychange",
-                       "document.lastModified", "Last-Modified", "defaultValue", "activeElement", "page-changed", "location.reload"):
+                       "Last-Modified", "defaultValue", "activeElement", "page-changed", "location.reload"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, "".join(snip.replace('"', "'").split()))  # quotes and spacing are the author's
+        self.assertNotIn("document.lastModified", snip)  # #332: compare Last-Modified header to header
         for blocking in ("alert(", "confirm(", "prompt("):
             self.assertNotIn(blocking, snip)
 
@@ -192,22 +193,25 @@ class ReloadSnippetTest(unittest.TestCase):
 
     def test_the_snippet_guards_every_kind_of_user_state_a_reload_would_lose(self):
         # A reload drops a picked radio or checkbox, a chosen option and edited rich text, as it drops typed text.
-        _, flat = self.code()
+        code, flat = self.code()
         self.assertRegex(flat, r"\.checked!==?\w+\.defaultChecked")
-        self.assertRegex(flat, r"\.selected!==?\w+\.defaultSelected")
         for word in ("defaultChecked", "defaultSelected", "defaultValue", "tagName", "INPUT", "TEXTAREA", "SELECT"):
             with self.subTest(word=word):
                 self.assertRegex(flat, rf"\b{word}\b")  # `SELECTX` is not SELECT
+        self.assertIn("selectDirty", code)  # #339: select default is first non-disabled / none if multiple
+        self.assertIn(".elements", flat)  # #388: form.elements includes form-attribute controls
         self.assertIn("isContentEditable", flat)  # in code, not only in a comment
         self.assertNotRegex(flat, r"false&&|&&false|\b0&&|&&0\b")  # a guard that can never be true guards nothing
 
     def test_the_snippet_counts_only_form_controls_as_unsaved_input(self):
         # R13: the source page's Unified/Split radios sit outside any form; picking Split is not input a reload loses.
+        # #388: form.elements (not a descendant query) so a control tied by the form attribute still counts.
         _, flat = self.code()
         selectors = re.findall(r"some\('([^']*)'", flat)
         self.assertTrue(selectors, "found no `some('selector', ...)` dirty check")
         scoped = all("form" in part for sel in selectors for part in sel.split(","))
         self.assertTrue(scoped or "closest('form')" in flat, f"dirty checks reach controls outside a form: {selectors}")
+        self.assertIn(".elements", flat)
 
     def test_the_source_pages_layout_radios_are_outside_any_form(self):
         # The premise of the test above: no form wraps them, so a form-scoped check never counts them.
@@ -216,11 +220,13 @@ class ReloadSnippetTest(unittest.TestCase):
         self.assertNotIn("<form", source_page.LAYOUT)
         self.assertNotIn("<form", Path(source_page.__file__).read_text())
 
-    def test_the_snippet_does_not_take_an_epoch_last_modified_for_an_absent_one(self):
-        # R16: Date.parse of a missing header is NaN; 0 is a real time, and a page stamped 0 must still reload.
-        _, flat = self.code()
-        self.assertIn("isNaN(", flat)
-        self.assertNotRegex(flat, r"\bt&&")
+    def test_the_snippet_compares_last_modified_headers_as_strings(self):
+        # #332: Date.parse(document.lastModified) vs the header disagrees in a DST fall-back's repeated hour.
+        code, flat = self.code()
+        self.assertNotIn("document.lastModified", code)
+        self.assertNotIn("Date.parse", code)
+        self.assertIn("Last-Modified", flat)
+        self.assertIn("t!=null&&t!==seen", flat)
 
     def test_the_snippet_listens_for_visibilitychange_without_replacing_the_pages_own_handler(self):
         flat = "".join(snippet().replace('"', "'").split())

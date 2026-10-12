@@ -10,12 +10,24 @@ RELOAD_COOKIE = "cos-reload=1"
 
 SNIPPET = """<script>
 (function(){
-  var seen=Date.parse(document.lastModified);
+  var seen,ready=false;
   function some(sel,f){return Array.prototype.some.call(document.querySelectorAll(sel),f);}
+  function selectDirty(s){
+    var o=s.options,def=[],cur=[],i;
+    for(i=0;i<o.length;i++) if(o[i].defaultSelected) def.push(o[i]);
+    if(!def.length&&!s.multiple) for(i=0;i<o.length;i++) if(!o[i].disabled){def=[o[i]];break;}
+    for(i=0;i<o.length;i++) if(o[i].selected) cur.push(o[i]);
+    if(cur.length!==def.length) return true;
+    for(i=0;i<cur.length;i++) if(cur[i]!==def[i]) return true;
+    return false;
+  }
   function typing(){var a=document.activeElement;
     return a&&(/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)||a.isContentEditable)||
-      some('form input,form textarea',function(e){return e.value!==e.defaultValue||e.checked!==e.defaultChecked;})||
-      some('form option',function(o){return o.selected!==o.defaultSelected;});}
+      some('form',function(f){return Array.prototype.some.call(f.elements,function(e){
+        if(e.tagName==='SELECT') return selectDirty(e);
+        if(!/^(INPUT|TEXTAREA)$/.test(e.tagName)) return false;  // buttons and fieldsets have no default to differ from
+        return e.value!==e.defaultValue||e.checked!==e.defaultChecked;
+      });});}
   function notice(){
     if(document.getElementById('page-changed'))return;
     var n=document.createElement('div');n.id='page-changed';n.setAttribute('role','status');
@@ -26,11 +38,12 @@ SNIPPET = """<script>
   }
   function poll(){
     fetch(location.pathname,{method:'HEAD',cache:'no-store'}).then(function(r){
-      var t=Date.parse(r.headers.get('Last-Modified'));
-      if(!isNaN(t)&&t!==seen){if(typing())notice();else{document.cookie='%s;max-age=10;path=/';location.reload();}}
+      var t=r.headers.get('Last-Modified');
+      if(!ready){seen=t;ready=true;return;}
+      if(t!=null&&t!==seen){if(typing())notice();else{document.cookie='%s;max-age=10;path=/';location.reload();}}
     }).catch(function(){});
   }
-  setInterval(poll,5000);document.addEventListener('visibilitychange',poll);
+  poll();setInterval(poll,5000);document.addEventListener('visibilitychange',poll);
 })();
 </script>
 """ % RELOAD_COOKIE

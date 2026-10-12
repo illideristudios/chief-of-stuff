@@ -38,42 +38,77 @@ async function run(scenario) {
 let header = scenario.header;
 let controls = (scenario.controls || []).slice();
 let reloads = 0, intervals = [], listeners = {}, notices = [];
-const control = c => Object.assign({value: '', defaultValue: '', checked: false, defaultChecked: false,
-                                    selected: false, defaultSelected: false, inForm: true}, c);
+const control = c => {
+  if ((c.tag || '').toUpperCase() === 'SELECT') {
+    const options = (c.options || []).map(o => Object.assign({selected: false, defaultSelected: false, disabled: false}, o));
+    return {tag: 'SELECT', tagName: 'SELECT', multiple: !!c.multiple, options,
+            value: '', defaultValue: '', checked: false, defaultChecked: false,
+            inForm: c.inForm !== false, formAttr: !!c.formAttr};
+  }
+  return Object.assign({tag: c.tag, tagName: (c.tag || '').toUpperCase(), value: '', defaultValue: '',
+                        checked: false, defaultChecked: false, selected: false, defaultSelected: false,
+                        inForm: true, formAttr: false}, c);
+};
+function el(tag) {
+  const n = {tagName: tag.toUpperCase(), style: {}, children: [], _text: '', setAttribute() {},
+             appendChild(c) { this.children.push(c); }};
+  Object.defineProperty(n, 'textContent', {
+    get() { return this._text; },
+    set(v) { this._text = String(v); this.children = []; },  // #388: a write clears children, as in a browser
+  });
+  return n;
+}
 const document = {
   lastModified: scenario.lastModified,
   activeElement: scenario.active || null,
   body: {appendChild: n => notices.push(n)},
   getElementById: id => notices.find(n => n.id === id) || null,
-  createElement: tag => ({tagName: tag.toUpperCase(), style: {}, children: [], setAttribute() {},
-                          appendChild(c) { this.children.push(c); }}),
+  createElement: el,
   addEventListener: (type, f) => { (listeners[type] = listeners[type] || []).push(f); },
-  // `form input,form textarea` and `form option`: a part is [form] tag, and `form` needs the control inside one
-  querySelectorAll: sel => controls.map(control).filter(c => sel.split(',').some(part => {
-    const words = part.trim().split(/\s+/), tag = words.pop();
-    return c.tag === tag && (words[0] !== 'form' || c.inForm);
-  })),
+  // `form`: one form whose .elements are in-form controls and those tied by the form attribute (#388).
+  // `form input` / `form option` (older snippet): a part is [form] tag; `form` needs the control inside one.
+  querySelectorAll: sel => {
+    if (sel === 'form') {
+      const members = controls.map(control).filter(c => c.inForm || c.formAttr);
+      const nested = controls.map(control).filter(c => c.inForm);  // tree descendants, not form= (#388 mutant)
+      return [{elements: members, querySelectorAll: q => nested.filter(c =>
+        q.split(',').some(t => (c.tag || '').toLowerCase() === t.trim().toLowerCase()))}];
+    }
+    const flat = [];
+    for (const c of controls.map(control)) {
+      if (c.tagName === 'SELECT') {
+        for (const o of c.options) flat.push(Object.assign({tag: 'option', tagName: 'OPTION', inForm: c.inForm}, o));
+      } else flat.push(c);
+    }
+    return flat.filter(c => sel.split(',').some(part => {
+      const words = part.trim().split(/\s+/), tag = words.pop();
+      return (c.tag || '').toLowerCase() === tag.toLowerCase() && (words[0] !== 'form' || c.inForm);
+    }));
+  },
 };
 // The poll must be a HEAD of this page, uncached; any other request is recorded and answered with no header.
+// The header value is captured at request time so a load-time HEAD is not rewritten by a later step (#332).
 const badFetch = [];
 const fetch = (url, opts) => {
   if (url !== location.pathname || !opts || opts.method !== 'HEAD' || opts.cache !== 'no-store') {
     badFetch.push([url, opts]);
     return Promise.resolve({headers: {get: () => null}});
   }
-  return header === 'fail' ? Promise.reject(new Error('offline'))
-    : Promise.resolve({headers: {get: name => name === 'Last-Modified' ? header : null}});
+  const at = header;
+  return at === 'fail' ? Promise.reject(new Error('offline'))
+    : Promise.resolve({headers: {get: name => name === 'Last-Modified' ? at : null}});
 };
 const location = {pathname: '/x.html', reload() { reloads++; }};
 const sandbox = {document, location, fetch, setInterval: f => intervals.push(f), isNaN, Date};
   new vm.Script(snippet.replace(/^\s*<script>|<\/script>\s*$/g, '')).runInNewContext(sandbox, {timeout: 2000});
+  await flush();  // the load-time HEAD sets the baseline before steps run
   for (const step of scenario.steps) {
     if ('header' in step) header = step.header;
     if ('active' in step) document.activeElement = step.active;
     if ('controls' in step) controls = step.controls;
     if (step.tick) for (let i = 0; i < step.tick; i++) { intervals.forEach(f => f()); await flush(); }
     if (step.visible) { (listeners.visibilitychange || []).forEach(f => f()); await flush(); }
-    if (step.click && notices[0]) notices[0].children[0].onclick();
+    if (step.click && notices[0] && notices[0].children[0]) notices[0].children[0].onclick();
   }
   return Object.assign({reloads, notices: notices.length}, badFetch.length ? {badFetch} : {});
 }
@@ -84,13 +119,13 @@ const sandbox = {document, location, fetch, setInterval: f => intervals.push(f),
 })();
 """
 
-SAME = "Tue, 06 Oct 2026 12:00:00 GMT"  # the header that matches document.lastModified below (run with TZ=UTC)
-# ponytail: TZ=UTC and a hand-written DOC_TIME cannot see #332 (document.lastModified is local time with no offset, so a
-# page modified in a DST fall-back's repeated hour parses an hour off its header and reloads on every poll); that is a
-# snippet bug, and these cases would need a TZ with DST and a header in that hour once it is fixed.
+SAME = "Tue, 06 Oct 2026 12:00:00 GMT"
 LATER = "Tue, 06 Oct 2026 12:00:05 GMT"
 EPOCH = "Thu, 01 Jan 1970 00:00:00 GMT"
+# An hour behind SAME when Date.parse'd in TZ=UTC: the DST fall-back case (#332) if the snippet still compared
+# document.lastModified to the header.
 DOC_TIME = "10/06/2026 12:00:00"
+DOC_HOUR_OFF = "10/06/2026 11:00:00"
 
 
 class NodeFailed(Exception):
@@ -100,7 +135,7 @@ class NodeFailed(Exception):
 def run_node(snippet: str, scenarios: list[dict], timeout: float = NODE_TIMEOUT, driver: str = DRIVER) -> list[dict]:
     """One result per scenario, from one node run of `snippet` against a fresh stub page each."""
     scenarios = [{"lastModified": DOC_TIME, "header": SAME, **s} for s in scenarios]
-    try:  # TZ=UTC below: DOC_TIME parses to SAME. It also hides #332 (see SAME).
+    try:
         done = subprocess.run(["node", "-e", driver], input=json.dumps({"snippet": snippet, "scenarios": scenarios}),
                               capture_output=True, text=True, timeout=timeout, env={**os.environ, "TZ": "UTC"})
     except subprocess.TimeoutExpired:
@@ -134,7 +169,24 @@ def grade(snippet: str) -> list[dict]:
 
 def typed(**kw): return {"tag": "input", "value": "x", "defaultValue": "", **kw}
 def picked_radio(**kw): return {"tag": "input", "checked": True, "defaultChecked": False, **kw}
-def picked_option(**kw): return {"tag": "option", "selected": True, "defaultSelected": False, **kw}
+
+
+def select_control(options, multiple=False, **kw):
+    return {"tag": "SELECT", "multiple": multiple, "options": options, **kw}
+
+
+def picked_option(**kw):
+    """A select whose current option is not its default."""
+    return select_control([{"selected": False, "defaultSelected": True},
+                           {"selected": True, "defaultSelected": False}], **kw)
+
+
+def untouched_select(**kw):
+    """A single select with no selected attribute: the browser selects the first option (#339)."""
+    return select_control([{"selected": True, "defaultSelected": False},
+                           {"selected": False, "defaultSelected": False}], **kw)
+
+
 def focused(tag, **kw): return {"tagName": tag, "isContentEditable": False, **kw}
 
 
@@ -150,23 +202,35 @@ SCENARIOS = {
     "changed time reloads once": (changed({"tick": 1}), RELOAD),
     "visibilitychange polls too": (changed({"visible": 1}), RELOAD),
     "no Last-Modified header": ({"header": None, "steps": [{"tick": 1}]}, NOTHING),
+    "a header that disappears is not a change": ({"steps": [{"header": None}, {"tick": 1}]}, NOTHING),
     "an epoch Last-Modified is a time, not an absent one": ({"steps": [{"header": EPOCH}, {"tick": 1}]}, RELOAD),
     "a failed fetch is ignored": ({"steps": [{"header": "fail"}, {"tick": 2}]}, NOTHING),
+    # #332: document.lastModified an hour off the header must not reload while the header is unchanged.
+    "lastModified disagrees with header by an hour, header unchanged": (
+        {"lastModified": DOC_HOUR_OFF, "steps": [{"tick": 3}]}, NOTHING),
+    "lastModified disagrees with header by an hour, header changes": (
+        {"lastModified": DOC_HOUR_OFF, "steps": [{"header": LATER}, {"tick": 1}]}, RELOAD),
     "typing without a change does not notice": ({"controls": [typed()], "steps": [{"tick": 2}]}, NOTHING),
     "typed text": (changed({"tick": 1}, controls=[typed()]), NOTICE),
     "typed text, changed after it is typed": ({"steps": [{"controls": [typed()]}, {"header": LATER}, {"tick": 1}]}, NOTICE),
     "typed textarea": (changed({"tick": 1}, controls=[typed(tag="textarea")]), NOTICE),
     "a picked radio or checkbox in a form": (changed({"tick": 1}, controls=[picked_radio()]), NOTICE),
     "a chosen option in a form": (changed({"tick": 1}, controls=[picked_option()]), NOTICE),
+    # #339: a plain <select> with no selected option is not typed input.
+    "an untouched select is a clean form": (changed({"tick": 1}, controls=[untouched_select()]), RELOAD),
     "focused input": (changed({"tick": 1}, active=focused("INPUT")), NOTICE),
     "focused textarea": (changed({"tick": 1}, active=focused("TEXTAREA")), NOTICE),
     "focused select": (changed({"tick": 1}, active=focused("SELECT")), NOTICE),
     "focused rich text": (changed({"tick": 1}, active=focused("DIV", isContentEditable=True)), NOTICE),
     "focused something else": (changed({"tick": 1}, active=focused("BODY")), RELOAD),
+    # form.elements includes buttons, which have no defaultValue: a form with one is still clean.
+    "a button in a clean form": (changed({"tick": 1}, controls=[{"tag": "button", "value": "go", "defaultValue": None}]), RELOAD),
     "a clean form": (changed({"tick": 1}, controls=[typed(value="", defaultValue=""), picked_radio(checked=False)]), RELOAD),
     "a radio outside any form": (changed({"tick": 1}, controls=[picked_radio(inForm=False), typed(inForm=False),
                                                                  typed(tag="textarea", inForm=False),
                                                                  picked_option(inForm=False)]), RELOAD),
+    # #388: a control tied by the form attribute sits outside the <form> in the tree but is still form state.
+    "typed text tied by the form attribute": (changed({"tick": 1}, controls=[typed(inForm=False, formAttr=True)]), NOTICE),
     "the notice shows once across polls": (changed({"tick": 4}, controls=[typed()]), NOTICE),
     "its button reloads": (changed({"tick": 2}, {"click": 1}, controls=[typed()]), {"reloads": 1, "notices": 1}),
 }
@@ -182,22 +246,26 @@ def failures(snippet: str) -> list[str]:
 MUTANTS = [
     # the four named in #337 and the review of the PR that added the check
     ("reload comparison inverted", "t!==seen", "t===seen"),
-    ("always reload", "!isNaN(t)&&t!==seen", "!isNaN(t)"),
+    ("always reload", "t!=null&&t!==seen", "t!=null"),
     ("typing() always true", "if(typing())notice()", "if(true)notice()"),
     ("notice not once-only", "if(document.getElementById('page-changed'))return;", ""),
     # the rest of the branches its guards pin
     ("typing() never true", "if(typing())notice()", "if(false)notice()"),
-    ("an epoch time is an absent one", "!isNaN(t)&&t!==seen", "t&&t!==seen"),
+    ("a null header is a change", "t!=null&&t!==seen", "t!==seen"),
     ("focus is not typing", "a&&(/^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName)||a.isContentEditable)||", ""),
     ("SELECT is not typing", "INPUT|TEXTAREA|SELECT", "INPUT|TEXTAREA"),
     ("rich text is not typing", "||a.isContentEditable", ""),
     ("edited text is not unsaved", "e.value!==e.defaultValue||", ""),
     ("a picked radio is not unsaved", "e.checked!==e.defaultChecked", "false"),
-    ("a chosen option is not unsaved", "o.selected!==o.defaultSelected", "false"),
-    ("inputs outside a form count", "form input,form textarea", "input,textarea"),
-    ("textareas outside a form count", "form input,form textarea", "form input,textarea"),
-    ("options outside a form count", "form option", "option"),
+    ("a chosen option is not unsaved", "return selectDirty(e);", "return false;"),
+    ("an untouched select counts as typed", "if(!def.length&&!s.multiple)", "if(false)"),
+    ("a button counts as edited text", "if(!/^(INPUT|TEXTAREA)$/.test(e.tagName)) return false;", ""),
+    ("form-attribute controls are missed", "f.elements", "f.querySelectorAll('input,textarea,select')"),
     ("the button does not reload", "b.onclick=function(){location.reload();}", "b.onclick=function(){}"),
+    # #388: append then textContent — in a browser that clears the button; the stub must model that.
+    ("textContent after append clears the button",
+     "n.textContent='This page changed. ';\n    var b=document.createElement('button');b.textContent='Reload';b.onclick=function(){location.reload();};\n    n.appendChild(b);document.body.appendChild(n);",
+     "var b=document.createElement('button');b.textContent='Reload';b.onclick=function(){location.reload();};\n    n.appendChild(b);n.textContent='This page changed. ';document.body.appendChild(n);"),
     # the poll's request, which the stub's fetch checks
     ("the poll is not a HEAD", "method:'HEAD'", "method:'GET'"),
     ("the poll may be cached", ",cache:'no-store'", ""),
