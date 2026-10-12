@@ -32,12 +32,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
 import git_view  # noqa: E402
-from git_trees import audit_env, clean, discover, git, read_state  # noqa: E402
+from git_trees import audit_env, clean, discover, git, read_state, trusted_commons  # noqa: E402
 from one_shot import launcher_copy, trees_lock  # noqa: E402
 from process_status import PIDFILE, check, one_shot_runs, registrations  # noqa: E402
 from store import Store, WorkItem  # noqa: E402
 from tree_state import at_risk, unsaved  # noqa: E402
-from workspace import worktrees_dir  # noqa: E402
+from settings import SettingsError, load as load_settings  # noqa: E402
+from workspace import settings_path, worktrees_dir  # noqa: E402
 
 FINISHED = "closed"  # the forge state of a finished item
 CONTAINER_CLIS = ("docker", "podman")
@@ -67,13 +68,15 @@ def containers() -> list[Path] | None:
     return found
 
 
-def git_guards(tree: Path) -> list[str]:
+def git_guards(tree: Path, expected_common: Path | None = None) -> list[str]:
     """What git status, index flags and the unlanded-work rule say losing this tree loses, read through one view."""
     try:
-        with git_view.opened(tree, audit_env()) as view:
+        with git_view.opened(tree, audit_env(), expected_common=expected_common) as view:
             code, status = git(["status", "--porcelain", "--ignored"], tree, view)
-            flags_code, files = git(["ls-files", "-v"], tree, view)
+            flags_code, _ = git(["ls-files", "-v"], tree, view)
             state = read_state(tree, view)
+    except git_view.CacheError as exc:
+        return [f"git view cache configuration error: {exc}"]
     except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
         return ["git cannot read this tree"]
     if code:
@@ -82,7 +85,7 @@ def git_guards(tree: Path) -> list[str]:
         return ["git ls-files -v is unreadable"]
     lost = unsaved(status)
     out = [f"{len(lost)} unsaved by git status --ignored ({', '.join(lost[:3])})"] if lost else []
-    hidden = sum(line[0].islower() or line[0] == "S" for line in files.splitlines() if line)
+    hidden = view.hidden_index_entries
     if hidden:
         out.append(f"{hidden} files hidden from git status by index flags")
     return out + list(at_risk(state))
@@ -165,10 +168,10 @@ def owner_guards(tree: Path, owned: list[tuple[Path, WorkItem]]) -> tuple[list[W
     return items, kept + [f"{item.issue_key} is not finished" for item in items if item.forge_state != FINISHED]
 
 
-def layout_guards(tree: Path) -> tuple[git_view.Layout | None, list[str]]:
+def layout_guards(tree: Path, expected_common: Path | None = None) -> tuple[git_view.Layout | None, list[str]]:
     """Re-locate the tree and check that its linked-worktree metadata permits removal."""
     try:
-        layout = git_view.locate(tree)
+        layout = git_view.locate(tree, expected_common=expected_common)
     except git_view.Unviewable:
         return None, ["git cannot read this tree"]
     if layout.tree is None or layout.gitdir == layout.common:
@@ -195,11 +198,14 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
     """Clean with the engine's open store, using exactly the CLI's guards and removal. None means no Worktrees dir."""
     trees_dir = str(trees) if trees is not None else ""
     trees = trees if trees is not None else root
+    settings = load_settings(root, settings_path((root / "CLAUDE.md").read_text()))
+    commons = trusted_commons([root / path for path in settings.repos.values()])
     owned = owned_items(root, db)
     mounts = containers()
     failed = False
     for tree in discover(root, trees_dir):
-        layout, kept = layout_guards(tree)
+        common = commons.get(tree)
+        layout, kept = layout_guards(tree, common)
         partial: list[str] = []
         items, owners_kept = owner_guards(tree, owned)
         kept += owners_kept
@@ -209,15 +215,15 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
         elif any(inside(mount.resolve(), tree) for mount in mounts):
             kept.append("a container binds a path in it")
         if layout is not None and layout.tree is not None:
-            kept += git_guards(tree)
+            kept += git_guards(tree, common)
         if not kept and remove:
             removal_started, tree_removed = False, False
             try:
                 with trees_lock(trees):  # workers register under this lock: re-check, then delete, holding it
-                    layout, kept = layout_guards(tree)
+                    layout, kept = layout_guards(tree, common)
                     kept += claims(root, trees, tree)
                     if layout is not None and layout.tree is not None:
-                        kept += git_guards(tree)
+                        kept += git_guards(tree, common)
                     current_mounts = containers()
                     if current_mounts is None:
                         kept.append("containers cannot be checked")
@@ -277,7 +283,7 @@ def main(argv: list[str] | None = None) -> int:
         trees_dir = worktrees_dir((root / "CLAUDE.md").read_text())
         db = Store(args.store)
         return execute(root, root / trees_dir if trees_dir else None, db, remove=args.remove)
-    except (OSError, UnicodeDecodeError, SQLAlchemyError) as exc:
+    except (OSError, UnicodeDecodeError, SQLAlchemyError, SettingsError) as exc:
         print(f"cannot read the workspace or the store ({type(exc).__name__}): nothing removed", file=sys.stderr)
         return 1
     finally:

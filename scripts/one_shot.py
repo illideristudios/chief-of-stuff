@@ -29,7 +29,7 @@ from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
 from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
-from workspace import worktrees_dir
+from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
 
@@ -41,7 +41,7 @@ BOOTSTRAP = ("Read {dispatch} first. It is your entire one-shot assignment. Work
 
 
 def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type: str | None,
-            model: str, effort: str, lead: list[str] = ()) -> list[str]:
+            model: str, effort: str, lead: list[str] = (), expected_common: Path | None = None) -> list[str]:
     """A single foreground CLI invocation, without interactive plan or mailbox modes."""
     prompt = BOOTSTRAP.format(dispatch=dispatch, cwd=cwd)
     tail: list[str] = []
@@ -55,7 +55,7 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
         argv = [binary, "-a", "never", "exec", "-C", str(cwd), "--sandbox", "workspace-write",
                 # Network for fetch, push, and forge APIs; file writes stay confined.
                 "-c", "sandbox_workspace_write.network_access=true", "--ephemeral"]
-        argv += git_trees.codex_add_dir_args(cwd)
+        argv += git_trees.codex_add_dir_args(cwd, expected_common=expected_common)
     elif runtime == "cursor":
         argv = [binary, "--print", "--force", "--trust", "--workspace", str(cwd)]
     elif runtime == "agy":
@@ -124,26 +124,27 @@ def _enclosing_repository(cwd: Path) -> Path | None:
     return next((parent for parent in parents if os.path.lexists(parent / ".git")), None)
 
 
-def _git(args: list[str], tree: Path) -> tuple[subprocess.CompletedProcess[str] | None, Exception | None]:
+def _git(args: list[str], tree: Path, *, expected_common: Path | None = None) -> tuple[subprocess.CompletedProcess[str] | None, Exception | None]:
     """Keep a refused or failed view separate from Git's own exit status. Only an absent
     layout (a plain folder below a repository) resolves to the enclosing repository; an
     unreadable one is never quietly replaced with another tree's view."""
     try:
-        return git_view.run(args, tree, env=git_trees.audit_env(), timeout=15), None
-    except (git_view.Unviewable, OSError, subprocess.TimeoutExpired) as exc:
+        options = {"expected_common": expected_common} if expected_common is not None else {}
+        return git_view.run(args, tree, env=git_trees.audit_env(), timeout=15, **options), None
+    except (git_view.Unviewable, git_view.CacheError, OSError, subprocess.TimeoutExpired) as exc:
         if not isinstance(exc, git_view.NotARepository):
             return None, exc
         root = _enclosing_repository(tree)
         if root is None:
             return None, exc
         try:
-            return git_view.run(args, root, env=git_trees.audit_env(), timeout=15), None
-        except (git_view.Unviewable, OSError, subprocess.TimeoutExpired) as enclosed:
+            return git_view.run(args, root, env=git_trees.audit_env(), timeout=15, **options), None
+        except (git_view.Unviewable, git_view.CacheError, OSError, subprocess.TimeoutExpired) as enclosed:
             return None, enclosed
 
 
-def changed_files(cwd: Path) -> str:
-    out, error = _git(["status", "--short"], cwd)
+def changed_files(cwd: Path, *, expected_common: Path | None = None) -> str:
+    out, error = _git(["status", "--short"], cwd, expected_common=expected_common)
     if out is None:
         if isinstance(error, git_view.NotARepository):  # a plain folder has no change list to report (#559)
             return ""
@@ -151,8 +152,8 @@ def changed_files(cwd: Path) -> str:
     return out.stdout.strip() if out.returncode == 0 else f"git status failed: {out.stderr.strip()}"
 
 
-def git_head(cwd: Path, *, strict: bool = False) -> str | None:
-    out, error = _git(["rev-parse", "HEAD"], cwd)
+def git_head(cwd: Path, *, strict: bool = False, expected_common: Path | None = None) -> str | None:
+    out, error = _git(["rev-parse", "HEAD"], cwd, expected_common=expected_common)
     if out is not None and out.returncode == 0:
         return out.stdout.strip()
     if strict:
@@ -160,22 +161,24 @@ def git_head(cwd: Path, *, strict: bool = False) -> str | None:
             return None
         # A missing symbolic branch is unborn; other failures cannot authorize a launch.
         if out is not None:
-            ref, _ = _git(["symbolic-ref", "-q", "HEAD"], cwd)
+            ref, error = _git(["symbolic-ref", "-q", "HEAD"], cwd, expected_common=expected_common)
             if ref is not None and ref.returncode == 0 and ref.stdout.strip():
-                refs, _ = _git(["for-each-ref", "--format=%(refname)", ref.stdout.strip()], cwd)
+                refs, error = _git(["for-each-ref", "--format=%(refname)", ref.stdout.strip()], cwd, expected_common=expected_common)
                 if refs is not None and refs.returncode == 0 and not refs.stdout.strip():
                     return None
+        if isinstance(error, git_view.CacheError):
+            raise ValueError(f"git view cache configuration error: {error}") from None
         raise ValueError("tree is unreadable")
     return None
 
 
-def committed_changes(cwd: Path, before: str | None) -> str:
-    after = git_head(cwd)
+def committed_changes(cwd: Path, before: str | None, *, expected_common: Path | None = None) -> str:
+    after = git_head(cwd, expected_common=expected_common)
     if not before or before == after:
         return NO_COMMITS
     if after is None:
         return "Could not read commits: tree unreadable"
-    out, error = _git(["log", "--format=%h %s", "--stat", f"{before}..{after}"], cwd)
+    out, error = _git(["log", "--format=%h %s", "--stat", f"{before}..{after}"], cwd, expected_common=expected_common)
     if out is None:
         return "Could not read commits: tree unreadable" if isinstance(error, git_view.Unviewable) else f"Could not read commits: {error}"
     return out.stdout.strip()[:12000] if out.returncode == 0 else f"Could not read commits: {out.stderr.strip()}"
@@ -216,14 +219,21 @@ def _carried(name: str) -> re.Pattern:
     return re.compile(rf"\|\s*{re.escape(name)}\s*\|\s*open\s*\|", re.I)
 
 
-def _tree_note(root: Path, cwd: Path) -> str:
+def _tree_note(root: Path, cwd: Path, expected_common: Path | None = None) -> str:
     """How the File ownership row names the tree: relative to the Worktrees dir, as audit reads it."""
-    base = (root / worktrees_dir((root / "CLAUDE.md").read_text())).resolve()
+    claude_md = (root / "CLAUDE.md").read_text()
+    base = (root / worktrees_dir(claude_md)).resolve()
+    if expected_common is None:
+        settings = load_settings(root, settings_path(claude_md))
+        commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+        expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
     try:
         tree = str(cwd.resolve().relative_to(base))
     except ValueError:
         tree = str(cwd.resolve())
-    out, error = _git(["branch", "--show-current"], cwd)
+    out, error = _git(["branch", "--show-current"], cwd, expected_common=expected_common)
+    if isinstance(error, git_view.CacheError):
+        raise ValueError(f"git view cache configuration error: {error}") from None
     if isinstance(error, git_view.NotARepository):
         branch = ""
     elif out is None or out.returncode:
@@ -336,12 +346,15 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
 
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
               before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
-              *, adopted: bool = False) -> dict:
+              *, adopted: bool = False, expected_common: Path | None = None) -> dict:
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
+    if expected_common is None:
+        commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+        expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
     status, reason, changes = worker_result(cwd / RESULT, exit_code)
-    actual = changed_files(cwd)
-    commits = committed_changes(cwd, before_head)
+    actual = changed_files(cwd, expected_common=expected_common)
+    commits = committed_changes(cwd, before_head, expected_common=expected_common)
     # The result lands on the day the run ends, falling back to the launch day's (#93).
     path = root / cfg.tracker_path(day)
     launch = path
@@ -484,13 +497,17 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
     chosen_day = day or datetime.now(cfg.zone).date().isoformat()
     body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
                                    runtime=runtime, one_shot=True)
-    workers = load_settings(root, cfg.settings_path).workers
+    settings = load_settings(root, cfg.settings_path)
+    workers = settings.workers
+    commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+    common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
     program, lead = runtimes.program(runtime, workers.claude_as_profile)
     binary = resolve(program)
     if not binary:
         raise ValueError(f"{program} is unavailable in the configured interactive login shell")
     dispatch = cwd / dispatch_prompt.DISPATCH_FILE
-    argv = command(runtime, binary, cwd, dispatch, agent_type=agent_type, model=model, effort=effort, lead=lead)
+    argv = command(runtime, binary, cwd, dispatch, agent_type=agent_type, model=model, effort=effort, lead=lead,
+                   expected_common=common)
     if dry_run:
         print("would run one-shot: " + " ".join(shlex.quote(x) for x in argv))
         print(f"would write: {dispatch}")
@@ -500,15 +517,15 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
     trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
     _clear_stale_dispatch(cwd, task)
     with slot(trees, cwd, task, workers.max_concurrency):
-        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv, timeout_minutes)
+        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv, timeout_minutes, common)
 
 
 def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, runtime: str, model: str,
-            effort: str, body: str, argv: list[str], timeout_minutes: int) -> int:
+            effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None) -> int:
     # Same clean login-shell path as interactive sessions; auth and user PATH come from shell setup.
     # Everything that can refuse runs before anything is written; a refused row takes its dispatch back.
-    launch_argv, tree = login_argv(argv), _tree_note(root, cwd)
-    before_head = git_head(cwd, strict=True)
+    launch_argv, tree = login_argv(argv), _tree_note(root, cwd, expected_common)
+    before_head = git_head(cwd, strict=True, expected_common=expected_common)
     written = dispatch_prompt.write_dispatch(cwd, body)
     logs = cwd / dispatch_prompt.PROMPT_DIR
     try:
@@ -545,7 +562,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
                 (cwd / RESULT).unlink(missing_ok=True)
             exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
     report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
-                       read_only=dispatch_prompt.READ_ONLY in body.splitlines())  # held to what it was told
+                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common)  # held to what it was told
     print(toon_encode(report))
     return 0 if report["status"] == "done" and not report["errors"] else 1
 
@@ -618,6 +635,8 @@ def adopt(root: Path, day: str | None = None) -> list[dict]:
     the next sweep adopts it. The day is a tracker day, not the zone's today; with none given,
     adoption looks back through ADOPT_LOOKBACK days."""
     cfg = dispatch_prompt.config(root)
+    settings = load_settings(root, cfg.settings_path)
+    commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
     days = [day] if day else [(datetime.now(cfg.zone).date() - timedelta(days=n)).isoformat()
                               for n in range(ADOPT_LOOKBACK)]
@@ -635,5 +654,6 @@ def adopt(root: Path, day: str | None = None) -> list[dict]:
         body = stale.read_text() if stale.is_file() else ""
         # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
         adopted.append(reconcile(root, row_day, task, name, cwd, 0,
-                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True))
+                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
+                                 expected_common=commons.get(cwd.resolve())))
     return adopted

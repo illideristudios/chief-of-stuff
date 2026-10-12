@@ -21,7 +21,7 @@ from clock import HHMM, RAN, dur as _dur, hhmm as _hhmm  # noqa: E402
 from findings import ISSUE, KANBAN, LANE, MERGED, NEXT, OVER, QUEUE, REOPEN, STOPPED  # noqa: E402
 from md import cells as _cells, is_separator as _is_separator, section as _section, unmark as _unmark  # noqa: E402
 from tracker import Session, clip_name, parse_tracker  # noqa: E402
-from workspace import ConfigError, parse_coordinator, read_config, worktrees_dir  # noqa: E402
+from workspace import ConfigError, parse_coordinator, read_config, settings_path, worktrees_dir  # noqa: E402
 from dispatch_prompt import PROMPT_DIR, STOP_FILE, task_keys  # noqa: E402
 from backlog import CLOSED, GITHUB, Backlog, BacklogError, GitHubBacklog, file_with, home_of, issue_ref, issue_states  # noqa: E402
 import backlog  # noqa: E402
@@ -820,6 +820,8 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
 def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetime | None = None, call=None) -> Report:
     claude_md = (root / "CLAUDE.md").read_text()
     cfg = parse_coordinator(claude_md, today=date.today())
+    settings = load_settings(root, cfg.settings_path)
+    commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     trees = worktrees_dir(claude_md)
     tracker_text = (root / cfg.tracker_path(day)).read_text()
     tracker = parse_tracker(tracker_text)
@@ -846,18 +848,18 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     names: dict[Path, str] = {}
     stopped_at: set[str] = set()
     gone: dict[str, str] = {}
-    views: dict[Path, git_view.View | None] = {}
+    views: dict[Path, git_view.View | git_view.Unviewable] = {}
     with contextlib.ExitStack() as stack:
 
-        def view_of(tree: Path) -> git_view.View | None:
+        def view_of(tree: Path) -> git_view.View | git_view.Unviewable:
             """One opened view per tree for the whole audit (#548): every git read about `tree` runs inside it, and
-            the view is closed when the audit's git reads are done. A tree whose view cannot be built (`None`)
-            keeps the per-call behaviour — each of its reads then answers on its own."""
+            the view is closed when the audit's git reads are done. A refused view keeps every read refused."""
             if tree not in views:
                 try:
-                    views[tree] = stack.enter_context(git_view.opened(tree, git_trees.audit_env()))
+                    options = {"expected_common": commons[tree.resolve()]} if tree.resolve() in commons else {}
+                    views[tree] = stack.enter_context(git_view.opened(tree, git_trees.audit_env(), **options))
                 except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
-                    views[tree] = None
+                    views[tree] = git_view.Unviewable("git cannot read this tree")
             return views[tree]
 
         def visit(row: OwnerRow, name: str, task) -> None:
@@ -947,7 +949,6 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     report.lines.extend(queue_lines)
     report.lines.extend(str(q) for q in report.queue)
     issues = merged = ""
-    settings = load_settings(root, cfg.settings_path)
     if cfg.backlog:
         if check_issues:
             report.issues.extend(issue_faults(tasks, cfg.backlog, gh, settings.lanes,
@@ -1014,14 +1015,25 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         if not SHA.fullmatch(args.sha):
             print("audit_tasks: --sha takes 7-64 lowercase hex digits", file=sys.stderr)
             return 2
-        trees = worktrees_dir((root / "CLAUDE.md").read_text())
-        asked = git_trees.sha_trees(root, trees)
+        claude_md = (root / "CLAUDE.md").read_text()
+        trees = worktrees_dir(claude_md)
+        try:
+            settings = load_settings(root, settings_path(claude_md))
+            commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+        except (SettingsError, ValueError) as e:
+            print(f"audit_tasks: {e}", file=sys.stderr)
+            return 2
+        asked = git_trees.sha_trees(root, trees, commons)
         if not asked:
             print(f"audit_tasks: --sha found no git tree under {trees or 'the workspace root'}, so nothing was checked", file=sys.stderr)
             return 2
         answers = []
         for name, tree in asked:
-            code, line, held = git_trees.check_sha(args.sha, tree)
+            try:
+                code, line, held = git_trees.check_sha(args.sha, tree, expected_common=commons.get(tree))
+            except git_view.CacheError as e:
+                print(f"audit_tasks: {e}", file=sys.stderr)
+                return 2
             print(git_trees.clean(f"{line} [{name}]"))  # escaped: neither a name nor a remote's error can forge or split a line
             answers.append((code, held))
         code = git_trees.sha_exit(answers)
@@ -1035,7 +1047,7 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         return 2
     try:
         report = audit(root, day, gh=gh, check_issues=not args.no_issues)
-    except SettingsError as e:
+    except (SettingsError, git_view.CacheError, ValueError) as e:
         print(f"audit_tasks: {e}", file=sys.stderr)
         return 2
     for line in report.lines:

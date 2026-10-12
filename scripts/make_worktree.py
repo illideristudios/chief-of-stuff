@@ -50,11 +50,12 @@ def _run(args: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
     return out.returncode, (out.stdout or out.stderr).strip()
 
 
-def git(args: list[str], cwd: Path) -> tuple[int, str]:
+def git(args: list[str], cwd: Path, *, expected_common: Path | None = None) -> tuple[int, str]:
     """Run a bounded Git read through the sanitised view (#443), without a shell, on the audit env. Any failure to view or run is (1, reason)."""
     try:
-        out = git_view.run(args, cwd, env=git_trees.audit_env(), timeout=GIT_TIMEOUT)
-    except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+        options = {"expected_common": expected_common} if expected_common is not None else {}
+        out = git_view.run(args, cwd, env=git_trees.audit_env(), timeout=GIT_TIMEOUT, **options)
+    except (git_view.Unviewable, git_view.CacheError, RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
         return 1, f"{type(exc).__name__}: {exc}"
     return out.returncode, (out.stdout or out.stderr).strip()
 
@@ -130,7 +131,7 @@ def clone_lock(clone: Path):
     fd = os.open(common, os.O_RDONLY)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        yield
+        yield common
     finally:
         os.close(fd)
 
@@ -150,8 +151,8 @@ def build(root: Path, clone: Path, trees: str, name: str, branch: str, agent_typ
             raise RefusedError(f"--from-branch checks out {from_branch}; drop --branch or name it {from_branch}")
     check_branch(branch)
     path = resolve(root, trees, name)
-    with clone_lock(clone):
-        no_main, local = git(["log", "-1", "--format=%h %cr", "refs/heads/main"], clone)  # git would quietly fall back to origin/main
+    with clone_lock(clone) as common:
+        no_main, local = git(["log", "-1", "--format=%h %cr", "refs/heads/main"], clone, expected_common=common)  # git would quietly fall back to origin/main
         if no_main == 1:  # 128 is git's "no such ref"; 1 is git() failing to view or run, which is not "no main"
             raise RefusedError(f"cannot read {clone}: {local}")
         if from_local and no_main:
@@ -159,7 +160,7 @@ def build(root: Path, clone: Path, trees: str, name: str, branch: str, agent_typ
         if from_branch:  # fetch, then the remote ref must exist: only the fetch can say the branch is there
             error = git_trees.fetch_branch(clone, branch)
             if not error:
-                code, _ = git(["rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}"], clone)
+                code, _ = git(["rev-parse", "--verify", "-q", f"refs/remotes/origin/{branch}"], clone, expected_common=common)
                 if code != 0:
                     error = f"no branch {branch} on origin"
             if error:
@@ -176,7 +177,7 @@ def build(root: Path, clone: Path, trees: str, name: str, branch: str, agent_typ
         code, detail = git_trusted(add, clone)
         if code != 0:
             raise RefusedError(f"git worktree add failed: {detail}")
-        sha = r[1] if (r := git(["rev-parse", "--short", "HEAD"], path))[0] == 0 else "?"  # not git's error text
+        sha = r[1] if (r := git(["rev-parse", "--short", "HEAD"], path, expected_common=common))[0] == 0 else "?"  # not git's error text
     return Made(path, branch, agent_type, base, sha)
 
 

@@ -114,6 +114,29 @@ class Repo(unittest.TestCase):
 
 
 class ReadStateTest(Repo):
+    def test_a_tree_redirected_to_another_repository_is_unreadable(self) -> None:
+        tree = self.tree("wt-a", "feat/a")
+        common = (self.clone / ".git").resolve()
+        other = self.root / "other"
+        git("clone", str(self.clone), str(other), cwd=self.root)
+        decoy = self.root / "decoy"
+        git("worktree", "add", "-b", "decoy", str(decoy), cwd=other)
+        admin = git_view.locate(decoy).gitdir
+        (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+        (tree / ".git").write_text(f"gitdir: {admin}\n")
+        state = git_trees.read_state(tree, expected_common=common)
+        self.assertEqual((state.branch, state.dirty, state.off_origin, state.unpushed),
+                         (tree_state.UNREADABLE_BRANCH, None, None, None))
+        commons = git_trees.trusted_commons([self.clone])
+        self.assertEqual(commons[tree.resolve()], common)
+        self.assertEqual(git_trees.sha_trees(self.root, "trees", commons), [("wt-a", tree.resolve())])
+        sha = git("rev-parse", "HEAD", cwd=self.clone)
+        with patch.object(git_trees, "fetch_base") as fetch:
+            code, line, held = git_trees.check_sha(sha, tree, expected_common=commons[tree.resolve()])
+        self.assertEqual((code, held), (2, True))
+        self.assertIn("git could not read this repository", line)
+        fetch.assert_not_called()
+
     def test_a_fresh_branch_at_main_holds_nothing(self) -> None:
         s = git_trees.read_state(self.tree("wt-a", "feat/a"))
         self.assertEqual((s.branch, s.dirty, s.off_origin, s.unpushed), ("feat/a", 0, 0, None))
@@ -498,7 +521,7 @@ class CheckShaTest(Repo):
         commits sharing a 7-hex prefix cannot be made cheaply."""
         calls = []
 
-        def fake(args, cwd):
+        def fake(args, cwd, **kw):
             calls.append(args)
             if args[0] == "rev-parse" and args[1].startswith("--disambiguate="):
                 return 0, "9f3c1e7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n9f3c1e7bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -551,7 +574,7 @@ class CheckShaTest(Repo):
         off = git("rev-parse", "HEAD", cwd=tree)
         real = git_trees.git
 
-        def fake(args, cwd):
+        def fake(args, cwd, **kw):
             return (128, "fatal: boom") if args[:2] == ["merge-base", "--is-ancestor"] else real(args, cwd)
 
         for what, sha in (("on origin/main", on), ("not on it", off)):
@@ -580,8 +603,8 @@ class CheckShaTest(Repo):
         real = git_trees.git
         for what, broken in (("disambiguate", lambda a: a[0] == "rev-parse" and a[1].startswith("--disambiguate=")),
                              ("cat-file -t", lambda a: a[:2] == ["cat-file", "-t"])):
-            def fake(args, cwd, broken=broken):
-                return (128, "fatal: boom") if broken(args) else real(args, cwd)
+            def fake(args, cwd, broken=broken, **kw):
+                return (128, "fatal: boom") if broken(args) else real(args, cwd, **kw)
 
             with self.subTest(what), patch.object(git_trees, "git", fake):
                 self.assertEqual(git_trees.check_sha(sha, self.clone),
@@ -1779,9 +1802,8 @@ class GitViewFunnelTest(unittest.TestCase):
         self.assertEqual([c.args[0] for c in viewed.call_args_list], list(argvs))
         self.assertEqual([c for c in calls if unsanitised(c)], [])
 
-    def test_a_home_python_cannot_find_is_an_unreadable_read_not_a_crash(self) -> None:
-        """R6: the view's default base asks for the home directory, and `Path.home()` raises `RuntimeError` when HOME is unset
-        and the uid has no passwd entry (a container run `--user`). That is one more tree git cannot be asked in."""
+    def test_a_home_python_cannot_find_is_a_cache_configuration_error(self) -> None:
+        """An unavailable launcher home must escape the per-tree unreadable handler."""
         fx = self.fixture()
         real = git_view._base
 
@@ -1791,9 +1813,8 @@ class GitViewFunnelTest(unittest.TestCase):
         with patch.dict(os.environ), patch.object(git_view, "_base", homeless), \
                 patch.object(Path, "home", side_effect=RuntimeError("Could not determine home directory.")):
             os.environ.pop("XDG_CACHE_HOME", None)
-            code, text = git_trees.git(["rev-parse", "HEAD"], fx.tree)
-        self.assertEqual(code, 128)
-        self.assertTrue(text.startswith("unreadable:"), text)
+            with self.assertRaisesRegex(git_view.CacheError, "cache"):
+                git_trees.git(["rev-parse", "HEAD"], fx.tree)
 
     def test_a_value_or_runtime_error_out_of_the_view_is_an_unreadable_read(self) -> None:
         """R6, `ValueError` (a non-UTF-8 object path written into the view on Linux; macOS refuses to create one, so this
@@ -1989,7 +2010,7 @@ class ShaViewTest(Repo):
     def test_more_than_one_commit_is_said_before_shallow(self) -> None:
         (self.clone / ".git" / "shallow").write_text(f"{self.head()}\n")
 
-        def fake(args, cwd):
+        def fake(args, cwd, **kw):
             if args[0] == "rev-parse" and args[1].startswith("--disambiguate="):
                 return 0, "9f3c1e7aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n9f3c1e7bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             return (0, "commit") if args[:2] == ["cat-file", "-t"] else (0, "abc1234") if args[:2] == ["rev-parse", "--short"] else (1, "")

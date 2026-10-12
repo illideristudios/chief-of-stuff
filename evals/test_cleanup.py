@@ -27,10 +27,12 @@ sys.path.insert(0, str(ROOT / "evals"))
 
 import cleanup  # noqa: E402
 import dispatch_prompt  # noqa: E402
+import git_trees  # noqa: E402
 import make_repo  # noqa: E402
 import one_shot  # noqa: E402
 import session_exec  # noqa: E402
 import store  # noqa: E402
+from evals import git_taint as taint  # noqa: E402
 from tree_state import unsaved  # noqa: E402
 
 KEY = "github:example/repo#7"
@@ -42,6 +44,8 @@ class CleanupTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
+        self.enterContext(taint.private_git_views(self.root / "private-views"))
+        self.enterContext(mock.patch.object(cleanup, "audit_env", side_effect=git_trees.audit_env))
         (self.root / "CLAUDE.md").write_text(CLAUDE)
         self.clone = make_repo.build(self.root, {"files": {".gitignore": "*.db\nnode_modules/\n"}, "worktrees": [
             {"name": "done", "branch": "done"},
@@ -111,6 +115,40 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(self.store.log(f"{KEY}-done"), [])
 
     # removal
+
+    def test_a_tree_redirected_to_another_repository_is_kept(self) -> None:
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text('[repos]\nproject = "repo"\n')
+        other_root = self.root / "other"
+        other = make_repo.build(other_root, {"files": {".gitignore": "*.db\nnode_modules/\n"},
+                                            "worktrees": [{"name": "decoy", "branch": "decoy"}]})
+        tree = self.trees / "done"
+        original = (tree / ".git").read_text()
+        admin = cleanup.git_view.locate(other_root / "trees" / "decoy").gitdir
+        (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+        (tree / ".git").write_text(f"gitdir: {admin}\n")
+        with mock.patch.object(cleanup.git_view, "_opened", wraps=cleanup.git_view._opened) as opened:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("git cannot read this tree", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir() and admin.is_dir())
+        self.assertFalse(any(call.args[0] == tree for call in opened.call_args_list))
+        self.assertTrue((other / ".git").is_dir())
+        (tree / ".git").write_text(original)
+        lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def redirect(trees):
+            with lock(trees):
+                (tree / ".git").write_text(f"gitdir: {admin}\n")
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", redirect):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("git cannot read this tree", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir() and admin.is_dir())
+
 
     def test_remove_deletes_the_clean_finished_tree_and_its_build_output_and_logs_it(self) -> None:
         admin = cleanup.git_view.locate(self.trees / "done").gitdir
@@ -366,6 +404,25 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn("git ls-files -v is unreadable", self.kept(out).get("done", out))
         self.assertTrue(tree.is_dir())
+
+    def test_cache_error_keeps_the_tree_and_names_the_configuration_problem(self) -> None:
+        reason = "cannot prepare view cache base '/unusable-cache'"
+        with mock.patch.object(cleanup.git_view, "opened", side_effect=cleanup.git_view.CacheError(reason)):
+            self.assertEqual(cleanup.git_guards(self.trees / "done"), [f"git view cache configuration error: {reason}"])
+
+    def test_relative_default_cache_keeps_every_tree_without_a_traceback(self) -> None:
+        real_base = cleanup.git_view._base
+        for flags in ((), ("--remove",)):
+            with self.subTest(flags=flags), mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "relative-cache"}), \
+                    mock.patch.object(cleanup.git_view, "_base", side_effect=lambda layout, base: real_base(layout, None)):
+                code, out = self.run_cleanup(*flags)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(self.removable(out), [])
+                for name in ("done", "unpushed", "dirty"):
+                    self.assertIn("git view cache configuration error: view cache base 'relative-cache' is relative",
+                                  self.kept(out)[name])
+                    self.assertTrue((self.trees / name).is_dir())
+                self.assertNotIn("Traceback", out)
 
     def test_a_git_operation_started_in_the_final_locked_recheck_keeps_the_tree(self) -> None:
         tree = self.trees / "done"
