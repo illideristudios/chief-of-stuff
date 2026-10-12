@@ -35,7 +35,9 @@ QUERY = """query($owner: String!, $name: String!, $cursor: String) { repository(
     nodes { number isDraft
     reviewThreads(first: %d) { pageInfo { hasNextPage } nodes { isResolved } }
     commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes {
-      __typename ... on CheckRun { checkSuite { workflowRun { databaseId } } } } } } } } } } } } } }""" % THREAD_LIMIT
+      __typename ... on CheckRun { checkSuite { workflowRun { databaseId } } }
+    } } } } } } }
+  } } }""" % THREAD_LIMIT
 
 
 def github_ready(repo: str, gh=backlog.run_gh, approver: str = "") -> list[Request]:

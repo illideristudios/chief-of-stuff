@@ -20,9 +20,10 @@ PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}  # a completed check that concluded a
 GITLAB_PIPELINE = {"success": "passed", "failed": "failed", "canceled": "failed"}
 # Not-ready forge statuses keep their own word so the line can name them (#425); anything else unknown is running.
 # skipped ran no jobs: nothing passed, nothing failed.
-GITLAB_WAITING = frozenset({"skipped", "pending", "created", "waiting_for_resource", "preparing", "scheduled", "manual", "draft"})
+GITLAB_WAITING = frozenset({"skipped", "pending", "created", "waiting_for_resource", "waiting_for_callback", "preparing",
+                            "scheduled", "manual", "draft", "canceling"})
 # Forge mergeability still being computed — not a settled blocker (#430).
-SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown"})
+SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown", "approvals_syncing", "preparing"})
 REQUEST_LIMIT = backlog.PER_PAGE  # one page; readers page until short, and refuse a full MAX_PAGES read as whole
 CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(#\d+)")
 
@@ -211,9 +212,9 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
         head = mr.get("head_pipeline") or {}
         status = mr.get("detailed_merge_status") or ""
         head_sha = mr.get("sha", "")
-        # Merged-results pipelines run on the merge commit; that sha is not an older source tip (#430).
+        # Merged-results pipelines run on a temporary merge ref; opened MRs have no merge_commit_sha (#430).
         pipe_sha = (head.get("sha") or None) if head else ""
-        if pipe_sha and pipe_sha == mr.get("merge_commit_sha"):
+        if pipe_sha and head.get("ref") == f"refs/merge-requests/{iid}/merge":
             pipe_sha = head_sha
         out.append(Request(iid, mr.get("title", ""), mr.get("web_url", ""), head_sha,
                            "approved" if approver in names else "none",

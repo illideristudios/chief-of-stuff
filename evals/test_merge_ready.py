@@ -110,6 +110,17 @@ def github_gh(numbers=None):
 
 
 class GitHubReadyTest(unittest.TestCase):
+    def test_graphql_query_has_balanced_braces(self):
+        # The response fakes never parse QUERY; catch unmatched braces before calling GitHub.
+        depth = 0
+        for offset, char in enumerate(mr.QUERY):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                self.assertGreaterEqual(depth, 0, f"unmatched closing brace at offset {offset}")
+        self.assertEqual(depth, 0, "unclosed GraphQL selection set")
+
     def test_every_verdict_in_the_precedence_list(self):
         got = {r.number: r.verdict for r in mr.github_ready("o/app", github_gh())}
         self.assertEqual(got, {n: v for n, (_, _, v) in GITHUB.items()})
@@ -308,6 +319,8 @@ def gitlab_fake(mrs, discussions_error=""):
         head = None if pipeline is None else {"id": 7000 + iid, "status": pipeline}
         if head is not None and m.get("pipeline_sha", HEAD) is not ABSENT:
             head["sha"] = m.get("pipeline_sha", HEAD)
+        if head is not None:
+            head["ref"] = m.get("pipeline_ref", "feature")
         return ({"iid": iid, "title": "MR", "web_url": f"https://labs.example.test/team/app/-/merge_requests/{iid}", "sha": HEAD,
                  "has_conflicts": m.get("conflict", False), "detailed_merge_status": m.get("status", "mergeable"),
                  "draft": m.get("draft", False), "merge_commit_sha": m.get("merge_commit_sha"),
@@ -353,7 +366,7 @@ GITLAB = {
     24: ({"discussions": [discussion(UNRESOLVED, SYSTEM)]}, "findings open"),
     # #430: settled non-mergeable statuses name themselves; merged-results pipeline sha is not stale
     25: ({"status": "discussions_not_resolved"}, "blocked"),
-    26: ({"pipeline_sha": "c" * 40, "merge_commit_sha": "c" * 40}, "ready"),
+    26: ({"pipeline_sha": "c" * 40, "pipeline_ref": "refs/merge-requests/26/merge", "merge_commit_sha": None}, "ready"),
     # #425: waiting / skipped pipelines name their real state (not a coarse "running" with no why)
     27: ({"pipeline": "skipped"}, "running"),
     28: ({"pipeline": "manual"}, "running"),
@@ -437,10 +450,40 @@ class GitLabReadyTest(unittest.TestCase):
         self.assertEqual(LINE.match(mr.line(r, "!"))["why"], "discussions_not_resolved")
 
     def test_a_merged_results_pipeline_sha_is_not_stale(self):
-        # #430: head_pipeline.sha is the merge commit; comparing it to the source sha falsely said stale.
+        # An opened MR has no merge_commit_sha; its merged-results pipeline runs on the temporary merge ref.
         (r,) = mr.gitlab_ready(self.HOME, "team/app", "t", gitlab_fake({26: GITLAB[26][0]}))
-        self.assertEqual(r.verdict, "ready")
-        self.assertNotEqual(r.verdict, "stale pipeline")
+        self.assertEqual((r.pipeline, r.pipeline_sha, r.verdict), ("passed", HEAD, "ready"))
+
+    def test_only_this_merge_requests_merge_ref_can_normalize_a_pipeline_sha(self):
+        for ref in (None, "feature", "refs/merge-requests/26/head", "refs/merge-requests/27/merge"):
+            with self.subTest(ref=ref):
+                spec = {"pipeline_sha": OLD, "pipeline_ref": ref, "merge_commit_sha": OLD}
+                (r,) = mr.gitlab_ready(self.HOME, "team/app", "t", gitlab_fake({26: spec}))
+                self.assertEqual((r.pipeline_sha, r.verdict), (OLD, "stale pipeline"))
+
+    def test_a_merged_results_pipeline_with_an_unread_sha_stays_unverified(self):
+        for sha in (ABSENT, None):
+            with self.subTest(sha=sha):
+                spec = {"pipeline_sha": sha, "pipeline_ref": "refs/merge-requests/26/merge"}
+                (r,) = mr.gitlab_ready(self.HOME, "team/app", "t", gitlab_fake({26: spec}))
+                self.assertIsNone(r.pipeline_sha)
+                self.assertEqual(r.verdict, "unverified")
+
+    def test_transient_merge_statuses_are_running_and_name_themselves(self):
+        for status in ("approvals_syncing", "preparing"):
+            with self.subTest(status=status):
+                (r,) = mr.gitlab_ready(self.HOME, "team/app", "t", gitlab_fake({5: {"status": status}}))
+                self.assertEqual((r.pipeline, r.verdict), ("passed", "running"))
+                self.assertEqual(LINE.match(mr.line(r, "!"))["why"], status)
+
+    def test_callback_and_canceling_pipelines_preserve_their_status_and_reason(self):
+        for status in ("waiting_for_callback", "canceling"):
+            with self.subTest(status=status):
+                (r,) = mr.gitlab_ready(self.HOME, "team/app", "t", gitlab_fake({5: {"pipeline": status}}))
+                self.assertEqual(r.verdict, "running")
+                self.assertEqual(r.pipeline, status)
+                printed = LINE.match(mr.line(r, "!"))
+                self.assertEqual((printed["status"], printed["why"]), (status, status))
 
     def test_waiting_and_skipped_pipelines_name_themselves(self):
         # #425: skipped/manual/created/scheduled/draft all printed bare running.
