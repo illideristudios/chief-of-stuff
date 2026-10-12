@@ -378,6 +378,11 @@ class StageWriteBackTest(unittest.TestCase):
                          [("github:example/app#3", "closed", "review", "merged"),
                           ("github:example/app#4", "open", "doing", "")])
 
+    def test_a_closed_issue_stays_merged_when_an_open_follow_up_cites_it(self):
+        gh = FakeGh(issues=[gh_issue(3, "Fix the parser", ["stage: review"], state="CLOSED")],
+                    prs=[tma.pr(22, [])], merged=[tma.pr(21, [])], bodies={21: "Closes #3", 22: "Closes #3"})
+        self.assertEqual(forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()[0]["merge_state"], "merged")
+
     def test_a_long_merged_history_does_not_refuse_the_snapshot(self):
         # Merged requests only annotate closed issues; a busy repo has far more than one read lists.
         many = [tma.pr(n, []) for n in range(1, forge.forge_review.REQUEST_LIMIT + 1)]

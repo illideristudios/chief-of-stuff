@@ -145,10 +145,10 @@ class Forge:
                 snap["human_review"] = self.kanban.human_review_label in one.labels
             if self.approver:
                 snap["review_state"] = r.approval if r else ""
-            if r:
-                snap["merge_state"] = r.verdict
-            elif one.state == backlog.CLOSED and one.iid in merged:
+            if one.state == backlog.CLOSED and one.iid in merged:  # an open follow-up does not undo a merge
                 snap["merge_state"] = "merged"
+            elif r:
+                snap["merge_state"] = r.verdict
             else:
                 snap["merge_state"] = ""
             out.append(snap)
