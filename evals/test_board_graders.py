@@ -38,7 +38,8 @@ class PagesWiringTest(unittest.TestCase):
     def test_stop_pages_ends_what_a_case_started(self) -> None:
         work = Path(tempfile.mkdtemp())
         (work / "pages").mkdir()
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        (work / "pages.py").write_text("import time; time.sleep(60)\n")  # stop_pages signals only a `pages.py serve` pid
+        proc = subprocess.Popen([sys.executable, str(work / "pages.py"), "serve"], start_new_session=True)
         (work / "pages" / ".pid").write_text(str(proc.pid))
         run.stop_pages(work)
         self.assertIsNotNone(proc.wait(timeout=5))
