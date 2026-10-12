@@ -281,6 +281,58 @@ class ReloadSnippetTest(unittest.TestCase):
         self.assertEqual(resp.status, 404)
         self.assertNotIn("1970", resp.getheader("Last-Modified") or "")
 
+    def test_odd_page_urls_are_404(self):
+        # #340: %00 closed with no response; /sub/ listed without the snippet; /dir.html/ was an empty 200.
+        (self.dir / "sub").mkdir()
+        (self.dir / "dir.html").mkdir()
+        for path in ("/%00", "/sub/", "/dir.html/"):
+            for method in ("GET", "HEAD"):
+                with self.subTest(path=path, method=method):
+                    self.assertEqual(get(self.port, path, method=method).status, 404)
+
+    def test_a_case_folded_rendered_name_is_not_served_by_file_name(self):
+        # #335: workerſ.html (U+017F) case-folds to workers.html; the route-only rule must use casefold, not lower.
+        (self.dir / "workers.html").write_text("<!doctype html><body><p>workers</p></body>")
+        self.assertEqual(get(self.port, "/worker%C5%BF.html").status, 404)
+        self.assertEqual(get(self.port, "/workers").status, 200)
+
+    def test_head_of_html_does_not_read_the_file_and_a_huge_page_is_refused(self):
+        # #333: HEAD matched GET's length without reading; a page over the cap is 413 and never read.
+        reads = []
+        real = Path.read_bytes
+
+        def spy(path):
+            reads.append(path.name)
+            return real(path)
+
+        with mock.patch.object(Path, "read_bytes", spy):
+            head = get(self.port, "/arch-review.html", method="HEAD")
+        self.assertEqual(head.status, 200)
+        self.assertNotIn("arch-review.html", reads)
+        self.assertEqual(head.getheader("Content-Length"), str(len(get(self.port, "/arch-review.html").body)))
+        with mock.patch.object(pg, "MAX_PAGE", 64):
+            (self.dir / "big.html").write_bytes(b"x" * 128)
+            reads.clear()
+            with mock.patch.object(Path, "read_bytes", spy):
+                for method in ("GET", "HEAD"):
+                    with self.subTest(method=method):
+                        self.assertEqual(get(self.port, "/big.html", method=method).status, 413)
+            self.assertEqual(reads, [])
+
+
+class BannerPerRequestTest(unittest.TestCase):
+    """#334: banner is per request, not a side effect left on a reused handler."""
+
+    def test_allowed_clears_banner_before_each_request(self):
+        h = pg.Handler.__new__(pg.Handler)
+        h.banner = "stale from the request before"
+        h.server = mock.Mock(server_address=("127.0.0.1", 9), root=None, refresher=None)
+        h.headers = {"Host": "evil.test"}
+        h.path, h.command, h.directory = "/", "GET", str(Path(tempfile.mkdtemp()))
+        h.send_error = mock.Mock()
+        self.assertFalse(h._allowed())
+        self.assertEqual(h.banner, "")
+
 
 class EnsureTest(unittest.TestCase):
     def setUp(self):
@@ -396,7 +448,12 @@ class RenderOnRequestTest(unittest.TestCase):
     make the page render automatically using scripts and stuff instead of the agent pulling in data each time")."""
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
+        # A private parent, removed after the test: FreshRefusesAForeignNameTest snapshots root.parent, which must
+        # never be the shared temp dir (#357: reading every file there hung the suite locally).
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
         self.day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
@@ -719,7 +776,12 @@ class _PagesFixture:
              "/issues/7/source": "issue-7-source.html"}
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
+        # A private parent, removed after the test: FreshRefusesAForeignNameTest snapshots root.parent, which must
+        # never be the shared temp dir (#357: reading every file there hung the suite locally).
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
         self.day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
