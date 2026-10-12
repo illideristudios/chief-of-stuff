@@ -46,11 +46,11 @@ def state_dir(root: Path) -> Path:
 
 
 @contextmanager
-def lock(path: Path):
+def lock(path: Path, wait: bool = False):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
         try:
-            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError:
             raise ServiceError(f"already running or being managed ({path.name} is held)") from None
         try:

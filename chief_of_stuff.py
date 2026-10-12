@@ -48,6 +48,8 @@ COMMANDS = {
     "sources": "scripts/board_sources.py",
     "tick": "scripts/flow.py",
 }
+# Commands whose scripts import store (SQLAlchemy/Alembic). Add cleanup/engine when they join COMMANDS.
+STORE_BACKED = frozenset({"performance"})
 
 
 def wrapper_text(current: Path) -> str:
@@ -144,7 +146,23 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_file():
         print(f"installed command is missing: {target}", file=sys.stderr)
         return 1
-    os.execv(sys.executable, [sys.executable, str(target), *args[1:]])
+    if args[0] in STORE_BACKED:
+        scripts_dir = str(SOURCE / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import subprocess
+        import shell_setup
+        import supervisor
+        try:
+            data = supervisor.data_dir()
+            with supervisor.lock(data / "supervisor.lock", wait=True):  # install holds it briefly; wait, do not refuse
+                python = str(supervisor.ensure_venv(data))
+        except (supervisor.ServiceError, shell_setup.ShellError, OSError, subprocess.SubprocessError) as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+    else:
+        python = sys.executable
+    os.execv(python, [python, str(target), *args[1:]])
     return 0
 
 
