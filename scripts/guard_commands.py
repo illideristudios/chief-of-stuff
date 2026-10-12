@@ -308,7 +308,8 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
                            (r"(?:lua(?:jit)?|julia|swift|Rscript|osascript|deno|bun)[\d.]*", "e"),
                            (r"pwsh|powershell", "cC")):
         if re.fullmatch(names, name) and any(
-                a.split("=", 1)[0] in {"--eval", "--print"} or a == "eval"  # deno eval, bun eval
+                a.split("=", 1)[0] in {"--eval", "--print", "--run", "--process-begin", "--process-code", "--process-end"}
+                or a == "eval"  # deno eval, bun eval
                 or a.startswith("-") and not a.startswith("--") and re.search(f"[{letters}]", a) for a in args):
             raise Opaque()
     if re.fullmatch(r"[gmn]?awk", name) and not any(a == "-f" or a.startswith(("-f", "--file")) for a in args):
@@ -329,6 +330,9 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
                                      or a.startswith("-") and not a.startswith("--") and "x" in a
                                      for a in args[1:]):
             raise Opaque()
+        if args[0] == "clone" and any(a.split("=", 1)[0] in {"-c", "--config"} or a.startswith("-c")
+                                      and not a.startswith("--") for a in args[1:]):
+            raise Opaque()  # core.sshCommand and friends run during the clone itself
         if args[0] == "config":
             # Values such as core.sshCommand, alias.* and *.helper run later inside allowed verbs. Reads only.
             return not any(a in {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"} for a in args[1:])
