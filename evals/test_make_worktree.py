@@ -381,10 +381,10 @@ class WorktreeAddEnvTest(CloneCase):
         checks = [env for argv, env in calls if argv[3:4] == ["check-ref-format"]]
         self.assertEqual(checks, [git_trees.audit_env()], "the branch check is one git call on the audit env")
         clone_reads = [(argv[3:], env) for argv, env in calls if argv[:3] == ["git", "-C", str(self.clone)]
-                       and argv[3:4] == ["rev-parse"]]
+                       and argv[3:4] in (["rev-parse"], ["show-ref"])]
         self.assertEqual(clone_reads, [
             (["rev-parse", "--show-toplevel"], git_trees.audit_env()),
-            (["rev-parse", "--verify", "-q", "refs/heads/feat/new"], git_trees.audit_env()),
+            (["show-ref", "--verify", "--quiet", "refs/heads/feat/new"], git_trees.audit_env()),
         ], "the root and branch-existence checks also stay on the audit env")
         self.assertEqual(sorted(args[0] for args, _ in views), ["log", "rev-parse"], "the two reads in `build` go through the view")
         for args, read_env in views:
@@ -673,6 +673,60 @@ class BuildTest(CloneCase):
         self.assertFalse(self.tree.exists())
         self.assertIn("feat/new", self.branches())
 
+    def test_a_tree_created_by_another_repository_during_add_survives(self):
+        other = make_repo.build(self.root, {"clone": "competitor", "origin": "competitor.git", "worktrees": []})
+        real = mw.git_trusted
+        head = rev(other)
+
+        def competing_add(args, cwd):
+            if args[:2] == ["worktree", "add"]:
+                make_repo.git(["worktree", "add", "-q", "--detach", str(self.tree), "main"], other)
+                (self.tree / "keep.txt").write_text("another repository's work\n")
+            return real(args, cwd)
+
+        with mock.patch.object(mw, "git_trusted", competing_add):
+            with self.assertRaises(mw.RefusedError) as raised:
+                self.build()
+        self.assertTrue(self.tree.is_dir(), "cleanup must preserve the other repository's worktree")
+        self.assertEqual((self.tree / "keep.txt").read_text(), "another repository's work\n")
+        self.assertEqual(rev(self.tree), head)
+        self.assertIn(str(self.tree), make_repo.git(["worktree", "list", "--porcelain"], other))
+        self.assertIn(str(self.tree), str(raised.exception))
+        self.assertIn("left", str(raised.exception))
+        self.assertEqual(self.branches(), "")
+
+    def test_a_nonempty_unregistered_directory_during_add_is_left_and_reported(self):
+        real = mw.git_trusted
+
+        def competing_directory(args, cwd):
+            if args[:2] == ["worktree", "add"]:
+                self.tree.mkdir()
+                (self.tree / "keep.txt").write_text("unowned\n")
+            return real(args, cwd)
+
+        with mock.patch.object(mw, "git_trusted", competing_directory):
+            with self.assertRaises(mw.RefusedError) as raised:
+                self.build()
+        self.assertTrue(self.tree.is_dir())
+        self.assertEqual((self.tree / "keep.txt").read_text(), "unowned\n")
+        self.assertIn(str(self.tree), str(raised.exception))
+        self.assertIn("left", str(raised.exception))
+
+    def test_a_failed_add_that_left_an_empty_directory_removes_it(self):
+        real = mw.git_trusted
+
+        def empty_then_fail(args, cwd):
+            if args[:2] == ["worktree", "add"]:
+                self.tree.mkdir()
+                return 1, "planted failure after mkdir"
+            return real(args, cwd)
+
+        with mock.patch.object(mw, "git_trusted", empty_then_fail):
+            with self.assertRaises(mw.RefusedError):
+                self.build()
+        self.assertFalse(self.tree.exists())
+        self.assertEqual(self.branches(), "")
+
     def test_a_failed_add_that_left_a_tree_and_branch_removes_both(self):
         """#448/#376: when add succeeds then the call still refuses, scrub only what this build made."""
         real = mw.git_trusted
@@ -707,6 +761,23 @@ class BuildTest(CloneCase):
         self.assertFalse(self.tree.exists())
         self.assertEqual(self.branches(), "")
 
+    def test_a_registered_tree_is_removed_even_when_git_remove_fails(self):
+        real = mw.git_trusted
+
+        def fail_after_add(args, cwd):
+            if args[:2] == ["worktree", "add"]:
+                code, detail = real(args, cwd)
+                self.assertEqual(code, 0, detail)
+                return 1, "planted failure after add"
+            if args[:2] == ["worktree", "remove"]:
+                return 1, "planted remove failure"
+            return real(args, cwd)
+
+        with mock.patch.object(mw, "git_trusted", fail_after_add):
+            with self.assertRaises(mw.RefusedError):
+                self.build()
+        self.assertFalse(self.tree.exists())
+
     def test_the_report_line_carries_the_short_sha_not_the_full_one(self):
         remote_head = advance_remote(self.root)
         self.assertEqual(len(remote_head), 40)
@@ -720,6 +791,51 @@ class BuildTest(CloneCase):
         self.assertEqual(code, 0, err)
         self.assertIn(remote_head[:7], out)
         self.assertNotIn(remote_head, out)
+
+
+class BranchProbeFailureTest(CloneCase):
+    """An unknown branch state must refuse before add and preserve existing branches."""
+
+    def assert_probe_failure_preserves_branch(self, failure, reason):
+        make_repo.git(["branch", "feat/new", "main"], self.clone)
+        head = rev(self.clone, "refs/heads/feat/new")
+        real = subprocess.run
+        probes = []
+
+        def fail_probe(argv, **kw):
+            if argv[3:] in (["rev-parse", "--verify", "-q", "refs/heads/feat/new"],
+                            ["show-ref", "--verify", "--quiet", "refs/heads/feat/new"]):
+                probes.append(argv)
+                if isinstance(failure, BaseException):
+                    raise failure
+                return subprocess.CompletedProcess(argv, failure, stdout="", stderr=reason)
+            return real(argv, **kw)
+
+        with mock.patch.object(mw.subprocess, "run", fail_probe), \
+                mock.patch.object(mw, "git_trusted", wraps=mw.git_trusted) as trusted:
+            with self.assertRaises(mw.RefusedError) as raised:
+                self.build(from_local=True)
+        self.assertIn("feat/new", self.branches(), "an unknown probe must never authorize branch deletion")
+        self.assertEqual(rev(self.clone, "refs/heads/feat/new"), head)
+        self.assertFalse(self.tree.exists())
+        trusted.assert_not_called()
+        self.assertEqual(len(probes), 1)
+        self.assertEqual(probes[0][3:], ["show-ref", "--verify", "--quiet", "refs/heads/feat/new"])
+        self.assertIn("cannot check", str(raised.exception))
+        self.assertIn("feat/new", str(raised.exception))
+        self.assertIn(reason, str(raised.exception))
+
+    def test_a_fatal_branch_probe_refuses_without_deleting_the_branch(self):
+        self.assert_probe_failure_preserves_branch(128, "fatal: cannot read refs")
+
+    def test_an_other_nonzero_branch_probe_refuses_without_deleting_the_branch(self):
+        self.assert_probe_failure_preserves_branch(2, "probe failed")
+
+    def test_a_branch_probe_timeout_refuses_without_deleting_the_branch(self):
+        self.assert_probe_failure_preserves_branch(subprocess.TimeoutExpired("git", 30), "TimeoutExpired")
+
+    def test_a_branch_probe_oserror_refuses_without_deleting_the_branch(self):
+        self.assert_probe_failure_preserves_branch(OSError("probe unavailable"), "OSError")
 
 
 class FreshBaseTest(CloneCase):

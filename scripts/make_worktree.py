@@ -45,13 +45,14 @@ class Made:
 
 
 def _run(args: list[str], cwd: Path, env: dict[str, str]) -> tuple[int, str]:
+    """Keep helper failures distinguishable from Git's exit 1 (which can mean a missing ref)."""
     try:
         out = subprocess.run(
             ["git", "-C", str(cwd), *args], capture_output=True, text=True, errors="backslashreplace",
             timeout=GIT_TIMEOUT, env=env,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        return 1, f"{type(exc).__name__}: {exc}"
+        return git_trees.ReadFailure(1, f"{type(exc).__name__}: {exc}")
     return out.returncode, (out.stdout or out.stderr).strip()
 
 
@@ -130,14 +131,30 @@ def require_root(clone: Path) -> None:
         )
 
 
-def discard(clone: Path, path: Path, branch: str | None) -> None:
-    """Remove a tree and optional branch this build created (#448/#376). Best-effort; the refusal already names the failure."""
-    if path.exists():
+def _owns_worktree(clone: Path, path: Path) -> bool:
+    """A linked tree's gitfile and registration backlink must agree and name this clone's common directory."""
+    try:
+        tree = git_view.locate(path)
+        return tree.tree == path.resolve() and tree.gitdir != tree.common and tree.common == git_view.locate(clone).common
+    except git_view.Unviewable:
+        return False
+
+
+def discard(clone: Path, path: Path, branch: str | None) -> str:
+    """Best-effort cleanup after add, whose path was checked absent under the clone lock (#448/#376).
+    Another clone can win the path race: only remove a registered tree of this clone, or an empty directory.
+    `branch` is set only when the pre-add probe confirmed it was missing. Report anything left behind."""
+    if _owns_worktree(clone, path):
         git_trusted(["worktree", "remove", "--force", "--", str(path)], clone)
-        if path.exists():
+        if _owns_worktree(clone, path):  # recheck before the recursive fallback: remove may have changed the metadata
             shutil.rmtree(path, ignore_errors=True)
+    try:
+        path.rmdir()  # safe for an unregistered partial add: never recursively remove unowned contents
+    except OSError:
+        pass
     if branch is not None:
         git_trusted(["branch", "-D", "--", branch], clone)
+    return f"; left {path}: cleanup could not safely remove it" if os.path.lexists(path) else ""
 
 
 def base_ref(fetch_error: str, from_local: bool) -> str:
@@ -206,16 +223,20 @@ def build(root: Path, clone: Path, trees: str, name: str, branch: str, agent_typ
                 raise RefusedError(f"{exc}; no local main" if no_main else f"{exc}; --from-local cuts from local main ({local}) instead") from None
             base = "local main" if from_local else "origin/main"
         # Only scrub a branch this call cuts: from_branch creates none; a pre-existing -b name is not ours (#448).
-        cut = None if from_branch else branch
-        branch_existed = bool(
-            cut and _run(["rev-parse", "--verify", "-q", f"refs/heads/{cut}"], clone, git_trees.audit_env())[0] == 0
-        )
+        cut = None
+        if not from_branch:
+            probe = _run(["show-ref", "--verify", "--quiet", f"refs/heads/{branch}"], clone, git_trees.audit_env())
+            probe_code, probe_detail = probe
+            if isinstance(probe, git_trees.ReadFailure) or probe_code not in (0, 1):
+                raise RefusedError(f"cannot check whether branch {branch!r} exists: {probe_detail or f'git exited {probe_code}'}")
+            if probe_code == 1:
+                cut = branch
         path.parent.mkdir(parents=True, exist_ok=True)
         add = ["worktree", "add"] + (["--detach"] if from_branch else ["--no-track", "-b", branch]) + ["--", str(path), ref]
         code, detail = git_trusted(add, clone)
         if code != 0:
-            discard(clone, path, None if branch_existed else cut)
-            raise RefusedError(f"git worktree add failed: {detail}")
+            cleanup = discard(clone, path, cut)
+            raise RefusedError(f"git worktree add failed: {detail}{cleanup}")
         sha = r[1] if (r := git(["rev-parse", "--short", "HEAD"], path, expected_common=common))[0] == 0 else "?"  # not git's error text
     return Made(path, branch, agent_type, base, sha, clone)
 
