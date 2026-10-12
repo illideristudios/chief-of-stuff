@@ -1,6 +1,7 @@
 """Python command hooks for the purpose-built worker guard (design 9 and 11)."""
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import sys
 
@@ -44,7 +45,9 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
             return _deny(event_name, f"Recorded permission ask {ask_id}. An ask is not an approval. "
                                      "Report blocked, then stop and wait.")
         if event_name == "Stop":
-            if db.reports(binding.issue_key, stage=binding.stage, attempt=binding.attempt, session_id=binding.session_id):
+            reports = db.reports(binding.issue_key, stage=binding.stage, attempt=binding.attempt,
+                                 session_id=binding.session_id)
+            if any(datetime.fromisoformat(report.created_at) >= binding.launched_at for report in reports):
                 return {}
             return _deny(event_name, "Call the engine MCP report tool for this run before stopping (done, failed or blocked).")
         if event_name == "SessionStart":

@@ -169,8 +169,9 @@ def _push_denied(args: list[str], protected: tuple[str, ...]) -> bool:
 
 
 def _forge_denied(args: list[str], client: str) -> bool:
-    if "--help" in args:
-        return False
+    # Bundles can hide protected flags; require separate short flags and values or long forms.
+    if any(arg.startswith("-") and not arg.startswith("--") and len(arg) > 2 for arg in args):
+        return True
     args = _global_args(args, {"-R", "--repo", "--hostname"}, {"--help", "--version"})
     if not args:
         return False

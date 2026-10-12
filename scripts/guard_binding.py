@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import sys
 from typing import Mapping
+
+import clock
 
 DEFAULT_PROTECTED_BRANCHES = ("main", "master", "develop")
 
@@ -18,6 +21,7 @@ class Binding:
     attempt: int
     session_id: str
     root: Path
+    launched_at: datetime
     protected_branches: tuple[str, ...] = DEFAULT_PROTECTED_BRANCHES
 
     def __post_init__(self) -> None:
@@ -27,6 +31,8 @@ class Binding:
             raise ValueError("worker attempt must be a positive integer")
         if not self.root.is_absolute():
             raise ValueError("CHIEF_ROOT must be absolute")
+        if not isinstance(self.launched_at, datetime) or self.launched_at.utcoffset() is None:
+            raise ValueError("CHIEF_LAUNCHED_AT must be a timezone-aware ISO 8601 timestamp")
         if not self.protected_branches or not all(isinstance(b, str) and b.strip() for b in self.protected_branches):
             raise ValueError("CHIEF_PROTECTED_BRANCHES must be a non-empty JSON array of branch names")
 
@@ -45,7 +51,8 @@ class Binding:
             if not root.strip():
                 raise ValueError("CHIEF_ROOT must be non-empty")
             return cls(env["CHIEF_ISSUE_KEY"], env["CHIEF_STAGE"], int(env["CHIEF_ATTEMPT"]),
-                       env["CHIEF_SESSION_ID"], Path(root), tuple(branches))
+                       env["CHIEF_SESSION_ID"], Path(root), datetime.fromisoformat(env["CHIEF_LAUNCHED_AT"]),
+                       tuple(branches))
         except KeyError as exc:
             raise ValueError(f"missing worker binding: {exc.args[0]}") from None
 
@@ -61,8 +68,10 @@ def guard_env(issue_key: str, stage: str, attempt: int, session_id: str, root: P
     Keep sys.executable's spelling: resolving a venv Python symlink loses the venv's dependencies.
     The engine supplies its forge default and protected branches when they differ from the defaults.
     """
-    binding = Binding(issue_key, stage, attempt, session_id, Path(root).resolve(), protected_branches)
+    binding = Binding(issue_key, stage, attempt, session_id, Path(root).resolve(),
+                      clock.system().astimezone(timezone.utc), protected_branches)
     return {"CHIEF_ISSUE_KEY": binding.issue_key, "CHIEF_STAGE": binding.stage,
             "CHIEF_ATTEMPT": str(binding.attempt), "CHIEF_SESSION_ID": binding.session_id,
+            "CHIEF_LAUNCHED_AT": binding.launched_at.isoformat(),
             "CHIEF_ROOT": str(binding.root), "CHIEF_PYTHON": sys.executable,
             "CHIEF_PROTECTED_BRANCHES": json.dumps(binding.protected_branches)}

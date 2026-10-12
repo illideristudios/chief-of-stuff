@@ -3,11 +3,13 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -27,6 +29,7 @@ class GuardTest(unittest.TestCase):
         self.db.upsert_item(KEY, title="Implement a widget", stage="implement")
         self.env = {**os.environ, "CHIEF_ISSUE_KEY": KEY, "CHIEF_STAGE": "implement",
                     "CHIEF_ATTEMPT": "2", "CHIEF_SESSION_ID": "session-two", "CHIEF_ROOT": str(self.root),
+                    "CHIEF_LAUNCHED_AT": datetime.now(timezone.utc).isoformat(),
                     "CHIEF_PYTHON": sys.executable, "CHIEF_PROTECTED_BRANCHES": '["main", "master", "develop", "release"]'}
 
     def hook(self, event, **fields):
@@ -74,7 +77,9 @@ class GuardTest(unittest.TestCase):
                         'gh project item-add 1 --owner owner --url https://github.com/o/r/issues/12',
                         'gh repo sync owner/repo --branch main --force',
                         '/usr/lib/git-core/git-push origin HEAD:main', 'git-merge topic',
-                        'gh pr frobnicate', 'gh pr review 12 --approve', 'gh pr review 12 -a'):
+                        'gh pr frobnicate', 'gh pr review 12 --approve', 'gh pr review 12 -a',
+                        'gh pr merge --help', 'gh pr create --label stage:done --title --help --body x',
+                        'gh pr create -dlstage:done --title x --body y', 'glab mr create -ad --title x'):
             with self.subTest(command=command):
                 result = self.hook("PreToolUse", tool_name="Bash", tool_input={"command": command})
                 output = result["hookSpecificOutput"]
@@ -91,7 +96,7 @@ class GuardTest(unittest.TestCase):
                         "gh pr review 12 --comment --body feedback", "gh pr checkout 12",
                         "glab mr create --title widget", "glab mr note 12 --message feedback",
                         "glab issue note 12 --message feedback", "glab mr checkout 12",
-                        "git-push origin HEAD:feat/widget", "gh pr merge --help"):
+                        "git-push origin HEAD:feat/widget", "gh pr create --help", "gh pr create -t x -b y"):
             with self.subTest(command=command):
                 self.assertEqual(self.hook("PreToolUse", tool_name="Bash", tool_input={"command": command}), {})
 
@@ -149,10 +154,51 @@ class GuardTest(unittest.TestCase):
         self.assertEqual([a["answer"] for a in state["asks"]], ["small", None])
         self.assertEqual(state["reports"][0]["summary"], "earlier result")
 
-    def test_missing_binding_denies_instead_of_skipping_gate(self):
-        self.env.pop("CHIEF_ISSUE_KEY")
-        self.denied("gh pr merge 12")
+    def test_stop_requires_a_report_since_the_latest_launch(self):
+        self.env["CHIEF_LAUNCHED_AT"] = "2026-10-11T12:00:00+00:00"
+        # Its local time sorts later than the launch string, but this instant is earlier.
+        self.db.clock = lambda: datetime.fromisoformat("2026-10-11T13:59:59+02:00")
+        self.db.add_report(KEY, "implement", 2, "session-two", "done", "before resume", [])
         self.assertEqual(self.hook("Stop")["decision"], "block")
+        # Its local time sorts earlier than the launch string, but this instant is later.
+        self.db.clock = lambda: datetime.fromisoformat("2026-10-11T07:00:01-05:00")
+        self.db.add_report(KEY, "implement", 2, "session-two", "done", "after resume", [])
+        self.assertEqual(self.hook("Stop"), {})
+
+    def test_stop_accepts_a_report_at_the_launch_instant(self):
+        self.env["CHIEF_LAUNCHED_AT"] = "2026-10-11T12:00:00Z"
+        self.db.clock = lambda: datetime.fromisoformat("2026-10-11T12:00:00+00:00")
+        self.db.add_report(KEY, "implement", 2, "session-two", "blocked", "waiting", [])
+        self.assertEqual(self.hook("Stop"), {})
+
+    def test_missing_binding_denies_instead_of_skipping_gate(self):
+        for field in ("CHIEF_ISSUE_KEY", "CHIEF_LAUNCHED_AT"):
+            with self.subTest(field=field):
+                value = self.env.pop(field)
+                try:
+                    self.denied("git status")
+                    result = self.hook("Stop")
+                    self.assertEqual(result["decision"], "block")
+                    self.assertIn(field, result["reason"])
+                    self.assertEqual(self.hook("Stop", stop_hook_active=True), {})
+                finally:
+                    self.env[field] = value
+
+    def test_invalid_launch_time_denies_instead_of_skipping_gate(self):
+        for value in ("", "not-a-time", "2026-10-11T12:00:00"):
+            with self.subTest(value=value):
+                self.env["CHIEF_LAUNCHED_AT"] = value
+                self.denied("git status")
+                self.assertEqual(self.hook("Stop")["decision"], "block")
+
+    def test_guard_env_uses_the_engine_clock_for_each_launch(self):
+        import guard_binding
+        for instant in (datetime(2026, 10, 11, 12, tzinfo=timezone.utc),
+                        datetime(2026, 10, 11, 13, tzinfo=timezone.utc)):
+            with self.subTest(instant=instant), patch("clock.system", return_value=instant):
+                env = guard_binding.guard_env(KEY, "implement", 2, "session-two", self.root)
+                self.assertEqual(env["CHIEF_LAUNCHED_AT"], instant.isoformat())
+                self.assertEqual(guard_binding.Binding.from_env(env).launched_at, instant)
 
     def test_plugin_uses_engine_python_and_exposes_launch_contract(self):
         import guard_binding

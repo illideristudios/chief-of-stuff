@@ -62,7 +62,8 @@ class MCPTest(unittest.TestCase):
         self.tools.report("done", "new result")
         import engine_mcp
         from guard_binding import Binding
-        older = engine_mcp.EngineTools(Binding(KEY, "review", 1, "session-one", self.root), self.db)
+        older = engine_mcp.EngineTools(Binding(KEY, "review", 1, "session-one", self.root,
+                                             self.tools.binding.launched_at), self.db)
         older.report("failed", "late old result")
         self.assertEqual([(r.attempt, r.summary) for r in self.db.reports(KEY)],
                          [(1, "late old result"), (2, "new result")])

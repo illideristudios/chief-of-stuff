@@ -80,7 +80,27 @@ class CommandTest(unittest.TestCase):
 
     def test_forge_help_remains_available(self):
         for command in ('gh --help', 'glab --help', 'gh --version', 'glab --version',
-                        'gh pr merge --help', 'glab mr merge --help', 'gh pr frobnicate --help'):
+                        'gh help pr create', 'gh pr create --help', 'glab mr create --help'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_help_cannot_bypass_denied_verbs_or_protected_flags(self):
+        for command in ('gh pr merge --help', 'glab mr merge --help', 'gh pr frobnicate --help',
+                        'gh pr create --label stage:done --title --help --body x'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
+    def test_forge_bundles_and_attached_short_values_are_denied(self):
+        for command in ('gh pr create -dlstage:done --title x --body y',
+                        'gh pr create -ad --title x --body y', 'glab mr create -ad --title x',
+                        'gh pr create -lstage:done', 'glab mr create -lstage:done',
+                        'gh pr create -bfoo', 'glab mr create -bfoo',
+                        'gh api -XGET repos/o/r/issues/12'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+        for command in ('gh pr create -t x -b y', 'gh -R owner/repo pr create -t x -b y',
+                        'gh pr -R owner/repo create -t x -b y',
+                        'glab -R owner/repo mr view 12'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 

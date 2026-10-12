@@ -10,6 +10,7 @@ The launch environment is the only record identity. Hook input and MCP arguments
 | `CHIEF_STAGE` | Non-empty stage assigned to this worker. |
 | `CHIEF_ATTEMPT` | Positive integer attempt for this stage. |
 | `CHIEF_SESSION_ID` | Non-empty engine-assigned session identifier; preserved on resume. |
+| `CHIEF_LAUNCHED_AT` | Required ISO 8601 UTC timestamp from the engine clock; refreshed on every launch, including resume. |
 | `CHIEF_ROOT` | Absolute workspace root, holding `store.db` (the existing store CLI convention). |
 | `CHIEF_PYTHON` | Engine venv Python executable, copied from `sys.executable` without resolving its symlink. Both hooks and MCP use it. |
 | `CHIEF_PROTECTED_BRANCHES` | JSON array containing the forge's default branch and all protected branches. Defaults to `main`, `master`, `develop`; launch supplies any additional or different names. |
@@ -18,13 +19,13 @@ The supervisor keeps engine process state under `supervisor.state_dir(root)` and
 
 The hooks implement these gates:
 
-- Bash rejects merges (including `git pull`), ambiguous or protected destination pushes, and `hub`. `gh`/`glab` pass only through an allowlist of reads and worker writes (PR/MR create, comments, comment-only reviews, checkout); within it, label, state and readiness flags are rejected. Plain HTTP clients naming a forge API are rejected. Quotes, paths to executables, assignments, `env`, `command`, `exec`, `nohup`, `time`, `timeout`, `nice`, `setsid`, supported `sudo` options, shell `-c` wrappers, pipelines and command chains are parsed without execution. Ordinary reads and explicit feature branch pushes are allowed.
+- Bash rejects merges (including `git pull`), ambiguous or protected destination pushes, and `hub`. `gh`/`glab` pass only through an allowlist of reads and worker writes (PR/MR create, comments, comment-only reviews, checkout); within it, label, state and readiness flags are rejected. Bundled short flags and attached short-option values are denied; use separate short flags and values or long forms. Help for denied verbs is also denied. Plain HTTP clients naming a forge API are rejected. Quotes, paths to executables, assignments, `env`, `command`, `exec`, `nohup`, `time`, `timeout`, `nice`, `setsid`, supported `sudo` options, shell `-c` wrappers, pipelines and command chains are parsed without execution. Ordinary reads and explicit feature branch pushes are allowed.
 
 - Commands outside the parser's shell subset are denied: dynamic expansion, inline interpreter programs, aliases, shell scripts, control flow, redirections, unsupported wrapper flags and malformed quoting. Forge API writes are denied conservatively because their effects cannot be established by the gate. These restrictions are guard rails; they do not replace engine verification.
 
 - `AskUserQuestion` is denied with instructions to call MCP `ask`. `PermissionRequest` also appends an unanswered ask containing the requested tool and input, then denies. Neither can approve an action.
 
-- Stop blocks until a report matches all four identity fields. A repeated Stop with `stop_hook_active=true` is allowed to prevent a hook loop. Store or binding failures produce an explicit deny/block/context message. Host timeouts and process crashes can still skip command hooks, as recorded in design decision 9.
+- Stop blocks until a report matches all four identity fields and was created at or after `CHIEF_LAUNCHED_AT`. A repeated Stop with `stop_hook_active=true` is allowed to prevent a hook loop. Store or binding failures produce an explicit deny/block/context message. Host timeouts and process crashes can still skip command hooks, as recorded in design decision 9.
 
 - SessionStart injects issue identity, title, assigned stage and attempt, cached forge stage, all asks with their answers, and previous reports. Answers and findings are store data for resume context.
 
