@@ -1,5 +1,6 @@
-"""The one forge adapter (1.0 plan, M2): GitHub and GitLab issues, requests, CI and review state, stage write-back as labels,
-and the snapshots the store is rebuilt from. Writes preview by default; a read that fails is an error, never an empty forge."""
+"""The one forge adapter (1.0 plan, M2): GitHub and GitLab issues, requests, CI and review state, stage write-back
+(labels, or GitHub Project Status when configured), and the snapshots the store is rebuilt from. Writes preview by
+default; a read that fails is an error, never an empty forge."""
 
 from __future__ import annotations
 
@@ -27,30 +28,44 @@ REPO = "example/app"
 GH = backlog.GitHubBacklog(REPO)
 GL = backlog.Backlog("https://gitlab.example.test", "team/app")
 FLOW = Kanban(stages=("stage: ready", "stage: doing", "stage: review"), human_review_label="needs human",
-              stage_map={"ready": 0, "doing": 1, "review": 2})
+              stage_map={"ready": 0, "doing": 1, "review": 2}, terminal_stages=("done",))
+PROJECT = GitHubProject("example", 3, "Status", ("Ready", "Doing", "Review"))
+BOARD = Kanban(FLOW.stages, FLOW.human_review_label, FLOW.stage_map, terminal_stages=FLOW.terminal_stages,
+               github_project=PROJECT)
+# Shared board column: exact rebuild must refuse, never pick the first stage.
+SHARED = Kanban(stages=("stage: shared",), human_review_label="needs human",
+                stage_map={"review": 0, "merge": 0}, terminal_stages=("done",))
 
 
-def gh_issue(number, title, labels=()):
-    return {"number": number, "title": title, "state": "OPEN", "labels": [{"name": n} for n in labels],
+def gh_issue(number, title, labels=(), state="OPEN"):
+    return {"number": number, "title": title, "state": state, "labels": [{"name": n} for n in labels],
             "url": f"https://github.com/{REPO}/issues/{number}", "updatedAt": "", "closedAt": None, "body": "the body"}
 
 
 class FakeGh(tma.FakeGhGraphql):
-    """`gh` for issues, labels and pull requests. Issue labels change on `issue edit`, so a write can be verified.
-    `fail` names the `gh` subcommands (`("issue", "list")`) that answer an error."""
+    """`gh` for issues, labels, projects and pull requests. Issue labels and project Status change on write, so a
+    round-trip can be verified. `fail` names the `gh` subcommands (`("issue", "list")`) that answer an error."""
 
-    def __init__(self, issues=(), prs=(), bodies=None, fail=()):
+    def __init__(self, issues=(), prs=(), merged=(), bodies=None, fail=(), status=None, project=PROJECT):
         super().__init__([{**p, "body": (bodies or {}).get(p["number"], "")} for p in prs])
         self.issues = {i["number"]: i for i in issues}
+        self.merged = [{**p, "body": (bodies or {}).get(p["number"], p.get("body", ""))} for p in merged]
         self.fail = set(fail)
         self.all_calls: list[list[str]] = []
+        self.project = project
+        self.status = dict(status or {})  # issue url -> Status option name
+        self.present = set(self.status)
 
     def __call__(self, args, input_text=None):
         self.all_calls.append(list(args))
         if tuple(args[:2]) in self.fail:
             return 1, "", "rate limited"
         if args[:2] == ["issue", "list"]:
-            return 0, json.dumps(list(self.issues.values())), ""
+            state = args[args.index("--state") + 1] if "--state" in args else "open"
+            rows = [i for i in self.issues.values()
+                    if state == "all" or (state == "open" and i["state"] == "OPEN")
+                    or (state == "closed" and i["state"] == "CLOSED")]
+            return 0, json.dumps(rows), ""
         if args[:2] == ["issue", "view"]:
             if int(args[2]) not in self.issues:
                 return 1, "", "Could not resolve to an issue"
@@ -63,10 +78,33 @@ class FakeGh(tma.FakeGhGraphql):
             row["labels"] = [{"name": n} for n in [*(n for n in names if n not in remove), *add]]
             return 0, "", ""
         if args[:2] == ["label", "list"]:
-            return 0, json.dumps([{"name": n} for n in (*FLOW.stages, FLOW.human_review_label)]), ""
+            names = (*FLOW.stages, FLOW.human_review_label, *FLOW.terminal_stages)
+            return 0, json.dumps([{"name": n} for n in names]), ""
         if args[:2] == ["issue", "create"]:
             self.issues[101] = gh_issue(101, args[args.index("--title") + 1])
             return 0, f"https://github.com/{REPO}/issues/101\n", ""
+        if args[:2] == ["pr", "list"]:
+            state = args[args.index("--state") + 1] if "--state" in args else "open"
+            if state == "merged":
+                return 0, json.dumps(self.merged), ""
+            return super().__call__(args, input_text)
+        if args[:2] == ["project", "field-list"]:
+            opts = [*self.project.options, *FLOW.terminal_stages]
+            return 0, json.dumps({"fields": [{"name": self.project.field,
+                                              "options": [{"name": n} for n in opts]}]}), ""
+        if args[:2] == ["project", "item-list"]:
+            items = [{"content": {"url": u}, "status": s} for u, s in self.status.items()]
+            return 0, json.dumps({"items": items, "totalCount": len(items)}), ""
+        if args[:2] == ["project", "item-add"]:
+            self.present.add(args[args.index("--url") + 1])
+            return 0, "{}", ""
+        if args[:2] == ["project", "item-edit"]:
+            url = args[args.index("--url") + 1]
+            if "--clear" in args:
+                self.status.pop(url, None)
+            else:
+                self.status[url] = args[args.index("--value") + 1]
+            return 0, "{}", ""
         return super().__call__(args, input_text)
 
 
@@ -177,6 +215,22 @@ class GitHubTest(unittest.TestCase):
             self.assertEqual([(i.issue_key, i.stage, i.review_state, i.merge_state) for i in db.items()],
                              [("github:example/app#3", "review", "approved", "ready"), ("github:example/app#4", "doing", "", "")])
 
+    def test_the_store_rebuilds_closed_issues_and_merged_requests(self):
+        # Was open-only; a dropped store must recover completed work (#627 / M1.3).
+        gh = FakeGh(issues=[gh_issue(3, "Fix the parser", ["stage: review"], state="CLOSED"),
+                            gh_issue(4, "Add a flag", ["stage: doing"])],
+                    prs=[], merged=[tma.pr(21, [tma.review("robin", "APPROVED")])],
+                    bodies={21: "Closes #3"})
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            db.sync_from_forge(forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots())
+            self.assertEqual([(i.issue_key, i.forge_state, i.stage, i.merge_state) for i in db.items()],
+                             [("github:example/app#3", "closed", "review", "merged"),
+                              ("github:example/app#4", "open", "doing", "")])
+
 
 class StageWriteBackTest(unittest.TestCase):
     def edits(self, gh):
@@ -194,14 +248,63 @@ class StageWriteBackTest(unittest.TestCase):
         self.assertTrue(got.done, got.error)
         self.assertEqual([x["name"] for x in gh.issues[3]["labels"]], ["bug", "stage: doing"])
 
-    def test_the_stage_goes_to_labels_even_when_a_project_is_configured(self):
-        gh = github()
-        board = Kanban(FLOW.stages, FLOW.human_review_label, FLOW.stage_map,
-                       github_project=GitHubProject("example", 3, "Status", ("Ready", "Doing", "Review")))
-        got = forge.Forge(GH, kanban=board, gh=gh).write_stage(4, "review", expected="doing", commit=True)
+    def test_a_configured_project_writes_status_not_labels(self):
+        # Encoded the pre-decision bug: forge stripped github_project and wrote labels anyway.
+        gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={})
+        got = forge.Forge(GH, kanban=BOARD, gh=gh).write_stage(4, "doing", commit=True)
         self.assertTrue(got.done, got.error)
-        self.assertEqual([c for c in gh.all_calls if c[0] == "project"], [])
-        self.assertEqual(len(self.edits(gh)), 1)
+        self.assertTrue(any(c[:2] == ["project", "item-edit"] for c in gh.all_calls), gh.all_calls)
+        self.assertEqual(gh.status[f"https://github.com/{REPO}/issues/4"], "Doing")
+        self.assertNotIn("stage: doing", [x["name"] for x in gh.issues[4]["labels"]])
+
+    def test_snapshots_read_stage_from_project_status(self):
+        url = gh_issue(4, "Add a flag")["url"]
+        gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={url: "Doing"})
+        got = forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
+        self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
+                                "stage": "doing", "merge_state": ""}])
+
+    def test_unknown_project_status_option_is_an_error(self):
+        url = gh_issue(4, "x")["url"]
+        gh = FakeGh(issues=[gh_issue(4, "x")], status={url: "Invented"})
+        with self.assertRaisesRegex(forge.ForgeError, "Invented"):
+            forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
+
+    def test_a_shared_label_never_reads_back_as_a_different_stage(self):
+        gh = FakeGh(issues=[gh_issue(4, "x", ["stage: shared"])])
+        with self.assertRaisesRegex(forge.ForgeError, "more than one stage"):
+            forge.Forge(GH, kanban=SHARED, gh=gh).snapshots()
+
+    def test_stage_round_trips_through_project_status_including_terminal(self):
+        gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={})
+        f = forge.Forge(GH, kanban=BOARD, gh=gh)
+        self.assertTrue(f.write_stage(4, "review", commit=True).done, "init")
+        self.assertEqual(f.snapshots()[0]["stage"], "review")
+        self.assertTrue(f.write_stage(4, "done", expected="review", commit=True).done)
+        self.assertEqual(f.snapshots()[0]["stage"], "done")
+
+    def test_stage_round_trips_through_labels_including_terminal(self):
+        gh = FakeGh(issues=[gh_issue(4, "Add a flag")])
+        f = forge.Forge(GH, kanban=FLOW, gh=gh)
+        self.assertTrue(f.write_stage(4, "review", commit=True).done)
+        self.assertEqual(f.snapshots()[0]["stage"], "review")
+        self.assertTrue(f.write_stage(4, "done", expected="review", commit=True).done)
+        self.assertEqual(f.snapshots()[0]["stage"], "done")
+
+    def test_snapshots_include_closed_issues_and_merged_requests(self):
+        gh = FakeGh(issues=[gh_issue(3, "Fix the parser", ["stage: review"], state="CLOSED"),
+                            gh_issue(4, "Add a flag", ["stage: doing"])],
+                    prs=[], merged=[tma.pr(21, [])], bodies={21: "Closes #3"})
+        got = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
+        self.assertEqual([(s["issue_key"], s["forge_state"], s["stage"], s["merge_state"]) for s in got],
+                         [("github:example/app#3", "closed", "review", "merged"),
+                          ("github:example/app#4", "open", "doing", "")])
+
+    def test_a_long_merged_history_does_not_refuse_the_snapshot(self):
+        # Merged requests only annotate closed issues; a busy repo has far more than one read lists.
+        many = [tma.pr(n, []) for n in range(1, forge.forge_review.REQUEST_LIMIT + 1)]
+        gh = FakeGh(issues=[gh_issue(3, "x", ["stage: doing"])], prs=[], merged=many)
+        self.assertEqual(forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()[0]["merge_state"], "")
 
     def test_a_new_issue_takes_its_first_stage_but_a_moved_card_is_not_overwritten(self):
         gh = FakeGh(issues=[gh_issue(5, "new"), gh_issue(6, "moved by hand", ["stage: review"])])
@@ -227,17 +330,23 @@ class CreateTest(unittest.TestCase):
         self.assertEqual(gh.all_calls[0][-4:], ["--parent", "3", "--blocked-by", "4"])
 
 
-def gitlab_call(issues, mrs, fail=""):
+def gitlab_call(issues, mrs, fail="", merged=None):
     """GitLab's REST answers: the issue list and one issue, labels, and merge requests with their approvals and discussions."""
     calls = []
+    merged = merged or {}
 
     def call(method, url, token, timeout, payload=None):
         calls.append((method, url, payload))
-        path = urlsplit(url).path.split("/api/v4/projects/team%2Fapp", 1)[1]
+        parts = urlsplit(url)
+        path = parts.path.split("/api/v4/projects/team%2Fapp", 1)[1]
+        query = parse_qs(parts.query)
         if fail and path.startswith(fail):
             return None, {}, "HTTP 500 from GitLab"
         if path == "/issues":
-            return [issues[n] for n in sorted(issues)], {}, ""
+            state = (query.get("state") or ["opened"])[0]
+            rows = [issues[n] for n in sorted(issues)
+                    if state == "all" or issues[n]["state"] == state]
+            return rows, {}, ""
         if path.startswith("/issues/"):
             row = issues[int(path.split("/")[2])]
             if method == "PUT":
@@ -246,12 +355,14 @@ def gitlab_call(issues, mrs, fail=""):
                     x for x in (payload.get("add_labels") or "").split(",") if x]
             return row, {}, ""
         if path == "/labels":
-            return [{"name": n} for n in FLOW.stages], {}, ""
+            return [{"name": n} for n in (*FLOW.stages, *FLOW.terminal_stages)], {}, ""
         if path == "/merge_requests":
-            query = parse_qs(urlsplit(url).query)
+            state = (query.get("state") or ["opened"])[0]
+            pool = merged if state == "merged" else mrs
             size, page = int(query.get("per_page", ["100"])[0]), int(query.get("page", ["1"])[0])
-            iids = sorted(mrs)
-            return [{"iid": i} for i in iids[(page - 1) * size:page * size]], {}, ""
+            iids = sorted(pool)
+            return [{"iid": i, "description": pool[i].get("description", "")}
+                    for i in iids[(page - 1) * size:page * size]], {}, ""
         iid = int(path.split("/")[2])
         if path.endswith("/approvals"):
             return {"approved_by": [{"user": {"username": u}} for u in mrs[iid]["approved_by"]]}, {}, ""
@@ -264,8 +375,8 @@ def gitlab_call(issues, mrs, fail=""):
     return call
 
 
-def gl_issue(iid, title, labels=(), description=""):
-    return {"iid": iid, "title": title, "state": "opened", "labels": list(labels), "web_url": "", "updated_at": "", "closed_at": "",
+def gl_issue(iid, title, labels=(), description="", state="opened"):
+    return {"iid": iid, "title": title, "state": state, "labels": list(labels), "web_url": "", "updated_at": "", "closed_at": "",
             "description": description}
 
 
@@ -316,6 +427,25 @@ class GitLabTest(unittest.TestCase):
         got = self.forge.write_stage(3, "doing", expected="review", commit=True)
         self.assertTrue(got.done, got.error)
         self.assertEqual([m for m, *_ in self.call.calls].count("PUT"), 1)
+
+    def test_stage_round_trips_through_labels_including_terminal(self):
+        issues = {4: gl_issue(4, "Add a flag")}
+        with mock.patch.object(backlog, "_call", gitlab_call(issues, {})):
+            f = forge.Forge(GL, kanban=FLOW, token="t")
+            self.assertTrue(f.write_stage(4, "review", commit=True).done)
+            self.assertEqual(f.snapshots()[0]["stage"], "review")
+            self.assertTrue(f.write_stage(4, "done", expected="review", commit=True).done)
+            self.assertEqual(f.snapshots()[0]["stage"], "done")
+
+    def test_snapshots_include_closed_issues_and_merged_requests(self):
+        issues = {3: gl_issue(3, "Fix the parser", ["stage: review"], state="closed"),
+                  4: gl_issue(4, "Add a flag")}
+        mrs, merged = {}, {5: {"description": "Fixes #3"}}
+        with mock.patch.object(backlog, "_call", gitlab_call(issues, mrs, merged=merged)):
+            got = forge.Forge(GL, kanban=FLOW, token="t").snapshots()
+        self.assertEqual([(s["issue_key"], s["forge_state"], s["stage"], s["merge_state"]) for s in got],
+                         [("gitlab:gitlab.example.test/team/app#3", "closed", "review", "merged"),
+                          ("gitlab:gitlab.example.test/team/app#4", "open", "", "")])
 
 
 class ThreadsTest(unittest.TestCase):

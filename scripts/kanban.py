@@ -43,11 +43,15 @@ class Sync:
         return not self.error
 
 
+def _managed(config: Kanban) -> set[str]:
+    return set(config.stages) | set(config.terminal_stages) | {config.human_review_label}
+
+
 def label_delta(config: Kanban, current: tuple[str, ...], stage: str, keep_hold: bool = False) -> Delta:
     """Exactly one numbered stage and an independent hold, preserving every other label."""
     desired = config.label_for(stage)
     hold = config.holds(stage) or keep_hold
-    managed = set(config.stages) | {config.human_review_label}
+    managed = _managed(config)
     remove = tuple(label for label in current if label in managed and label != desired
                    and not (label == config.human_review_label and hold))
     add = tuple(label for label in (desired, config.human_review_label if hold else None)
@@ -68,7 +72,7 @@ def drift(config: Kanban, labels: tuple[str, ...], stage: str,
         return f"unmapped tracker stage {stage}"
     hold = config.human_review_label if (config.holds(stage) or
            (allow_extra_hold and config.human_review_label in labels)) else None
-    managed = set(config.stages) | {config.human_review_label}
+    managed = _managed(config)
     expected = {x for x in (hold, target if config.github_project is None else None) if x}
     actual = set(labels) & managed
     problems = []
@@ -76,7 +80,7 @@ def drift(config: Kanban, labels: tuple[str, ...], stage: str,
         problems.append(f"expected {', '.join(sorted(expected)) or 'no managed labels'}, "
                         f"found {', '.join(sorted(actual)) or 'none'}")
     if config.github_project:
-        wanted = config.github_project.options[config.stage_map[stage]] if target else None
+        wanted = config.status_for(stage)
         if project_status != wanted:
             problems.append(f"expected project {config.github_project.field} {wanted or 'empty'}, "
                             f"found {project_status or 'none'}")
@@ -126,7 +130,7 @@ def sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, sta
     current = tuple(str(label) for label in row["labels"])
     held = extra_hold(config, current, expected_stage)
     delta = label_delta(config, current, stage, keep_hold=held)
-    managed = set(config.stages) | {config.human_review_label}
+    managed = _managed(config)
     prior = frozenset(label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
     hold = frozenset({config.human_review_label})
     desired = set(after(current, delta)) & managed
@@ -288,7 +292,8 @@ def _github_label_delta(config: Kanban, current: tuple[str, ...], stage: str, ke
         return label_delta(config, current, stage, keep_hold)
     # A Project Status is the numbered stage; only the human hold lives on its issue.
     hold = config.holds(stage) or keep_hold
-    remove = tuple(x for x in current if x in config.stages or
+    stage_labels = set(config.stages) | set(config.terminal_stages)
+    remove = tuple(x for x in current if x in stage_labels or
                    (x == config.human_review_label and not hold))
     add = (config.human_review_label,) if hold and config.human_review_label not in current else ()
     return Delta(add, remove)
@@ -301,7 +306,7 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if ref.host != backlog.GITHUB:
         return Sync(ref, stage, error="issue is not on GitHub")
     try:
-        label = config.label_for(stage)
+        config.label_for(stage)
     except KeyError:
         return Sync(ref, stage, error=f"unmapped tracker stage: {stage}")
     if expected_stage is not None:
@@ -314,7 +319,7 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if error:
         return Sync(ref, stage, error=error)
     delta = _github_label_delta(config, current, stage, keep_hold=extra_hold(config, current, expected_stage))
-    managed = set(config.stages) | {config.human_review_label}
+    managed = _managed(config)
     current_labels = frozenset(current) & managed
     desired_labels = set(after(current, delta)) & managed
     prior_labels = frozenset(_github_label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
@@ -325,7 +330,7 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         present, old_status, error = _project_item(gh, project, ref)
         if error:
             return Sync(ref, stage, delta, error=error)
-        wanted = project.options[config.stage_map[stage]] if label is not None else None
+        wanted = config.status_for(stage)
         if wanted:
             error = _project_option_exists(gh, project, wanted)
             if error:
@@ -339,8 +344,7 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if not commit:
         return result
     if project:
-        prior_status = (project.options[config.stage_map[expected_stage]]
-                        if expected_stage and expected_stage not in config.terminal_stages else None)
+        prior_status = config.status_for(expected_stage) if expected_stage else None
         current_state = (old_status if present else None, frozenset(current_labels))
         desired_state = (wanted, frozenset(desired_labels))
         prior_state = (prior_status, frozenset(prior_labels))

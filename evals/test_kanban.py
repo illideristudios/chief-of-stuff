@@ -260,8 +260,9 @@ class GitHubUpdaterTest(unittest.TestCase):
         if args[:2] == ["label", "list"]:
             return 0, json.dumps([{"name": x} for x in (*self.config.stages, self.config.human_review_label)]), ""
         if args[:2] == ["project", "field-list"]:
+            opts = [*self.config.github_project.options, *self.config.terminal_stages]
             return 0, json.dumps({"fields": [{"name": "Status", "options":
-                [{"name": x} for x in self.config.github_project.options]}]}), ""
+                [{"name": x} for x in opts]}]}), ""
         if args[:2] == ["project", "item-list"]:
             items = ([{"content": {"url": self.ref.url}, "status": self.status}] if self.present else [])
             return 0, json.dumps({"items": items, "totalCount": len(items)}), ""
@@ -305,13 +306,14 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.assertTrue(got.project_add)
         self.assertTrue(any(a[:2] == ["project", "item-add"] for a in self.calls))
 
-    def test_terminal_stage_does_not_add_missing_project_item(self):
-        self.present = False
+    def test_terminal_stage_sets_status_named_like_the_stage(self):
+        # Cleared Status before #627; terminal must round-trip through Project Status.
+        self.status = "Review"
         got = kanban.sync_github(self.ref, self.config, "main", gh=self.gh, commit=True,
-                                 expected_stage="merge")
+                                 expected_stage="review")
         self.assertTrue(got.done, got.error)
-        self.assertFalse(got.project_add)
-        self.assertFalse(any(a[:2] == ["project", "item-add"] for a in self.calls))
+        self.assertEqual(self.status, "main")
+        self.assertTrue(any(a[:2] == ["project", "item-edit"] for a in self.calls))
 
     def test_a_launcher_hold_moves_with_its_project_status(self):
         self.labels = ["kind::code", FLOW.human_review_label]

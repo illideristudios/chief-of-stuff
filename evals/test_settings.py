@@ -363,7 +363,8 @@ class KanbanSettingsTest(unittest.TestCase):
         self.assertEqual(cfg.label_for("fix"), "05 - FIX")
         self.assertTrue(cfg.holds("triage"))
         self.assertFalse(cfg.holds("review"))
-        self.assertIsNone(cfg.label_for("main"))
+        # Terminal stages leave a forge mark named like the stage so a rebuild can round-trip (#627).
+        self.assertEqual(cfg.label_for("main"), "main")
 
     def test_invalid_mapping_is_refused(self):
         for bad in (
@@ -389,9 +390,17 @@ options = ["Plan", "Plan Review", "Test", "Build", "Review", "Fix"]
 
     def test_invalid_github_project_is_refused(self):
         for extra in ('owner = ""\nnumber = 7', 'owner = "org"\nnumber = 0',
-                      'owner = "org"\nnumber = 7\noptions = ["one"]'):
+                      'owner = "org"\nnumber = 7\noptions = ["one"]',
+                      'owner = "org"\nnumber = 7\noptions = ["Plan", "Plan", "Test", "Build", "Review", "Fix"]'):
             with self.subTest(extra=extra), self.assertRaises(st.SettingsError):
                 self.load(KANBAN + "\n[kanban.github_project]\n" + extra + "\n")
+
+    def test_project_shorthand_owner_number_is_accepted(self):
+        text = KANBAN.replace('terminal_stages = ["main"]',
+                              'terminal_stages = ["main"]\nproject = "example-org/7"')
+        cfg = self.load(text).kanban.github_project
+        self.assertEqual((cfg.owner, cfg.number, cfg.field), ("example-org", 7, "Status"))
+        self.assertEqual(cfg.options[0], "00 - PLAN")
 
 
 MODELS = '''[models.deep]

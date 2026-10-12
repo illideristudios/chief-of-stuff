@@ -2,17 +2,18 @@
 
 The forge is the source of truth and the store a cache rebuilt from `snapshots`. It reads issues (backlog.py), open pull or merge
 requests with their CI and review state (merge_ready.py over forge_review.py), and the user's review threads (review_threads.py);
-it creates issues (backlog.py), writes stage back as labels (kanban.py), and merges verified heads (merge_approved.py).
-Writes preview unless `commit=True`. A read that fails
-raises ForgeError: an empty answer would read as an empty forge.
+it creates issues (backlog.py), writes stage back as labels or a GitHub Project Status (kanban.py), and merges verified heads
+(merge_approved.py). Writes preview unless `commit=True`. A read that fails raises ForgeError: an empty answer would read as an
+empty forge.
 """
 
 from __future__ import annotations
 
-import dataclasses
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlencode
 
 import backlog
 import kanban
@@ -28,7 +29,7 @@ from settings import Kanban
 class Forge:
     home: Backlog | GitHubBacklog
     approver: str = ""                 # the user's forge username: whose approval and review threads count
-    kanban: Kanban | None = None       # the stage labels; None leaves stage unread and unwritten
+    kanban: Kanban | None = None       # the stage labels / Project Status; None leaves stage unread and unwritten
     gh: Callable = backlog.run_gh
     token: str | None = None           # GitLab only; None looks it up as backlog.token does
 
@@ -59,6 +60,36 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}") from exc
 
+    def _merged_closes(self) -> set[int]:
+        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+        try:
+            if self.github:
+                code, out, err = self.gh(
+                    ["pr", "list", "-R", self.home.repo, "--state", "merged",
+                     "--limit", str(forge_review.REQUEST_LIMIT), "--json", "number,body"])
+                if code:
+                    raise ForgeError(f"merged requests: {err.strip() or code}")
+                rows = json.loads(out)
+            else:
+                listed, _, err = backlog._call(
+                    "GET",
+                    f"{self.home.api(self.home.project)}/merge_requests?"
+                    + urlencode({"state": "merged", "per_page": forge_review.REQUEST_LIMIT}),
+                    self._token(), backlog.TIMEOUT)
+                if err:
+                    raise ForgeError(f"merged requests: {err}")
+                rows = listed
+            # shortcut: only the newest REQUEST_LIMIT merged requests annotate closed issues; an older closed issue keeps
+            # its terminal stage mark and reads merge_state "". Page the list if a rebuild needs every merge.
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"merged requests: {exc}") from exc
+        closed: set[int] = set()
+        for row in rows:
+            body = row.get("body") if self.github else row.get("description")
+            for ref in forge_review.closes(body):
+                closed.add(int(ref[1:]))
+        return closed
+
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
         """The newest open request closing the issue, as snapshots report for rework."""
         found = self.requests() if requests is None else requests
@@ -79,9 +110,10 @@ class Forge:
             raise ForgeError(f"review threads: {exc}") from exc
 
     def snapshots(self) -> list[dict[str, Any]]:
-        """One `store.Store.sync_from_forge` row per open issue. Stage and human hold are left out without kanban, and review state
-        without an approver, so a sync never blanks what was not read."""
-        got = self.issues()
+        """One `store.Store.sync_from_forge` row per open or closed issue. Stage and human hold are left out without kanban,
+        and review state without an approver, so a sync never blanks what was not read. Closed issues and recently merged
+        requests are included so a dropped store can rebuild completed work (#627)."""
+        got = self.issues(state="all")
         if not got.ok:
             raise ForgeError(f"issues: {got.error}")
         latest: dict[int, merge_ready.Request] = {}
@@ -89,23 +121,40 @@ class Forge:
         for r in sorted(self.requests(), key=lambda r: r.number):
             for ref in r.closes:
                 latest[int(ref[1:])] = r
+        merged = self._merged_closes()
+        statuses: dict[str, str | None] = {}
+        if self.kanban is not None and self.kanban.github_project is not None and self.github:
+            statuses, error = kanban._project_items(self.gh, self.kanban.github_project)
+            if error:
+                raise ForgeError(f"project status: {error}")
         out = []
         for one in sorted(got.issues, key=lambda i: i.iid):
             r = latest.get(one.iid)
             snap = {"issue_key": self.key(one.iid), "title": one.title,
                     "forge_state": "open" if one.state == backlog.OPEN else "closed"}
             if self.kanban is not None:
-                snap["stage"] = self._stage(one.labels)
+                snap["stage"] = self._stage(one, statuses if self.kanban.github_project and self.github else None)
                 snap["human_review"] = self.kanban.human_review_label in one.labels
             if self.approver:
                 snap["review_state"] = r.approval if r else ""
-            snap["merge_state"] = r.verdict if r else ""
+            if r:
+                snap["merge_state"] = r.verdict
+            elif one.iid in merged:
+                snap["merge_state"] = "merged"
+            else:
+                snap["merge_state"] = ""
             out.append(snap)
         return out
 
-    def _stage(self, labels: tuple[str, ...]) -> str:
-        # shortcut: a label several stages share reads back as the first of them; give each stage its own label for an exact rebuild
-        return next((stage for stage in self.kanban.stage_map if self.kanban.label_for(stage) in labels), "")
+    def _stage(self, one: backlog.Issue, statuses: dict[str, str | None] | None = None) -> str:
+        assert self.kanban is not None
+        try:
+            if self.kanban.github_project is not None and self.github and statuses is not None:
+                url = IssueRef(self.home.repo, one.iid).url
+                return self.kanban.stage_for_status(statuses.get(url))
+            return self.kanban.stage_for_label(one.labels)
+        except ValueError as exc:
+            raise ForgeError(f"stage: {exc}") from exc
 
     # writes: preview unless commit
     def merge(self, number: int, commit: bool = False, issue_key: str | None = None) -> str:
@@ -141,18 +190,17 @@ class Forge:
                               parent=parent, blocked_by=blocked_by)
 
     def write_stage(self, number: int, stage: str, expected: str | None = None, commit: bool = False) -> kanban.Sync:
-        """Move the issue's stage label to `stage`, leaving its other labels. `expected` is the stage the store last wrote; with
-        none, only an issue carrying no stage label is written. A label moved by hand is reported, never overwritten."""
+        """Move the issue's stage (label, or GitHub Project Status when configured), leaving its other labels.
+        `expected` is the stage the store last wrote; with none, only an issue carrying no stage is written. A card moved by
+        hand is reported, never overwritten."""
         host, repo = home_of(self.home)
         ref = IssueRef(repo, number, host)
         if self.kanban is None:
             return kanban.Sync(ref, stage, error="no [kanban] stage labels configured")
-        # Labels, not Project Status: both forges have them (design decision 1 leaves the choice open).
-        labels = dataclasses.replace(self.kanban, github_project=None)
         if self.github:
-            return kanban.sync_github(ref, labels, stage, gh=self.gh, commit=commit, expected_stage=expected,
+            return kanban.sync_github(ref, self.kanban, stage, gh=self.gh, commit=commit, expected_stage=expected,
                                       initialize=expected is None)
-        return kanban.sync_gitlab(self.home, ref, labels, stage, token=self.token, commit=commit, expected_stage=expected,
+        return kanban.sync_gitlab(self.home, ref, self.kanban, stage, token=self.token, commit=commit, expected_stage=expected,
                                   initialize=expected is None)
 
 
