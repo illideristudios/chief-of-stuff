@@ -112,7 +112,8 @@ class Forge:
               head: str | None = None, stage_mark: str | None = None) -> str:
         """Re-read readiness and the issue's closing request, then preview or report the verified head's merge outcome.
         `approval`, `head` and the issue's `stage_mark` are what a policy check relied on; the final read must still
-        report them, and the issue must still be open."""
+        report them, and the issue must still be open. A blank `stage_mark` expects no mapped stage label;
+        None leaves the stage unchecked."""
         mark = "#" if self.github else "!"
         found = self.requests()
         one = next((r for r in found if r.number == number), None)
@@ -136,7 +137,9 @@ class Forge:
                 raise ForgeError(f"{issue_key} is no longer open on the forge")
             if self.kanban and self.kanban.human_review_label in got.issue.labels:
                 raise ForgeError(f"{issue_key} is held for human review on the forge")
-            if stage_mark is not None and stage_mark not in got.issue.labels:
+            if stage_mark == "" and self.kanban and self._stage(got.issue.labels):
+                raise ForgeError(f"{issue_key} left its stage since the policy check: a mapped stage label appeared")
+            if stage_mark and stage_mark not in got.issue.labels:
                 raise ForgeError(f"{issue_key} left its stage since the policy check: {stage_mark} is gone")
         evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
         if not commit:

@@ -59,10 +59,17 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
             raise ForgeError("the issue is no longer open on the forge")
         board = forge.kanban
         stage_mark = board.label_for(item.stage) if board and item.stage in board.stage_map else None
-        # A shared board mark cannot name a precise stage; only a move off the stored stage's mark replaces it.
-        if stage_mark is not None and stage_mark not in got.issue.labels:
-            item.stage = next((s for s in board.stage_map if board.label_for(s) in got.issue.labels), "")
-            stage_mark = board.label_for(item.stage) if item.stage else None
+        if board:
+            observed_stage = next((s for s in board.stage_map if board.label_for(s) in got.issue.labels), "")
+            if stage_mark is None:
+                # Terminal and blank stages expect no mapped label, including at the merge's final read.
+                stage_mark = ""
+                if observed_stage:
+                    raise ForgeError(f"{action.issue_key} left its stage since planning: found {observed_stage}")
+            elif stage_mark not in got.issue.labels:
+                # A shared board mark cannot name a precise stage; only a move off the stored mark replaces it.
+                item.stage = observed_stage
+                stage_mark = board.label_for(item.stage) if item.stage else ""
         if board and board.human_review_label in got.issue.labels:
             item.human_review = True  # a forge-side hold counts even before the store hears of it
         item.merge_state = request.verdict

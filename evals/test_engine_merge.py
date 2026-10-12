@@ -144,6 +144,56 @@ class ExecutorTest(unittest.TestCase):
         self.gh.issues[3]["labels"] = [{"name": "stage: doing"}]
         self.refused("dispatch required")
 
+    def at_unlabelled_merge_stage(self, stage="merge"):
+        board = tf.Kanban(stages=("stage: doing", "stage: review"), human_review_label="needs human",
+                          stage_map={"implement": 0, "review": 1}, terminal_stages=("merge",))
+        self.forge = forge.Forge(tf.GH, kanban=board, gh=self.gh)
+        self.gh.issues[3]["labels"] = [{"name": "bug"}]
+        self.db.upsert_item(self.key, stage=stage)
+        if not stage:
+            self.p.workflows["standard"] = policy.Workflow("standard", "merge")
+            self.forge = replace(self.forge, approver="robin")
+        self.planned()
+
+    def test_a_terminal_stage_moved_to_implementation_after_planning_refuses(self):
+        self.at_unlabelled_merge_stage()
+        self.gh.issues[3]["labels"] = [{"name": "stage: doing"}]
+        self.refused("left its stage")
+
+    def test_a_terminal_stage_moved_to_completed_review_after_planning_refuses(self):
+        self.at_unlabelled_merge_stage()
+        self.gh.issues[3]["labels"] = [{"name": "stage: review"}]
+        self.refused("left its stage")
+
+    def test_a_blank_merge_stage_with_a_stage_label_added_after_planning_refuses(self):
+        self.at_unlabelled_merge_stage("")
+        self.gh.issues[3]["labels"] = [{"name": "stage: review"}]
+        self.refused("left its stage")
+
+    def test_a_terminal_stage_moved_during_the_policy_check_refuses(self):
+        self.at_unlabelled_merge_stage()
+        with self.during_policy_check(lambda: self.gh.issues[3].update(labels=[{"name": "stage: review"}])):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("left its stage", self.message())
+
+    def test_a_blank_merge_stage_moved_during_the_policy_check_refuses(self):
+        self.at_unlabelled_merge_stage("")
+        with self.during_policy_check(lambda: self.gh.issues[3].update(labels=[{"name": "stage: doing"}])):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("left its stage", self.message())
+
+    def test_an_unchanged_terminal_stage_with_unrelated_labels_merges(self):
+        self.at_unlabelled_merge_stage()
+        self.assertTrue(self.execute())
+        self.assertEqual(len(self.gh.merges), 1)
+
+    def test_an_unchanged_blank_merge_stage_with_unrelated_labels_merges(self):
+        self.at_unlabelled_merge_stage("")
+        self.assertTrue(self.execute())
+        self.assertEqual(len(self.gh.merges), 1)
+
     def during_policy_check(self, change):
         real = reconcile.plan
 
