@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
@@ -684,6 +685,17 @@ class OrphanJoinTest(unittest.TestCase):
         self.assertIn("wt-dirty", line)
         self.assertIn("sam", line)
         self.assertIn("uncommitted", line)
+
+    def test_an_orphan_line_escapes_controls_in_the_branch(self) -> None:
+        tmp, root = workspace(self.DIRTY, self.OWNS, sessions=session_row("robin"))
+        self.addCleanup(tmp.cleanup)
+        real = git_trees.read_state
+        with patch.object(git_trees, "read_state",
+                          side_effect=lambda *a, **k: replace(real(*a, **k), branch="feat/x\u202ey")):
+            report = al.audit(root, "2026-09-17")
+        line = str(report.orphans[0])
+        self.assertNotIn("\u202e", line)
+        self.assertIn("\\u202e", line)
 
     def test_a_live_owner_is_not_an_orphan(self) -> None:
         tmp, root = workspace(self.DIRTY, self.OWNS, sessions=session_row("sam"))

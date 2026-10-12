@@ -942,7 +942,9 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
             for path, found in source.items():
                 claims.setdefault(path, []).extend(found)
         for path in order:
-            finding = judge(names[path], git_trees.read_state(path, view_of(path)), claims.get(path, []))
+            state = git_trees.read_state(path, view_of(path))
+            state = replace(state, branch=git_trees.clean(state.branch))  # the branch reaches an audit line (#534)
+            finding = judge(names[path], state, claims.get(path, []))
             if isinstance(finding, Orphan):
                 report.orphans.append(finding)
             elif isinstance(finding, Unclaimed):
