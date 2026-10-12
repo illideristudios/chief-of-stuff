@@ -195,9 +195,12 @@ def _github_issue(gh, ref: backlog.IssueRef):
 
 def _project_rows(gh, project):
     # item-list serializes values using at most 100 field definitions, even with a larger item limit.
-    _, error = _project_fields(gh, project)
+    fields, error = _project_fields(gh, project)
     if error:
         return {}, error
+    # item-list omits an unknown field's key, which would read as every item having no stage.
+    if not any(isinstance(f, dict) and f.get("name") == project.field for f in fields):
+        return {}, f"GitHub Project has no field named {project.field}"
     row, error = _gh_json(gh, ["project", "item-list", str(project.number), "--owner", project.owner,
                                "--format", "json", "--limit", "5000"])
     if error:

@@ -547,7 +547,8 @@ class GitHubUpdaterTest(unittest.TestCase):
 
     def test_project_reads_refuse_truncated_field_metadata(self):
         for total in (None, 100, 101):
-            fields = {"fields": [{"id": "PVTF_other", "name": "Other"}] * 100}
+            status = {"id": "PVTSSF_status", "name": self.config.github_project.field}
+            fields = {"fields": [{"id": "PVTF_other", "name": "Other"}] * 99 + [status]}
             if total is not None:
                 fields["totalCount"] = total
 
@@ -567,6 +568,16 @@ class GitHubUpdaterTest(unittest.TestCase):
                     self.assertEqual((item, status), (None, None))
                     self.assertIn("field list was truncated", error)
                     self.assertIn("field list was truncated", item_error)
+
+    def test_project_reads_refuse_a_missing_configured_field(self):
+        def gh(args):
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"id": "PVTF_other", "name": "Other"}], "totalCount": 1}), ""
+            return self.gh(args)
+
+        statuses, error = kanban._project_items(gh, self.config.github_project)
+        self.assertEqual(statuses, {})
+        self.assertIn(f"no field named {self.config.github_project.field}", error)
 
     def test_project_field_list_at_limit_is_refused_unless_total_count_says_it_is_whole(self):
         status = {"id": "PVTSSF_status", "name": "Status", "options": [{"id": "option_Build", "name": "Build"}]}
