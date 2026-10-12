@@ -68,6 +68,41 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(len(self.store.items()), 1)
         self.assertEqual(len(self.store.segments(KEY)), 1)
 
+    def test_concurrent_fresh_writers_wait_for_an_existing_write_lock(self) -> None:
+        # Use a raw connection so no Store has initialized the journal mode before the race.
+        blocker = sqlite3.connect(self.path)
+        self.addCleanup(blocker.close)
+        blocker.execute("BEGIN IMMEDIATE")
+        writers = [store.Store(self.path) for _ in range(32)]
+        for writer in writers:
+            self.addCleanup(writer.engine.dispose)
+        start = threading.Barrier(len(writers) + 1)
+        errors: list[BaseException] = []
+
+        def write(n: int) -> None:
+            try:
+                start.wait(timeout=5)
+                for i in range(10):
+                    writers[n].upsert_item(KEY, title=f"w{n}-{i}")
+                    writers[n].record_segment(KEY, "review", 1, started_at=f"t{n}-{i}")
+            except BaseException as exc:  # noqa: BLE001 - the test reports whatever a writer hit
+                errors.append(exc)
+
+        threads = [threading.Thread(target=write, args=(n,)) for n in range(len(writers))]
+        try:
+            for thread in threads:
+                thread.start()
+            start.wait(timeout=5)
+            # Fresh connections must wait at BEGIN IMMEDIATE, even while another writer holds the lock.
+            time.sleep(0.1)
+        finally:
+            blocker.rollback()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(errors, [])
+        self.assertEqual(len(self.store.items()), 1)
+        self.assertEqual(len(self.store.segments(KEY)), 1)
+
     def test_concurrent_read_then_write_sessions_wait_for_the_lock(self) -> None:
         self.store.upsert_item(KEY, title="x")
         for message in ("first", "second"):
@@ -196,6 +231,32 @@ class StoreTest(unittest.TestCase):
 
 
 class MigrationTest(unittest.TestCase):
+    def test_migration_enables_wal_before_any_store_connects(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            conn = sqlite3.connect(path)
+            try:
+                self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone(), ("wal",))
+            finally:
+                conn.close()
+
+    def test_migration_enables_wal_for_an_existing_database_at_head(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            conn = sqlite3.connect(path)
+            try:
+                self.assertEqual(conn.execute("PRAGMA journal_mode=DELETE").fetchone(), ("delete",))
+            finally:
+                conn.close()
+            store.migrate(path)
+            conn = sqlite3.connect(path)
+            try:
+                self.assertEqual(conn.execute("PRAGMA journal_mode").fetchone(), ("wal",))
+            finally:
+                conn.close()
+
     def test_migrations_build_exactly_the_schema_the_models_declare(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.db"

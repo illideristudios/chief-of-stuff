@@ -92,8 +92,8 @@ class Resume(Base):
 
 
 def migrate(path: Path | str) -> None:
-    """Bring the database at `path` to the latest revision. Call it once at engine start, never from concurrent writers:
-    two first-time migrations race to create the same tables."""
+    """Enable WAL and bring the database at `path` to the latest revision. Call it once at engine start, never from
+    concurrent writers: journal-mode changes need an exclusive lock, and first-time migrations race to create tables."""
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
@@ -109,7 +109,6 @@ class Store:
         @event.listens_for(self.engine, "connect")
         def _pragmas(conn, _record) -> None:  # noqa: ANN001 - DBAPI connection
             conn.execute("PRAGMA foreign_keys=ON")
-            conn.execute("PRAGMA journal_mode=WAL")
 
         @event.listens_for(self.engine, "begin")
         def _begin(conn) -> None:  # noqa: ANN001 - SQLAlchemy connection
