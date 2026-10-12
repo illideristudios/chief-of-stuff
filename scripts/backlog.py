@@ -61,6 +61,10 @@ class Issue:
     closed_at: str = ""
     body: str = ""
 
+    @property
+    def is_open(self) -> bool:
+        return self.state == OPEN
+
 
 @dataclass(frozen=True)
 class Note:

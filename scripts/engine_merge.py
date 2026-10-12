@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-import backlog
 import reconcile
 from forge_port import ForgeError
 from policy import Policies, PolicyError
@@ -25,7 +24,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
         got = forge.issue(int(action.issue_key.rsplit("#", 1)[1]))
         if not got.ok or got.issue is None:
             raise ForgeError(f"issue: {got.error or 'not found'}")
-        if got.issue.state != backlog.OPEN:
+        if not got.issue.is_open:
             raise ForgeError("the issue is no longer open on the forge")
         board = forge.kanban
         # A shared board mark cannot name a precise stage; only a move off the stored stage's mark replaces it.
@@ -44,7 +43,8 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
                       if planned else "no eligible merge")
             mark = "#" if forge.github else "!"
             raise ForgeError(f"engine policy: {reason} ({mark}{request.number}: {request.verdict})")
-        message = forge.merge(request.number, commit=True, issue_key=action.issue_key, approval=request.approval)
+        message = forge.merge(request.number, commit=True, issue_key=action.issue_key, approval=request.approval,
+                              head=request.head)
     except (ForgeError, PolicyError) as exc:
         store.add_log(action.issue_key, f"merge refused: {exc}", at)
         return False

@@ -108,9 +108,10 @@ class Forge:
         return next((stage for stage in self.kanban.stage_map if self.kanban.label_for(stage) in labels), "")
 
     # writes: preview unless commit
-    def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None) -> str:
+    def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None,
+              head: str | None = None) -> str:
         """Re-read readiness and the issue's closing request, then preview or report the verified head's merge outcome.
-        `approval` is the approval a policy check relied on; the final read must still report it."""
+        `approval` and `head` are what a policy check relied on; the final read must still report them."""
         mark = "#" if self.github else "!"
         found = self.requests()
         one = next((r for r in found if r.number == number), None)
@@ -124,6 +125,8 @@ class Forge:
             raise ForgeError(f"not merged: {merge_ready.line(one, mark)}")
         if approval is not None and one.approval != approval:  # verdict leaves approval out
             raise ForgeError(f"{mark}{number} approval changed since the policy check: {approval} -> {one.approval}")
+        if head is not None and one.head != head:  # a push after the check is unreviewed code
+            raise ForgeError(f"{mark}{number} head changed since the policy check: {head[:7]} -> {one.head[:7]}")
         evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
         if not commit:
             return f"would merge {evidence}"
