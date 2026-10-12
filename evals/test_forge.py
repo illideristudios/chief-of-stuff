@@ -348,10 +348,10 @@ class StageWriteBackTest(unittest.TestCase):
         with self.assertRaisesRegex(forge.ForgeError, "Invented"):
             forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
 
-    def test_a_shared_label_never_reads_back_as_a_different_stage(self):
+    def test_a_shared_label_reads_as_its_first_stage_so_snapshots_still_load(self):
+        # The documented example shares columns; the engine keeps its stored stage within the column (#651).
         gh = FakeGh(issues=[gh_issue(4, "x", ["stage: shared"])])
-        with self.assertRaisesRegex(forge.ForgeError, "more than one stage"):
-            forge.Forge(GH, kanban=SHARED, gh=gh).snapshots()
+        self.assertEqual(forge.Forge(GH, kanban=SHARED, gh=gh).snapshots()[0]["stage"], "review")
 
     def test_stage_round_trips_through_project_status_including_terminal(self):
         gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={})

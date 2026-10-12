@@ -122,24 +122,23 @@ class Kanban:
         return self.github_project.options[self.stage_map[stage]]
 
     def stage_for_label(self, labels: tuple[str, ...]) -> str:
-        """The unique tracker stage those labels encode; ambiguous or unknown is refused."""
+        """The tracker stage those labels encode. A mark shared by stages reads as the first of them; the engine keeps its
+        stored stage when it shares that mark (#651). Marks for two different columns are refused."""
         hits = [s for s in (*self.stage_map, *self.terminal_stages) if self.label_for(s) in labels]
         if not hits:
             return ""
-        if len(hits) > 1:
-            raise ValueError(f"label maps to more than one stage: {', '.join(hits)}")
+        if len({self.label_for(s) for s in hits}) > 1:
+            raise ValueError(f"labels map to more than one stage: {', '.join(hits)}")
         return hits[0]
 
     def stage_for_status(self, option: str | None) -> str:
-        """The unique tracker stage a Status option encodes; unknown or shared is refused."""
+        """The tracker stage a Status option encodes; an unknown option is refused."""
         if not option:
             return ""
         hits = [s for s in (*self.stage_map, *self.terminal_stages) if self.status_for(s) == option]
         if not hits:
             raise ValueError(f"unknown project Status option: {option}")
-        if len(hits) > 1:
-            raise ValueError(f"Status option {option!r} maps to more than one stage: {', '.join(hits)}")
-        return hits[0]
+        return hits[0]  # a shared option reads as its first stage, as stage_for_label does
 
     def holds(self, stage: str) -> bool:
         return stage in self.hold_stages
