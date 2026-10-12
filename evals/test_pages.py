@@ -285,7 +285,7 @@ class ReloadSnippetTest(unittest.TestCase):
         # #340: %00 closed with no response; /sub/ listed without the snippet; /dir.html/ was an empty 200.
         (self.dir / "sub").mkdir()
         (self.dir / "dir.html").mkdir()
-        for path in ("/%00", "/sub/", "/dir.html/"):
+        for path in ("/%00", "/sub/", "/dir.html/", "/sub/%2F", "/dir.html%2F", "/%2F"):
             for method in ("GET", "HEAD"):
                 with self.subTest(path=path, method=method):
                     self.assertEqual(get(self.port, path, method=method).status, 404)
@@ -318,6 +318,13 @@ class ReloadSnippetTest(unittest.TestCase):
                     with self.subTest(method=method):
                         self.assertEqual(get(self.port, "/big.html", method=method).status, 413)
             self.assertEqual(reads, [])
+        locked = self.dir / "locked.html"
+        locked.write_text("<!doctype html><body>x</body>")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o600)
+        for method in ("GET", "HEAD"):
+            with self.subTest(unreadable=method):
+                self.assertEqual(get(self.port, "/locked.html", method=method).status, 404)
 
 
 class BannerPerRequestTest(unittest.TestCase):

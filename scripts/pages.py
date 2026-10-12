@@ -228,7 +228,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return False
         path = self.path.split("?")[0]
         decoded = unquote(path)
-        if "\0" in decoded or (path != "/" and path.endswith("/")):  # #340: null or a directory URL
+        if "\0" in decoded or (decoded != "/" and decoded.endswith("/")):  # #340: null or a directory URL, `%2F` too
             self.send_error(404)
             return False
         if any(part.startswith(".") for part in decoded.split("/")):  # `%2e` is a dot too
@@ -318,6 +318,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self.send_error(413, f"a page is at most {MAX_PAGE} bytes")
             stamp = stat.st_mtime
             if not body and not self.banner:
+                with path.open("rb"):  # GET would read it: an unreadable page is GET's 404, not a 200
+                    pass
                 # inject always adds ENCODED; length matches GET without reading the file
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
