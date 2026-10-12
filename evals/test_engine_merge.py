@@ -5,8 +5,8 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from dataclasses import dataclass
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -16,10 +16,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import engine_merge  # noqa: E402
 import forge  # noqa: E402
+import policy  # noqa: E402
+import reconcile  # noqa: E402
 import store  # noqa: E402
 import test_forge as tf  # noqa: E402
 import test_merge_approved as tma  # noqa: E402
 import test_merge_ready as tmr  # noqa: E402
+import test_reconcile as tr  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -41,9 +44,116 @@ class ExecutorTest(unittest.TestCase):
         self.db.upsert_item(self.key, title="Fix the parser")
         self.action = Merge(self.key)
         self.at = datetime.now(timezone.utc).isoformat()
+        self.p = tr.policies()
+        self.ready()
+
+    def ready(self):
+        self.db.upsert_item(self.key, stage="merge", review_state="approved", merge_state="ready")
+        self.db.record_segment(self.key, "review", 1,
+                               (datetime.fromisoformat(self.at) - timedelta(minutes=2)).isoformat(),
+                               self.at, "done")
+        self.db.set_resume(self.key, {"open_findings": {}})
+
+    def planned(self):
+        item = next(i for i in self.db.items() if i.issue_key == self.key)
+        state = self.db.resume(self.key)
+        actions = reconcile.plan([item], {self.key: self.db.segments(self.key)}, self.p,
+                                 {self.key: state.get("issue_type")}, 0, datetime.fromisoformat(self.at),
+                                 {self.key: state["open_findings"]}, rooms={self.key: state.get("room")},
+                                 decisions={self.key: self.db.decisions(self.key)})
+        self.assertEqual(actions, [reconcile.Merge(self.key)])
+        self.action = actions[0]
+
+    def refused(self, reason):
+        with mock.patch.object(forge.Forge, "merge", return_value="merged unexpectedly") as merge:
+            self.assertFalse(self.execute())
+        merge.assert_not_called()
+        self.assertIn("merge refused", self.message())
+        self.assertIn(reason, self.db.log(self.key)[0].message)
+
+    def test_review_withdrawn_after_planning_refuses_without_a_merge_call(self):
+        self.planned()
+        segment, = self.db.segments(self.key)
+        self.db.record_segment(self.key, "review", 1, segment.started_at, self.at, "failed")
+        self.refused("review")
+
+    def test_skipped_review_hook_refuses_even_with_a_green_approved_request(self):
+        with self.db.session() as session:
+            segment, = session.query(store.Segment).all()
+            session.delete(segment)
+        self.refused("review")
+
+    def test_architect_required_by_policy_after_planning_refuses_when_absent(self):
+        self.planned()
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        self.refused("architect")
+
+    def test_required_architect_and_answered_decision_allow_merge(self):
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
+        self.db.add_decision(self.key, "design", "Split the parser?", answer="yes", decided_by="trio")
+        self.planned()
+        self.assertTrue(self.execute())
+        self.assertEqual(len(self.gh.merges), 1)
+        self.assertIn("merged", self.message())
+
+    def test_room_policy_changed_after_planning_is_rechecked(self):
+        self.db.set_resume(self.key, {"room": "lab", "open_findings": {}})
+        self.planned()
+        self.p.rooms["lab"] = policy.Place("lab", policy={"architect": True})
+        self.refused("architect")
+
+    def test_a_decision_pending_after_planning_refuses_without_a_merge_call(self):
+        self.planned()
+        self.db.add_decision(self.key, "design", "Split the parser?")
+        self.refused("decision")
+
+    def test_changed_review_severity_policy_is_rechecked(self):
+        self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "important"})
+        self.db.set_resume(self.key, {"open_findings": {"minor": 1}})
+        self.planned()
+        self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "minor"})
+        self.refused("blocking review findings")
+
+    def test_findings_missing_at_execution_are_not_assumed_clean(self):
+        self.planned()
+        self.db.set_resume(self.key, {})
+        self.refused("review findings are unknown")
+
+    def test_new_blocking_findings_after_planning_refuse_merge(self):
+        self.planned()
+        self.db.set_resume(self.key, {"open_findings": {"important": 1}})
+        self.refused("blocking review findings")
+
+    def test_an_expired_merge_approval_is_rechecked_at_execution_time(self):
+        now = datetime.fromisoformat(self.at)
+        self.p.stages["review"] = policy.Place("review", "critic", {
+            "zach_gates": ("merge",), "approvals": (policy.Approval("merge", now + timedelta(seconds=1)),)})
+        self.planned()
+        self.at = (now + timedelta(seconds=1)).isoformat()
+        self.refused("gate requires Zach's approval")
+
+    def test_a_human_review_hold_added_after_planning_refuses(self):
+        self.planned()
+        self.db.set_human_review(self.key, True)
+        self.refused("human review")
+
+    def test_fresh_forge_changes_requested_refuses_after_planning(self):
+        self.planned()
+        self.forge = replace(self.forge, approver="robin")
+        self.gh.prs[0]["reviews"] = [tma.review("robin", "CHANGES_REQUESTED")]
+        self.refused("changes requested on the forge")
+
+    def test_issue_type_without_engine_review_requires_current_forge_approval(self):
+        self.p.workflows["short"] = policy.Workflow("short", "merge", issue_types=("bug",))
+        self.db.set_resume(self.key, {"issue_type": "bug", "open_findings": {}})
+        self.forge = replace(self.forge, approver="robin")
+        self.planned()
+        self.gh.prs[0]["reviews"] = []
+        self.refused("review has not run")
 
     def execute(self):
-        return engine_merge.execute(self.action, self.forge, self.db, at=self.at)
+        return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p)
 
     def message(self):
         entries = self.db.log(self.key)
@@ -170,6 +280,7 @@ class ExecutorTest(unittest.TestCase):
         self.key = self.forge.key(3)
         self.action = Merge(self.key)
         self.db.upsert_item(self.key)
+        self.ready()
         calls = []
         read = tmr.gitlab_fake({5: {}})
 
@@ -192,6 +303,7 @@ class ExecutorTest(unittest.TestCase):
         self.key = self.forge.key(3)
         self.action = Merge(self.key)
         self.db.upsert_item(self.key)
+        self.ready()
         writes = []
         read = tmr.gitlab_fake({5: {}})
 
