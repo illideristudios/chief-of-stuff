@@ -62,6 +62,8 @@ glab label create --name main --color '#428bca' --repo your-group/your-repo
 
 In Project mode, create the Status options `Planning`, `Plan Review`, `Testing`, `Implementation`, `Code Review`, `Fixes`, and `main` in the Project's field settings. The numbered stage lives in Status and `!!` remains an issue label. The updater adds the issue to the configured Project if it is absent. These labels and Status options must already exist; the updater reports missing marks and tells you to create them. Workspace initialization provisions the configured stage, terminal, and hold labels in label mode; in Project mode it provisions the hold label and checks all configured Status options, including terminal stages.
 
+Project reads refuse truncated item or field metadata, including Projects with more than 100 fields.
+
 Preview all active tracker issues:
 
 ```sh

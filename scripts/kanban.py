@@ -194,6 +194,10 @@ def _github_issue(gh, ref: backlog.IssueRef):
 
 
 def _project_rows(gh, project):
+    # item-list serializes values using at most 100 field definitions, even with a larger item limit.
+    _, error = _project_fields(gh, project)
+    if error:
+        return {}, error
     row, error = _gh_json(gh, ["project", "item-list", str(project.number), "--owner", project.owner,
                                "--format", "json", "--limit", "5000"])
     if error:
@@ -237,17 +241,24 @@ def _node_id(row):
     return value if isinstance(value, str) and value.strip() else None
 
 
-def _project_option_ids(gh, project, value: str | None):
+def _project_fields(gh, project):
     row, error = _gh_json(gh, ["project", "field-list", str(project.number), "--owner", project.owner,
                                "--format", "json", "--limit", "100"])
     if error:
-        return None, None, error
+        return [], error
     fields = row.get("fields") if isinstance(row, dict) else None
     if not isinstance(fields, list):
-        return None, None, "GitHub Project fields could not be parsed"
+        return [], "GitHub Project fields could not be parsed"
     total = row.get("totalCount")  # as for items: a full page is whole only when totalCount says so
     if total > len(fields) if isinstance(total, int) else len(fields) >= 100:
-        return None, None, "GitHub Project field list was truncated"
+        return [], "GitHub Project field list was truncated"
+    return fields, ""
+
+
+def _project_option_ids(gh, project, value: str | None):
+    fields, error = _project_fields(gh, project)
+    if error:
+        return None, None, error
     for field in fields:
         if isinstance(field, dict) and field.get("name") == project.field:
             field_id = _node_id(field)

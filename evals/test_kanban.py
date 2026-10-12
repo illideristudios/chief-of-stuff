@@ -535,12 +535,38 @@ class GitHubUpdaterTest(unittest.TestCase):
             if total is not None:
                 row["totalCount"] = total
             with self.subTest(total=total):
-                items, error = kanban._project_items(lambda args: (0, json.dumps(row), ""), self.config.github_project)
+                def gh(args):
+                    return (0, json.dumps(row), "") if args[:2] == ["project", "item-list"] else self.gh(args)
+
+                items, error = kanban._project_items(gh, self.config.github_project)
                 if total == 5000:
                     self.assertEqual((error, items), ("", {self.ref.url: "Plan"}))
                 else:
                     self.assertEqual(items, {})
                     self.assertIn("truncated", error)
+
+    def test_project_reads_refuse_truncated_field_metadata(self):
+        for total in (None, 100, 101):
+            fields = {"fields": [{"id": "PVTF_other", "name": "Other"}] * 100}
+            if total is not None:
+                fields["totalCount"] = total
+
+            def gh(args):
+                if args[:2] == ["project", "field-list"]:
+                    return 0, json.dumps(fields), ""
+                return self.gh(args)
+
+            with self.subTest(total=total):
+                statuses, error = kanban._project_items(gh, self.config.github_project)
+                item, status, item_error = kanban._project_item(gh, self.config.github_project, self.ref)
+                if total == 100:
+                    self.assertEqual((statuses, error), ({self.ref.url: "Plan"}, ""))
+                    self.assertEqual((status, item_error), ("Plan", ""))
+                else:
+                    self.assertEqual(statuses, {})
+                    self.assertEqual((item, status), (None, None))
+                    self.assertIn("field list was truncated", error)
+                    self.assertIn("field list was truncated", item_error)
 
     def test_project_field_list_at_limit_is_refused_unless_total_count_says_it_is_whole(self):
         status = {"id": "PVTSSF_status", "name": "Status", "options": [{"id": "option_Build", "name": "Build"}]}

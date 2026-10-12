@@ -331,6 +331,28 @@ class StageWriteBackTest(unittest.TestCase):
         self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
                                 "stage": "doing", "human_review": False, "merge_state": ""}])
 
+    def test_snapshots_refuse_partial_project_fields_before_store_sync(self):
+        issue = gh_issue(4, "Project issue", ["stage: ready"])
+        gh = FakeGh(issues=[issue], status={issue["url"]: "Doing"})
+
+        def partial(args):
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"name": "Other"}] * 100, "totalCount": 101}), ""
+            if args[:2] == ["project", "item-list"]:
+                # gh drops Status when its field definition is beyond the first page.
+                return 0, json.dumps({"items": [{"content": {"url": issue["url"]}}], "totalCount": 1}), ""
+            return gh(args)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            db.upsert_item("github:example/app#4", stage="doing")
+            with self.assertRaisesRegex(forge.ForgeError, "project status: .*field list was truncated"):
+                db.sync_from_forge(forge.Forge(GH, kanban=BOARD, gh=partial).snapshots())
+            self.assertEqual(db.items()[0].stage, "doing")
+
     def test_project_snapshots_match_issue_urls_case_insensitively(self):
         for repo, item_repo in (("Example/App", "example/app"), ("example/app", "Example/App")):
             with self.subTest(repo=repo, item_repo=item_repo):
