@@ -659,11 +659,13 @@ class BuildTest(CloneCase):
 
     def test_a_failed_worktree_add_is_a_refusal_and_leaves_no_tree(self):
         make_repo.git(["branch", "feat/new", "main"], self.clone)
-        with self.assertRaises(mw.RefusedError) as e:
+        with mock.patch.object(mw, "git_trusted", wraps=mw.git_trusted) as trusted, self.assertRaises(mw.RefusedError) as e:
             self.build()
         self.assertIn("worktree add", str(e.exception))
         self.assertFalse(self.tree.exists())
         self.assertIn("feat/new", self.branches(), "a branch that existed before the build must stay")
+        self.assertNotIn("left branch", str(e.exception))
+        self.assertEqual([call.args[0][:2] for call in trusted.call_args_list], [["worktree", "add"]])
 
     def test_main_exits_1_when_the_worktree_add_fails(self):
         make_repo.git(["branch", "feat/new", "main"], self.clone)
@@ -672,6 +674,7 @@ class BuildTest(CloneCase):
         self.assertTrue(err.startswith("refused:"), err)
         self.assertFalse(self.tree.exists())
         self.assertIn("feat/new", self.branches())
+        self.assertNotIn("left branch", err)
 
     def test_a_tree_created_by_another_repository_during_add_survives(self):
         other = make_repo.build(self.root, {"clone": "competitor", "origin": "competitor.git", "worktrees": []})
@@ -722,14 +725,16 @@ class BuildTest(CloneCase):
                 return 1, "planted failure after mkdir"
             return real(args, cwd)
 
-        with mock.patch.object(mw, "git_trusted", empty_then_fail):
-            with self.assertRaises(mw.RefusedError):
+        with mock.patch.object(mw, "git_trusted", side_effect=empty_then_fail) as trusted:
+            with self.assertRaises(mw.RefusedError) as raised:
                 self.build()
         self.assertFalse(self.tree.exists())
         self.assertEqual(self.branches(), "")
+        self.assertEqual(str(raised.exception), "git worktree add failed: planted failure after mkdir")
+        self.assertEqual([call.args[0][:2] for call in trusted.call_args_list], [["worktree", "add"]])
 
-    def test_a_failed_add_that_left_a_tree_and_branch_removes_both(self):
-        """#448/#376: when add succeeds then the call still refuses, scrub only what this build made."""
+    def test_a_failed_add_that_left_a_tree_and_branch_preserves_and_reports_both(self):
+        """Even a clean tree at the base may hold work by the time cleanup runs."""
         real = mw.git_trusted
 
         def add_then_fail(args, cwd):
@@ -739,12 +744,15 @@ class BuildTest(CloneCase):
                 return 1, "planted failure after add"
             return real(args, cwd)
 
-        with mock.patch.object(mw, "git_trusted", add_then_fail):
+        with mock.patch.object(mw, "git_trusted", side_effect=add_then_fail) as trusted:
             with self.assertRaises(mw.RefusedError) as e:
                 self.build()
-        self.assertIn("worktree add", str(e.exception))
-        self.assertFalse(self.tree.exists())
-        self.assertEqual(self.branches(), "")
+        self.assertEqual(str(e.exception), "git worktree add failed: planted failure after add"
+                         f"; left {self.tree.resolve()}: remove it after checking it; left branch feat/new")
+        self.assertTrue((self.tree / "README.md").is_file())
+        self.assertIn(str(self.tree), make_repo.git(["worktree", "list", "--porcelain"], self.clone))
+        self.assertIn("feat/new", self.branches())
+        self.assertEqual([call.args[0][:2] for call in trusted.call_args_list], [["worktree", "add"]])
 
     def test_a_failed_add_that_left_only_a_new_branch_preserves_and_reports_it(self):
         """A branch without an owned tree cannot be distinguished from a competing creator's ref."""
@@ -786,29 +794,23 @@ class BuildTest(CloneCase):
         head = make_repo.git(["commit-tree", "main^{tree}", "-p", "main", "-m", "competitor"], self.clone)
         self.assert_competing_branch_preserved(head)
 
-    def test_a_branch_moved_during_cleanup_survives_and_is_reported(self):
+    def test_a_tree_created_by_the_same_repository_during_add_survives(self):
         real = mw.git_trusted
-        head = make_repo.git(["commit-tree", "main^{tree}", "-p", "main", "-m", "competitor"], self.clone)
-        deletes = []
 
-        def move_before_delete(args, cwd):
+        def competing_add(args, cwd):
             if args[:2] == ["worktree", "add"]:
-                code, detail = real(args, cwd)
-                self.assertEqual(code, 0, detail)
-                return 1, "planted failure after add"
-            if args[:2] == ["update-ref", "-d"]:
-                deletes.append(args)
-                make_repo.git(["update-ref", "refs/heads/feat/new", head], self.clone)
+                make_repo.git(["worktree", "add", "-q", "--detach", str(self.tree), "main"], self.clone)
             return real(args, cwd)
 
-        with mock.patch.object(mw, "git_trusted", move_before_delete):
+        with mock.patch.object(mw, "git_trusted", side_effect=competing_add) as trusted:
             with self.assertRaises(mw.RefusedError) as raised:
                 self.build(from_local=True)
-        self.assertEqual(len(deletes), 1, "exercise the compare-and-delete race")
-        self.assertEqual(rev(self.clone, "refs/heads/feat/new"), head)
-        self.assertFalse(self.tree.exists())
+        self.assertTrue((self.tree / "README.md").is_file())
+        self.assertEqual(rev(self.tree), rev(self.clone, "main"))
+        self.assertIn(str(self.tree), make_repo.git(["worktree", "list", "--porcelain"], self.clone))
+        self.assertIn(f"; left {self.tree.resolve()}: remove it after checking it", str(raised.exception))
         self.assertIn("left branch feat/new", str(raised.exception))
-        self.assertIn("cleanup failed", str(raised.exception))
+        self.assertEqual([call.args[0][:2] for call in trusted.call_args_list], [["worktree", "add"]])
 
     def test_a_branch_checked_out_in_another_tree_survives_cleanup(self):
         real = mw.git_trusted
@@ -827,43 +829,38 @@ class BuildTest(CloneCase):
         with mock.patch.object(mw, "git_trusted", another_checkout):
             with self.assertRaises(mw.RefusedError) as raised:
                 self.build(from_local=True)
-        self.assertFalse(self.tree.exists())
-        self.assertTrue(mw._owns_worktree(self.clone, other))
+        self.assertTrue((self.tree / "README.md").is_file())
+        self.assertTrue((other / "README.md").is_file())
+        self.assertEqual(make_repo.git(["symbolic-ref", "HEAD"], other), "refs/heads/feat/new")
         self.assertIn("feat/new", self.branches())
         self.assertIn("left branch feat/new", str(raised.exception))
-        self.assertFalse(any(args[:2] == ["update-ref", "-d"] for args in calls))
+        self.assertEqual([args[:2] for args in calls], [["worktree", "add"]])
 
-    def assert_failed_remove_retains_tree(self, failure):
+    def test_a_failed_add_preserves_dirty_work_and_a_moved_branch(self):
         real = mw.git_trusted
         calls = []
+        head = make_repo.git(["commit-tree", "main^{tree}", "-p", "main", "-m", "competitor"], self.clone)
 
         def fail_after_add(args, cwd):
             calls.append(args)
             if args[:2] == ["worktree", "add"]:
                 code, detail = real(args, cwd)
                 self.assertEqual(code, 0, detail)
+                (self.tree / "README.md").write_text("work to keep\n")
+                make_repo.git(["update-ref", "refs/heads/feat/new", head], self.clone)
                 return 1, "planted failure after add"
-            if args[:2] == ["worktree", "remove"]:
-                return failure
             return real(args, cwd)
 
         with mock.patch.object(mw, "git_trusted", fail_after_add):
             with self.assertRaises(mw.RefusedError) as raised:
                 self.build()
-        self.assertTrue(mw._owns_worktree(self.clone, self.tree))
-        self.assertTrue((self.tree / "README.md").is_file())
+        self.assertEqual((self.tree / "README.md").read_text(), "work to keep\n")
+        self.assertEqual(rev(self.clone, "refs/heads/feat/new"), head)
         self.assertIn(str(self.tree), make_repo.git(["worktree", "list", "--porcelain"], self.clone))
         self.assertIn("feat/new", self.branches())
         self.assertIn(f"left {self.tree.resolve()}", str(raised.exception))
         self.assertIn("left branch feat/new", str(raised.exception))
-        self.assertIn(failure[1], str(raised.exception))
-        self.assertFalse(any(args[0] == "update-ref" or args[:2] == ["branch", "-D"] for args in calls))
-
-    def test_a_registered_tree_is_retained_and_reported_when_git_remove_fails(self):
-        self.assert_failed_remove_retains_tree((1, "planted remove failure"))
-
-    def test_a_registered_tree_is_retained_and_reported_when_git_remove_times_out(self):
-        self.assert_failed_remove_retains_tree(git_trees.ReadFailure(1, "TimeoutExpired: git worktree remove"))
+        self.assertEqual([args[:2] for args in calls], [["worktree", "add"]])
 
     def test_the_report_line_carries_the_short_sha_not_the_full_one(self):
         remote_head = advance_remote(self.root)
@@ -878,6 +875,49 @@ class BuildTest(CloneCase):
         self.assertEqual(code, 0, err)
         self.assertIn(remote_head[:7], out)
         self.assertNotIn(remote_head, out)
+
+
+class DiscardTest(unittest.TestCase):
+    """Failed adds leave all potential work alone, and branch probes only affect the report."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.path = self.root / "tree"
+
+    def test_only_a_confirmed_missing_cut_branch_is_omitted(self):
+        for result in ((0, ""), (1, ""), (2, "failed"), (128, "fatal"),
+                       git_trees.ReadFailure(1, "TimeoutExpired")):
+            with self.subTest(result=result), mock.patch.object(mw, "_run", return_value=result) as run, \
+                    mock.patch.object(mw, "git_trusted", side_effect=AssertionError("cleanup wrote to Git")), \
+                    mock.patch.object(mw, "git", side_effect=AssertionError("cleanup checked ownership")):
+                report = mw.discard(self.root, self.path, "feat/new")
+            expected = "" if result == (1, "") else "; left branch feat/new"
+            self.assertEqual(report, expected)
+            run.assert_called_once_with(["show-ref", "--verify", "--quiet", "refs/heads/feat/new"],
+                                        self.root, git_trees.audit_env())
+
+    def test_a_pre_existing_branch_is_never_probed_or_reported(self):
+        self.path.mkdir()
+        (self.path / "keep.txt").write_text("work\n")
+        with mock.patch.object(mw, "_run") as run:
+            report = mw.discard(self.root, self.path, None)
+        run.assert_not_called()
+        self.assertEqual(report, f"; left {self.path}: remove it after checking it")
+        self.assertEqual((self.path / "keep.txt").read_text(), "work\n")
+
+    def test_a_file_or_symlink_is_preserved_and_reported(self):
+        for kind in ("file", "symlink"):
+            with self.subTest(kind=kind):
+                path = self.root / kind
+                if kind == "file":
+                    path.write_text("work\n")
+                else:
+                    path.symlink_to(self.root / "missing")
+                self.assertEqual(mw.discard(self.root, path, None),
+                                 f"; left {path}: remove it after checking it")
+                self.assertTrue(os.path.lexists(path))
 
 
 class BranchProbeFailureTest(CloneCase):
