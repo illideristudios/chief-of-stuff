@@ -32,6 +32,8 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
         if stage_mark is not None and stage_mark not in got.issue.labels:
             item.stage = next((s for s in board.stage_map if board.label_for(s) in got.issue.labels), "")
             stage_mark = board.label_for(item.stage) if item.stage else None
+        if board and board.human_review_label in got.issue.labels:
+            item.human_review = True  # a forge-side hold counts even before the store hears of it
         item.merge_state = request.verdict
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
         state = store.resume(action.issue_key) or {}

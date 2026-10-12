@@ -174,6 +174,27 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(self.gh.merges, [])
         self.assertIn("left its stage", self.message())
 
+    HOLD = [{"name": "stage: merge"}, {"name": "needs human"}]
+
+    def at_merge_stage(self):
+        board = tf.Kanban(stages=("stage: doing", "stage: merge"), human_review_label="needs human",
+                          stage_map={"implement": 0, "review": 0, "merge": 1})
+        self.forge = forge.Forge(tf.GH, kanban=board, gh=self.gh)
+        self.gh.issues[3]["labels"] = [{"name": "stage: merge"}]
+        self.planned()
+
+    def test_a_forge_human_review_hold_added_after_planning_refuses(self):
+        self.at_merge_stage()
+        self.gh.issues[3]["labels"] = self.HOLD
+        self.refused("human review")
+
+    def test_a_forge_human_review_hold_added_during_the_policy_check_refuses(self):
+        self.at_merge_stage()
+        with self.during_policy_check(lambda: self.gh.issues[3].update(labels=self.HOLD)):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("held for human review", self.message())
+
     def test_a_stale_cached_approval_is_replaced_by_the_fresh_request(self):
         no_review = policy.parse({"default_workflow": "direct", "personas": {}, "stages": {"merge": {}},
                                   "workflows": {"direct": {"start": "merge", "edges": []}}})

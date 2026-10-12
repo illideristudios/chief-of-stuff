@@ -134,6 +134,8 @@ class Forge:
                 raise ForgeError(f"issue: {got.error or 'not found'}")
             if not got.issue.is_open:
                 raise ForgeError(f"{issue_key} is no longer open on the forge")
+            if self.kanban and self.kanban.human_review_label in got.issue.labels:
+                raise ForgeError(f"{issue_key} is held for human review on the forge")
             if stage_mark is not None and stage_mark not in got.issue.labels:
                 raise ForgeError(f"{issue_key} left its stage since the policy check: {stage_mark} is gone")
         evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
