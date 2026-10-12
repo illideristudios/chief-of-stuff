@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
@@ -568,6 +569,20 @@ class PushGapTest(unittest.TestCase):
         report = al.audit(root, "2026-09-17")
         self.assertTrue(any("unpushed" in line for line in report.lines), report.lines)
 
+    def test_pass_push_gap_skips_unreadable_then_names_when_none_readable(self):
+        """#537: `_pass_push_gap` takes the first readable fact, else names the first tree."""
+        a, b = Path("/tmp/wt-a"), Path("/tmp/wt-b")
+        answers = {a: al.UNREADABLE_GAP, b: "main abc even with origin/main"}
+        with patch.object(al, "_push_gap", side_effect=lambda path, view=None: answers[path]):
+            self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
+                             "main abc even with origin/main")
+            answers[b] = al.UNREADABLE_GAP
+            self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
+                             "wt-a: main vs origin/main unknown")
+            answers.update({a: "main abc123 vs origin/main unknown", b: "main abc even with origin/main"})
+            self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
+                             "main abc even with origin/main")
+
 
 class ArgvTest(unittest.TestCase):
     def test_git_is_called_with_a_list_and_never_through_a_shell(self):
@@ -670,6 +685,17 @@ class OrphanJoinTest(unittest.TestCase):
         self.assertIn("wt-dirty", line)
         self.assertIn("sam", line)
         self.assertIn("uncommitted", line)
+
+    def test_an_orphan_line_escapes_controls_in_the_branch(self) -> None:
+        tmp, root = workspace(self.DIRTY, self.OWNS, sessions=session_row("robin"))
+        self.addCleanup(tmp.cleanup)
+        real = git_trees.read_state
+        with patch.object(git_trees, "read_state",
+                          side_effect=lambda *a, **k: replace(real(*a, **k), branch="feat/x\u202ey")):
+            report = al.audit(root, "2026-09-17")
+        line = str(report.orphans[0])
+        self.assertNotIn("\u202e", line)
+        self.assertIn("\\u202e", line)
 
     def test_a_live_owner_is_not_an_orphan(self) -> None:
         tmp, root = workspace(self.DIRTY, self.OWNS, sessions=session_row("sam"))
@@ -1191,6 +1217,26 @@ class PushGapNamesMainTest(unittest.TestCase):
         line = al._push_gap(self.root / "trees" / "wt-unmerged")
         self.assertIn(f"main {self.main}", line)
         self.assertIn("even with origin/main", line)
+
+
+class BranchNameControlTest(unittest.TestCase):
+    """#534: worker branch names with controls must not reach an audit line raw."""
+
+    def test_state_escapes_line_separator_bidi_and_c1_in_the_branch(self):
+        for what, ctl, shown in (("line separator", "\u2028", "\\u2028"),
+                                 ("bidi override", "\u202e", "\\u202e"),
+                                 ("C1 control", "\x9b", "\\x9b")):
+            with self.subTest(what), \
+                    patch.object(git_trees, "branch_of", return_value=f"feat/x{ctl}y"), \
+                    patch.object(git_trees, "git", return_value=(0, "")), \
+                    patch.object(al, "_merged", return_value=0):
+                branch, _why = al._state(Path("/tmp/tree"))
+                self.assertEqual(branch, f"feat/x{shown}y")
+                self.assertEqual([c for c in branch if not c.isprintable()], [], repr(branch))
+                line = al._tree_line("wt-x", branch, "")
+                self.assertEqual([c for c in line if not c.isprintable()], [], repr(line))
+                self.assertIn(shown, line)
+                self.assertNotIn(ctl, line)
 
 
 class RefJoinTest(unittest.TestCase):

@@ -292,16 +292,37 @@ class SettingsCheckTest(unittest.TestCase):
         self.assertEqual(code, 1)
 
     def test_a_missing_settings_file_is_not_a_fault_and_is_said_to_be_absent(self):
-        # settings.load: a `Settings:` line whose path is not a file is the defaults. Nothing was validated,
+        # settings.load: a `Settings:` line whose path is absent is the defaults. Nothing was validated,
         # so the line says the file is absent and never says ok.
-        for what, setup in (("no file", None), ("a directory in its place", lambda root: (root / TOML).mkdir())):
-            with self.subTest(what):
-                code, lines, err = self.run_health(f"- Settings: `{TOML}`\n", setup=setup)
-                found = self.settings_line(lines)
-                self.assertIn("absent", found)
-                self.assertNotRegex(found, r"\bok\b")
-                self.assertEqual(code, 0)
-                self.assertEqual(err, "")
+        code, lines, err = self.run_health(f"- Settings: `{TOML}`\n")
+        found = self.settings_line(lines)
+        self.assertIn("absent", found)
+        self.assertNotRegex(found, r"\bok\b")
+        self.assertEqual(code, 0)
+        self.assertEqual(err, "")
+
+    def test_a_directory_at_the_settings_path_is_a_settings_fault_not_absent(self):
+        """#347: a Settings path that is a directory is a refusal, not `absent, defaults`."""
+        code, lines, err = self.run_health(f"- Settings: `{TOML}`\n", setup=lambda root: (root / TOML).mkdir())
+        found = self.settings_line(lines)
+        self.assertIn("invalid", found)
+        self.assertNotIn("absent", found)
+        self.assertEqual(code, 1)
+        self.assertEqual(err, "")
+
+    def test_a_non_utf8_config_is_one_line_on_stderr_and_exit_2(self):
+        """#285: CLAUDE.md that is not UTF-8 is exit 2 on stderr, not a traceback."""
+        with tempfile.TemporaryDirectory() as d:
+            config = Path(d) / "CLAUDE.md"
+            config.write_bytes(b"\xff\xfe## Coordinator\n")
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = ph.main(["--config", str(config), "--timeout", "1"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(err.getvalue().count("\n"), 1)
+        self.assertIn("UTF-8", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
 
     def test_an_empty_settings_file_is_ok_not_absent(self):
         # probe_health: "a settings file that is not there is `absent, defaults`". A zero-byte file is there.

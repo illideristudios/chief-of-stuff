@@ -1024,8 +1024,9 @@ class HealthServerTest(unittest.TestCase):
             run.stop_server(server)
         calls = [json.loads(l) for l in log.read_text().splitlines()]
         self.assertEqual([c["tool"] for c in calls], ["health", "health"])
-        self.assertEqual([c["path"] for c in calls], ["/ready", "/login"])
-        self.assertEqual([c["status"] for c in calls], [200, 500])
+        # Concurrent probes on ThreadingHTTPServer can land in either order (#389).
+        self.assertEqual(sorted((c["path"], c["status"]) for c in calls),
+                         [("/login", 500), ("/ready", 200)])
 
     def test_an_unlisted_path_is_404_not_a_crash(self) -> None:
         import urllib.request

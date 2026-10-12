@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import call, patch
+from unittest.mock import ANY, call, patch
 
 import run
 
@@ -47,20 +47,49 @@ class PagesLifecycleTest(unittest.TestCase):
                 run.stop_pages(self.work)
                 kill.assert_not_called()
 
-    def test_stop_pages_signals_a_live_non_harness_pid(self):
-        """R1 positive control: an inert cleanup stub must not pass."""
-        child = subprocess.Popen(
-            [sys.executable, "-c", "import time; time.sleep(60)"],
+    def _pages_serve_child(self) -> subprocess.Popen:
+        """A live process whose cmdline looks like `pages.py serve` (the harness identity check)."""
+        script = self.root / "pages.py"
+        script.write_text("import time; time.sleep(60)\n")
+        return subprocess.Popen(
+            [sys.executable, str(script), "serve", "--port", "41000"],
             start_new_session=True,
         )
+
+    def test_stop_pages_signals_a_live_pages_serve_pid(self):
+        """#482: only a pid whose command line is pages.py serve is signalled."""
+        child = self._pages_serve_child()
         try:
             self.assertIsNone(child.poll())
             self.assertGreater(child.pid, 1)
             self.assertNotEqual(child.pid, os.getpid())
             self.pid.write_text(str(child.pid))
-            with patch.object(run.os, "kill") as kill:
+            sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
+            import pages as pg  # noqa: E402
+            with patch.object(run.os, "kill") as kill, \
+                 patch.object(pg, "is_pages_serve", return_value=True) as identified:
                 run.stop_pages(self.work)
+                identified.assert_called_once_with(child.pid, None)
                 kill.assert_called_once_with(child.pid, signal.SIGTERM)
+        finally:
+            child.terminate()
+            child.wait(timeout=5)
+
+    def test_stop_pages_spares_an_unrelated_positive_pid(self):
+        """#482: a positive pid that is not pages.py serve must not be signalled."""
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import time; time.sleep(60)"],
+            start_new_session=True,
+        )
+        try:
+            self.pid.write_text(str(child.pid))
+            sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
+            import pages as pg  # noqa: E402
+            with patch.object(run.os, "kill") as kill, \
+                 patch.object(pg, "is_pages_serve", return_value=False) as identified:
+                run.stop_pages(self.work)
+                identified.assert_called_once_with(child.pid, None)
+                kill.assert_not_called()
         finally:
             child.terminate()
             child.wait(timeout=5)
@@ -96,9 +125,9 @@ class PagesLifecycleTest(unittest.TestCase):
             events.append("turn")
             raise RuntimeError("first turn failed")
 
-        def stop(work):
+        def stop(work, port=None):
             events.append("stop")
-            real_stop_pages(work)
+            real_stop_pages(work, port)
 
         def kill(pid, sig):
             events.append("kill")
@@ -109,13 +138,16 @@ class PagesLifecycleTest(unittest.TestCase):
              patch.object(run.os, "kill", side_effect=kill) as signalled, \
              patch.object(run, "command", return_value=["mock-runtime"]), \
              patch.object(run, "drive_turns", side_effect=first_turn) as turns:
-            with self.assertRaisesRegex(RuntimeError, "first turn failed"):
-                run.run_one(self.case, "agent", "sonnet", self.root / "out")
+            sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
+            import pages as pg  # noqa: E402
+            with patch.object(pg, "is_pages_serve", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "first turn failed"):
+                    run.run_one(self.case, "agent", "sonnet", self.root / "out")
             self.assertEqual(events, ["start", "turn", "stop", "kill"])
             started.assert_called_once()
             self.assertEqual(started.call_args.args[0], self.work)
             turns.assert_called_once()
-            stopped.assert_called_once_with(self.work)
+            stopped.assert_called_once_with(self.work, ANY)  # the case's own Board port
             signalled.assert_called_once_with(server_pid, signal.SIGTERM)
         self.assertFalse(self.work.exists())
 
@@ -189,8 +221,11 @@ class PagesLifecycleTest(unittest.TestCase):
             self.pid.write_text(str(server_pid))
             return subprocess.CompletedProcess(args[0], 0, "pages: serving\n", "")
 
+        sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
+        import pages as pg  # noqa: E402
         with patch.object(run.subprocess, "run", side_effect=ensure) as started, \
-             patch.object(run.os, "kill") as kill:
+             patch.object(run.os, "kill") as kill, \
+             patch.object(pg, "is_pages_serve", return_value=True):
             run.start_fixture_pages(self.work, {}, run.PLUGIN_ROOT)
             started.assert_called_once()
             self.assertEqual(int(self.pid.read_text()), server_pid)
@@ -205,19 +240,25 @@ class PagesLifecycleTest(unittest.TestCase):
         output = io.StringIO()
         attempts = []
 
+        real_run = subprocess.run
+
         def ensure(argv, **kwargs):
-            self.assertIn("--ensure", argv)
+            if "--ensure" not in argv:  # stop_pages may ask ps via the same subprocess.run
+                return real_run(argv, **kwargs)
             attempts.append(kwargs["cwd"])
             if len(attempts) == 1:
                 raise error
             (kwargs["cwd"] / "pages" / ".pid").write_text(str(os.getpid() + 1000))
             return subprocess.CompletedProcess(argv, 0, "pages: serving\n", "")
 
+        sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
+        import pages as pg  # noqa: E402
         with patch.object(run, "EVALS", self.root / "sweep"), \
              patch.object(run, "load_cases", return_value=[failed, healthy]), \
              patch.object(run, "snapshot_plugin", return_value=run.PLUGIN_ROOT), \
              patch.object(run.subprocess, "run", side_effect=ensure), \
              patch.object(run.os, "kill"), \
+             patch.object(pg, "is_pages_serve", return_value=True), \
              patch.object(run, "run_turns", return_value=(
                  [("next case ran", True, "control")], None, {},
              )) as turns, \

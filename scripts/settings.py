@@ -367,16 +367,28 @@ def _notify(table: dict, root: Path) -> Notify:
 
 
 def load(root: Path, settings_path: str | None) -> Settings:
-    """`settings_path` is the `Settings:` line's value, relative to `root`, or None when there is none."""
+    """`settings_path` is the `Settings:` line's value, relative to `root`, or None when there is none.
+
+    An absent file is the defaults. A path that is there but not a readable UTF-8 file (a directory,
+    unreadable, not UTF-8) is a refusal — never silent defaults (#347, #285).
+    """
     if not settings_path:
         return Settings()
     path = Path(root) / settings_path
-    if not path.is_file():
+    try:
+        path.stat()
+    except (FileNotFoundError, NotADirectoryError):
         return Settings()
+    except OSError as e:
+        raise SettingsError(f"{settings_path}: {e.strerror or e}") from None
+    if not path.is_file():
+        raise SettingsError(f"{settings_path}: not a file")
     try:
         data = tomllib.loads(path.read_text())
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise SettingsError(f"{settings_path}: {e}") from None
+    except OSError as e:
+        raise SettingsError(f"{settings_path}: {e.strerror or e}") from None
     lanes = data.get("lanes", {})
     if not isinstance(lanes, dict):
         raise SettingsError(f"{settings_path}: [lanes] is not a table")

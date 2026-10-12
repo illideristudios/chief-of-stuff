@@ -650,7 +650,8 @@ def _state(worktree: Path, view=None) -> tuple[str, str]:
         reasons.append("not on main")
     elif merged != 0:
         reasons.append(f"on main: {UNREADABLE_PHRASE}")
-    return branch, "; ".join(reasons)
+    # Worker-controlled branch names can carry line/bidi/C1 controls; escape before any audit line (#534).
+    return git_trees.clean(branch), "; ".join(reasons)
 
 
 def _tree_line(name: str, branch: str, why: str) -> str:
@@ -749,6 +750,18 @@ def _push_gap(worktree: Path, view=None) -> str:
     if behind != "0":
         parts.append(f"{behind} behind")
     return at + ", ".join(parts) + " vs origin/main"
+
+
+UNREADABLE_GAP = "main vs origin/main unknown"
+
+
+def _pass_push_gap(order: list[Path], view_of, names: dict[Path, str]) -> str:
+    """Gap line for the pass: first readable tree's fact, else name the first tree that could not be read (#537)."""
+    for path in order:
+        line = _push_gap(path, view_of(path))
+        if not line.endswith(UNREADABLE_GAP.removeprefix("main ")):  # `main abc123 vs origin/main unknown` too
+            return line
+    return f"{names[order[0]]}: {UNREADABLE_GAP}"
 
 
 # Read labeled stop-file fields.
@@ -929,7 +942,9 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
             for path, found in source.items():
                 claims.setdefault(path, []).extend(found)
         for path in order:
-            finding = judge(names[path], git_trees.read_state(path, view_of(path)), claims.get(path, []))
+            state = git_trees.read_state(path, view_of(path))
+            state = replace(state, branch=git_trees.clean(state.branch))  # the branch reaches an audit line (#534)
+            finding = judge(names[path], state, claims.get(path, []))
             if isinstance(finding, Orphan):
                 report.orphans.append(finding)
             elif isinstance(finding, Unclaimed):
@@ -939,7 +954,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
             report.lines.append(missing_tree(handle, name, detail, view_of(handle) if handle else None))
         if order:
             # All worktrees share the same main and origin/main refs.
-            report.lines.append(_push_gap(order[0], view_of(order[0])))
+            report.lines.append(_pass_push_gap(order, view_of, names))
     report.lines.extend(group_reopens(report.reopen))
     report.lines.extend(str(o) for o in report.orphans)
     report.lines.extend(str(u) for u in report.unclaimed)

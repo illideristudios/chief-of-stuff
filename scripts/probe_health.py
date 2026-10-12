@@ -91,13 +91,12 @@ def check_settings(root: Path, name: str) -> tuple[str, int, dict[str, tuple[Mod
     """The line and fault count for the settings file `name`, loaded from `root`, and its `[models]` rotations."""
     absent = f"settings {name} absent, defaults", 0, {}
     try:
-        (root / name).stat()  # is_file() answers False for a path it cannot reach; stat says which it is
-        if not (root / name).is_file():
+        try:
+            (root / name).stat()  # distinguish absent from a path that is there but not a file (#347)
+        except (FileNotFoundError, NotADirectoryError):
             return absent
-        models = load_settings(root, name).models
-    except (FileNotFoundError, NotADirectoryError):
-        return absent
-    except (SettingsError, ValueError, OSError) as exc:  # schema or TOML; not UTF-8 or a NUL in the name; unreadable
+        models = load_settings(root, name).models  # directory / unreadable / bad TOML → SettingsError
+    except (SettingsError, ValueError, OSError) as exc:  # schema or TOML; not UTF-8; a NUL in the name; unreadable
         why = getattr(exc, "strerror", None) or str(exc)  # an OSError's own text carries the absolute path
         return f"settings {name} invalid: {' '.join(why.split()).removeprefix(f'{name}: ')}", 1, {}
     return f"settings {name} ok", 0, models
@@ -160,7 +159,11 @@ def main(argv: list[str] | None = None) -> int:
     if not config.is_file():
         print(f"no config at {config}", file=sys.stderr)
         return 2
-    text = config.read_text()
+    try:
+        text = config.read_text()
+    except UnicodeDecodeError as exc:
+        print(f"{config}: not UTF-8 ({exc.reason})", file=sys.stderr)
+        return 2
     bad = 0
     if name := settings_path(text):
         said, bad, models = check_settings(config.parent, name)
