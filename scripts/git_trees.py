@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import git_view
 from tree_state import UNREADABLE_BRANCH, TreeState
@@ -66,6 +67,13 @@ def write_env() -> dict[str, str]:
     return env
 
 
+class ReadFailure(NamedTuple):
+    """A helper failure, distinguishable from Git's exit while preserving the two-item return shape."""
+
+    code: int
+    detail: str
+
+
 def git(args: list[str], cwd: Path, view: git_view.View | git_view.Unviewable | None = None, *,
         expected_common: Path | None = None) -> tuple[int, str]:
     """One git call that reads, through the sanitised view (#443). Never a shell, always a list, always bounded.
@@ -80,11 +88,11 @@ def git(args: list[str], cwd: Path, view: git_view.View | git_view.Unviewable | 
         elif _for_tree(view, cwd) and (expected_common is None or view.layout.common == expected_common.resolve()):
             out = git_view.in_view(view, args, timeout=GIT_TIMEOUT)
         else:
-            return 128, "unreadable: the opened view is not this tree's"
+            return ReadFailure(128, "unreadable: the opened view is not this tree's")
     except (git_view.Unviewable, RuntimeError, ValueError) as exc:  # RuntimeError: no home to put the view in; ValueError: a path it cannot write
-        return 128, f"unreadable: {exc}"
+        return ReadFailure(128, f"unreadable: {exc}")
     except (OSError, subprocess.SubprocessError) as exc:
-        return 128, f"{type(exc).__name__}: {exc}"  # git's own failure code: 1 is a real answer to `--is-ancestor`
+        return ReadFailure(128, f"{type(exc).__name__}: {exc}")  # 1 is a real answer to `--is-ancestor`
     return out.returncode, (out.stdout or out.stderr).strip()
 
 

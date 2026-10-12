@@ -1692,9 +1692,11 @@ class GitViewFunnelTest(unittest.TestCase):
                              (128, "unreadable: metadata is not a bounded regular file"))
 
     def test_os_and_timeout_failures_keep_their_128_and_their_text(self) -> None:
-        for exc in (OSError("no git"), subprocess.TimeoutExpired(["git"], 15)):
+        for exc in (OSError("no git"), PermissionError("cache is read-only"), subprocess.TimeoutExpired(["git"], 15)):
             with self.subTest(type(exc).__name__), patch.object(git_view, "run", side_effect=exc):
-                code, text = git_trees.git(["rev-parse", "HEAD"], self.root)
+                result = git_trees.git(["rev-parse", "HEAD"], self.root)
+                self.assertIsInstance(result, git_trees.ReadFailure)
+                code, text = result
                 self.assertEqual((code, text), (128, f"{type(exc).__name__}: {exc}"))
 
     def test_a_hung_git_inside_the_view_is_bounded_by_git_timeout(self) -> None:
