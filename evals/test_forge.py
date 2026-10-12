@@ -317,6 +317,14 @@ class StageWriteBackTest(unittest.TestCase):
         self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
                                 "stage": "doing", "merge_state": ""}])
 
+    def test_project_snapshots_match_issue_urls_case_insensitively(self):
+        for repo, item_repo in (("Example/App", "example/app"), ("example/app", "Example/App")):
+            with self.subTest(repo=repo, item_repo=item_repo):
+                url = f"https://github.com/{item_repo}/issues/7"
+                gh = FakeGh(issues=[gh_issue(7, "Add a flag")], status={url: "Doing"})
+                snapshot, = forge.Forge(backlog.GitHubBacklog(repo), kanban=BOARD, gh=gh).snapshots()
+                self.assertEqual(snapshot["stage"], "doing")
+
     def test_project_snapshots_fall_back_to_legacy_labels_without_status(self):
         for present in (False, True):
             for label, stage in (("stage: doing", "doing"), ("done", "done")):

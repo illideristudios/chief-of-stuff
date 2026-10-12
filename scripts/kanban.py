@@ -203,7 +203,7 @@ def _project_rows(gh, project):
         if isinstance(item, dict) and isinstance(item.get("content"), dict):
             url = item["content"].get("url")
             if isinstance(url, str):
-                items[url] = item
+                items[url.casefold()] = item
     return items, ""
 
 
@@ -221,7 +221,7 @@ def _project_items(gh, project):
 
 def _project_item(gh, project, ref: backlog.IssueRef):
     items, error = _project_rows(gh, project)
-    item = items.get(ref.url)
+    item = items.get(ref.url.casefold())
     return item, _project_status(item, project) if item is not None else None, error
 
 
@@ -267,8 +267,8 @@ def _github_labels_exist(gh, ref: backlog.IssueRef, names: tuple[str, ...]) -> s
         return error
     if not isinstance(row, list):
         return "GitHub labels could not be parsed"
-    have = {x.get("name") for x in row if isinstance(x, dict)}
-    missing = set(names) - have
+    have = {x["name"].casefold() for x in row if isinstance(x, dict) and isinstance(x.get("name"), str)}
+    missing = {name for name in names if name.casefold() not in have}
     return (f"missing label in GitHub: {', '.join(sorted(missing))}; "
             f"create the label(s) {', '.join(sorted(missing))} before syncing") if missing else ""
 

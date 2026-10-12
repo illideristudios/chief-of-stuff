@@ -373,6 +373,17 @@ class KanbanSettingsTest(unittest.TestCase):
         # Terminal stages leave a forge mark named like the stage so a rebuild can round-trip (#627).
         self.assertEqual(cfg.label_for("main"), "main")
 
+    def test_stage_labels_round_trip_case_insensitively(self):
+        cfg = self.load(KANBAN).kanban
+        for label, stage in (("Main", "main"), ("03 - build", "implement")):
+            with self.subTest(label=label):
+                self.assertEqual(cfg.stage_for_label((label, "kind::code")), stage)
+
+    def test_different_stage_labels_are_refused_regardless_of_case(self):
+        cfg = self.load(KANBAN).kanban
+        with self.assertRaisesRegex(ValueError, "more than one stage"):
+            cfg.stage_for_label(("Main", "03 - build"))
+
     def test_invalid_mapping_is_refused(self):
         for bad in (
             KANBAN.replace('plan = 0', 'plan = 6'),

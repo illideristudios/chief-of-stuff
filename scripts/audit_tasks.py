@@ -362,11 +362,11 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))
                 continue
-            if ref.url not in project_items:
+            if ref.url.casefold() not in project_items:
                 faults.append(KanbanFault(clip_name(furthest.label),
                                           "issue is absent from the configured GitHub Project"))
                 continue
-            status = project_items[ref.url]
+            status = project_items[ref.url.casefold()]
         issue_config = config if ref.host == GITHUB else replace(config, github_project=None)
         why = kanban_tool.drift(issue_config, found.labels, furthest.stage.strip(), project_status=status,
                                 allow_extra_hold=furthest.kind == "waiting")

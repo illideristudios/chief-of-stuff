@@ -267,6 +267,7 @@ class GitLabUpdaterTest(unittest.TestCase):
 class GitHubUpdaterTest(unittest.TestCase):
     def setUp(self):
         self.ref = backlog.IssueRef("example/app", 7)
+        self.item_url = self.ref.url
         self.config = Kanban(FLOW.stages, FLOW.human_review_label, FLOW.stage_map,
                              FLOW.hold_stages, FLOW.terminal_stages,
                              GitHubProject("example", 3, "Status", ("Plan", "Plan Review", "Test", "Build", "Review", "Fix")))
@@ -291,7 +292,7 @@ class GitHubUpdaterTest(unittest.TestCase):
             return 0, json.dumps({"id": "PVT_board"}), ""
         if args[:2] == ["project", "item-list"]:
             field = self.config.github_project.field
-            items = ([{"id": "PVTI_issue", "content": {"url": self.ref.url},
+            items = ([{"id": "PVTI_issue", "content": {"url": self.item_url},
                        field[0].lower() + field[1:]: self.status}] if self.present else [])
             return 0, json.dumps({"items": items, "totalCount": len(items)}), ""
         if args[:2] == ["project", "item-add"]:
@@ -320,6 +321,26 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.assertEqual(got.project_status, "Plan Review")
         self.assertEqual(got.delta.add, (FLOW.human_review_label,))
         self.assertFalse(any(args[1] in ("item-edit", "item-add", "edit") for args in self.calls))
+
+    def test_project_preview_matches_issue_urls_case_insensitively(self):
+        for repo, item_repo in (("Example/App", "example/app"), ("example/app", "Example/App")):
+            with self.subTest(repo=repo, item_repo=item_repo):
+                self.ref = backlog.issue_ref("#7", backlog.GitHubBacklog(repo))
+                self.item_url = f"https://github.com/{item_repo}/issues/7"
+                got = kanban.sync_github(self.ref, self.config, "implement", gh=self.gh)
+                self.assertTrue(got.ok, got.error)
+                self.assertEqual(got.current_status, "Plan")
+                self.assertFalse(got.project_add)
+
+    def test_project_commit_does_not_readd_issue_with_mixed_case_repo(self):
+        self.ref = backlog.issue_ref("#7", backlog.GitHubBacklog("Example/App"))
+        got = kanban.sync_github(self.ref, self.config, "implement", gh=self.gh, commit=True,
+                                 expected_stage="plan")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.current_status, "Plan")
+        self.assertEqual(self.status, "Build")
+        self.assertFalse(got.project_add)
+        self.assertFalse(any(a[:2] == ["project", "item-add"] for a in self.calls))
 
     def test_project_commit_sets_status_and_hold_then_verifies(self):
         got = kanban.sync_github(self.ref, self.config, "plan review", gh=self.gh, commit=True,
@@ -456,6 +477,18 @@ class GitHubUpdaterTest(unittest.TestCase):
         got = kanban.sync_github(self.ref, self.config, "main", gh=gh, commit=True, expected_stage="review")
         self.assertTrue(got.done, got.error)
         self.assertEqual(set(self.labels), {"main", "kind::code"})
+
+    def test_github_labels_exist_case_insensitively(self):
+        for wanted, present in (("main", "Main"), ("03 - BUILD", "03 - build")):
+            with self.subTest(wanted=wanted, present=present):
+                gh = mock.Mock(return_value=(0, json.dumps([{"name": present}]), ""))
+                self.assertEqual(kanban._github_labels_exist(gh, self.ref, (wanted,)), "")
+
+    def test_missing_github_label_preserves_configured_name(self):
+        gh = mock.Mock(return_value=(0, json.dumps([{"name": "Main"}]), ""))
+        error = kanban._github_labels_exist(gh, self.ref, ("main", "03 - BUILD"))
+        self.assertEqual(error, "missing label in GitHub: 03 - BUILD; "
+                               "create the label(s) 03 - BUILD before syncing")
 
     def test_a_launcher_hold_moves_with_its_project_status(self):
         self.labels = ["kind::code", FLOW.human_review_label]
@@ -698,6 +731,18 @@ class AuditTest(unittest.TestCase):
              mock.patch.object(kanban, "_project_items", return_value=(project_items, "")) as items:
             self.assertEqual(audit_tasks.kanban_faults(tasks, cfg, mixed), [])
         items.assert_called_once()
+
+    def test_github_project_audit_matches_mixed_case_repo(self):
+        cfg = backlog.GitHubBacklog("Example/App")
+        mixed = Kanban(FLOW.stages, FLOW.human_review_label, FLOW.stage_map,
+                       FLOW.hold_stages, FLOW.terminal_stages, GitHubProject("example", 3, options=FLOW.stages))
+        task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
+                               label="Build it", kind="open", item="Build it")
+        issue = backlog.Issue(7, "Build it", "opened", ())
+        project_items = {"https://github.com/example/app/issues/7": FLOW.stages[3]}
+        with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}), \
+             mock.patch.object(kanban, "_project_items", return_value=(project_items, "")):
+            self.assertEqual(audit_tasks.kanban_faults([task], cfg, mixed), [])
 
     def test_rows_sharing_an_issue_expect_the_furthest_stage_only(self):
         """#87: one expected stage per issue — a further-stage row makes the earlier row's stage clean."""

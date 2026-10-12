@@ -161,7 +161,7 @@ class Forge:
         try:
             if self.kanban.github_project is not None and self.github and statuses is not None:
                 url = IssueRef(self.home.repo, one.iid).url
-                status = statuses.get(url)
+                status = statuses.get(url.casefold())
                 if status is not None:
                     return self.kanban.stage_for_status(status)
                 # Existing workspaces recorded their stages as labels before Project Status was honored.

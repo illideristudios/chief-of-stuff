@@ -124,10 +124,11 @@ class Kanban:
     def stage_for_label(self, labels: tuple[str, ...]) -> str:
         """The tracker stage those labels encode. A mark shared by stages reads as the first of them; the engine keeps its
         stored stage when it shares that mark (#651). Marks for two different columns are refused."""
-        hits = [s for s in (*self.stage_map, *self.terminal_stages) if self.label_for(s) in labels]
+        names = {label.casefold() for label in labels}
+        hits = [s for s in (*self.stage_map, *self.terminal_stages) if self.label_for(s).casefold() in names]
         if not hits:
             return ""
-        if len({self.label_for(s) for s in hits}) > 1:
+        if len({self.label_for(s).casefold() for s in hits}) > 1:
             raise ValueError(f"labels map to more than one stage: {', '.join(hits)}")
         return hits[0]
 
