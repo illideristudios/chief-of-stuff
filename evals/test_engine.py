@@ -291,6 +291,85 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
         self.assertFalse(self.db.items()[0].human_review)
 
+    def test_merge_hold_is_written_before_merging_and_waits_for_release(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held merge", ["stage: doing"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
+                       hold_stages=("merge",))
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        with mock.patch.object(engine.engine_merge, "execute", wraps=engine.engine_merge.execute) as merged:
+            self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+            merged.assert_not_called()
+            self.assertEqual(self.db.items()[0].stage, "merge")
+            self.assertIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+            merged.assert_not_called()
+            gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
+            self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+            merged.assert_called_once()
+        self.assertEqual(len([call for call in gh.all_calls if call[:2] == ["pr", "merge"]]), 1)
+        self.assertNotIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
+
+    def test_shared_label_preserves_implement_when_it_reads_back_as_plan(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Shared stages", ["stage: doing"])])
+        board = Kanban(tf.FLOW.stages, "needs human",
+                       {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.p = policy.parse({
+            "default_workflow": "standard",
+            "personas": {"builder": {"role": "implements", "model": "example"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"plan": {"persona": "builder"}, "implement": {"persona": "builder"},
+                       "review": {"persona": "critic"}, "merge": {}},
+            "workflows": {"standard": {"start": "plan", "edges": [
+                {"from": "plan", "to": "implement"}, {"from": "implement", "to": "review"},
+                {"from": "review", "to": "implement"}, {"from": "review", "to": "merge"},
+            ]}},
+        })
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "plan", "builder", 1)])
+        self.finish("plan")
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual(self.db.items()[0].stage, "implement")
+        self.assertEqual(self.forge.snapshots()[0]["stage"], "plan")
+        self.finish("implement")
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual([call[1] for call in self.launched], ["plan", "implement", "review"])
+
+    def test_retried_merge_hold_write_cannot_merge_on_the_retry_pass(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held merge", ["stage: doing"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
+                       hold_stages=("merge",))
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        with mock.patch.object(engine.forge.Forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertFalse(any(call[:2] == ["pr", "merge"] for call in gh.all_calls))
+        self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "merge", "expected": "review"})
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertFalse(any(call[:2] == ["pr", "merge"] for call in gh.all_calls))
+        self.assertEqual(self.db.items()[0].stage, "merge")
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+
+    def test_manual_move_to_a_different_label_overrides_the_stored_stage(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Moved by hand", ["stage: review"])])
+        board = Kanban(tf.FLOW.stages, "needs human",
+                       {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.db.upsert_item(KEY, stage="implement")
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.db.items()[0].stage, "review")
+
     def test_unresolved_stage_write_cannot_dispatch_work_from_the_old_stage(self):
         self.run_pass()
         self.finish("implement")
@@ -398,6 +477,18 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
         passed.assert_not_called()
         self.assertIn("plan", errors.getvalue())
+
+    def test_github_project_refuses_startup_until_project_status_is_read(self):
+        path = self.root / "settings.toml"
+        path.write_text(path.read_text() + '\n[kanban.github_project]\nowner = "example"\nnumber = 3\n')
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
+        passed.assert_not_called()
+        self.assertFalse((self.root / "store.db").exists())
+        self.assertIn("[kanban.github_project]", errors.getvalue())
+        self.assertIn("#627", errors.getvalue())
 
     def test_default_interval_is_sixty_seconds(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

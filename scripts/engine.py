@@ -51,7 +51,12 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
     result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None, commit=True)
     if not result.ok:
         raise ForgeError(result.error)
-    store.upsert_item(key, stage=stage)
+    fields: dict[str, Any] = {"stage": stage}
+    board = getattr(forge, "kanban", None)
+    if board is not None and board.holds(stage):
+        # A retried write runs before planning, so cache its new hold immediately.
+        fields["human_review"] = True
+    store.upsert_item(key, **fields)
     data = _resume(store, key)
     data.pop("pending_stage", None)
     store.set_resume(key, data)
@@ -66,6 +71,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     snapshots = list(forge.snapshots())
+    board = getattr(forge, "kanban", None)
+    if board is not None:
+        stored_stages = {item.issue_key: item.stage for item in store.items()}
+        for row in snapshots:
+            observed = row.get("stage")
+            stored = stored_stages.get(row["issue_key"])
+            # Shared labels cannot identify a precise workflow stage; a different label still wins.
+            if (observed in board.stage_map and stored in board.stage_map
+                    and board.stage_map[observed] == board.stage_map[stored]):
+                row["stage"] = stored
     store.sync_from_forge(snapshots)
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
@@ -108,7 +123,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                             max_concurrency=max_concurrency, clock=clock,
                             launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona)
             elif isinstance(action, reconcile.Merge):
-                if engine_merge.execute(action, forge, store, at):
+                if board is not None and board.holds("merge") and stages[key] != "merge":
+                    # Enter the hold before merging; a later pass observes the human's release.
+                    stage = "merge"
+                elif engine_merge.execute(action, forge, store, at):
                     stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
@@ -159,6 +177,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("no Backlog: line; configure the workspace backlog before running the engine")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
+            if config.kanban.github_project is not None:
+                raise ValueError("[kanban.github_project] requires Project Status snapshot reads (#627)")
             policies = settings.load_policy()
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
             stages = {s for w in policies.workflows.values() for e in w.edges for s in (e.source, e.target)}
