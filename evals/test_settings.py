@@ -346,8 +346,9 @@ merge = 4
 
 class KanbanSettingsTest(unittest.TestCase):
     def test_terminal_stages_are_unique_safe_managed_labels(self):
-        for names in ('["main", "main"]', '["!! - HUMAN REVIEW REQUIRED"]',
-                      '["main,done"]', '["00 - PLAN"]'):
+        # Forges compare label names case-insensitively, so a case-only variant collides too.
+        for names in ('["main", "main"]', '["!! - HUMAN REVIEW REQUIRED"]', '["main,done"]', '["00 - PLAN"]',
+                      '["main", "Main"]', '["!! - human review required"]', '["00 - plan"]'):
             with self.subTest(names=names), self.assertRaisesRegex(st.SettingsError, "terminal_stages"):
                 self.load(KANBAN.replace('terminal_stages = ["main"]', f'terminal_stages = {names}'))
 

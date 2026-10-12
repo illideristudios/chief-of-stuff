@@ -367,10 +367,11 @@ def _kanban(table) -> Kanban:
     stages = table.get("stages")
     if not isinstance(stages, list) or not stages or any(not isinstance(x, str) or not x.strip() for x in stages):
         raise SettingsError("[kanban] stages must be a non-empty list of labels")
-    if len(stages) != len(set(stages)) or any("," in label for label in stages):
+    fold = {label.casefold() for label in stages}  # forges compare label names case-insensitively
+    if len(stages) != len(fold) or any("," in label for label in stages):
         raise SettingsError("[kanban] stages must be unique")
     human = table.get("human_review_label")
-    if not isinstance(human, str) or not human.strip() or human in stages or "," in human:
+    if not isinstance(human, str) or not human.strip() or human.casefold() in fold or "," in human:
         raise SettingsError("[kanban] human_review_label must be distinct from stage labels")
     mapping = table.get("map")
     if not isinstance(mapping, dict) or not mapping:
@@ -382,8 +383,9 @@ def _kanban(table) -> Kanban:
     if not isinstance(holds, list) or not all(isinstance(x, str) for x in holds) or not set(holds) <= set(mapping):
         raise SettingsError("[kanban] hold_stages must be mapped stages")
     if (not isinstance(terminal, list) or not all(isinstance(x, str) and x.strip() for x in terminal)
-            or len(terminal) != len(set(terminal)) or any("," in x for x in terminal)
-            or human in terminal or set(terminal) & set(mapping) or set(terminal) & set(stages)):
+            or len(terminal) != len({x.casefold() for x in terminal}) or any("," in x for x in terminal)
+            or human.casefold() in {x.casefold() for x in terminal} or set(terminal) & set(mapping)
+            or {x.casefold() for x in terminal} & fold):
         raise SettingsError("[kanban] terminal_stages must be unique, comma-free labels distinct from "
                             "human_review_label, mapped stages and board labels")
     project = None
