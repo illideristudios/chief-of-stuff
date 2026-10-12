@@ -58,6 +58,7 @@ RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.h
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 ISSUE = re.compile(r"/issues/(\d+)(/source)?")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
+MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
 PAGE_LOCKS: dict[str, threading.Lock] = {}
@@ -220,12 +221,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _allowed(self) -> bool:
         """Refuse a foreign Host or a dotfile; map `/` to today's (else the newest) board, `/all` to the listing and
         `/workers`, `/decisions[/<slug>]` and `/issues/<n>` to its file; refuse a rendered page's file name; re-render a page its sources outdate."""
+        self.banner = ""  # per request: keep-alive reuses the handler (#334)
         port = self.server.server_address[1]
         if self.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
             self.send_error(403, "Host is not this machine")
             return False
-        path = self.path.split("?")[0]
-        if any(part.startswith(".") for part in unquote(path).split("/")):  # `%2e` is a dot too
+        path = re.split(r"[?#]", self.path, maxsplit=1)[0]
+        decoded = unquote(path)
+        if "\0" in decoded or (decoded != "/" and decoded.endswith("/")):  # #340: null or a directory URL, `%2F` too
+            self.send_error(404)
+            return False
+        if any(part.startswith(".") for part in decoded.split("/")):  # `%2e` is a dot too
             self.send_error(404)
             return False
         root = getattr(self.server, "root", None)
@@ -264,11 +270,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(404, "no such issue")
                 return False
             self.path = f"/issue-{int(m[1])}{'-source' if m[2] else ''}.html"
-        elif RENDERED.fullmatch(Path(self.translate_path(path)).name.lower()):
-            # A rendered page is a route only. The resolved name, lowercased: `//x` and a case-insensitive disk reach it too.
+        elif RENDERED.fullmatch(Path(self.translate_path(path)).name.casefold()):
+            # A rendered page is a route only. casefold: long s and a case-insensitive disk reach it too (#335).
             self.send_error(404)
             return False
-        name = self.path.split("?")[0].lstrip("/")
+        name = re.split(r"[?#]", self.path, maxsplit=1)[0].lstrip("/")
         if root is not None and RENDERED.fullmatch(name):
             # A look is recorded before `fresh`, so the board counts from the look before, and taken back when the
             # board cannot render; one lock around it all, so two tabs loading at once cannot interleave it.
@@ -301,13 +307,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _send_html(self, body: bool):
         """An HTML page with the shared reload check; with the banner set, the last good page plus one line saying the
-        render failed (never a blank 500). HEAD's length is GET's, and Last-Modified stays the file's own."""
+        render failed (never a blank 500). HEAD's length is GET's, and Last-Modified stays the file's own.
+        A page over MAX_PAGE is refused without reading; HEAD without a banner never reads (#333)."""
         path = Path(self.translate_path(self.path))
         try:
             stat = path.stat()
             if not S_ISREG(stat.st_mode):
                 raise OSError  # a directory, FIFO or device is not a page
-            page, stamp = path.read_bytes(), stat.st_mtime
+            if stat.st_size > MAX_PAGE:
+                return self.send_error(413, f"a page is at most {MAX_PAGE} bytes")
+            stamp = stat.st_mtime
+            if not body and not self.banner:
+                with path.open("rb"):  # GET would read it: an unreadable page is GET's 404, not a 200
+                    pass
+                # inject always adds ENCODED; length matches GET without reading the file
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(stat.st_size + len(page_reload.ENCODED)))
+                self.send_header("Last-Modified", self.date_time_string(stamp))
+                self.end_headers()
+                return
+            page = path.read_bytes()
         except OSError:
             if not self.banner:  # no page, or it vanished: a 404, never a blank 200 stamped 1970
                 return self.send_error(404)
@@ -341,7 +361,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if self.headers.get("Host", "") not in own or (origin is not None and origin not in [f"http://{h}" for h in own]):
             return self.send_error(403, "not a page of this server")
-        m = ROUTE.fullmatch(self.path.split("?")[0])
+        m = ROUTE.fullmatch(re.split(r"[?#]", self.path, maxsplit=1)[0])
         source = Path(self.directory) / f"decision-{m[1]}.json" if m else None
         if source is None or not source.is_file():
             return self.send_error(404, "no such decision")
