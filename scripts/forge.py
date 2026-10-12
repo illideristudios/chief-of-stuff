@@ -16,6 +16,7 @@ from typing import Any, Callable
 from urllib.parse import urlencode
 
 import backlog
+import forge_review
 import kanban
 import merge_approved
 import merge_ready
