@@ -19,8 +19,8 @@ import shell_setup
 
 RELEASE = Path(__file__).resolve().parent.parent
 
-# M3 engine loop: fill in the engine's entry argv, run after the venv python with the workspace as working directory,
-# e.g. (str(RELEASE / "scripts/engine.py"), "serve"). Until then `install` refuses.
+# Run after the venv python, with the workspace as working directory: (str(RELEASE / "scripts/engine.py"),).
+# Unset until worker launch is wired (#631): an engine that cannot launch only logs failed dispatches. Until then `install` refuses.
 ENGINE: tuple[str, ...] = ()
 
 

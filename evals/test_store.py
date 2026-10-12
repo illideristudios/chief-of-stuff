@@ -182,6 +182,14 @@ class StoreTest(unittest.TestCase):
             self.store.set_human_review("github:example/repo#404", True)
         self.assertEqual(self.store.items(), [])
 
+    def test_sync_updates_reported_human_review_and_preserves_it_when_omitted(self) -> None:
+        self.store.sync_from_forge([{"issue_key": KEY, "human_review": True}])
+        self.assertTrue(self.store.items()[0].human_review)
+        self.store.sync_from_forge([{"issue_key": KEY, "title": "no kanban"}])
+        self.assertTrue(self.store.items()[0].human_review)
+        self.store.sync_from_forge([{"issue_key": KEY, "human_review": False}])
+        self.assertFalse(self.store.items()[0].human_review)
+
     def test_a_segment_for_an_issue_with_no_row_is_refused(self) -> None:
         with self.assertRaises(IntegrityError):
             self.store.record_segment("github:example/repo#404", "review", 1, started_at="09:00")

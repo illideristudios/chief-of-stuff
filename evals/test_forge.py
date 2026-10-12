@@ -83,6 +83,12 @@ class KeyTest(unittest.TestCase):
 
 
 class GitHubTest(unittest.TestCase):
+    def test_snapshots_report_configured_human_review_label(self):
+        gh = FakeGh(issues=[gh_issue(1, "held", ["stage: review", "needs human"]),
+                            gh_issue(2, "free", ["stage: review", "other hold"])])
+        snapshots = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
+        self.assertEqual([row.get("human_review") for row in snapshots], [True, False])
+
     def test_changes_requested_snapshot_prevents_merge_after_a_clean_engine_review(self):
         for oid in (tma.HEAD, tma.OLD):
             with self.subTest(oid=oid):
@@ -92,7 +98,7 @@ class GitHubTest(unittest.TestCase):
                             prs=[tma.pr(21, reviews)], bodies={21: "Closes #3"})
                 snapshot, = forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots()
                 self.assertEqual((snapshot["review_state"], snapshot["merge_state"]), ("changes_requested", "ready"))
-                item = store.WorkItem(**snapshot, human_review=False)
+                item = store.WorkItem(**snapshot)
                 for stage in ("review", "merge"):
                     item.stage = stage
                     self.assertEqual(tr.reconcile.plan([item],
@@ -122,9 +128,9 @@ class GitHubTest(unittest.TestCase):
         got = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshots()
         self.assertEqual(got, [
             {"issue_key": "github:example/app#3", "title": "Fix the parser", "forge_state": "open", "stage": "review",
-             "review_state": "approved", "merge_state": "ready"},
+             "human_review": False, "review_state": "approved", "merge_state": "ready"},
             {"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open", "stage": "doing",
-             "review_state": "", "merge_state": ""},
+             "human_review": False, "review_state": "", "merge_state": ""},
         ])
 
     def test_what_was_not_configured_is_left_out_so_a_sync_never_blanks_it(self):
@@ -272,12 +278,17 @@ class GitLabTest(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.forge = forge.Forge(GL, approver="robin", kanban=FLOW, token="t")
 
+    def test_snapshots_report_configured_human_review_label(self):
+        issues = {1: gl_issue(1, "held", ["needs human"]), 2: gl_issue(2, "free", ["other hold"])}
+        with mock.patch.object(backlog, "_call", gitlab_call(issues, {})):
+            self.assertEqual([row["human_review"] for row in self.forge.snapshots()], [True, False])
+
     def test_snapshots_carry_identity_stage_review_and_merge_state(self):
         self.assertEqual(self.forge.snapshots(), [
             {"issue_key": "gitlab:gitlab.example.test/team/app#3", "title": "Fix the parser", "forge_state": "open",
-             "stage": "review", "review_state": "approved", "merge_state": "ready"},
+             "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready"},
             {"issue_key": "gitlab:gitlab.example.test/team/app#4", "title": "Add a flag", "forge_state": "open",
-             "stage": "", "review_state": "", "merge_state": ""},
+             "stage": "", "human_review": False, "review_state": "", "merge_state": ""},
         ])
 
     def test_a_failed_read_is_an_error_never_an_empty_forge(self):

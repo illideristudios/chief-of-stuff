@@ -202,9 +202,10 @@ class AgentTest(SupervisorTest):
 
     def test_cli_reports_errors_without_a_traceback(self):
         errors = io.StringIO()
-        with contextlib.redirect_stderr(errors):
+        with mock.patch.object(supervisor, "install", side_effect=supervisor.ServiceError("cannot install engine")), \
+             contextlib.redirect_stderr(errors):
             self.assertEqual(supervisor.main(["--root", str(self.root), "install"]), 2)
-        self.assertIn("entry command", errors.getvalue())
+        self.assertIn("cannot install engine", errors.getvalue())
         self.assertNotIn("Traceback", errors.getvalue())
 
 

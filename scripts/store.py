@@ -1,8 +1,9 @@
 """The issue-keyed store: one row per forge issue, written by upsert only.
 
-The forge is the source of truth. The forge-owned columns of a `WorkItem` (title, stage, forge/review/merge state) are a cache
-`sync_from_forge` can rebuild; everything else here (segments, decisions, ownership, log, resume, the human-review flag) is the
-engine's own and is never touched by a sync. The schema lives in `migrations/`, not in `create_all`: `migrate` is the one place
+The forge is the source of truth. The forge-owned columns of a `WorkItem` (title, stage, forge/review/merge state, and the
+human-review flag when kanban is configured) are a cache `sync_from_forge` can rebuild; segments, decisions, ownership, log,
+and resume are the engine's own and are never touched by a sync. Omitted snapshot fields keep their stored values.
+The schema lives in `migrations/`, not in `create_all`: `migrate` is the one place
 it changes, and a test holds these models to what the migrations build.
 """
 
@@ -20,7 +21,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 import clock
 
-FORGE_COLUMNS = ("title", "stage", "forge_state", "review_state", "merge_state")
+FORGE_COLUMNS = ("title", "stage", "forge_state", "review_state", "merge_state", "human_review")
 
 
 class Base(DeclarativeBase):
@@ -136,7 +137,7 @@ class Store:
         self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **fields, "updated_at": self._stamp()})
 
     def set_human_review(self, issue_key: str, flag: bool) -> None:
-        """Flag an existing item. The flag is engine data, so it never creates a row the forge does not know."""
+        """Flag an existing item; a kanban snapshot can subsequently refresh it from forge labels."""
         with self.session() as s:
             if s.execute(update(WorkItem).where(WorkItem.issue_key == issue_key)
                          .values(human_review=flag, updated_at=self._stamp())).rowcount == 0:

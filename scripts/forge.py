@@ -79,7 +79,7 @@ class Forge:
             raise ForgeError(f"review threads: {exc}") from exc
 
     def snapshots(self) -> list[dict[str, Any]]:
-        """One `store.Store.sync_from_forge` row per open issue. Stage is left out without stage labels, and review state
+        """One `store.Store.sync_from_forge` row per open issue. Stage and human hold are left out without kanban, and review state
         without an approver, so a sync never blanks what was not read."""
         got = self.issues()
         if not got.ok:
@@ -96,6 +96,7 @@ class Forge:
                     "forge_state": "open" if one.state == backlog.OPEN else "closed"}
             if self.kanban is not None:
                 snap["stage"] = self._stage(one.labels)
+                snap["human_review"] = self.kanban.human_review_label in one.labels
             if self.approver:
                 snap["review_state"] = r.approval if r else ""
             snap["merge_state"] = r.verdict if r else ""
