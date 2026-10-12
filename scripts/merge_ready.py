@@ -24,29 +24,42 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import backlog
-from forge_review import Request, forge, github_requests, gitlab_requests
+from forge_review import Request, forge, github_requests, gitlab_requests, scrub
 from settings import SettingsError
 from workspace import ConfigError
 
 THREAD_LIMIT = 100
-# ponytail: first 100 open requests and checks each; paginate when a request outgrows that. Threads past THREAD_LIMIT print `unverified`.
-QUERY = """query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) {
-  pullRequests(states: OPEN, first: 100) { nodes { number isDraft
+# Page open pull requests; threads past THREAD_LIMIT print `unverified`. A full MAX_PAGES read is refused as partial (#425).
+QUERY = """query($owner: String!, $name: String!, $cursor: String) { repository(owner: $owner, name: $name) {
+  pullRequests(states: OPEN, first: 100, after: $cursor) { pageInfo { hasNextPage endCursor }
+    nodes { number isDraft
     reviewThreads(first: %d) { pageInfo { hasNextPage } nodes { isResolved } }
     commits(last: 1) { nodes { commit { oid statusCheckRollup { contexts(first: 100) { nodes {
-      __typename ... on CheckRun { checkSuite { workflowRun { databaseId } } } } } } } } } } } } }""" % THREAD_LIMIT
+      __typename ... on CheckRun { checkSuite { workflowRun { databaseId } } } } } } } } } } } } } }""" % THREAD_LIMIT
 
 
 def github_ready(repo: str, gh=backlog.run_gh, approver: str = "") -> list[Request]:
     owner, name = repo.split("/", 1)
-    # -f, not -F: -F types its value (digits become a number, `@path` reads a file)
-    code, out, err = gh(["api", "graphql", "-f", f"query={QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"])
-    if code != 0:
-        raise RuntimeError(f"gh api graphql: {err.strip() or code}")
-    answer = json.loads(out)
-    if answer.get("errors"):
-        raise RuntimeError(f"gh api graphql: {answer['errors']}")
-    nodes = {n["number"]: n for n in answer["data"]["repository"]["pullRequests"]["nodes"]}
+    nodes: dict[int, dict] = {}
+    cursor = None
+    for _ in range(backlog.MAX_PAGES):
+        # -f for strings; -F cursor=null types a GraphQL null for the first page
+        args = ["api", "graphql", "-f", f"query={QUERY}", "-f", f"owner={owner}", "-f", f"name={name}"]
+        args += ["-f", f"cursor={cursor}"] if cursor else ["-F", "cursor=null"]
+        code, out, err = gh(args)
+        if code != 0:
+            raise RuntimeError(f"gh api graphql: {err.strip() or code}")
+        answer = json.loads(out)
+        if answer.get("errors"):
+            raise RuntimeError(f"gh api graphql: {answer['errors']}")
+        page = answer["data"]["repository"]["pullRequests"]
+        for n in page["nodes"]:
+            nodes[n["number"]] = n
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+    else:
+        raise RuntimeError(f"more than {backlog.MAX_PAGES} pages of pull requests; refusing to read a partial list as whole")
     found = []
     for r in github_requests(repo, approver, gh):
         n = nodes.get(r.number)
@@ -91,12 +104,15 @@ def read(home, github: bool, repo: str, gh=backlog.run_gh, call=backlog._call) -
 
 
 def line(r: Request, mark: str) -> str:
-    sha = "unread" if r.pipeline_sha is None else r.pipeline_sha[:7] or "-"
-    pipeline = "none" if r.pipeline == "none" else f"{r.pipeline_id or '-'} {r.pipeline} on {sha}"
-    why = f" ({r.why})" if r.why else ""
+    sha = "unread" if r.pipeline_sha is None else scrub(r.pipeline_sha[:7]) or "-"
+    pid = scrub(r.pipeline_id or "-")
+    status = scrub(r.pipeline)
+    pipeline = "none" if r.pipeline == "none" else f"{pid} {status} on {sha}"
+    why = f" ({scrub(r.why)})" if r.why else ""
     threads = "unread" if r.threads is None else r.threads
-    return (f"{mark}{r.number} {r.verdict}{why} · head {r.head[:7]} · pipeline {pipeline} · "
-            f"conflicts {'yes' if r.mergeable == 'conflict' else 'no'} · unresolved threads {threads} · {r.url}")
+    head = scrub(r.head[:7])
+    return (f"{mark}{r.number} {r.verdict}{why} · head {head} · pipeline {pipeline} · "
+            f"conflicts {'yes' if r.mergeable == 'conflict' else 'no'} · unresolved threads {threads} · {scrub(r.url)}")
 
 
 def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -> int:
