@@ -318,6 +318,8 @@ class ReloadSnippetTest(unittest.TestCase):
                     with self.subTest(method=method):
                         self.assertEqual(get(self.port, "/big.html", method=method).status, 413)
             self.assertEqual(reads, [])
+        if os.geteuid() == 0:
+            return  # root reads a mode-0 file
         locked = self.dir / "locked.html"
         locked.write_text("<!doctype html><body>x</body>")
         locked.chmod(0)
