@@ -153,7 +153,7 @@ def discard(clone: Path, path: Path, branch: str | None, base: str | None = None
             base_code, base_tip = git(["rev-parse", "--verify", base], clone)
             if head_code == tip_code == base_code == 0 and head == f"refs/heads/{branch}" and tip == base_tip:
                 expected = tip
-        code, detail = git_trusted(["worktree", "remove", "--force", "--", str(path)], clone)
+        code, detail = git_trusted(["worktree", "remove", "--", str(path)], clone)
         if code != 0:
             warnings.append(f"git worktree remove failed: {detail or f'git exited {code}'}")
             expected = None
