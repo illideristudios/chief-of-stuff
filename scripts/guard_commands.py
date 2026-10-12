@@ -52,6 +52,10 @@ class Opaque(Unparsed):
     """A program the gate cannot read, such as an inline interpreter program: denied even when no guarded word shows."""
 
 
+class ImplicitPush(ValueError):
+    pass
+
+
 def _tokens(command: str) -> list[tuple[str, bool]]:
     # Expansion can construct an executable, verb, refspec or a nested command unknown to the gate.
     if not isinstance(command, str) or "$" in command or "`" in command or "\x00" in command:
@@ -187,7 +191,36 @@ def _push_denied(args: list[str], protected: tuple[str, ...]) -> bool:
     return False
 
 
-def _forge_denied(args: list[str], client: str) -> bool:
+def _pr_create_denied(flags: list[str], protected: tuple[str, ...]) -> bool:
+    # Consume value flags so a title or body containing --head cannot stand in for the branch option.
+    values = {"--head", "-H", "--title", "-t", "--body", "-b", "--body-file", "-F", "--base", "-B",
+              "--assignee", "-a", "--reviewer", "-r", "--milestone", "-m", "--template", "-T",
+              "--recover", "--repo", "-R", "--attach", "--project", "-p", "--label", "-l"}
+    head, help_requested = None, False
+    i = 0
+    while i < len(flags):
+        flag = flags[i]
+        i += 1
+        if flag == "--":
+            break
+        if flag in values:
+            value = flags[i] if i < len(flags) else ""
+            i += 1
+        elif flag.startswith("--") and "=" in flag:
+            flag, value = flag.split("=", 1)
+        else:
+            help_requested |= flag in {"--help", "-h"}
+            continue
+        if flag in {"--head", "-H"}:
+            head = value
+    if help_requested:
+        return False
+    if not head or not head.strip():
+        raise ImplicitPush()
+    return _push_denied(["origin", head], protected)
+
+
+def _forge_denied(args: list[str], client: str, protected: tuple[str, ...]) -> bool:
     # Bundles can hide protected flags; require separate short flags and values or long forms.
     if any(arg.startswith("-") and not arg.startswith("--") and len(arg) > 2 for arg in args):
         return True
@@ -232,9 +265,18 @@ def _forge_denied(args: list[str], client: str) -> bool:
             return True
     if group in {"issue", "issues", "pr", "mr"}:
         # Stage label names are configurable. Protect all label writes rather than guessing from a prefix.
-        return any(flag.split("=", 1)[0] in {"--add-label", "--remove-label", "--label", "--labels", "--unlabel",
-                                             "-l", "--ready", "--draft", "--wip", "--state", "--close"}
-                   or flag.startswith("-l") and not flag.startswith("--") for flag in flags)
+        if any(flag.split("=", 1)[0] in {"--add-label", "--remove-label", "--label", "--labels", "--unlabel",
+                                       "-l", "--ready", "--draft", "--wip", "--state", "--close"}
+               or flag.startswith("-l") and not flag.startswith("--")
+               or client == "gh" and verb in {"create", "edit"}
+               and flag.split("=", 1)[0] in {"--project", "-p", "--add-project", "--remove-project"}
+               for flag in flags):
+            return True
+    if client == "gh" and group == "pr" and verb == "create":
+        return _pr_create_denied(flags, protected)
+    if client == "glab" and group == "mr" and verb == "create":
+        # --fill also sets push to true in glab.
+        return any(flag.split("=", 1)[0] in {"--push", "--fill", "-f"} for flag in flags)
     return False
 
 
@@ -269,7 +311,7 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if re.fullmatch(r"[gmn]?awk", name) and not any(a == "-f" or a.startswith(("-f", "--file")) for a in args):
         raise Opaque()  # the first operand is an inline program with system()
     if name in {"gh", "glab"}:
-        return _forge_denied(args, name)
+        return _forge_denied(args, name, protected)
     if name == "git":
         args = _global_args(args, {"-C", "--git-dir", "--work-tree"}, {"--no-pager", "--paginate"})
         if not args:
@@ -280,6 +322,10 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
             raise Opaque()  # ext:: transports run a command (git-remote-ext), for push as for fetch
         if args[0] == "push":
             return _push_denied(args[1:], protected)
+        if args[0] == "rebase" and any(a.split("=", 1)[0] == "--exec"
+                                     or a.startswith("-") and not a.startswith("--") and "x" in a
+                                     for a in args[1:]):
+            raise Opaque()
         if args[0] == "config":
             # Values such as core.sshCommand, alias.* and *.helper run later inside allowed verbs. Reads only.
             return not any(a in {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"} for a in args[1:])
@@ -335,6 +381,8 @@ def _denied(command: str, protected: tuple[str, ...], depth: int) -> bool:
 def denial_reason(command: str, protected_branches: tuple[str, ...]) -> str | None:
     try:
         return OWNED if _denied(command, protected_branches, 0) else None
+    except ImplicitPush:
+        return "Push with git first and pass --head (or -H) with an explicit branch to gh pr create. " + OWNED
     except Opaque:
         return UNPARSED
     except (ValueError, TypeError, RecursionError):

@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from guard_commands import OWNED, denial_reason
+from guard_commands import OWNED, UNPARSED, denial_reason
 
 
 class CommandTest(unittest.TestCase):
@@ -44,13 +44,76 @@ class CommandTest(unittest.TestCase):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
     def test_allowlisted_worker_writes_are_available(self):
-        for command in ('gh pr create --title widget --body details', 'gh pr comment 12 --body feedback',
+        for command in ('gh pr create --head feat/widget --title widget --body details', 'gh pr comment 12 --body feedback',
                         'gh issue comment 12 --body feedback', 'gh pr review 12 --comment --body feedback',
                         'gh pr review 12 -c -b feedback', 'gh pr checkout 12',
                         'glab mr create --title widget --description details', 'glab mr note 12 --message feedback',
                         'glab issue note 12 --message feedback', 'glab mr checkout 12'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_rebase_execution_options_are_opaque(self):
+        for command in ('git rebase -x "gh pr merge 12" HEAD~1',
+                        'git rebase --exec "gh pr merge 12" HEAD~1',
+                        'git rebase --exec="gh pr merge 12" HEAD~1',
+                        'git rebase -ix "gh pr merge 12" HEAD~1',
+                        'git rebase -xtrue HEAD~1', 'git-rebase -x true HEAD~1'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
+        self.assertIsNone(denial_reason('git rebase origin/develop', ("main", "develop")))
+
+    def test_other_git_command_runners_remain_denied(self):
+        for command in ('git bisect run true', 'git submodule foreach true',
+                        'git difftool -x true', 'git difftool --extcmd=true',
+                        'git filter-branch --tree-filter true HEAD'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
+
+    def test_pr_create_requires_an_explicit_nonempty_head(self):
+        for command in ('gh pr create --title x --body y', 'gh pr create',
+                        'gh pr create --head', 'gh pr create --head="" --title x --body y',
+                        'gh pr create -H "" --title x --body y',
+                        'gh pr create --title "--head" feat/x --body y',
+                        'gh pr create --body "--head" feat/x --title x',
+                        'gh pr create --head feat/x --head="" --title x --body y'):
+            with self.subTest(command=command):
+                reason = denial_reason(command, ("main", "develop"))
+                self.assertIsNotNone(reason)
+                self.assertIn('Push with git first', reason)
+                self.assertIn('--head', reason)
+        for command in ('gh pr create --head feat/x --title x --body y',
+                        'gh pr create --head=feat/x --title x --body y',
+                        'gh pr create -H feat/x --title x --body y',
+                        'gh pr create --title x --body y --head owner:feat/x',
+                        'gh pr create --head feat/x --base main --title x --body y'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_pr_create_head_uses_push_branch_protection(self):
+        for head in ('main', 'develop', 'owner:main', 'refs/heads/main',
+                     'owner:refs/heads/develop', 'HEAD', 'feat/*', 'feat/x~1'):
+            for flag in ('--head', '-H', '--head='):
+                command = f'gh pr create {flag}{" " if flag != "--head=" else ""}{head} --title x --body y'
+                with self.subTest(command=command):
+                    self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+        self.assertIsNone(denial_reason('gh pr create --head main --title x --body y', ("release",)))
+
+    def test_glab_create_push_options_are_denied(self):
+        for flag in ('--push', '--push=true', '--fill', '--fill=true', '-f'):
+            command = f'glab mr create {flag} --title x --description y'
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+        self.assertIsNone(denial_reason('glab mr create --title x --description y', ("main", "develop")))
+
+    def test_project_membership_writes_are_denied(self):
+        for command in ('gh pr create --head feat/x --title x --body y --project Roadmap',
+                        'gh pr create --head feat/x --title x --body y -p Roadmap',
+                        'gh pr create --head feat/x --title x --body y --project=Roadmap',
+                        'gh issue create --title x --body y --project Roadmap',
+                        'gh issue create --title x --body y -p Roadmap',
+                        'gh pr edit 12 --add-project Roadmap', 'gh issue edit 12 --remove-project Roadmap'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
 
     def test_allowed_issue_and_pr_verbs_still_protect_flags_and_approval(self):
         for command in ('gh pr create --draft', 'gh pr create --ready', 'gh pr create --label stage:done',
@@ -98,8 +161,8 @@ class CommandTest(unittest.TestCase):
                         'gh api -XGET repos/o/r/issues/12'):
             with self.subTest(command=command):
                 self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
-        for command in ('gh pr create -t x -b y', 'gh -R owner/repo pr create -t x -b y',
-                        'gh pr -R owner/repo create -t x -b y',
+        for command in ('gh pr create -H feat/x -t x -b y', 'gh -R owner/repo pr create -H feat/x -t x -b y',
+                        'gh pr -R owner/repo create -H feat/x -t x -b y',
                         'glab -R owner/repo mr view 12'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
