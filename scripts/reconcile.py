@@ -134,11 +134,13 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
     completed = tuple(s for s in history if s.started_at and s.ended_at)
+    # An out-of-band architect consultation changes no code; an architect workflow stage is work to review.
+    unreviewed = {"review", "merge"} | ({"architect"} if "architect" not in stages else set())
     if "review" in stages:
         review = max((s for s in completed if s.stage == "review" and s.outcome == "done"),
                      key=lambda s: _time(s.started_at), default=None)
         # Work that ended after the review started was not all reviewed, even if it started first.
-        if review is None or any(s.stage not in ("review", "merge", "architect")
+        if review is None or any(s.stage not in unreviewed
                                  and _time(s.ended_at) > _time(review.started_at) for s in completed):
             return _work(key, "review", workflow, history, policies, room)
     elif item.review_state != "approved":

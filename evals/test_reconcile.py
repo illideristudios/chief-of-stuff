@@ -293,6 +293,23 @@ class ReconcileTest(unittest.TestCase):
         item = replace(Item(), stage="architect")
         self.assertEqual(self.plan(item, [Segment("architect")], {}), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 
+    def test_an_architect_workflow_stage_after_review_is_reviewed_again(self):
+        self.p = policy.parse({
+            "default_workflow": "designed",
+            "personas": {"builder": {"role": "implements", "model": "example"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"implement": {"persona": "builder"}, "review": {"persona": "critic"},
+                       "architect": {"persona": "critic"}, "merge": {}},
+            "workflows": {"designed": {"start": "implement", "edges": [
+                {"from": "implement", "to": "review"}, {"from": "review", "to": "architect"},
+                {"from": "architect", "to": "merge", "gate": "merge"}]}},
+        })
+        item = replace(Item(), stage="merge", review_state="none", merge_state="ready")
+        history = [Segment("implement", started_at=NOW - timedelta(hours=6), ended_at=NOW - timedelta(hours=5)),
+                   Segment("review", started_at=NOW - timedelta(hours=4), ended_at=NOW - timedelta(hours=3)),
+                   Segment("architect")]
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+
     def test_architect_requirement_obeys_room_policy(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         self.p.rooms["lab"] = policy.Place("lab", policy={"architect": False})
