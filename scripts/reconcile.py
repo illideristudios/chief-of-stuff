@@ -151,7 +151,8 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
     resolved = _policy(policies, review_stage, room)
     if _blocking(counts, resolved):
         return Wait(key, "blocking review findings")
-    if resolved.architect:
+    work_stages = {review_stage} | {s.stage for s in completed if s.stage in policies.stages}
+    if any(_policy(policies, stage, room).architect for stage in work_stages):
         architect = max((s for s in completed if s.stage == "architect" and s.outcome == "done"),
                         key=lambda s: _time(s.started_at), default=None)
         if architect is None or any(s.stage not in ("review", "merge", "architect")

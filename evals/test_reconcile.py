@@ -282,6 +282,32 @@ class ReconcileTest(unittest.TestCase):
                 architect = Segment("architect", started_at=started_at, ended_at=NOW)
                 self.assertEqual(self.plan(item, [implement, review, architect], {}), [reconcile.Merge(KEY)])
 
+    def test_implement_stage_architect_policy_requires_consultation(self):
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"architect": True})
+        review = Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)
+        for stage in ("review", "merge"):
+            with self.subTest(stage=stage):
+                item = replace(Item(), stage=stage, merge_state="ready")
+                self.assertEqual(self.plan(item, [review], {}), [reconcile.Merge(KEY)])
+                history = [Segment("implement"), review]
+                self.assertEqual(self.plan(item, history, {}),
+                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
+                                 [reconcile.Merge(KEY)])
+
+    def test_implementer_persona_architect_policy_requires_consultation(self):
+        self.p.personas["builder"] = replace(self.p.personas["builder"], policy={"architect": True})
+        review = Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)
+        for stage in ("review", "merge"):
+            with self.subTest(stage=stage):
+                item = replace(Item(), stage=stage, merge_state="ready")
+                self.assertEqual(self.plan(item, [review], {}), [reconcile.Merge(KEY)])
+                history = [Segment("implement"), review]
+                self.assertEqual(self.plan(item, history, {}),
+                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
+                                 [reconcile.Merge(KEY)])
+
     def test_an_architect_workflow_stage_follows_its_edge_after_a_done_segment(self):
         self.p = policy.parse({
             "default_workflow": "designed",
