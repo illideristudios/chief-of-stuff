@@ -245,7 +245,8 @@ def _project_option_ids(gh, project, value: str | None):
     fields = row.get("fields") if isinstance(row, dict) else None
     if not isinstance(fields, list):
         return None, None, "GitHub Project fields could not be parsed"
-    if len(fields) >= 100 or row.get("totalCount", len(fields)) > len(fields):
+    total = row.get("totalCount")  # as for items: a full page is whole only when totalCount says so
+    if total > len(fields) if isinstance(total, int) else len(fields) >= 100:
         return None, None, "GitHub Project field list was truncated"
     for field in fields:
         if isinstance(field, dict) and field.get("name") == project.field:

@@ -542,6 +542,20 @@ class GitHubUpdaterTest(unittest.TestCase):
                     self.assertEqual(items, {})
                     self.assertIn("truncated", error)
 
+    def test_project_field_list_at_limit_is_refused_unless_total_count_says_it_is_whole(self):
+        status = {"id": "PVTSSF_status", "name": "Status", "options": [{"id": "option_Build", "name": "Build"}]}
+        for total in (None, 100, 101):
+            row = {"fields": [{"id": "PVTF_other", "name": "Other"}] * 99 + [status]}
+            if total is not None:
+                row["totalCount"] = total
+            with self.subTest(total=total):
+                got = kanban._project_option_ids(lambda args: (0, json.dumps(row), ""),
+                                                 self.config.github_project, "Build")
+                if total == 100:
+                    self.assertEqual(got, ("PVTSSF_status", "option_Build", ""))
+                else:
+                    self.assertIn("truncated", got[2])
+
     def test_issue_label_mode_uses_add_remove_without_project(self):
         self.config = FLOW
         self.labels = ["00 - PLAN", "kind::code"]
