@@ -93,35 +93,44 @@ def settings_text(launcher: str, mode: str = "interactive") -> str:
     return text
 
 
-def _configured_hold_label(settings: Path, new_settings: str) -> str:
-    """The hold label the workspace will run with: the existing settings file's, else the new text's (#566)."""
+def _configured_labels(settings: Path, new_settings: str) -> dict[str, str]:
+    """Label -> kind from the existing settings, else the new text; Project mode only needs the hold label."""
     try:
         data = tomllib.loads(settings.read_text() if settings.exists() else new_settings)
     except (OSError, tomllib.TOMLDecodeError, ValueError):
-        return ""
+        return {}
     kanban = data.get("kanban")
-    label = kanban.get("human_review_label", "") if isinstance(kanban, dict) else ""
-    return label.strip() if isinstance(label, str) else ""
+    if not isinstance(kanban, dict):
+        return {}
+    labels = {}
+    if "github_project" not in kanban:
+        for key, kind in (("stages", "stage"), ("terminal_stages", "terminal")):
+            labels.update((label.strip(), kind) for label in kanban.get(key, []))
+    label = kanban.get("human_review_label", "")
+    if isinstance(label, str) and label.strip():
+        labels[label.strip()] = "hold"
+    return labels
 
 
-def provision_hold_label(forge, label: str, dry: bool) -> tuple[str, str]:
-    """Create the configured hold label on the forge when it has never seen it, via backlog.ensure_labels (#566).
+def provision_labels(forge, labels: dict[str, str], dry: bool) -> tuple[str, str]:
+    """Create missing configured kanban labels via backlog.ensure_labels.
 
     Dry-run prints the intent and touches nothing. A forge that refuses is reported and init still succeeds —
-    the first hold attempt reports the label again if it never lands.
+    the first sync attempt reports the label again if it never lands.
     """
-    if forge is None or not label:
+    if forge is None or not labels:
         return "", ""
     where = forge.repo if isinstance(forge, backlog.GitHubBacklog) else forge.project
     if dry:
-        return f"would create the hold label {label} on {where}", ""
+        return "\n".join(f"would create the {kind} label {label} on {where}"
+                         for label, kind in labels.items()), ""
     try:
-        made = backlog.ensure_labels(forge, (label,), commit=True)
+        made = backlog.ensure_labels(forge, tuple(labels), commit=True)
     except (BacklogError, OSError) as exc:
-        return "", f"hold label not created on {where}: {exc}"
-    out = " ".join(f"hold label {w.what} created on {where}" for w in made if w.done)
+        return "", f"kanban labels not created on {where}: {exc}"
+    out = "\n".join(f"{labels[w.what]} label {w.what} created on {where}" for w in made if w.done)
     pending = "; ".join(w.error for w in made if w.error)
-    return out, f"hold label not created on {where}: {pending}" if pending else ""
+    return out, f"kanban labels not created on {where}: {pending}" if pending else ""
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -176,12 +185,11 @@ def main(argv: list[str] | None = None) -> int:
             except SettingsError as exc:
                 raise InitError(f"existing settings are invalid: {exc}") from None
         new_settings = settings_text(args.launcher, args.worker_mode)
-        # #566: with a backlog named, create the [kanban] hold label the workspace will run with, so no
-        # review hold ever dies on a label the forge has not seen.
+        # Provision the workspace's configured labels before its first stage or hold write.
         forge = (backlog.GitHubBacklog(args.github_repo) if args.github_repo else
                  backlog.Backlog(args.gitlab_host, args.gitlab_project) if args.gitlab_host else None)
-        label_out, label_err = provision_hold_label(
-            forge, _configured_hold_label(settings, new_settings), args.dry_run)
+        label_out, label_err = provision_labels(
+            forge, _configured_labels(settings, new_settings), args.dry_run)
         if args.dry_run:
             print(f"would {'append to' if claude.exists() else 'create'}: {claude}\n{block}")
             print(f"would {'keep existing' if settings.exists() else 'create'}: {settings}")

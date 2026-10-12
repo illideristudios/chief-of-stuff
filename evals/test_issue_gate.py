@@ -20,6 +20,7 @@ import backlog  # noqa: E402
 import forge  # noqa: E402
 import issue_gate  # noqa: E402
 import store  # noqa: E402
+import supervisor  # noqa: E402
 import test_forge as tf  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 
 BLOCK = "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Timezone: UTC\n{backlog}\n## After\n"
@@ -59,6 +60,14 @@ class GateTest(unittest.TestCase):
     def test_a_supplied_issue_the_forge_does_not_confirm_is_refused_and_writes_no_row(self):
         got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Add a flag", issue=999999, commit=True)
         self.assertIn("#999999", got.refused)
+        self.assertEqual(self.store.items(), [])
+
+    def test_closed_gitlab_issue_is_refused_without_a_row(self):
+        row = {**tf.gl_issue(3, "Fix the parser"), "state": "closed"}
+        with mock.patch.object(backlog, "_call", return_value=(row, {}, "")):
+            got = issue_gate.start(forge.Forge(tf.GL, token="fixture-token"), self.store,
+                                   "Fix the parser", issue=3, commit=True)
+        self.assertIn("issue #3 is closed", got.refused)
         self.assertEqual(self.store.items(), [])
 
     def test_a_preview_of_work_on_an_existing_issue_writes_nothing(self):
@@ -159,6 +168,38 @@ class WorkMainTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("would create: Add a flag", out)
         self.assertEqual((self.gh.all_calls, self.items()), ([], []))
+
+    def test_a_running_engine_does_not_block_intake(self):
+        with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"):
+            code, out, err = self.run_work("--commit")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.items()), 1)
+
+    def test_migration_holds_the_migrate_lock_and_releases_it_afterward(self):
+        work = importlib.import_module("work")
+        path = supervisor.state_dir(self.root) / "migrate.lock"
+
+        def migrate(db_path):
+            with self.assertRaises(supervisor.ServiceError), supervisor.lock(path):
+                pass
+            store.migrate(db_path)
+
+        with mock.patch.object(work, "migrate", side_effect=migrate) as migrated:
+            code, _, err = self.run_work()
+        self.assertEqual(code, 0, err)
+        migrated.assert_called_once_with(self.root.resolve() / "store.db")
+        with supervisor.lock(path):
+            pass
+
+    def test_closed_issue_refuses_preview_and_commit_without_a_row(self):
+        self.gh = tf.FakeGh(issues=[{**tf.gh_issue(3, "Fix the parser"), "state": "CLOSED"}])
+        for args in ((), ("--commit",)):
+            with self.subTest(args=args):
+                code, out, err = self.run_work("--issue", "3", *args)
+                self.assertNotEqual(code, 0)
+                self.assertIn("issue #3 is closed", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.items(), [])
 
     def test_existing_issue_is_confirmed_and_uses_the_forge_title(self):
         self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])

@@ -195,7 +195,8 @@ def main(argv: list[str] | None = None) -> int:
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
             path = root / "store.db"
-            migrate(path)
+            with supervisor.lock(supervisor.state_dir(root) / "migrate.lock", wait=True):  # `work` migrates too
+                migrate(path)
             db = Store(path)
             try:
                 while True:

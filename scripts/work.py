@@ -10,6 +10,7 @@ from pathlib import Path
 import forge
 import issue_gate
 import settings
+import supervisor
 from store import Store, migrate
 from workspace import settings_path
 
@@ -32,7 +33,9 @@ def main(argv: list[str] | None = None) -> int:
             result = issue_gate.start(None, None, args.title)
         else:
             path = root / "store.db"
-            migrate(path)
+            # The live engine holds engine.lock for its whole run; migrations take their own short lock.
+            with supervisor.lock(supervisor.state_dir(root) / "migrate.lock", wait=True):
+                migrate(path)
             db = Store(path)
             try:
                 result = issue_gate.start(source, db, args.title, body=args.body,
