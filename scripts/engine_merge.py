@@ -7,13 +7,44 @@ from typing import Any
 
 import reconcile
 from forge_port import ForgeError
-from policy import Policies, PolicyError
+from policy import Policies, PolicyError, SEVERITIES
+
+
+def _findings(state: dict, history: list) -> dict[str, int] | None:
+    latest = max((s for s in history if s.stage == "review" and s.ended_at),
+                 key=lambda s: (datetime.fromisoformat(s.started_at), s.attempt), default=None)
+    record = state.get("review_findings")
+    # TODO #639: replace this attempt-keyed resume bridge with structured findings from the latest review.
+    # Forge approval and threads have no severity counts; neither means a worker reported zero findings.
+    if latest is None or latest.outcome != "done" or not isinstance(record, dict):
+        return None
+    counts = record.get("counts")
+    if (record.get("attempt") != latest.attempt or not isinstance(counts, dict)
+            or any(k not in SEVERITIES or type(v) is not int or v < 0 for k, v in counts.items())):
+        return None
+    return counts
+
+
+def planning_inputs(store: Any, items: list) -> dict:
+    """Read the same issue context for the engine pass and merge recheck."""
+    segments = {item.issue_key: store.segments(item.issue_key) for item in items}
+    states = {item.issue_key: store.resume(item.issue_key) for item in items}
+    states = {key: state if isinstance(state, dict) else {} for key, state in states.items()}
+    return {
+        "segments": segments,
+        "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
+                        or getattr(item, "issue_type", None) for item in items},
+        "open_findings": {key: counts for key, history in segments.items()
+                          if (counts := _findings(states[key], history)) is not None},
+        "rooms": {key: state.get("room") for key, state in states.items()},
+        "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
+    }
 
 
 def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies) -> bool:
-    """Re-plan under the caller's current policies, then log one attempt without retrying.
+    """Re-plan with shared store inputs and current policies, then log one attempt without retrying.
 
-    Resume data holds issue_type, room and open_findings (absent findings remain unknown).
+    Resume data holds issue_type, room and attempt-keyed review_findings; absent findings remain unknown.
     """
     try:
         request = forge.closing_request(action.issue_key)
@@ -36,12 +67,8 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
             item.human_review = True  # a forge-side hold counts even before the store hears of it
         item.merge_state = request.verdict
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
-        state = store.resume(action.issue_key) or {}
-        planned = reconcile.plan([item], {item.issue_key: store.segments(item.issue_key)}, policies,
-                                 {item.issue_key: state.get("issue_type")}, 1, datetime.fromisoformat(at),
-                                 {item.issue_key: state["open_findings"]} if "open_findings" in state else {},
-                                 rooms={item.issue_key: state.get("room")},
-                                 decisions={item.issue_key: store.decisions(item.issue_key)})
+        planned = reconcile.plan([item], policies=policies, free_slots=1, now=datetime.fromisoformat(at),
+                                 **planning_inputs(store, [item]))
         if not planned or not isinstance(planned[0], reconcile.Merge):
             reason = (getattr(planned[0], "reason", f"{type(planned[0]).__name__.lower()} required")
                       if planned else "no eligible merge")
