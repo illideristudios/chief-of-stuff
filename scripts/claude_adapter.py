@@ -38,7 +38,8 @@ def command(request: Request, claude_as_profile: str = "") -> list[str]:
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "") -> subprocess.Popen:
     """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
     prepared = command(request, claude_as_profile)
-    (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd}))
+    (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
+                                                    "session_id": request.session_id}))
     with (run_dir / "runner.stderr").open("w") as errors:
         return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
                                  request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -67,7 +68,8 @@ def _worker(run_dir: Path) -> None:
         try:
             process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env=clean_env(),
                                        stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
-            _write(run_dir, "started.json", {"pid": process.pid})
+            _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
+                                             "session_id": prepared["session_id"]})
             code = process.wait()
         except OSError as exc:
             stderr.write(str(exc))

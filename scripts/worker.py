@@ -53,6 +53,53 @@ def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
     return supervisor.state_dir(root) / "runs" / f"{int(number)}-{stage}-{attempt}"
 
 
+def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
+                  trees: Path, clock: engine_clock.Clock) -> dict | None:
+    """Recover a detached start before changing its tree or moving its exit evidence."""
+    if not run_dir.exists():
+        return None
+    record = data.get("runs", {}).get(f"{stage}-{attempt}")
+    if record is None:
+        started = run_dir / "started.json"
+        if not started.exists():
+            if (run_dir / "command.json").exists() and not (run_dir / "exit.json").exists():
+                raise RuntimeError("existing worker start is unverified; preserving its evidence")
+            return None
+        record = json.loads(started.read_text())
+        prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
+            "tree": data.get("worktree"), "branch": data.get("work_branch")}
+        record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
+                      started_at=clock().isoformat())
+    else:
+        record = dict(record)
+    if (any(type(record.get(field)) is not int or record[field] <= 0 for field in ("pid", "runner_pid"))
+            or not isinstance(record.get("session_id"), str) or not record["session_id"]
+            or not isinstance(record.get("tree"), str) or not record["tree"]
+            or Path(record.get("run_dir", "")).resolve() != run_dir.resolve()
+            or not Path(record["tree"]).resolve().is_relative_to(trees.resolve())
+            or run_dir.resolve().is_relative_to(Path(record["tree"]).resolve())):
+        raise RuntimeError("existing worker identity is incomplete; preserving its evidence")
+    host = process_status.identity(record["pid"], record["session_id"], host=True)
+    runner = process_status.identity(record["runner_pid"], record["session_id"])
+    host_live = host is not None and ("identity" not in record or host == record["identity"])
+    runner_live = runner is not None and ("runner_identity" not in record or runner == record["runner_identity"])
+    if not host_live and not runner_live:
+        return None
+    record.setdefault("identity", host)
+    record.setdefault("runner_identity", runner or "")
+    if not record["identity"]:
+        # The runner may still be between spawning the host and its exec through the login shell.
+        raise RuntimeError("existing worker host is unverified; preserving its evidence")
+    return record
+
+
+def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> None:
+    data = _resume(store, key)
+    data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
+    data.pop("quota", None)
+    store.set_resume(key, data)
+
+
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
@@ -61,47 +108,64 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
     actor = policies.personas[name]
+    run_dir = _run_dir(root, issue_key, stage, attempt)
+    data = _resume(store, issue_key)
+    existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
+    if existing is not None:
+        store.set_ownership(issue_key, existing["tree"])
+        _save_run(store, issue_key, stage, attempt, existing)
+        return actor.model, actor.effort or ""
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
     assignment = compose(row, got.issue.title, got.issue.body, stage, actor)
-    run_dir = _run_dir(root, issue_key, stage, attempt)
-    data = _resume(store, issue_key)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
     # build's from_branch is detached. Reviews use it; fixes need the original writable checkout.
     prepared_review = data.get("review_trees", {}).get(str(attempt)) if stage == "review" else None
+    request_head = forge.closing_request(issue_key) if stage == "review" else None
+    if stage == "review" and (request_head is None or not request_head.branch or not request_head.head):
+        raise RuntimeError("request head branch or SHA is unreadable")
     if prepared_review:
         tree, branch = Path(prepared_review["tree"]), prepared_review["branch"]
         head = make_worktree.git(["rev-parse", "HEAD"], tree)
         if head[0] or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("prepared review tree is unreadable")
-        if forge.closing_request(issue_key).branch != branch:
+        if request_head.branch != branch:
             raise RuntimeError("request branch changed since the refused start")
-    elif stage != "review" and data.get("worktree"):
+        store.set_ownership(issue_key, str(tree))
+        if prepared_review.get("head") != request_head.head or head[1] != request_head.head:
+            # Retain the obsolete tree under cleanup ownership; build the new head in a fresh checkout.
+            tree_name = f"{tree_name}-{uuid.uuid4()}"
+            prepared_review = None
+    if stage != "review" and data.get("worktree"):
         tree, branch = Path(data["worktree"]), data["work_branch"]
         code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
         if code or actual != branch or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
-    else:
+        store.set_ownership(issue_key, str(tree))
+    elif not prepared_review:
         if stage == "fix" or (stage != "review" and attempt > 1):
             raise RuntimeError("fix/retry has no existing worktree; refusing a fresh branch")
-        from_branch = forge.closing_request(issue_key).branch if stage == "review" else ""
-        if stage == "review" and not from_branch:
-            raise RuntimeError("request head branch is unreadable")
+        from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
         made = make_worktree.build(root, clone or root, str(trees), tree_name, branch,
                                    actor.agent or actor.name, from_branch=from_branch)
         tree = made.path
+        store.set_ownership(issue_key, str(tree))
         if stage != "review":
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
             data.update(worktree=str(tree), work_branch=branch)
             store.set_resume(issue_key, data)
         else:
-            data["review_trees"] = {**data.get("review_trees", {}), str(attempt): {"tree": str(tree), "branch": branch}}
+            data["review_trees"] = {**data.get("review_trees", {}), str(attempt): {
+                "tree": str(tree), "branch": branch, "head": request_head.head}}
             store.set_resume(issue_key, data)
+            code, actual_head = make_worktree.git(["rev-parse", "HEAD"], tree)
+            if code or actual_head != request_head.head:
+                raise RuntimeError("prepared review tree does not match the request head")
     if run_dir.resolve().is_relative_to(tree.resolve()):
         raise RuntimeError("engine run directory must be outside the worker tree")
     # A failed start may be retried at the same attempt. Preserve its evidence under a unique sibling.
@@ -130,10 +194,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
                   "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
-        data = _resume(store, issue_key)
-        data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
-        data.pop("quota", None)
-        store.set_resume(issue_key, data)
+        _save_run(store, issue_key, stage, attempt, record)
     except Exception:
         claude_adapter.cancel(runner)
         raise

@@ -15,6 +15,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import engine
 import claude_adapter
+import cleanup
 import forge_review
 import process_status
 import reconcile
@@ -43,14 +44,18 @@ class WorkerTest(unittest.TestCase):
         self.persona = self.p.personas["builder"]
         self.forge = SimpleNamespace(
             issue=lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Forge title", body="Issue body")),
-            closing_request=lambda key: SimpleNamespace(branch="feature/existing"))
+            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"))
+        git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
+        git.start()
+        self.addCleanup(git.stop)
 
     def launch(self, stage="implement", attempt=1):
         return worker.launch(KEY, stage, attempt, None, store=self.db, root=self.root,
                              trees=self.trees, policies=self.p, forge=self.forge, clock=lambda: NOW)
 
     def start(self, request, run_dir, **kwargs):
-        (run_dir / "started.json").write_text(json.dumps({"pid": 77}))
+        (run_dir / "started.json").write_text(json.dumps({
+            "pid": 77, "runner_pid": 78, "session_id": request.session_id}))
         return SimpleNamespace(pid=78, poll=lambda: None)
 
     def launched(self, stage="implement", attempt=1):
@@ -114,6 +119,161 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             self.launch("review")
         self.assertEqual(build.call_args.kwargs["from_branch"], "feature/existing")
+
+    def test_generated_trees_have_cleanup_ownership_even_after_refused_start(self):
+        for stage in ("implement", "review"):
+            with self.subTest(stage=stage):
+                tree = self.trees / f"owned-{stage}"
+                tree.mkdir()
+                with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=tree)), \
+                     mock.patch.object(worker.claude_adapter, "start", side_effect=RuntimeError("refused")):
+                    with self.assertRaisesRegex(RuntimeError, "refused"):
+                        self.launch(stage)
+                self.assertIn(str(tree), [row.path for row in self.db.ownership(KEY)])
+                self.db.upsert_item(KEY, forge_state="closed")
+                items, guards = cleanup.owner_guards(tree, cleanup.owned_items(self.root, self.db))
+                self.assertEqual([item.issue_key for item in items], [KEY])
+                self.assertEqual(guards, [])
+
+    def test_restart_adopts_live_run_before_slot_record_with_or_without_resume_record(self):
+        for recorded in (True, False):
+            with self.subTest(recorded=recorded):
+                if self.db.resume(KEY):
+                    self.db.engine.dispose()
+                    self.setUp()
+                with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+                     mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+                     mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+                    self.launch()
+                data = self.db.resume(KEY)
+                record = data["runs"]["implement-1"]
+                run = Path(record["run_dir"])
+                if not recorded:
+                    data.pop("runs")
+                    self.db.set_resume(KEY, data)
+                worker._runners.pop(str(run), None)
+                with mock.patch.object(worker.make_worktree, "build") as build, \
+                     mock.patch.object(worker.make_worktree, "git", return_value=(0, record["branch"])) as git, \
+                     mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+                     mock.patch.object(worker.process_status, "identity", return_value="process-start") as identity:
+                    slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                                max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+                start.assert_not_called()
+                build.assert_not_called()
+                git.assert_not_called()
+                identity.assert_any_call(77, record["session_id"], host=True)
+                identity.assert_any_call(78, record["session_id"])
+                self.assertEqual(slots.running(self.db), 1)
+                self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"], record)
+                self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
+                (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+                (run / "stderr").write_text("")
+                (run / "exit.json").write_text('{"exit_code": 0}')
+                with mock.patch.object(worker.process_status, "identity", return_value=None):
+                    worker.collect(self.db, self.root, lambda: NOW)
+                self.assertEqual(self.db.segments()[0].outcome, "done")
+
+    def test_dead_or_reused_run_is_preserved_as_refused_before_relaunch(self):
+        for recorded, old_identity in ((True, None), (True, "different-birth"), (False, None)):
+            with self.subTest(recorded=recorded, old_identity=old_identity):
+                if self.db.resume(KEY):
+                    self.db.engine.dispose()
+                    self.setUp()
+                with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+                     mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+                     mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+                    self.launch()
+                old = self.db.resume(KEY)["runs"]["implement-1"]
+                run = Path(old["run_dir"])
+                if not recorded:
+                    data = self.db.resume(KEY)
+                    data.pop("runs")
+                    self.db.set_resume(KEY, data)
+                (run / "exit.json").write_text('{"exit_code": 1}')
+                with mock.patch.object(worker.make_worktree, "git", return_value=(0, old["branch"])), \
+                     mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+                     mock.patch.object(worker.process_status, "identity", side_effect=[old_identity, old_identity,
+                                                                                          "new-start", "new-start"]):
+                    self.launch()
+                self.assertEqual(start.call_count, 1)
+                refused, = run.parent.glob(f"{run.name}-refused-*")
+                self.assertTrue((refused / "exit.json").exists())
+                self.assertNotEqual(self.db.resume(KEY)["runs"]["implement-1"]["session_id"], old["session_id"])
+
+    def test_unverified_existing_run_keeps_evidence_and_refuses_second_worker(self):
+        run = self.launched()
+        with mock.patch.object(worker.claude_adapter, "start") as start, \
+             mock.patch.object(worker.process_status, "identity", side_effect=RuntimeError("ps blocked")):
+            with self.assertRaisesRegex(RuntimeError, "ps blocked"):
+                self.launch()
+        start.assert_not_called()
+        self.assertTrue((run / "started.json").exists())
+        self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
+
+    def test_adopted_host_with_dead_runner_can_be_collected_after_exit(self):
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.launch()
+        data = self.db.resume(KEY)
+        run = Path(data.pop("runs")["implement-1"]["run_dir"])
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.claude_adapter, "start") as start, \
+             mock.patch.object(worker.process_status, "identity", side_effect=["process-start", None]):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                        max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        start.assert_not_called()
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW)
+        self.assertEqual(self.db.segments()[0].outcome, "done")
+
+    def test_refused_review_tree_is_rebuilt_when_request_head_changes(self):
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=RuntimeError("refused")):
+            with self.assertRaisesRegex(RuntimeError, "refused"):
+                self.launch("review")
+        self.assertEqual(self.db.resume(KEY)["review_trees"]["1"].get("head"), "head")
+        self.forge.closing_request = lambda key: SimpleNamespace(branch="feature/existing", head="new-head")
+        fresh = self.trees / "fresh-review"
+        fresh.mkdir()
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=fresh)) as build, \
+             mock.patch.object(worker.make_worktree, "git", side_effect=[(0, "head"), (0, "new-head")]), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch("review")
+        build.assert_called_once()
+        self.assertNotEqual(build.call_args.args[3], self.tree.name)
+        self.assertEqual(start.call_args.args[0].cwd, str(fresh))
+        self.assertEqual(self.db.resume(KEY)["review_trees"]["1"]["head"], "new-head")
+        self.assertEqual({row.path for row in self.db.ownership(KEY)}, {str(self.tree), str(fresh)})
+
+    def test_live_review_is_adopted_before_changed_head_can_rebuild_its_tree(self):
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.launch("review")
+        self.forge.closing_request = mock.Mock(return_value=SimpleNamespace(branch="feature/existing", head="new-head"))
+        with mock.patch.object(worker.make_worktree, "build") as build, \
+             mock.patch.object(worker.claude_adapter, "start") as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="review", attempt=1,
+                        max_concurrency=1, clock=lambda: NOW, launch=lambda: self.launch("review"))
+        build.assert_not_called()
+        start.assert_not_called()
+        self.forge.closing_request.assert_not_called()
+        self.assertEqual(slots.running(self.db), 1)
+
+    def test_review_refuses_a_checkout_that_does_not_match_the_request_sha(self):
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.make_worktree, "git", return_value=(0, "unexpected-head")), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "does not match the request head"):
+                self.launch("review")
+        start.assert_not_called()
+        self.assertEqual([row.path for row in self.db.ownership(KEY)], [str(self.tree)])
 
     def test_rework_reuses_tree_and_branch_without_build(self):
         self.launched()
@@ -202,15 +362,17 @@ class WorkerTest(unittest.TestCase):
 
     def test_failed_review_start_can_reuse_its_prepared_tree(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
-             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
-             mock.patch.object(worker.claude_adapter, "cancel"), \
-             mock.patch.object(worker.time, "monotonic", side_effect=[0, 10, 20]), \
-             mock.patch.object(worker.process_status, "identity", side_effect=[None, None, "start", "start"]):
-            with self.assertRaises(RuntimeError):
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.claude_adapter, "cancel"):
+            with mock.patch.object(worker.time, "monotonic", side_effect=[0, 10]), \
+                 mock.patch.object(worker.process_status, "identity", return_value=None), \
+                 self.assertRaises(RuntimeError):
                 self.launch("review")
-            with mock.patch.object(worker.make_worktree, "git", return_value=(0, "head")):
+            with mock.patch.object(worker.process_status, "identity", side_effect=[None, None, "start", "start"]):
                 self.launch("review")
         self.assertEqual(build.call_count, 1)
+        self.assertEqual(start.call_count, 2)
+        self.assertEqual(start.call_args.args[0].cwd, str(self.tree))
 
     def test_collect_does_not_count_a_reused_pid_as_live(self):
         run = self.launched()
@@ -235,7 +397,7 @@ class WorkerTest(unittest.TestCase):
         worker.collect(self.db, self.root, lambda: NOW)
         self.assertEqual(self.db.segments()[0].outcome, "failed")
 
-    def test_real_detached_adapter_collects_after_losing_engine_process_handle(self):
+    def test_real_detached_adapter_is_adopted_and_collected_after_engine_restart(self):
         fake = Path(__file__).parent / "fixtures" / "fake_claude.py"
         cli = self.root / "fake-cli"
         cli.write_text(f"#!{sys.executable}\nimport time, runpy\ntime.sleep(0.5)\n"
@@ -246,11 +408,19 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(claude_adapter, "resolve", return_value=str(cli)), \
              mock.patch.object(worker.process_status, "identity", return_value="fake-start"), \
              mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}):
-            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                        max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+            self.launch()
         record = self.db.resume(KEY)["runs"]["implement-1"]
         runner = worker._runners.pop(record["run_dir"])
         self.addCleanup(lambda: claude_adapter.cancel(runner) if runner.poll() is None else None)
+        data = self.db.resume(KEY)
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.claude_adapter, "start") as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="fake-start"):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                        max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        start.assert_not_called()
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"], record)
         runner.wait(timeout=5)
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))

@@ -66,10 +66,13 @@ class CleanupTest(unittest.TestCase):
         self.addCleanup(path.stop)
         self.lsof = mock.Mock(return_value=subprocess.CompletedProcess(["lsof"], 1, "", ""))
         real_run = subprocess.run
+        self.ps = mock.Mock(wraps=real_run)
 
         def run(args, *positional, **kwargs):
             if args[0] == "lsof":
                 return self.lsof(args, *positional, **kwargs)
+            if args[0] == "ps":
+                return self.ps(args, *positional, **kwargs)
             return real_run(args, *positional, **kwargs)
 
         processes = mock.patch.object(cleanup.subprocess, "run", side_effect=run)
@@ -507,6 +510,9 @@ class CleanupTest(unittest.TestCase):
         self.addCleanup(worker.wait)
         self.addCleanup(worker.kill)
         self.register(worker.pid, tree)
+        # Keep the real PID existence check; provide command evidence without a sandbox-blocked ps.
+        self.ps.return_value = subprocess.CompletedProcess(
+            ["ps"], 0, f"{worker.pid} {sys.executable} -c sleep claude {tree}\n", "")
         _, out = self.run_cleanup("--remove")
         self.assertIn("live worker", self.kept(out)["done"])
         self.assertTrue(tree.is_dir())
@@ -592,6 +598,8 @@ class CleanupTest(unittest.TestCase):
 
     def test_a_reused_pid_is_not_a_live_worker(self) -> None:
         self.register(os.getpid(), self.trees / "done")  # alive, but its command is this test, not the worker
+        self.ps.return_value = subprocess.CompletedProcess(
+            ["ps"], 0, f"{os.getpid()} {sys.executable} -m unittest evals.test_cleanup\n", "")
         _, out = self.run_cleanup("--remove")
         self.assertEqual(self.removable(out), ["done"])
         self.assertFalse((self.trees / "done").exists())
