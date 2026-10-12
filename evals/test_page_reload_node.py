@@ -15,7 +15,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
-import page_reload  # noqa: E402  (test_pages.py pins that every served page carries page_reload.SNIPPET)
+import page_reload  # noqa: E402  (test_pages.py pins that every served page carries the shared reload check)
 
 NODE_TIMEOUT = 10  # seconds; a hung node must not stall CI
 
@@ -41,7 +41,7 @@ let reloads = 0, intervals = [], listeners = {}, notices = [];
 const control = c => {
   if ((c.tag || '').toUpperCase() === 'SELECT') {
     const options = (c.options || []).map(o => Object.assign({selected: false, defaultSelected: false, disabled: false}, o));
-    return {tag: 'SELECT', tagName: 'SELECT', multiple: !!c.multiple, options,
+    return {tag: 'SELECT', tagName: 'SELECT', multiple: !!c.multiple, size: c.size || 0, options,
             value: '', defaultValue: '', checked: false, defaultChecked: false,
             inForm: c.inForm !== false, formAttr: !!c.formAttr};
   }
@@ -101,7 +101,7 @@ const fetch = (url, opts) => {
 const location = {pathname: '/x.html', reload() { reloads++; }};
 const sandbox = {document, location, fetch, setInterval: f => intervals.push(f), isNaN, Date};
   new vm.Script(snippet.replace(/^\s*<script>|<\/script>\s*$/g, '')).runInNewContext(sandbox, {timeout: 2000});
-  await flush();  // the load-time HEAD sets the baseline before steps run
+  await flush();  // finish the load-time HEAD before steps run; the GET supplies the baseline
   for (const step of scenario.steps) {
     if ('header' in step) header = step.header;
     if ('active' in step) document.activeElement = step.active;
@@ -205,6 +205,8 @@ SCENARIOS = {
     "a header that disappears is not a change": ({"steps": [{"header": None}, {"tick": 1}]}, NOTHING),
     "an epoch Last-Modified is a time, not an absent one": ({"steps": [{"header": EPOCH}, {"tick": 1}]}, RELOAD),
     "a failed fetch is ignored": ({"steps": [{"header": "fail"}, {"tick": 2}]}, NOTHING),
+    "first HEAD fails, then the page changes": (changed({"tick": 1}, header="fail"), RELOAD),
+    "page changed between GET and first HEAD": ({"header": LATER, "steps": []}, RELOAD),
     # #332: document.lastModified an hour off the header must not reload while the header is unchanged.
     "lastModified disagrees with header by an hour, header unchanged": (
         {"lastModified": DOC_HOUR_OFF, "steps": [{"tick": 3}]}, NOTHING),
@@ -218,6 +220,8 @@ SCENARIOS = {
     "a chosen option in a form": (changed({"tick": 1}, controls=[picked_option()]), NOTICE),
     # #339: a plain <select> with no selected option is not typed input.
     "an untouched select is a clean form": (changed({"tick": 1}, controls=[untouched_select()]), RELOAD),
+    "an untouched list box with no selection is a clean form": (
+        changed({"tick": 1}, controls=[select_control([{}, {}], size=2)]), RELOAD),
     "focused input": (changed({"tick": 1}, active=focused("INPUT")), NOTICE),
     "focused textarea": (changed({"tick": 1}, active=focused("TEXTAREA")), NOTICE),
     "focused select": (changed({"tick": 1}, active=focused("SELECT")), NOTICE),
@@ -258,7 +262,10 @@ MUTANTS = [
     ("edited text is not unsaved", "e.value!==e.defaultValue||", ""),
     ("a picked radio is not unsaved", "e.checked!==e.defaultChecked", "false"),
     ("a chosen option is not unsaved", "return selectDirty(e);", "return false;"),
-    ("an untouched select counts as typed", "if(!def.length&&!s.multiple)", "if(false)"),
+    ("an untouched select counts as typed", "if(!def.length&&!s.multiple&&s.size<=1)", "if(false)"),
+    ("a list box defaults to its first option", "&&s.size<=1", ""),
+    ("the first HEAD sets the baseline", "var t=r.headers.get('Last-Modified');",
+     "var t=r.headers.get('Last-Modified');if(!poll.ready){seen=t;poll.ready=true;return;}"),
     ("a button counts as edited text", "if(!/^(INPUT|TEXTAREA)$/.test(e.tagName)) return false;", ""),
     ("form-attribute controls are missed", "f.elements", "f.querySelectorAll('input,textarea,select')"),
     ("the button does not reload", "b.onclick=function(){location.reload();}", "b.onclick=function(){}"),
@@ -279,7 +286,7 @@ MUTANTS = [
 class ReloadSnippetInNodeTest(unittest.TestCase):
     """The snippet every served page carries, run in node against the stub page."""
 
-    snippet = page_reload.SNIPPET
+    snippet = page_reload.inject(b"", SAME).decode()
 
     def test_the_served_snippet_does_what_the_cases_say(self):
         for (name, (_, want)), result in zip(SCENARIOS.items(), grade(self.snippet), strict=True):

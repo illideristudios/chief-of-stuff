@@ -109,10 +109,10 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(get(self.port, "/.pid").status, 404)
 
 
-def snippet() -> str:
+def snippet(last_modified: str = "Thu, 01 Jan 1970 00:00:00 GMT") -> str:
     """The shared reload check. Imported here, not at the top, so only the tests of it are red while it is missing."""
     import page_reload
-    return page_reload.SNIPPET
+    return page_reload.inject(b"", last_modified).decode()
 
 
 class ReloadSnippetTest(unittest.TestCase):
@@ -140,10 +140,11 @@ class ReloadSnippetTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
 
     def test_every_page_kind_carries_the_snippet_once_before_the_last_body_end(self):
-        snip = snippet().encode()
         for path in self.ROUTES:
             with self.subTest(path=path):
-                body = get(self.port, path).body
+                got = get(self.port, path)
+                body = got.body
+                snip = snippet(got.getheader("Last-Modified")).encode()
                 self.assertEqual(body.count(snip), 1)
                 self.assertLess(body.index(snip), body.rindex(b"</body>"))
                 self.assertIn(f"<p>{self.ROUTES[path]}</p>".encode(), body)
@@ -157,14 +158,16 @@ class ReloadSnippetTest(unittest.TestCase):
                 self.assertEqual(head.body, b"")
                 self.assertEqual(head.getheader("Last-Modified"), got.getheader("Last-Modified"))
                 self.assertEqual(got.getheader("Last-Modified"), email.utils.formatdate(self.MTIME, usegmt=True))
+                self.assertIn(f"var seen={json.dumps(got.getheader('Last-Modified'))};".encode(), got.body)
 
     def test_a_page_without_a_body_end_gets_it_appended_and_the_last_one_is_where_it_goes(self):
-        snip = snippet().encode()
         (self.dir / "arch-review.html").write_text("<p>no body</p>")
-        body = get(self.port, "/arch-review.html").body
+        got = get(self.port, "/arch-review.html")
+        body, snip = got.body, snippet(got.getheader("Last-Modified")).encode()
         self.assertEqual((body.count(snip), body.startswith(b"<p>no body</p>"), body.endswith(snip)), (1, True, True))
         (self.dir / "arch-review.html").write_text('<body><script>var s="</body>"</script></body>')
-        body = get(self.port, "/arch-review.html").body
+        got = get(self.port, "/arch-review.html")
+        body, snip = got.body, snippet(got.getheader("Last-Modified")).encode()
         self.assertEqual((body.count(snip), body.index(snip) > body.index(b'"</body>"'), body.endswith(b"</body>")), (1, True, True))
 
     def test_a_file_that_is_not_html_is_served_unchanged(self):
@@ -235,16 +238,24 @@ class ReloadSnippetTest(unittest.TestCase):
     def test_inject_matches_the_body_end_in_any_case(self):
         import page_reload
         snip = page_reload.ENCODED  # the bytes inject() writes
-        self.assertEqual(snip, page_reload.SNIPPET.encode())
+        self.assertEqual(snip, snippet().encode())
         for end in (b"</BODY>", b"</Body>"):
             with self.subTest(end=end):
-                out = page_reload.inject(b"<BODY><p>x</p>" + end + b"</HTML>")
+                out = page_reload.inject(b"<BODY><p>x</p>" + end + b"</HTML>", "Thu, 01 Jan 1970 00:00:00 GMT")
                 self.assertEqual((out.count(snip), out.index(snip) < out.rindex(end), out.endswith(end + b"</HTML>")), (1, True, True))
 
+    def test_inject_escapes_the_baseline_as_a_script_safe_json_string(self):
+        stamp = '"\\\n</script>\u2028'
+        snip = snippet(stamp)
+        value = re.search(r"var seen=(.*);", snip)[1]
+        self.assertEqual(json.loads(value), stamp)
+        self.assertNotIn("<", value)
+        self.assertEqual(snip.count("</script>"), 1)
+
     def test_an_upper_case_html_suffix_is_injected_like_html(self):
-        snip = snippet().encode()
         (self.dir / "LOUD.HTML").write_text("<body><p>loud</p></body>")
-        body = get(self.port, "/LOUD.HTML").body
+        got = get(self.port, "/LOUD.HTML")
+        body, snip = got.body, snippet(got.getheader("Last-Modified")).encode()
         self.assertEqual((body.count(snip), b"<p>loud</p>" in body), (1, True))
 
     def test_an_html_that_does_not_exist_or_is_not_a_file_is_404_for_get_and_head(self):
@@ -546,11 +557,11 @@ class RenderOnRequestTest(unittest.TestCase):
         (self.pages / "decision-cache-ttl.json").write_text(
             '{"headline": "Cache TTL", "ask": "Keep 5 minutes?", "options": [{"key": "A", "title": "Keep", '
             '"text": "no change"}, {"key": "B", "title": "Drop", "text": "slower"}], "recommended": "A", "why": "fine", "default": "A at 17:00"}')
-        snip = snippet()
         for path, name in (("/", f"{self.day}-board.html"), ("/decisions", "decisions.html"),
                            ("/decisions/cache-ttl", "decision-cache-ttl.html")):
             with self.subTest(path=path):
-                page = get(self.port, path).body.decode()
+                got = get(self.port, path)
+                page, snip = got.body.decode(), snippet(got.getheader("Last-Modified"))
                 self.assertEqual(page.count(snip), 1)
                 self.assertEqual(page.count("fetch(location.pathname"), 1)
                 on_disk = (self.pages / name).read_text()
@@ -560,8 +571,8 @@ class RenderOnRequestTest(unittest.TestCase):
     def test_the_banner_variant_carries_the_snippet_once(self):
         get(self.port, "/")
         (self.root / "cos.toml").write_text("[lanes\n")
-        snip = snippet()
         got, head = get(self.port, "/"), get(self.port, "/", method="HEAD")
+        snip = snippet(got.getheader("Last-Modified"))
         self.assertIn(b"not re-rendered", got.body)
         body = got.body.decode()
         self.assertEqual(body.count(snip), 1)
@@ -994,7 +1005,7 @@ class RenderStampTest(_PagesFixture, unittest.TestCase):
             got, head = get(self.port, "/issues/7"), get(self.port, "/issues/7", method="HEAD")
         self.assertEqual((got.status, head.status), (200, 200))
         self.assertIn(b"not re-rendered: RuntimeError: boom", got.body)
-        self.assertEqual(got.body.count(page_reload_bytes()), 1)
+        self.assertEqual(got.body.count(snippet(got.getheader("Last-Modified")).encode()), 1)
         self.assertEqual(head.getheader("Content-Length"), str(len(got.body)))
 
     def test_a_page_file_that_is_not_utf8_is_rewritten_not_wedged(self):
@@ -1026,11 +1037,6 @@ class RenderStampTest(_PagesFixture, unittest.TestCase):
         self.assertTrue([r for r in replaced if r[1].name == target.name and r[0] != r[1] and r[0].parent == r[1].parent],
                         f"workers.html was not replaced from a temp file beside it: {replaced}")
         self.assertEqual(set(os.listdir(self.pages)), before, "a temp file was left behind")
-
-
-def page_reload_bytes() -> bytes:
-    import page_reload
-    return page_reload.ENCODED
 
 
 class UnfrozenBoardTest(_PagesFixture, unittest.TestCase):

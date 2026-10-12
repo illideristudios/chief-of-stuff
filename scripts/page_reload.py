@@ -4,18 +4,20 @@ It polls the file's Last-Modified with a HEAD every 5 s and when the tab is show
 throttled). A change reloads the page, except while the user has unsaved input in a form (typing, a picked option): then it shows one notice with a button.
 """
 
+import json
+
 # Set by the timer's reload, so the page server does not count it as a person looking at the board (#229); the
 # notice's Reload button is the person's own click and sets none.
 RELOAD_COOKIE = "cos-reload=1"
 
 SNIPPET = """<script>
 (function(){
-  var seen,ready=false;
+  var seen=LAST_MODIFIED;
   function some(sel,f){return Array.prototype.some.call(document.querySelectorAll(sel),f);}
   function selectDirty(s){
     var o=s.options,def=[],cur=[],i;
     for(i=0;i<o.length;i++) if(o[i].defaultSelected) def.push(o[i]);
-    if(!def.length&&!s.multiple) for(i=0;i<o.length;i++) if(!o[i].disabled){def=[o[i]];break;}
+    if(!def.length&&!s.multiple&&s.size<=1) for(i=0;i<o.length;i++) if(!o[i].disabled){def=[o[i]];break;}
     for(i=0;i<o.length;i++) if(o[i].selected) cur.push(o[i]);
     if(cur.length!==def.length) return true;
     for(i=0;i<cur.length;i++) if(cur[i]!==def[i]) return true;
@@ -39,7 +41,6 @@ SNIPPET = """<script>
   function poll(){
     fetch(location.pathname,{method:'HEAD',cache:'no-store'}).then(function(r){
       var t=r.headers.get('Last-Modified');
-      if(!ready){seen=t;ready=true;return;}
       if(t!=null&&t!==seen){if(typing())notice();else{document.cookie='%s;max-age=10;path=/';location.reload();}}
     }).catch(function(){});
   }
@@ -49,10 +50,12 @@ SNIPPET = """<script>
 """ % RELOAD_COOKIE
 
 
-ENCODED = SNIPPET.encode()
-
-
-def inject(page: bytes) -> bytes:
-    """`page` with SNIPPET before its last `</body>`, or appended when it has none."""
+def inject(page: bytes, last_modified: str) -> bytes:
+    """Reload check baselined to the GET's Last-Modified, before the last `</body>` or appended if absent."""
+    encoded = SNIPPET.replace("LAST_MODIFIED", json.dumps(last_modified).replace("<", "\\u003c")).encode()
     at = page.lower().rfind(b"</body>")
-    return page + ENCODED if at < 0 else page[:at] + ENCODED + page[at:]
+    return page + encoded if at < 0 else page[:at] + encoded + page[at:]
+
+
+# HTTP dates have a fixed length, so HEAD can count the injected bytes without reading the page.
+ENCODED = inject(b"", "Thu, 01 Jan 1970 00:00:00 GMT")
