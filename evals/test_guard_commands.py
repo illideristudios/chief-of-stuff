@@ -46,7 +46,7 @@ class CommandTest(unittest.TestCase):
     def test_allowlisted_worker_writes_are_available(self):
         for command in ('gh pr create --title widget --body details', 'gh pr comment 12 --body feedback',
                         'gh issue comment 12 --body feedback', 'gh pr review 12 --comment --body feedback',
-                        'gh pr review 12 --request-changes --body feedback', 'gh pr checkout 12',
+                        'gh pr review 12 -c -b feedback', 'gh pr checkout 12',
                         'glab mr create --title widget --description details', 'glab mr note 12 --message feedback',
                         'glab issue note 12 --message feedback', 'glab mr checkout 12'):
             with self.subTest(command=command):
@@ -57,7 +57,8 @@ class CommandTest(unittest.TestCase):
                         'glab mr create --draft', 'glab mr create --ready', 'glab mr create --wip',
                         'glab mr create --label stage:done', 'gh pr review 12 --approve', 'gh pr review 12 -a',
                         'gh pr review 12', 'gh pr review 12 --comment --approve',
-                        'gh pr review 12 --request-changes -a', 'gh issue view 12 --state closed',
+                        'gh pr review 12 --request-changes -a', 'gh pr review 12 --request-changes --body x',
+                        'gh pr review 12 -r -b x', 'gh issue view 12 --state closed',
                         'gh pr comment 12 --add-label stage:done', 'glab issue note 12 --close',
                         'gh pr create -lstage:done', 'glab mr create --labels=stage:done'):
             with self.subTest(command=command):
@@ -83,10 +84,11 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
-    def test_dashed_git_executables_use_git_checks(self):
+    def test_dashed_git_executables_and_hub_use_git_checks(self):
         for command in ('/usr/lib/git-core/git-push origin HEAD:main', 'git-merge topic',
                         'git-push origin HEAD:refs/heads/develop', 'git-push', 'git-push --all',
-                        'git-pull origin main', 'env FLAG=yes /usr/lib/git-core/git-merge topic'):
+                        'git-pull origin main', 'env FLAG=yes /usr/lib/git-core/git-merge topic',
+                        'hub merge topic', 'hub push origin HEAD:main', 'hub status', 'env X=1 hub push'):
             with self.subTest(command=command):
                 self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
         for command in ('git-status', '/usr/lib/git-core/git-diff',

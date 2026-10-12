@@ -10,7 +10,7 @@ from pathlib import PurePosixPath
 import re
 import shlex
 
-OWNED = "The engine owns merges, protected branch pushes, stage labels, Project Status, issue closure and PR readiness."
+OWNED = "The engine owns merges, protected branch pushes, stage labels, Project Status, issue closure, PR readiness and review verdicts; forge commands outside the worker allowlist are denied."
 UNPARSED = "The guard cannot safely parse this command. Use a plain command; " + OWNED
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
@@ -204,10 +204,11 @@ def _forge_denied(args: list[str], client: str) -> bool:
     if verb not in allowed:
         return True
     if group == "pr" and verb == "review":
-        # Approval belongs to the user; a review without a mode could prompt for it.
-        if any(flag.split("=", 1)[0] == "--approve" or flag.startswith("-a") for flag in flags):
+        # Approval is the user's and a change request holds the merge (reconcile); findings go through the report.
+        if any(flag.split("=", 1)[0] in {"--approve", "--request-changes"}
+               or flag.startswith(("-a", "-r")) and not flag.startswith("--") for flag in flags):
             return True
-        if not any(flag in {"--comment", "--request-changes"} for flag in flags):
+        if not any(flag in {"--comment", "-c"} for flag in flags):
             return True
     if group in {"issue", "issues", "pr", "mr"}:
         # Stage label names are configurable. Protect all label writes rather than guessing from a prefix.
@@ -226,6 +227,8 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     name, args = PurePosixPath(tokens[0]).name, tokens[1:]
     if name.startswith("git-"):
         name, args = "git", [name[4:], *args]
+    if name == "hub":
+        return True  # a git wrapper with forge verbs of its own: workers use git and gh
     # Plain clients bypass the forge CLI gates. Workers must use gh/glab for forge reads too.
     if name not in {"echo", "printf"} and any(FORGE_API.search(arg) for arg in args):
         return True
@@ -257,7 +260,7 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if name not in {"echo", "printf"}:
         for i, token in enumerate(args):
             nested_name = PurePosixPath(token).name
-            if (nested_name in {"gh", "glab", "git", "sh", "bash", "zsh", "dash", "eval"}
+            if (nested_name in {"gh", "glab", "git", "hub", "sh", "bash", "zsh", "dash", "eval"}
                     or nested_name.startswith("git-")):
                 if _one(args[i:], protected, depth + 1):
                     raise Unparsed()

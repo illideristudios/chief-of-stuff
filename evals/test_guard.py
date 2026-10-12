@@ -88,7 +88,7 @@ class GuardTest(unittest.TestCase):
                         "gh label list", "gh project item-list 1 --owner owner",
                         "gh pr create --title widget --body details", "gh pr comment 12 --body feedback",
                         "gh issue comment 12 --body feedback", "gh pr review 12 --comment --body feedback",
-                        "gh pr review 12 --request-changes --body feedback", "gh pr checkout 12",
+                        "gh pr review 12 --comment --body feedback", "gh pr checkout 12",
                         "glab mr create --title widget", "glab mr note 12 --message feedback",
                         "glab issue note 12 --message feedback", "glab mr checkout 12",
                         "git-push origin HEAD:feat/widget", "gh pr merge --help"):
@@ -125,6 +125,7 @@ class GuardTest(unittest.TestCase):
         self.assertEqual((asks[0].stage, asks[0].attempt, asks[0].session_id, asks[0].answer),
                          ("implement", 2, "session-two", None))
         self.assertIn("touch /outside/file", asks[0].context)
+        self.assertNotIn("ask tool", json.dumps(result))  # already recorded; a second ask would duplicate it
 
     def test_stop_requires_this_exact_run_report_and_cannot_loop(self):
         self.assertEqual(self.hook("Stop")["decision"], "block")

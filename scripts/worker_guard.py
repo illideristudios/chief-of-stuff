@@ -40,7 +40,9 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
             context = json.dumps({"tool_name": event.get("tool_name"), "tool_input": event.get("tool_input")})
             ask_id = db.add_ask(binding.issue_key, binding.stage, binding.attempt, binding.session_id,
                                 f"Permission requested for {event.get('tool_name', 'tool')}", [], context)
-            return _deny(event_name, f"Recorded permission ask {ask_id}. {RELAY}")
+            # Already recorded: asking again through the MCP tool would duplicate it.
+            return _deny(event_name, f"Recorded permission ask {ask_id}. An ask is not an approval. "
+                                     "Report blocked, then stop and wait.")
         if event_name == "Stop":
             if db.reports(binding.issue_key, stage=binding.stage, attempt=binding.attempt, session_id=binding.session_id):
                 return {}

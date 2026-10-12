@@ -18,7 +18,7 @@ The supervisor keeps engine process state under `supervisor.state_dir(root)` and
 
 The hooks implement these gates:
 
-- Bash rejects merges (including `git pull`), ambiguous or protected destination pushes, label mutations (stage label names are configurable), Project edits, issue closure and PR readiness. Quotes, paths to executables, assignments, `env`, `command`, `exec`, `nohup`, `time`, `timeout`, `nice`, `setsid`, supported `sudo` options, shell `-c` wrappers, pipelines and command chains are parsed without execution. Ordinary reads and explicit feature branch pushes are allowed.
+- Bash rejects merges (including `git pull`), ambiguous or protected destination pushes, and `hub`. `gh`/`glab` pass only through an allowlist of reads and worker writes (PR/MR create, comments, comment-only reviews, checkout); within it, label, state and readiness flags are rejected. Plain HTTP clients naming a forge API are rejected. Quotes, paths to executables, assignments, `env`, `command`, `exec`, `nohup`, `time`, `timeout`, `nice`, `setsid`, supported `sudo` options, shell `-c` wrappers, pipelines and command chains are parsed without execution. Ordinary reads and explicit feature branch pushes are allowed.
 
 - Commands outside the parser's shell subset are denied: dynamic expansion, inline interpreter programs, aliases, shell scripts, control flow, redirections, unsupported wrapper flags and malformed quoting. Forge API writes are denied conservatively because their effects cannot be established by the gate. These restrictions are guard rails; they do not replace engine verification.
 
