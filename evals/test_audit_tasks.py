@@ -3007,7 +3007,7 @@ class ShaTreesTest(unittest.TestCase):
                 trees = [(f"t{i}", self.trees) for i in range(len(answers))]
                 seen = iter([(code, f"{line} {i}", held) for i, (code, line, held) in enumerate(answers)])
                 with patch.object(git_trees, "sha_trees", return_value=trees), \
-                        patch.object(git_trees, "check_sha", lambda sha, tree: next(seen)):
+                        patch.object(git_trees, "check_sha", lambda sha, tree, **kw: next(seen)):
                     code, out, _ = self.run_main("--sha", self.sha)
                 self.assertEqual(code, want, out)
                 per_repo = [f"{line} {i} [t{i}]" for i, (_, line, _) in enumerate(answers)]
@@ -3026,7 +3026,7 @@ class ShaTreesTest(unittest.TestCase):
                     trees = [(f"t{i}", self.trees) for i in range(len(chosen))]
                     seen = iter([(code, f"{line} {i}", held) for i, (code, line, held) in enumerate(chosen)])
                     with patch.object(git_trees, "sha_trees", return_value=trees), \
-                            patch.object(git_trees, "check_sha", lambda sha, tree: next(seen)):
+                            patch.object(git_trees, "check_sha", lambda sha, tree, **kw: next(seen)):
                         code, out, _ = self.run_main("--sha", self.sha)
                     self.assertEqual(code, want, out)
                     per_repo = [f"{line} {i} [t{i}]" for i, (_, line, _) in enumerate(chosen)]
@@ -3433,6 +3433,23 @@ class AuditThroughTheViewTest(unittest.TestCase):
     def command(self) -> str:
         code = f"from pathlib import Path; import sys; Path({str(self.canary)!r}).write_text('fired'); sys.exit(1)"
         return shlex.join([sys.executable, "-c", code])
+
+    def test_a_configured_clones_redirected_tree_stays_unreadable(self) -> None:
+        claude = self.root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("## Coordinator\n", "## Coordinator\n- Settings: `settings.toml`\n"))
+        (self.root / "settings.toml").write_text('[repos]\nproject = "repo"\n')
+        other, decoy = self.root / "other", self.root / "decoy"
+        git("clone", str(self.root / "repo"), str(other), cwd=self.root)
+        git("worktree", "add", "-b", "decoy", str(decoy), cwd=other)
+        tree = self.root / "trees" / "wt-unmerged"
+        admin = git_view.locate(decoy).gitdir
+        (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+        (tree / ".git").write_text(f"gitdir: {admin}\n")
+        with patch.object(git_view, "run", wraps=git_view.run) as reads:
+            report = al.audit(self.root, "2026-09-17", check_issues=False)
+        line = next(line for line in report.lines if line.startswith("wt-unmerged ("))
+        self.assertIn(tree_state.UNREADABLE_BRANCH, line)
+        self.assertFalse(any(call.args[1] == tree for call in reads.call_args_list), "a refused view is never retried unpinned")
 
     def test_bad_cache_is_one_configuration_error_not_per_tree_unknowns(self) -> None:
         # Bypass the test module's explicit trusted base to exercise launcher configuration.

@@ -2142,6 +2142,20 @@ class SanitisedTreeReadTest(unittest.TestCase):
         (fx.root / "CLAUDE.md").write_text(CLAUDE.replace("`trees/`", "`.`"))
         return fx
 
+    def test_tree_note_refuses_a_configured_clones_redirected_tree(self):
+        fx = self.fixture()
+        claude = fx.root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("## Coordinator\n", "## Coordinator\n- Settings: `settings.toml`\n"))
+        (fx.root / "settings.toml").write_text(f'[repos]\nproject = "{fx.clone}"\n')
+        other, decoy = fx.root / "other", fx.root / "decoy"
+        taint.git(["clone", str(fx.clone), str(other)], fx.root)
+        taint.git(["worktree", "add", "-b", "decoy", str(decoy)], other)
+        admin = git_view.locate(decoy).gitdir
+        (admin / "gitdir").write_text(str(fx.tree / ".git") + "\n")
+        (fx.tree / ".git").write_text(f"gitdir: {admin}\n")
+        with self.assertRaisesRegex(ValueError, "tree is unreadable"):
+            one_shot._tree_note(fx.root, fx.tree)
+
     def old_env(self):
         # Spell out the former implementation; tests survive its deletion.
         return {**git_trees.user_env(), "GIT_NO_REPLACE_OBJECTS": "1"}
@@ -2396,7 +2410,7 @@ class SanitisedTreeReadTest(unittest.TestCase):
         with mock.patch.object(one_shot, "git_head", return_value=None) as head:
             self.assertEqual(one_shot.committed_changes(fx.tree, fx.sha["B"]),
                              "Could not read commits: tree unreadable")
-        head.assert_called_once_with(fx.tree)
+        head.assert_called_once_with(fx.tree, expected_common=None)
 
     def test_unchanged_head_and_unknown_before_keep_no_commits(self):
         fx = self.fixture()

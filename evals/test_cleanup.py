@@ -116,6 +116,40 @@ class CleanupTest(unittest.TestCase):
 
     # removal
 
+    def test_a_tree_redirected_to_another_repository_is_kept(self) -> None:
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text('[repos]\nproject = "repo"\n')
+        other_root = self.root / "other"
+        other = make_repo.build(other_root, {"files": {".gitignore": "*.db\nnode_modules/\n"},
+                                            "worktrees": [{"name": "decoy", "branch": "decoy"}]})
+        tree = self.trees / "done"
+        original = (tree / ".git").read_text()
+        admin = cleanup.git_view.locate(other_root / "trees" / "decoy").gitdir
+        (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+        (tree / ".git").write_text(f"gitdir: {admin}\n")
+        with mock.patch.object(cleanup.git_view, "_opened", wraps=cleanup.git_view._opened) as opened:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("git cannot read this tree", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir() and admin.is_dir())
+        self.assertFalse(any(call.args[0] == tree for call in opened.call_args_list))
+        self.assertTrue((other / ".git").is_dir())
+        (tree / ".git").write_text(original)
+        lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def redirect(trees):
+            with lock(trees):
+                (tree / ".git").write_text(f"gitdir: {admin}\n")
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", redirect):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertIn("git cannot read this tree", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir() and admin.is_dir())
+
+
     def test_remove_deletes_the_clean_finished_tree_and_its_build_output_and_logs_it(self) -> None:
         admin = cleanup.git_view.locate(self.trees / "done").gitdir
         (self.trees / "done" / "node_modules" / "pkg").mkdir(parents=True)

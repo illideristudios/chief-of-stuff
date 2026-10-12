@@ -539,7 +539,7 @@ class BuildReadsThroughTheViewTest(CloneCase):
         real = git_view.run
 
         def view_spy(args, path, **kw):
-            views.append((args, Path(path), kw.get("env"), kw.get("timeout")))
+            views.append((args, Path(path), kw.get("env"), kw.get("timeout"), kw.get("expected_common")))
             return real(args, path, **kw)
 
         with mock.patch.object(git_view, "run", view_spy):
@@ -548,8 +548,9 @@ class BuildReadsThroughTheViewTest(CloneCase):
             (["log", "-1", "--format=%h %cr", "refs/heads/main"], self.clone),
             (["rev-parse", "--short", "HEAD"], made.path),
         ])
-        for _, _, env, timeout in views:
+        for _, _, env, timeout, common in views:
             self.assertEqual((env, timeout), (git_trees.audit_env(), mw.GIT_TIMEOUT))
+            self.assertEqual(common, (self.clone / ".git").resolve())
         self.assertEqual(made.sha, make_repo.git(["rev-parse", "--short", "HEAD"], made.path))
         self.assertEqual(made.sha, make_repo.git(["rev-parse", "--short", "refs/remotes/origin/main"], self.clone))
 
