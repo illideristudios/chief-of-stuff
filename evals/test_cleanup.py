@@ -185,6 +185,36 @@ class CleanupTest(unittest.TestCase):
         for name in ("done", "unpushed", "dirty"):
             self.assertEqual(self.store.log(f"{KEY}-{name}")[0].at, instant.isoformat())
 
+    def test_two_passes_over_a_retained_tree_log_once_despite_an_unrelated_log(self) -> None:
+        key = f"{KEY}-done"
+        self.finish("done", state="open")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+            self.store.add_log(key, "wait: human review", self.store.clock().isoformat())
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+        self.assertTrue((self.trees / "done").is_dir())
+        self.assertEqual([entry.message for entry in self.store.log(key)],
+                         [f"keep done — {key} is not finished", "wait: human review"])
+
+    def test_changed_cleanup_results_and_removal_still_log(self) -> None:
+        key = f"{KEY}-done"
+        self.finish("done", state="open")
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+            snapshot = self.trees / "done" / "snapshot.db"
+            snapshot.write_text("only copy\n")
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+            snapshot.unlink()
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+            self.finish("done")
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+        messages = [entry.message for entry in self.store.log(key)]
+        self.assertEqual(len(messages), 4)
+        self.assertIn("snapshot.db", messages[1])
+        self.assertEqual(messages[0], messages[2])
+        self.assertEqual(messages[3], f"removed done — {key}")
+        self.assertFalse((self.trees / "done").exists())
+
     def test_a_failed_removal_log_prints_the_result_and_continues_with_other_trees(self) -> None:
         real = store.Store.add_log
         err = io.StringIO()

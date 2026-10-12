@@ -157,6 +157,8 @@ def main(argv: list[str] | None = None) -> int:
             source = forge.for_workspace(root, approver=config.workflow.approver or "", kanban=config.kanban)
             if source is None:
                 raise ValueError("no Backlog: line; configure the workspace backlog before running the engine")
+            if config.kanban is None:
+                raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
             policies = settings.load_policy()
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)

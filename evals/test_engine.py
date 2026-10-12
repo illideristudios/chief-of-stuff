@@ -280,7 +280,14 @@ class MainTest(unittest.TestCase):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name).resolve()
-        (self.root / "CLAUDE.md").write_text("# Workspace\n\n## Coordinator\n\n- Worktrees: `trees/`\n")
+        (self.root / "CLAUDE.md").write_text(
+            "# Workspace\n\n## Coordinator\n\n- Worktrees: `trees/`\n\n"
+            "- Backlog: https://github.com/example/project/issues\n\n"
+            "- Settings: `settings.toml`\n\n")
+        (self.root / "settings.toml").write_text(
+            '[kanban]\nstages = ["In progress", "In review", "Merging"]\n'
+            'human_review_label = "Human review"\n'
+            '[kanban.map]\nimplement = 0\nreview = 1\nmerge = 2\n')
 
     def test_once_refuses_a_held_workspace_lock_before_opening_the_forge(self):
         errors = io.StringIO()
@@ -324,6 +331,17 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
         self.assertFalse((self.root / "store.db").exists())
         self.assertIn("Backlog:", errors.getvalue())
+
+    def test_no_kanban_refuses_without_creating_a_store_or_running_a_pass(self):
+        (self.root / "settings.toml").write_text("[workers]\nmax_concurrency = 1\n")
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
+        passed.assert_not_called()
+        self.assertFalse((self.root / "store.db").exists())
+        self.assertIn("[kanban]", errors.getvalue())
+        self.assertIn("stage labels", errors.getvalue())
 
     def test_default_interval_is_sixty_seconds(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
