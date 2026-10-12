@@ -152,6 +152,9 @@ class CommandTest(unittest.TestCase):
                         "env GIT_SSH_COMMAND=\"sh -c 'gh pr merge 12'\" git fetch origin",
                         "GIT_ALLOW_PROTOCOL=ext git fetch 'ext::sh -c gh% pr% merge% 12'",
                         "git fetch 'ext::sh -c x'", "git clone fd::3 dest",
+                        "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=protocol.ext.allow GIT_CONFIG_VALUE_0=always "
+                        "git push 'ext::sh -c gh% pr% merge% 12' HEAD:feature",
+                        "git push 'ext::sh -c x' HEAD:feature", "GIT_CONFIG_GLOBAL=./evil git fetch origin",
                         "awk 'BEGIN{system(sprintf(\"%c%c\",103,104)\" pr merge 12\")}' /dev/null",
                         "python3 -c 'import os; os.system(chr(103)+chr(104)+\" pr merge 12\")'",
                         'python -c "print(1)"'):

@@ -85,7 +85,10 @@ def _assignment(token: str) -> bool:
         return False
     # GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_CONFIG_PARAMETERS and the like run their value inside allowed verbs.
     name, value = token.split("=", 1)
-    if name in {"GIT_ALLOW_PROTOCOL", "GIT_PROTOCOL_FROM_USER"}:
+    # Git reads configuration from GIT_CONFIG_COUNT/KEY_n/VALUE_n and GIT_CONFIG_PARAMETERS; config is read-only here.
+    if name in {"GIT_ALLOW_PROTOCOL", "GIT_PROTOCOL_FROM_USER", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS",
+                "GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"} or name.startswith(("GIT_CONFIG_KEY_",
+                                                                                          "GIT_CONFIG_VALUE_")):
         raise Opaque()
     if re.search(r"\s", value) and NESTED_WORD.search(value):
         raise Unparsed()
@@ -273,10 +276,10 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
             return False
         if args[0] in {"merge", "pull"}:
             return True
+        if any(re.match(r"(?i)(?:ext|fd)::", a) for a in args):
+            raise Opaque()  # ext:: transports run a command (git-remote-ext), for push as for fetch
         if args[0] == "push":
             return _push_denied(args[1:], protected)
-        if any(re.match(r"(?i)(?:ext|fd)::", a) for a in args):
-            raise Opaque()  # ext:: transports run a command (git-remote-ext)
         if args[0] == "config":
             # Values such as core.sshCommand, alias.* and *.helper run later inside allowed verbs. Reads only.
             return not any(a in {"--get", "--get-all", "--get-regexp", "--list", "-l", "get", "list"} for a in args[1:])
