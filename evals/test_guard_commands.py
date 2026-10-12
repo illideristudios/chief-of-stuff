@@ -147,7 +147,9 @@ class CommandTest(unittest.TestCase):
                         "node -p 'require(\"child_process\").execSync(\"gh pr merge 12\")'",
                         "ssh host 'gh pr merge 12'", "ssh host 'cd repo && git push origin HEAD:main'",
                         "git config core.sshCommand \"sh -c 'gh pr merge 12'\" && git fetch ssh://github.com/o/r",
-                        'git config alias.ship "!gh pr merge 12"', 'git config --global credential.helper x'):
+                        'git config alias.ship "!gh pr merge 12"', 'git config --global credential.helper x',
+                        "GIT_SSH_COMMAND=\"sh -c 'gh pr merge 12; exit 1' --\" git fetch ssh://github.com/o/r",
+                        "env GIT_SSH_COMMAND=\"sh -c 'gh pr merge 12'\" git fetch origin"):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 

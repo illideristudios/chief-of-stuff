@@ -76,10 +76,20 @@ def _tokens(command: str) -> list[tuple[str, bool]]:
     return tokens
 
 
+def _assignment(token: str) -> bool:
+    if not ASSIGNMENT.match(token):
+        return False
+    # GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF, GIT_CONFIG_PARAMETERS and the like run their value inside allowed verbs.
+    value = token.split("=", 1)[1]
+    if re.search(r"\s", value) and NESTED_WORD.search(value):
+        raise Unparsed()
+    return True
+
+
 def _unwrap(tokens: list[str]) -> list[str]:
     while tokens:
         name = PurePosixPath(tokens[0]).name
-        if ASSIGNMENT.match(tokens[0]):
+        if _assignment(tokens[0]):
             tokens = tokens[1:]
         elif name in {"command", "exec", "nohup", "time", "setsid"}:
             tokens = tokens[1:]
@@ -104,7 +114,7 @@ def _unwrap(tokens: list[str]) -> list[str]:
             tokens = tokens[1:]
             while tokens:
                 flag = tokens[0]
-                if ASSIGNMENT.match(flag) or flag in {"-i", "--ignore-environment", "--"}:
+                if _assignment(flag) or flag in {"-i", "--ignore-environment", "--"}:
                     tokens = tokens[1:]
                 elif flag in {"-u", "--unset", "-C", "--chdir"} and len(tokens) > 1:
                     tokens = tokens[2:]
