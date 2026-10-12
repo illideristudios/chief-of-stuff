@@ -27,6 +27,8 @@ class Segment(Protocol):
 
 
 class Decision(Protocol):
+    topic: str
+    question: str
     answer: str | None
 
 
@@ -125,7 +127,9 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
            decisions: Sequence[Decision]) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
-    if any(not d.answer or not d.answer.strip() for d in decisions):
+    # Decision rows are append-only, oldest first: the latest row for a question is its state.
+    latest = {(d.topic, d.question): d for d in decisions}
+    if any(not d.answer or not d.answer.strip() for d in latest.values()):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
@@ -133,8 +137,9 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
     if "review" in stages:
         review = max((s for s in completed if s.stage == "review" and s.outcome == "done"),
                      key=lambda s: _time(s.started_at), default=None)
+        # Work that ended after the review started was not all reviewed, even if it started first.
         if review is None or any(s.stage not in ("review", "merge", "architect")
-                                 and _time(s.started_at) >= _time(review.started_at) for s in completed):
+                                 and _time(s.ended_at) > _time(review.started_at) for s in completed):
             return _work(key, "review", workflow, history, policies, room)
     elif item.review_state != "approved":
         return Wait(key, "review has not run")
@@ -148,7 +153,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         architect = max((s for s in completed if s.stage == "architect" and s.outcome == "done"),
                         key=lambda s: _time(s.started_at), default=None)
         if architect is None or any(s.stage not in ("review", "merge", "architect")
-                                    and _time(s.started_at) >= _time(architect.started_at) for s in completed):
+                                    and _time(s.ended_at) > _time(architect.started_at) for s in completed):
             return Wait(key, "architect consultation is required")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")

@@ -37,6 +37,8 @@ class Segment:
 @dataclass(frozen=True)
 class Decision:
     answer: str | None = None
+    topic: str = "scope"
+    question: str = "Split the parser?"
 
 
 def policies():
@@ -248,6 +250,20 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(actions, [reconcile.Merge(KEY)] if answer and answer.strip() else
                                  [reconcile.Wait(KEY, "decision pending")])
 
+    def test_a_later_answer_resolves_an_earlier_pending_row_for_the_same_question(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        answered = [Decision(None), Decision("Split it")]
+        self.assertEqual(self.plan(item, [Segment("review")], {}, decisions={KEY: answered}), [reconcile.Merge(KEY)])
+        other = [Decision("Split it"), Decision(None, question="Rename it?")]
+        self.assertEqual(self.plan(item, [Segment("review")], {}, decisions={KEY: other}),
+                         [reconcile.Wait(KEY, "decision pending")])
+
+    def test_a_review_that_started_before_the_work_ended_does_not_count(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        implement = Segment("implement", started_at=NOW - timedelta(hours=3), ended_at=NOW - timedelta(minutes=30))
+        review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
+        self.assertNotIn(reconcile.Merge(KEY), self.plan(item, [implement, review], {}))
+
     def test_required_architect_consultation_must_be_done_for_the_current_work(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         item = replace(Item(), stage="merge", merge_state="ready")
@@ -255,11 +271,13 @@ class ReconcileTest(unittest.TestCase):
         review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
         for architect in (None, Segment("architect", outcome="failed"),
                           Segment("architect", ended_at=None),
-                          Segment("architect", started_at=NOW - timedelta(hours=4))):
+                          Segment("architect", started_at=NOW - timedelta(hours=4)),
+                          # overlaps implement (ends NOW-1h): it could not see the final work
+                          Segment("architect", started_at=NOW - timedelta(hours=2), ended_at=NOW)):
             with self.subTest(architect=architect):
                 history = [implement, review, *([architect] if architect else [])]
                 self.assertNotIn(reconcile.Merge(KEY), self.plan(item, history, {}))
-        for started_at in (NOW - timedelta(hours=2), NOW):
+        for started_at in (NOW - timedelta(hours=1), NOW):
             with self.subTest(started_at=started_at):
                 architect = Segment("architect", started_at=started_at, ended_at=NOW)
                 self.assertEqual(self.plan(item, [implement, review, architect], {}), [reconcile.Merge(KEY)])
