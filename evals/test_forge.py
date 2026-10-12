@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "evals"))
@@ -139,9 +139,17 @@ class GitHubTest(unittest.TestCase):
                 with self.assertRaises(forge.ForgeError):
                     forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots()
 
+    def test_a_request_read_past_one_page_is_still_a_whole_answer(self):
+        # #425: forge used to refuse at REQUEST_LIMIT; paging must return every open request.
+        n = forge.backlog.PER_PAGE + 1
+        gh = FakeGh(issues=[gh_issue(3, "x")], prs=[tma.pr(i, []) for i in range(1, n + 1)],
+                    bodies={i: "Closes #3" for i in range(1, n + 1)})
+        got = forge.Forge(GH, gh=gh).requests()
+        self.assertEqual(len(got), n)
+
     def test_a_request_read_that_reaches_the_cap_is_an_error_never_a_whole_answer(self):
-        gh = FakeGh(issues=[gh_issue(3, "x")], prs=[tma.pr(n, []) for n in range(1, forge.forge_review.REQUEST_LIMIT + 1)])
-        with self.assertRaisesRegex(forge.ForgeError, "or more"):
+        gh = FakeGh(issues=[gh_issue(3, "x")], prs=[tma.pr(n, []) for n in range(1, forge.backlog.GH_LIMIT + 1)])
+        with self.assertRaisesRegex(forge.ForgeError, "or more|partial"):
             forge.Forge(GH, gh=gh).snapshots()
 
     def test_reads_use_gh_subcommands_and_graphql_only_for_what_no_subcommand_answers(self):
@@ -234,7 +242,10 @@ def gitlab_call(issues, mrs, fail=""):
         if path == "/labels":
             return [{"name": n} for n in FLOW.stages], {}, ""
         if path == "/merge_requests":
-            return [{"iid": i} for i in mrs], {}, ""
+            query = parse_qs(urlsplit(url).query)
+            size, page = int(query.get("per_page", ["100"])[0]), int(query.get("page", ["1"])[0])
+            iids = sorted(mrs)
+            return [{"iid": i} for i in iids[(page - 1) * size:page * size]], {}, ""
         iid = int(path.split("/")[2])
         if path.endswith("/approvals"):
             return {"approved_by": [{"user": {"username": u}} for u in mrs[iid]["approved_by"]]}, {}, ""
@@ -279,10 +290,15 @@ class GitLabTest(unittest.TestCase):
         got = self.forge.issue(3)
         self.assertEqual((got.issue.iid, got.issue.body), (3, "what to fix"))
 
-    def test_a_request_read_that_reaches_the_cap_is_an_error_never_a_whole_answer(self):
-        mrs = {n: {"approved_by": [], "description": ""} for n in range(1, forge.forge_review.REQUEST_LIMIT + 1)}
+    def test_a_request_read_past_one_page_is_still_a_whole_answer(self):
+        mrs = {n: {"approved_by": [], "description": ""} for n in range(1, forge.backlog.PER_PAGE + 2)}
         with mock.patch.object(backlog, "_call", gitlab_call({}, mrs)):
-            with self.assertRaisesRegex(forge.ForgeError, "or more"):
+            self.assertEqual(len(forge.Forge(GL, token="t").requests()), forge.backlog.PER_PAGE + 1)
+
+    def test_a_request_read_that_reaches_the_cap_is_an_error_never_a_whole_answer(self):
+        mrs = {n: {"approved_by": [], "description": ""} for n in range(1, forge.backlog.MAX_PAGES * forge.backlog.PER_PAGE + 1)}
+        with mock.patch.object(backlog, "_call", gitlab_call({}, mrs)):
+            with self.assertRaisesRegex(forge.ForgeError, "or more|partial|pages"):
                 self.forge.snapshots()
 
     def test_a_committed_stage_write_swaps_the_stage_label(self):
@@ -469,6 +485,19 @@ class GitLabMergeTest(unittest.TestCase):
         self.assertIn("would merge", got)
         self.assertIn(tma.HEAD, got)
         self.assertEqual((writes, landed), ([], []))
+
+    def test_merged_results_evidence_names_the_pipeline_commit_and_merges_the_source_head(self):
+        for commit in (False, True):
+            with self.subTest(commit=commit):
+                call, writes, landed = self.fake({"pipeline_sha": "c" * 40,
+                                                  "pipeline_ref": "refs/merge-requests/5/merge"})
+                with mock.patch.object(backlog, "_call", call):
+                    got = forge.Forge(GL, token="t").merge(5, commit=commit)
+                outcome = "merged" if commit else "would merge"
+                self.assertEqual(got, f"{outcome} !5 at {tma.HEAD} · pipeline 7005 on {'c' * 40} · "
+                                     "https://labs.example.test/team/app/-/merge_requests/5")
+                self.assertEqual(landed, [{"sha": tma.HEAD}] if commit else [])
+                self.assertEqual(len(writes), int(commit))
 
     def test_each_not_ready_gitlab_verdict_refuses_and_writes_nothing(self):
         for options, verdict in tmr.GITLAB.values():

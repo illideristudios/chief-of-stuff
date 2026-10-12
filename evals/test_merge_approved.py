@@ -95,7 +95,8 @@ class FakeGhGraphql(FakeGh):
                                         **(self.nodes.get(p["number"]) or graphql_node(p["number"], sha=p["headRefOid"]))}.items()
                       if k in ("number", "reviewThreads", "commits") or k in query}
                      for p in self.prs if p["number"] in self.nodes or not self.only_given]
-            return 0, json.dumps({"data": {"repository": {"pullRequests": {"nodes": nodes}}}}), ""
+            return 0, json.dumps({"data": {"repository": {"pullRequests": {
+                "pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": nodes}}}}), ""
         return super().__call__(args, input_text)
 
 
@@ -248,8 +249,8 @@ class MergeHeadTest(unittest.TestCase):
 
 class RequestVerdictTest(unittest.TestCase):
     """One place decides ready or not (#419: the coordinator wrote mergeable from the forge's own status, no pipeline read).
-    Precedence (#419 review): conflicts > draft > red > stale pipeline > running > no pipeline > unverified > blocked > findings
-    open > ready. A state that was not read is None, never "" or 0, and None is not ready."""
+    Precedence (#419 review, #430): conflicts > draft > red > stale pipeline > running > no pipeline > unverified >
+    findings open > blocked > ready. A state that was not read is None, never "" or 0, and None is not ready."""
 
     def test_the_request_carries_the_head_pipeline_and_the_thread_count_and_unread_is_none(self):
         r = ma.Request(1, "t", "u", HEAD, "approved", "passed", "yes", "robin")
@@ -305,14 +306,17 @@ class RequestVerdictTest(unittest.TestCase):
             ({"pipeline_sha": None, "pipeline": "failed"}, "red"),
             ({"threads": None, "merge_state": "BEHIND"}, "unverified"),
             ({"threads": None, "pipeline": "none", "pipeline_id": "", "pipeline_sha": ""}, "no pipeline"),
-            # blocked: GitHub's mergeStateStatus is anything but CLEAN; below unverified, above findings
+            # blocked: GitHub's mergeStateStatus is anything but CLEAN; below findings (#430)
             ({"merge_state": "BLOCKED"}, "blocked"),
             ({"merge_state": "BEHIND"}, "blocked"),
             ({"merge_state": "DIRTY"}, "blocked"),
             ({"merge_state": "UNSTABLE"}, "blocked"),
             ({"merge_state": "HAS_HOOKS"}, "blocked"),
             ({"merge_state": "UNKNOWN"}, "blocked"),
-            ({"merge_state": "BEHIND", "threads": 2}, "blocked"),
+            ({"merge_state": "BEHIND", "threads": 2}, "findings open"),
+            ({"merge_state": "BLOCKED", "threads": 2}, "findings open"),
+            ({"mergeable": "discussions_not_resolved"}, "blocked"),
+            ({"mergeable": "discussions_not_resolved", "threads": 2}, "findings open"),
             ({"merge_state": "BEHIND", "pipeline": "running"}, "running"),
             ({"merge_state": "BEHIND", "pipeline_sha": OLD}, "stale pipeline"),
             ({"merge_state": "CLEAN"}, "ready"),
