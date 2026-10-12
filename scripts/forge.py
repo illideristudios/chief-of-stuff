@@ -139,7 +139,7 @@ class Forge:
                 snap["review_state"] = r.approval if r else ""
             if r:
                 snap["merge_state"] = r.verdict
-            elif one.iid in merged:
+            elif one.state == backlog.CLOSED and one.iid in merged:
                 snap["merge_state"] = "merged"
             else:
                 snap["merge_state"] = ""

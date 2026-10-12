@@ -382,8 +382,10 @@ def _kanban(table) -> Kanban:
     if not isinstance(holds, list) or not all(isinstance(x, str) for x in holds) or not set(holds) <= set(mapping):
         raise SettingsError("[kanban] hold_stages must be mapped stages")
     if (not isinstance(terminal, list) or not all(isinstance(x, str) and x.strip() for x in terminal)
-            or set(terminal) & set(mapping) or set(terminal) & set(stages)):
-        raise SettingsError("[kanban] terminal_stages must be distinct from mapped stages and board labels")
+            or len(terminal) != len(set(terminal)) or any("," in x for x in terminal)
+            or human in terminal or set(terminal) & set(mapping) or set(terminal) & set(stages)):
+        raise SettingsError("[kanban] terminal_stages must be unique, comma-free labels distinct from "
+                            "human_review_label, mapped stages and board labels")
     project = None
     if "github_project" in table and "project" in table:
         raise SettingsError("[kanban] set github_project or project, not both")

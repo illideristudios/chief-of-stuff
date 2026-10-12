@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import backlog  # noqa: E402
 import audit_tasks  # noqa: E402
 import kanban  # noqa: E402
+from evals.project_cli import validate as validate_project_cli  # noqa: E402
 from settings import GitHubProject, Kanban  # noqa: E402
 
 
@@ -254,6 +255,7 @@ class GitHubUpdaterTest(unittest.TestCase):
 
     def gh(self, args):
         self.calls.append(args)
+        validate_project_cli(args)
         if args[:2] == ["issue", "view"]:
             return 0, json.dumps({"state": "OPEN", "url": self.ref.url,
                 "labels": [{"name": x} for x in self.labels]}), ""
@@ -261,16 +263,25 @@ class GitHubUpdaterTest(unittest.TestCase):
             return 0, json.dumps([{"name": x} for x in (*self.config.stages, self.config.human_review_label)]), ""
         if args[:2] == ["project", "field-list"]:
             opts = [*self.config.github_project.options, *self.config.terminal_stages]
-            return 0, json.dumps({"fields": [{"name": "Status", "options":
-                [{"name": x} for x in opts]}]}), ""
+            return 0, json.dumps({"fields": [{"id": "PVTSSF_status", "name": self.config.github_project.field, "options":
+                [{"id": f"option_{x}", "name": x} for x in opts]}]}), ""
+        if args[:2] == ["project", "view"]:
+            return 0, json.dumps({"id": "PVT_board"}), ""
         if args[:2] == ["project", "item-list"]:
-            items = ([{"content": {"url": self.ref.url}, "status": self.status}] if self.present else [])
+            field = self.config.github_project.field
+            items = ([{"id": "PVTI_issue", "content": {"url": self.ref.url},
+                       field[0].lower() + field[1:]: self.status}] if self.present else [])
             return 0, json.dumps({"items": items, "totalCount": len(items)}), ""
         if args[:2] == ["project", "item-add"]:
             self.present = True
-            return 0, "{}", ""
+            return 0, json.dumps({"id": "PVTI_issue"}), ""
         if args[:2] == ["project", "item-edit"]:
-            self.status = args[args.index("--value") + 1]
+            assert args[args.index("--id") + 1] == "PVTI_issue"
+            assert args[args.index("--project-id") + 1] == "PVT_board"
+            assert args[args.index("--field-id") + 1] == "PVTSSF_status"
+            option = args[args.index("--single-select-option-id") + 1]
+            self.status = next(x for x in (*self.config.github_project.options, *self.config.terminal_stages)
+                               if f"option_{x}" == option)
             return 0, "{}", ""
         if args[:2] == ["issue", "edit"]:
             if "--add-label" in args:
@@ -323,10 +334,31 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.assertEqual(self.status, "Review")
         self.assertIn(FLOW.human_review_label, self.labels)
 
-    def test_configured_status_field_is_requested(self):
-        kanban.sync_github(self.ref, self.config, "implement", gh=self.gh)
+    def test_status_is_read_without_new_item_list_flags(self):
+        got = kanban.sync_github(self.ref, self.config, "implement", gh=self.gh)
+        self.assertTrue(got.ok, got.error)
+        self.assertEqual(got.current_status, "Plan")
         call = next(a for a in self.calls if a[:2] == ["project", "item-list"])
-        self.assertEqual(call[call.index("--field") + 1], "Status")
+        self.assertEqual(call, ["project", "item-list", "3", "--owner", "example",
+                                "--format", "json", "--limit", "5000"])
+
+    def test_project_commit_uses_node_ids(self):
+        got = kanban.sync_github(self.ref, self.config, "implement", gh=self.gh, commit=True,
+                                 expected_stage="plan")
+        self.assertTrue(got.done, got.error)
+        call = next(a for a in self.calls if a[:2] == ["project", "item-edit"])
+        self.assertEqual(call, ["project", "item-edit", "--id", "PVTI_issue", "--project-id", "PVT_board",
+                                "--field-id", "PVTSSF_status", "--single-select-option-id", "option_Build"])
+
+    def test_project_item_list_at_limit_is_refused_even_without_total_count(self):
+        for total in (None, 5000, 5001):
+            row = {"items": [{"content": {"url": self.ref.url}, "status": "Plan"}] * 5000}
+            if total is not None:
+                row["totalCount"] = total
+            with self.subTest(total=total):
+                items, error = kanban._project_items(lambda args: (0, json.dumps(row), ""), self.config.github_project)
+                self.assertEqual(items, {})
+                self.assertIn("truncated", error)
 
     def test_issue_label_mode_uses_add_remove_without_project(self):
         self.config = FLOW

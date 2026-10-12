@@ -22,6 +22,7 @@ import store  # noqa: E402
 import test_merge_approved as tma  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 import test_merge_ready as tmr  # noqa: E402
 import test_reconcile as tr  # noqa: E402
+from evals.project_cli import validate as validate_project_cli  # noqa: E402
 from settings import GitHubProject, Kanban  # noqa: E402
 
 REPO = "example/app"
@@ -58,6 +59,7 @@ class FakeGh(tma.FakeGhGraphql):
 
     def __call__(self, args, input_text=None):
         self.all_calls.append(list(args))
+        validate_project_cli(args)
         if tuple(args[:2]) in self.fail:
             return 1, "", "rate limited"
         if args[:2] == ["issue", "list"]:
@@ -90,20 +92,30 @@ class FakeGh(tma.FakeGhGraphql):
             return super().__call__(args, input_text)
         if args[:2] == ["project", "field-list"]:
             opts = [*self.project.options, *FLOW.terminal_stages]
-            return 0, json.dumps({"fields": [{"name": self.project.field,
-                                              "options": [{"name": n} for n in opts]}]}), ""
+            return 0, json.dumps({"fields": [{"id": "PVTSSF_status", "name": self.project.field,
+                                              "options": [{"id": f"option_{n}", "name": n} for n in opts]}]}), ""
+        if args[:2] == ["project", "view"]:
+            return 0, json.dumps({"id": "PVT_board"}), ""
         if args[:2] == ["project", "item-list"]:
-            items = [{"content": {"url": u}, "status": s} for u, s in self.status.items()]
+            items = [{"id": f"PVTI_{u.rsplit('/', 1)[1]}", "content": {"url": u},
+                      self.project.field[0].lower() + self.project.field[1:]: self.status.get(u)}
+                     for u in sorted(self.present)]
             return 0, json.dumps({"items": items, "totalCount": len(items)}), ""
         if args[:2] == ["project", "item-add"]:
-            self.present.add(args[args.index("--url") + 1])
-            return 0, "{}", ""
-        if args[:2] == ["project", "item-edit"]:
             url = args[args.index("--url") + 1]
+            self.present.add(url)
+            return 0, json.dumps({"id": f"PVTI_{url.rsplit('/', 1)[1]}"}), ""
+        if args[:2] == ["project", "item-edit"]:
+            assert args[args.index("--project-id") + 1] == "PVT_board"
+            assert args[args.index("--field-id") + 1] == "PVTSSF_status"
+            item_id = args[args.index("--id") + 1]
+            url = next(u for u in self.present if f"PVTI_{u.rsplit('/', 1)[1]}" == item_id)
             if "--clear" in args:
                 self.status.pop(url, None)
             else:
-                self.status[url] = args[args.index("--value") + 1]
+                option = args[args.index("--single-select-option-id") + 1]
+                self.status[url] = next(n for n in (*self.project.options, *FLOW.terminal_stages)
+                                        if f"option_{n}" == option)
             return 0, "{}", ""
         return super().__call__(args, input_text)
 
@@ -126,6 +138,13 @@ class GitHubTest(unittest.TestCase):
                             gh_issue(2, "free", ["stage: review", "other hold"])])
         snapshots = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
         self.assertEqual([row.get("human_review") for row in snapshots], [True, False])
+
+    def test_merged_request_does_not_mark_an_open_issue_as_merged(self):
+        gh = FakeGh(issues=[gh_issue(3, "Still open"), gh_issue(4, "Closed", state="CLOSED")],
+                    merged=[tma.pr(21, [])], bodies={21: "Closes #3 and fixes #4"})
+        got = forge.Forge(GH, gh=gh).snapshots()
+        self.assertEqual([(s["forge_state"], s["merge_state"]) for s in got],
+                         [("open", ""), ("closed", "merged")])
 
     def test_changes_requested_snapshot_prevents_merge_after_a_clean_engine_review(self):
         for oid in (tma.HEAD, tma.OLD):
@@ -381,6 +400,13 @@ def gl_issue(iid, title, labels=(), description="", state="opened"):
 
 
 class GitLabTest(unittest.TestCase):
+    def test_merged_request_does_not_mark_an_open_issue_as_merged(self):
+        issues = {3: gl_issue(3, "Still open"), 4: gl_issue(4, "Closed", state="closed")}
+        with mock.patch.object(backlog, "_call", gitlab_call(issues, {}, merged={5: {"description": "Closes #3 and fixes #4"}})):
+            got = forge.Forge(GL, token="t").snapshots()
+        self.assertEqual([(s["forge_state"], s["merge_state"]) for s in got],
+                         [("open", ""), ("closed", "merged")])
+
     def setUp(self):
         self.call = gitlab_call({3: gl_issue(3, "Fix the parser", ["stage: review"], "what to fix"), 4: gl_issue(4, "Add a flag")},
                                 {5: {"approved_by": ["robin"], "description": "Fixes #3"}})

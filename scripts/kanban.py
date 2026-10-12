@@ -185,45 +185,74 @@ def _github_issue(gh, ref: backlog.IssueRef):
     return tuple(str(x["name"]) for x in row["labels"] if isinstance(x, dict) and "name" in x), ""
 
 
-def _project_items(gh, project):
+def _project_rows(gh, project):
     row, error = _gh_json(gh, ["project", "item-list", str(project.number), "--owner", project.owner,
-                               "--format", "json", "--limit", "5000", "--field", project.field])
+                               "--format", "json", "--limit", "5000"])
     if error:
         return {}, error
     if not isinstance(row, dict) or not isinstance(row.get("items"), list):
         return {}, "GitHub Project items could not be parsed"
-    if row.get("totalCount", len(row["items"])) > len(row["items"]):
+    if len(row["items"]) >= 5000 or row.get("totalCount", len(row["items"])) > len(row["items"]):
         return {}, "GitHub Project item list was truncated"
     items = {}
     for item in row["items"]:
         if isinstance(item, dict) and isinstance(item.get("content"), dict):
             url = item["content"].get("url")
-            value = item.get(project.field.lower(), item.get(project.field))
             if isinstance(url, str):
-                items[url] = str(value) if value is not None else None
+                items[url] = item
     return items, ""
 
 
+def _project_status(item, project):
+    # gh's JSON serializer lowercases the first character of the field name.
+    key = project.field[:1].lower() + project.field[1:]
+    value = item.get(key, item.get(project.field.lower()))
+    return str(value) if value is not None else None
+
+
+def _project_items(gh, project):
+    items, error = _project_rows(gh, project)
+    return {url: _project_status(item, project) for url, item in items.items()}, error
+
+
 def _project_item(gh, project, ref: backlog.IssueRef):
-    items, error = _project_items(gh, project)
-    return ref.url in items, items.get(ref.url), error
+    items, error = _project_rows(gh, project)
+    item = items.get(ref.url)
+    return item, _project_status(item, project) if item is not None else None, error
 
 
-def _project_option_exists(gh, project, value: str) -> str:
+def _node_id(row):
+    value = row.get("id") if isinstance(row, dict) else None
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _project_option_ids(gh, project, value: str | None):
     row, error = _gh_json(gh, ["project", "field-list", str(project.number), "--owner", project.owner,
                                "--format", "json", "--limit", "100"])
     if error:
-        return error
+        return None, None, error
     fields = row.get("fields") if isinstance(row, dict) else None
     if not isinstance(fields, list):
-        return "GitHub Project fields could not be parsed"
+        return None, None, "GitHub Project fields could not be parsed"
+    if len(fields) >= 100 or row.get("totalCount", len(fields)) > len(fields):
+        return None, None, "GitHub Project field list was truncated"
     for field in fields:
         if isinstance(field, dict) and field.get("name") == project.field:
+            field_id = _node_id(field)
+            if field_id is None:
+                return None, None, "GitHub Project field has no readable node ID"
+            if value is None:
+                return field_id, None, ""
             options = field.get("options")
-            if isinstance(options, list) and value in {x.get("name") for x in options if isinstance(x, dict)}:
-                return ""
-            return f"missing GitHub Project option: {value}"
-    return f"missing GitHub Project field: {project.field}"
+            if isinstance(options, list):
+                for option in options:
+                    if isinstance(option, dict) and option.get("name") == value:
+                        option_id = _node_id(option)
+                        if option_id is None:
+                            return None, None, "GitHub Project option has no readable node ID"
+                        return field_id, option_id, ""
+            return None, None, f"missing GitHub Project option: {value}"
+    return None, None, f"missing GitHub Project field: {project.field}"
 
 
 def _github_labels_exist(gh, ref: backlog.IssueRef, names: tuple[str, ...]) -> str:
@@ -326,13 +355,16 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     hold = frozenset({config.human_review_label})
     project = config.github_project
     present, old_status, wanted = False, None, None
+    item_id, field_id, option_id, project_id = None, None, None, None
     if project:
-        present, old_status, error = _project_item(gh, project, ref)
+        item, old_status, error = _project_item(gh, project, ref)
         if error:
             return Sync(ref, stage, delta, error=error)
+        present = item is not None
+        item_id = _node_id(item)
         wanted = config.status_for(stage)
         if wanted:
-            error = _project_option_exists(gh, project, wanted)
+            field_id, option_id, error = _project_option_ids(gh, project, wanted)
             if error:
                 return Sync(ref, stage, delta, error=error)
     project_add = bool(project and not present and wanted is not None)
@@ -363,6 +395,20 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if error:
         return Sync(ref, stage, delta, error=error, current_status=old_status, project_status=wanted)
 
+    project_changed = project is not None and (project_add or (present and old_status != wanted))
+    if project_changed:
+        if present and item_id is None:
+            return Sync(ref, stage, delta, error="GitHub Project item has no readable node ID")
+        if field_id is None:
+            field_id, option_id, error = _project_option_ids(gh, project, wanted)
+            if error:
+                return Sync(ref, stage, delta, error=error)
+        row, error = _gh_json(gh, ["project", "view", str(project.number), "--owner", project.owner,
+                                  "--format", "json"])
+        project_id = _node_id(row)
+        if error or project_id is None:
+            return Sync(ref, stage, delta, error=error or "GitHub Project has no readable node ID")
+
     def edit_labels():
         if not delta.changed:
             return ""
@@ -375,16 +421,18 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         return stderr.strip() or f"gh exited {code}" if code else ""
 
     def edit_project():
-        if project is None or (not present and wanted is None) or (present and old_status == wanted):
+        if not project_changed:
             return ""
+        edit_id = item_id
         if not present:
-            code, _, stderr = gh(["project", "item-add", str(project.number), "--owner", project.owner,
-                                  "--url", ref.url])
-            if code:
-                return stderr.strip() or f"gh exited {code}"
-        cmd = ["project", "item-edit", str(project.number), "--owner", project.owner,
-               "--url", ref.url, "--field", project.field]
-        cmd += ["--value", wanted] if wanted is not None else ["--clear"]
+            row, error = _gh_json(gh, ["project", "item-add", str(project.number), "--owner", project.owner,
+                                      "--url", ref.url, "--format", "json"])
+            edit_id = _node_id(row)
+            if error or edit_id is None:
+                return error or "added GitHub Project item has no readable node ID"
+        cmd = ["project", "item-edit", "--id", edit_id, "--project-id", project_id,
+               "--field-id", field_id]
+        cmd += ["--single-select-option-id", option_id] if wanted is not None else ["--clear"]
         code, _, stderr = gh(cmd)
         return stderr.strip() or f"gh exited {code}" if code else ""
 
@@ -399,7 +447,8 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if error or set(verified_labels) != set(after(current, delta)):
         return Sync(ref, stage, delta, error=error or "GitHub labels differ after update")
     if project:
-        present, status, error = _project_item(gh, project, ref)
+        item, status, error = _project_item(gh, project, ref)
+        present = item is not None
         if error or (wanted is not None and not present) or (present and status != wanted):
             return Sync(ref, stage, delta, error=error or "GitHub Project status differs after update")
     return Sync(ref, stage, delta, done=True, current_status=old_status,
