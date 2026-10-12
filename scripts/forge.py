@@ -66,7 +66,7 @@ class Forge:
             if self.github:
                 code, out, err = self.gh(
                     ["pr", "list", "-R", self.home.repo, "--state", "merged",
-                     "--limit", str(forge_review.REQUEST_LIMIT), "--json", "number,body"])
+                     "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json", "number,body"])
                 if code:
                     raise ForgeError(f"merged requests: {err.strip() or code}")
                 rows = json.loads(out)
@@ -74,13 +74,15 @@ class Forge:
                 listed, _, err = backlog._call(
                     "GET",
                     f"{self.home.api(self.home.project)}/merge_requests?"
-                    + urlencode({"state": "merged", "per_page": forge_review.REQUEST_LIMIT}),
+                    + urlencode({"state": "merged", "order_by": "updated_at", "sort": "desc",
+                                 "per_page": forge_review.REQUEST_LIMIT}),
                     self._token(), backlog.TIMEOUT)
                 if err:
                     raise ForgeError(f"merged requests: {err}")
                 rows = listed
-            # shortcut: only the newest REQUEST_LIMIT merged requests annotate closed issues; an older closed issue keeps
-            # its terminal stage mark and reads merge_state "". Page the list if a rebuild needs every merge.
+            # shortcut: only the REQUEST_LIMIT most recently updated merged requests annotate closed issues (merging
+            # updates a request; later edits can shift the window). Other closed issues keep their terminal stage mark
+            # and read merge_state "". Page the list if a rebuild needs every merge.
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
         closed: set[int] = set()

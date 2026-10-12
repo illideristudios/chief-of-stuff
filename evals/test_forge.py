@@ -88,7 +88,11 @@ class FakeGh(tma.FakeGhGraphql):
         if args[:2] == ["pr", "list"]:
             state = args[args.index("--state") + 1] if "--state" in args else "open"
             if state == "merged":
-                return 0, json.dumps(self.merged), ""
+                assert "--search" in args, "merged PRs need search ordering by update recency"
+                assert args[args.index("--search") + 1] == "sort:updated-desc"
+                assert args[args.index("--limit") + 1] == str(forge.forge_review.REQUEST_LIMIT)
+                rows = sorted(self.merged, key=lambda p: p.get("updatedAt", ""), reverse=True)
+                return 0, json.dumps(rows[:forge.forge_review.REQUEST_LIMIT]), ""
             return super().__call__(args, input_text)
         if args[:2] == ["project", "field-list"]:
             opts = [*self.project.options, *FLOW.terminal_stages]
@@ -138,6 +142,16 @@ class GitHubTest(unittest.TestCase):
                             gh_issue(2, "free", ["stage: review", "other hold"])])
         snapshots = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
         self.assertEqual([row.get("human_review") for row in snapshots], [True, False])
+    def test_merged_window_includes_a_recently_updated_long_lived_pr(self):
+        limit = forge.forge_review.REQUEST_LIMIT
+        merged = [{"number": n, "createdAt": "2025-01-01", "updatedAt": "2025-06-01"}
+                  for n in range(1, limit + 2)]
+        merged[0].update(createdAt="2020-01-01", updatedAt="2026-10-11", body="Closes #3")
+        merged[-1].update(updatedAt="2024-01-01", body="Closes #4")
+        gh = FakeGh(issues=[gh_issue(3, "Recent merge", state="CLOSED"),
+                            gh_issue(4, "Outside window", state="CLOSED")], merged=merged)
+        got = forge.Forge(GH, gh=gh).snapshots()
+        self.assertEqual([s["merge_state"] for s in got], ["merged", ""])
 
     def test_merged_request_does_not_mark_an_open_issue_as_merged(self):
         gh = FakeGh(issues=[gh_issue(3, "Still open"), gh_issue(4, "Closed", state="CLOSED")],
@@ -378,10 +392,17 @@ def gitlab_call(issues, mrs, fail="", merged=None):
         if path == "/merge_requests":
             state = (query.get("state") or ["opened"])[0]
             pool = merged if state == "merged" else mrs
-            size, page = int(query.get("per_page", ["100"])[0]), int(query.get("page", ["1"])[0])
-            iids = sorted(pool)
-            return [{"iid": i, "description": pool[i].get("description", "")}
-                    for i in iids[(page - 1) * size:page * size]], {}, ""
+            numbers = list(pool)
+            if state == "merged":
+                assert query.get("order_by") == ["updated_at"], "merged MRs need ordering by update recency"
+                assert query.get("sort") == ["desc"]
+                assert query.get("per_page") == [str(forge.forge_review.REQUEST_LIMIT)]
+                numbers.sort(key=lambda i: pool[i].get("updated_at", ""), reverse=True)
+                numbers = numbers[:forge.forge_review.REQUEST_LIMIT]
+            else:
+                size, page = int(query.get("per_page", ["100"])[0]), int(query.get("page", ["1"])[0])
+                numbers = sorted(numbers)[(page - 1) * size:page * size]
+            return [{"iid": i, "description": pool[i].get("description", "")} for i in numbers], {}, ""
         iid = int(path.split("/")[2])
         if path.endswith("/approvals"):
             return {"approved_by": [{"user": {"username": u}} for u in mrs[iid]["approved_by"]]}, {}, ""
@@ -400,6 +421,18 @@ def gl_issue(iid, title, labels=(), description="", state="opened"):
 
 
 class GitLabTest(unittest.TestCase):
+    def test_merged_window_includes_a_recently_updated_long_lived_mr(self):
+        limit = forge.forge_review.REQUEST_LIMIT
+        merged = {n: {"created_at": "2025-01-01", "updated_at": "2025-06-01"}
+                  for n in range(1, limit + 2)}
+        merged[1].update(created_at="2020-01-01", updated_at="2026-10-11", description="Closes #3")
+        merged[limit + 1].update(updated_at="2024-01-01", description="Closes #4")
+        issues = {3: gl_issue(3, "Recent merge", state="closed"),
+                  4: gl_issue(4, "Outside window", state="closed")}
+        with mock.patch.object(backlog, "_call", gitlab_call(issues, {}, merged=merged)):
+            got = forge.Forge(GL, token="t").snapshots()
+        self.assertEqual([s["merge_state"] for s in got], ["merged", ""])
+
     def test_merged_request_does_not_mark_an_open_issue_as_merged(self):
         issues = {3: gl_issue(3, "Still open"), 4: gl_issue(4, "Closed", state="closed")}
         with mock.patch.object(backlog, "_call", gitlab_call(issues, {}, merged={5: {"description": "Closes #3 and fixes #4"}})):
