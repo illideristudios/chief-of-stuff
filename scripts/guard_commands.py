@@ -339,8 +339,11 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     # commands, but never treat an unknown wrapper as proof that a sensitive write is safe.
     if name not in {"echo", "printf", "git"}:
         for token in args:
-            # A launcher can take the whole command as one argument: ssh host 'gh pr merge 12'.
-            if re.search(r"\s", token) and NESTED_WORD.search(token) and _denied(token, protected, depth + 1):
+            # A launcher can take the whole command as one argument: ssh host 'gh pr merge 12', or after an option
+            # prefix: tar --checkpoint-action=exec='gh pr merge 12'. Read it from each named program too.
+            if re.search(r"\s", token) and NESTED_WORD.search(token) and any(
+                    _denied(token[start:], protected, depth + 1)
+                    for start in (0, *(m.start() for m in NESTED_WORD.finditer(token)))):
                 raise Unparsed()
     if name not in {"echo", "printf"}:
         for i, token in enumerate(args):
