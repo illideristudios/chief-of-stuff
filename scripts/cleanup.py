@@ -249,9 +249,10 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
             at = db.clock().isoformat()
             for item in items:
                 try:
+                    # Only an unchanged keep repeats each pass; every removal is its own event.
                     last = next((entry.message for entry in reversed(db.log(item.issue_key))
                                  if entry.message.startswith(("keep ", "removed ", "partially removed "))), None)
-                    if last != line:
+                    if not (line.startswith("keep ") and last == line):
                         db.add_log(item.issue_key, line, at)
                 except SQLAlchemyError as exc:
                     failed = True

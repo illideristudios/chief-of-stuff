@@ -287,7 +287,7 @@ class MainTest(unittest.TestCase):
         (self.root / "settings.toml").write_text(
             '[kanban]\nstages = ["In progress", "In review", "Merging"]\n'
             'human_review_label = "Human review"\n'
-            '[kanban.map]\nimplement = 0\nreview = 1\nmerge = 2\n')
+            '[kanban.map]\nplan = 0\nimplement = 0\nfix = 0\nreview = 1\nmerge = 2\n')
 
     def test_once_refuses_a_held_workspace_lock_before_opening_the_forge(self):
         errors = io.StringIO()
@@ -342,6 +342,17 @@ class MainTest(unittest.TestCase):
         self.assertFalse((self.root / "store.db").exists())
         self.assertIn("[kanban]", errors.getvalue())
         self.assertIn("stage labels", errors.getvalue())
+
+    def test_a_workflow_stage_missing_from_the_map_refuses_startup(self):
+        (self.root / "settings.toml").write_text(
+            '[kanban]\nstages = ["In progress", "Merging"]\nhuman_review_label = "Human review"\n'
+            '[kanban.map]\nimplement = 0\nfix = 0\nreview = 0\nmerge = 1\n')
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
+        passed.assert_not_called()
+        self.assertIn("plan", errors.getvalue())
 
     def test_default_interval_is_sixty_seconds(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

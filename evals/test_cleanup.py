@@ -215,6 +215,14 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(messages[3], f"removed done — {key}")
         self.assertFalse((self.trees / "done").exists())
 
+    def test_a_recreated_tree_removed_again_logs_the_second_removal(self) -> None:
+        key = f"{KEY}-done"
+        self.finish("done")
+        self.store.add_log(key, f"removed done — {key}", self.store.clock().isoformat())  # an earlier tree of this name
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+        self.assertEqual([entry.message for entry in self.store.log(key)], [f"removed done — {key}"] * 2)
+
     def test_a_failed_removal_log_prints_the_result_and_continues_with_other_trees(self) -> None:
         real = store.Store.add_log
         err = io.StringIO()
