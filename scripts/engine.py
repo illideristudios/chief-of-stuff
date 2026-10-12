@@ -101,7 +101,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 else:
                     _write_stage(forge, store, item.issue_key, pending["stage"], pending["expected"])
             except Exception as exc:
-                store.add_log(item.issue_key, f"stage write failed: {exc}", at)
+                message = f"stage write failed: {exc}"
+                logged = store.log(item.issue_key)
+                if not logged or logged[-1].message != message:  # retried every pass; log only a change
+                    store.add_log(item.issue_key, message, at)
 
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     segments = {item.issue_key: store.segments(item.issue_key) for item in items}

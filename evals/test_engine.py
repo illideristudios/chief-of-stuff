@@ -242,6 +242,10 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="label offline")):
             self.run_pass()
         self.assertIn("label offline", self.db.log(KEY)[-1].message)
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="label offline")):
+            self.run_pass()
+            self.run_pass()
+        self.assertEqual(sum(e.message == "stage write failed: label offline" for e in self.db.log(KEY)), 1)  # a repeat is not logged again
         self.finish("review")
         self.findings()
         self.run_pass()
@@ -497,8 +501,11 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         sleep.assert_called_once_with(60)
 
-    def test_supervisor_default_entry_is_the_engine_driver(self):
-        self.assertEqual(supervisor.ENGINE, (str(Path(engine.__file__).resolve()),))
+    def test_the_supervisor_does_not_start_the_engine_until_worker_launch_is_wired(self):
+        # #631 sets supervisor.ENGINE to the engine driver when engine.launch starts real workers.
+        self.assertEqual(supervisor.ENGINE, ())
+        with self.assertRaises(supervisor.ServiceError):
+            supervisor.install(self.root)
 
 
 if __name__ == "__main__":
