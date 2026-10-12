@@ -339,6 +339,59 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.assertTrue(got.project_add)
         self.assertTrue(any(a[:2] == ["project", "item-add"] for a in self.calls))
 
+    def test_project_transition_migrates_the_recorded_legacy_label(self):
+        for present in (False, True):
+            with self.subTest(present=present):
+                self.present, self.status = present, None
+                self.labels = ["kind::code", "00 - PLAN"]
+                self.calls = []
+                got = kanban.sync_github(self.ref, self.config, "plan review", gh=self.gh,
+                                         commit=True, expected_stage="plan")
+                self.assertTrue(got.done, got.error)
+                self.assertEqual(self.status, "Plan Review")
+                self.assertEqual(self.labels, ["kind::code", FLOW.human_review_label])
+                writes = [a[:2] for a in self.calls if a[1] in ("item-add", "item-edit", "edit")]
+                self.assertEqual(writes, ([['project', 'item-add']] if not present else []) +
+                                 [["project", "item-edit"], ["issue", "edit"]])
+
+    def test_project_initialize_migrates_a_single_legacy_label(self):
+        self.present, self.status = False, None
+        self.labels = ["kind::code", "02 - TEST", FLOW.human_review_label]
+        got = kanban.sync_github(self.ref, self.config, "implement", gh=self.gh,
+                                 commit=True, initialize=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "Build")
+        self.assertEqual(self.labels, ["kind::code", FLOW.human_review_label])
+
+    def test_project_refuses_legacy_label_mismatch_or_multiple_stage_labels(self):
+        for labels, expected, initialize in (
+                (["02 - TEST"], "plan", False),
+                (["00 - PLAN", "02 - TEST"], "plan", False),
+                (["00 - PLAN", "02 - TEST"], None, True)):
+            with self.subTest(labels=labels, expected=expected, initialize=initialize):
+                self.present, self.status = False, None
+                self.labels, self.calls = labels.copy(), []
+                got = kanban.sync_github(self.ref, self.config, "plan review", gh=self.gh,
+                                         commit=True, expected_stage=expected, initialize=initialize)
+                self.assertIn("changed outside the tracker", got.error)
+                self.assertFalse(any(a[1] in ("item-add", "item-edit", "edit") for a in self.calls))
+                self.assertEqual(self.labels, labels)
+
+    def test_failed_project_migration_keeps_the_legacy_stage_label(self):
+        self.present, self.status = False, None
+        self.labels = ["kind::code", "00 - PLAN"]
+
+        def gh(args):
+            if args[:2] == ["project", "item-edit"]:
+                return 1, "", "status update failed"
+            return self.gh(args)
+
+        got = kanban.sync_github(self.ref, self.config, "plan review", gh=gh,
+                                 commit=True, expected_stage="plan")
+        self.assertEqual(got.error, "status update failed")
+        self.assertIn("00 - PLAN", self.labels)
+        self.assertFalse(any(a[:2] == ["issue", "edit"] for a in self.calls))
+
     def test_terminal_stage_sets_status_named_like_the_stage(self):
         # Cleared Status before #627; terminal must round-trip through Project Status.
         self.status = "Review"

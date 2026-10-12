@@ -356,6 +356,7 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     prior_labels = frozenset(_github_label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
     hold = frozenset({config.human_review_label})
     project = config.github_project
+    legacy = False
     present, old_status, wanted = False, None, None
     item_id, field_id, option_id, project_id = None, None, None, None
     if project:
@@ -364,6 +365,8 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
             return Sync(ref, stage, delta, error=error)
         present = item is not None
         item_id = _node_id(item)
+        # Forge used stage labels before it honored github_project. Migrate only a single stage mark.
+        legacy = old_status is None and len(current_labels & (set(config.stages) | set(config.terminal_stages))) == 1
         wanted = config.status_for(stage)
         if wanted:
             field_id, option_id, error = _project_option_ids(gh, project, wanted)
@@ -382,12 +385,15 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         current_state = (old_status if present else None, frozenset(current_labels))
         desired_state = (wanted, frozenset(desired_labels))
         prior_state = (prior_status, frozenset(prior_labels))
+        priors = (prior_state, (prior_status, prior_labels | hold))
         blanks = ((None, frozenset()), (None, hold))
-        if current_state in blanks and initialize:
-            error = ""
-        else:
-            error = _guard(current_state, desired_state, (prior_state, (prior_status, prior_labels | hold)),
-                           expected_stage=expected_stage, initialize=False)
+        if legacy:
+            legacy_prior = frozenset(label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
+            priors += ((None, legacy_prior), (None, legacy_prior | hold))
+            if expected_stage is None:
+                blanks += (current_state,)
+        error = _guard(current_state, desired_state, priors,
+                       expected_stage=expected_stage, initialize=initialize, blanks=blanks)
     else:
         error = _guard(current_labels, desired_labels, (prior_labels, prior_labels | hold),
                        expected_stage=expected_stage, initialize=initialize, blanks=(frozenset(), hold))
@@ -438,8 +444,9 @@ def sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         code, _, stderr = gh(cmd)
         return stderr.strip() or f"gh exited {code}" if code else ""
 
-    # Enter a hold before moving the card. Leave a hold only after the destination is set.
-    steps = (edit_labels, edit_project) if config.holds(stage) else (edit_project, edit_labels)
+    # Enter a hold before moving the card. During migration, retain the legacy stage until Status is written.
+    # Leave a hold only after the destination is set.
+    steps = (edit_labels, edit_project) if config.holds(stage) and not legacy else (edit_project, edit_labels)
     for step in steps:
         error = step()
         if error:

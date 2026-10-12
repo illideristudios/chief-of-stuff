@@ -317,6 +317,31 @@ class StageWriteBackTest(unittest.TestCase):
         self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
                                 "stage": "doing", "merge_state": ""}])
 
+    def test_project_snapshots_fall_back_to_legacy_labels_without_status(self):
+        for present in (False, True):
+            for label, stage in (("stage: doing", "doing"), ("done", "done")):
+                with self.subTest(present=present, label=label):
+                    issue = gh_issue(4, "Legacy issue", [label, "needs human", "bug"])
+                    gh = FakeGh(issues=[issue], status={issue["url"]: None} if present else {})
+                    snapshot, = forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
+                    self.assertEqual(snapshot["stage"], stage)
+
+    def test_project_status_takes_precedence_over_legacy_labels_in_snapshots(self):
+        issue = gh_issue(4, "x", ["stage: ready"])
+        gh = FakeGh(issues=[issue], status={issue["url"]: "Doing"})
+        snapshot, = forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
+        self.assertEqual(snapshot["stage"], "doing")
+
+    def test_project_write_migrates_legacy_labels_and_round_trips(self):
+        for expected in ("doing", None):
+            with self.subTest(expected=expected):
+                gh = FakeGh(issues=[gh_issue(4, "Legacy issue", ["stage: doing", "bug"])])
+                f = forge.Forge(GH, kanban=BOARD, gh=gh)
+                got = f.write_stage(4, "review", expected=expected, commit=True)
+                self.assertTrue(got.done, got.error)
+                self.assertEqual(f.snapshots()[0]["stage"], "review")
+                self.assertEqual(gh.issues[4]["labels"], [{"name": "bug"}])
+
     def test_unknown_project_status_option_is_an_error(self):
         url = gh_issue(4, "x")["url"]
         gh = FakeGh(issues=[gh_issue(4, "x")], status={url: "Invented"})

@@ -158,7 +158,10 @@ class Forge:
         try:
             if self.kanban.github_project is not None and self.github and statuses is not None:
                 url = IssueRef(self.home.repo, one.iid).url
-                return self.kanban.stage_for_status(statuses.get(url))
+                status = statuses.get(url)
+                if status is not None:
+                    return self.kanban.stage_for_status(status)
+                # Existing workspaces recorded their stages as labels before Project Status was honored.
             return self.kanban.stage_for_label(one.labels)
         except ValueError as exc:
             raise ForgeError(f"stage: {exc}") from exc
@@ -198,8 +201,8 @@ class Forge:
 
     def write_stage(self, number: int, stage: str, expected: str | None = None, commit: bool = False) -> kanban.Sync:
         """Move the issue's stage (label, or GitHub Project Status when configured), leaving its other labels.
-        `expected` is the stage the store last wrote; with none, only an issue carrying no stage is written. A card moved by
-        hand is reported, never overwritten."""
+        `expected` is the stage the store last wrote; with none, initialize a blank issue or migrate its legacy label
+        into Project Status. A card moved by hand is reported, never overwritten."""
         host, repo = home_of(self.home)
         ref = IssueRef(repo, number, host)
         if self.kanban is None:
