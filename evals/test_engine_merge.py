@@ -153,6 +153,22 @@ class ExecutorTest(unittest.TestCase):
         self.p = no_review
         self.refused("review has not run")
 
+    def test_approval_withdrawn_between_the_policy_check_and_the_merge_read_refuses(self):
+        self.planned()
+        real = forge.Forge.requests
+        reads = []
+
+        def requests(forge_self):
+            found = real(forge_self)
+            reads.append(1)
+            # The second read is the merge's final one: the approver has just requested changes.
+            return [replace(r, approval="changes_requested") for r in found] if len(reads) > 1 else found
+
+        with mock.patch.object(forge.Forge, "requests", requests):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.gh.merges, [])
+        self.assertIn("approval changed", self.message())
+
     def test_a_human_review_hold_added_after_planning_refuses(self):
         self.planned()
         self.db.set_human_review(self.key, True)
@@ -192,7 +208,7 @@ class ExecutorTest(unittest.TestCase):
     def test_a_refusal_is_logged_once_with_no_retry_or_crash(self):
         with mock.patch.object(forge.Forge, "merge", side_effect=forge.ForgeError("head changed")) as merge:
             self.assertFalse(self.execute())
-        merge.assert_called_once_with(21, commit=True, issue_key=self.key)
+        merge.assert_called_once_with(21, commit=True, issue_key=self.key, approval=mock.ANY)
         self.assertIn("merge refused", self.message())
         self.assertIn("head changed", self.db.log(self.key)[0].message)
 

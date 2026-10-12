@@ -44,7 +44,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies)
                       if planned else "no eligible merge")
             mark = "#" if forge.github else "!"
             raise ForgeError(f"engine policy: {reason} ({mark}{request.number}: {request.verdict})")
-        message = forge.merge(request.number, commit=True, issue_key=action.issue_key)
+        message = forge.merge(request.number, commit=True, issue_key=action.issue_key, approval=request.approval)
     except (ForgeError, PolicyError) as exc:
         store.add_log(action.issue_key, f"merge refused: {exc}", at)
         return False
