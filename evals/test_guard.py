@@ -74,6 +74,20 @@ class GuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.hook("PreToolUse", tool_name="Bash", tool_input={"command": command}), {})
 
+    def test_plain_http_forge_access_cannot_pass(self):
+        for command in ('curl -X PATCH https://api.github.com/repos/o/r/issues/12 -d state=closed',
+                        'wget https://uploads.github.com/repos/o/r/releases/12/assets',
+                        'http GET https://github.example.com/api/v3/repos/o/r/issues/12',
+                        'https GET https://github.example.com/api/graphql',
+                        'python request.py https://labs.example.test/api/v4/projects/12/issues/3',
+                        'node request.js https://api.github.com/repos/o/r/issues/12'):
+            with self.subTest(command=command):
+                self.denied(command)
+        for command in ('curl https://example.com', 'echo https://api.github.com',
+                        'printf "%s" https://uploads.github.com'):
+            with self.subTest(command=command):
+                self.assertEqual(self.hook("PreToolUse", tool_name="Bash", tool_input={"command": command}), {})
+
     def test_ask_user_question_is_relayed_to_mcp(self):
         result = self.hook("PreToolUse", tool_name="AskUserQuestion", tool_input={"questions": []})
         self.assertEqual(result["hookSpecificOutput"]["permissionDecision"], "deny")

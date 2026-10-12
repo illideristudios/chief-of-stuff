@@ -15,7 +15,9 @@ UNPARSED = "The guard cannot safely parse this command. Use a plain command; " +
 ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z_0-9]*=")
 SEPARATORS = {";", "&&", "||", "|", "&", "\n"}
 REDIRECTIONS = {">", ">>", "<", "<>", ">|", ">&", "<&", "&>", "&>>"}
-GUARDED_TEXT = re.compile(r"\b(?:gh|glab|git|hub)\b|\b(?:api\.github\.com|gitlab\.com)\b", re.I)
+# Enterprise forge hosts can have arbitrary names, so also recognise their standard API paths.
+FORGE_API = re.compile(r"\b(?:api|uploads)\.github\.com\b|/api/(?:graphql|v3|v4)\b", re.I)
+GUARDED_TEXT = re.compile(r"\b(?:gh|glab|git|hub)\b|\bgitlab\.com\b|" + FORGE_API.pattern, re.I)
 # Keep operators separate from quoted/escaped words: shlex alone discards that distinction.
 SHELL_TOKEN = re.compile(r'''(?P<operator>[;&|()<>\n]+)|(?P<word>(?:[^\s;&|()<>'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*")+)''')
 
@@ -196,6 +198,9 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if not tokens:
         return False
     name, args = PurePosixPath(tokens[0]).name, tokens[1:]
+    # Plain clients bypass the forge CLI gates. Workers must use gh/glab for forge reads too.
+    if name not in {"echo", "printf"} and any(FORGE_API.search(arg) for arg in args):
+        return True
     if name in {"sh", "bash", "zsh", "dash", "ksh"}:
         raise Unparsed()
     if name in {"eval", "source", ".", "xargs", "parallel", "if", "then", "else", "fi", "for", "while", "until",

@@ -35,6 +35,56 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
+    def test_plain_clients_cannot_access_forge_api_endpoints(self):
+        clients = ('curl', 'wget', 'http GET', 'https GET',
+                   'python request.py', 'python3 request.py', 'node request.js', 'request-forge')
+        endpoints = ('https://api.github.com/repos/o/r/issues/12',
+                     'https://uploads.github.com/repos/o/r/releases/12/assets',
+                     'https://github.com/api/graphql',
+                     'https://github.example.com/api/v3/repos/o/r/issues/12',
+                     'https://forge.example.com/api/graphql',
+                     'https://forge.example.com/api/v3/repos/o/r/issues/12',
+                     'https://gitlab.com/api/v4/projects/12/issues/3',
+                     'https://labs.example.test/api/v4/projects/12/issues/3')
+        for client in clients:
+            for endpoint in endpoints:
+                command = f'{client} {endpoint}'
+                with self.subTest(command=command):
+                    self.assertIsNotNone(denial_reason(command, ("main", "develop")))
+
+    def test_forge_api_writes_wrappers_and_url_options_are_denied(self):
+        for command in ('curl -X PATCH https://api.github.com/repos/o/r/issues/12 -d state=closed',
+                        'curl -X POST https://uploads.github.com/repos/o/r/releases/12/assets -d payload',
+                        'wget --method=PUT https://labs.example.test/api/v4/projects/12/issues/3',
+                        'http PATCH https://api.github.com/repos/o/r/issues/12 state=closed',
+                        'https PUT https://labs.example.test/api/v4/projects/12/issues/3 state_event=close',
+                        'curl --url=https://API.GITHUB.COM/repos/o/r/issues/12',
+                        'curl https://labs.example.test:8443/api/v4?query=issues',
+                        'env FLAG=yes /usr/bin/curl https://uploads.github.com/repos/o/r/releases',
+                        'true && curl https://api.github.com/repos/o/r/issues/12',
+                        'docker exec container curl https://labs.example.test/api/v4/projects/12'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(denial_reason(command, ("main", "develop")))
+
+    def test_forge_api_text_in_unparsed_commands_fails_closed(self):
+        for command in ('curl https://uploads.github.com/repos/$REPO/releases/12/assets',
+                        'curl https://forge.example.com/api/v3/repos/$REPO/issues/12',
+                        'curl https://forge.example.com/api/graphql -d "$QUERY"',
+                        'curl https://labs.example.test/api/v4/projects/$PROJECT/issues/3'):
+            with self.subTest(command=command):
+                self.assertIsNotNone(denial_reason(command, ("main", "develop")))
+
+    def test_other_http_endpoints_and_printed_forge_urls_are_available(self):
+        for command in ('curl https://example.com', 'wget https://example.com',
+                        'http GET https://example.com', 'https GET https://example.com',
+                        'python request.py https://example.com', 'node request.js https://example.com',
+                        'curl https://example.com/api/v40', 'curl https://example.com/api/graphqlish',
+                        'echo https://api.github.com', 'printf "%s\\n" https://uploads.github.com',
+                        'env FLAG=yes echo https://labs.example.test/api/v4/projects/12',
+                        'printf "%s" https://github.example.com/api/graphql'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
     def test_redirections_preserve_command_judgements(self):
         for command in ('git status > status.txt', 'git diff 2>&1 | tail',
                         'git status < input.txt', 'git status >> status.txt',
