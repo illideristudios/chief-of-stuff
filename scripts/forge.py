@@ -60,9 +60,9 @@ class Forge:
             raise ForgeError(f"requests: {exc}") from exc
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
-        """The newest open request closing the issue, as snapshots report for rework."""
+        """The newest open request closing only the assigned issue; extra closing refs are unsafe to merge."""
         found = self.requests() if requests is None else requests
-        closing = [r for r in found if any(self.key(int(ref[1:])) == issue_key for ref in r.closes)]
+        closing = [r for r in found if r.closes and all(self.key(int(ref[1:])) == issue_key for ref in r.closes)]
         if not closing:
             raise ForgeError(f"no open request closes {issue_key}")
         return max(closing, key=lambda r: r.number)

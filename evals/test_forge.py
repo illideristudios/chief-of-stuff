@@ -7,6 +7,7 @@ import json
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
@@ -329,6 +330,38 @@ class ThreadsTest(unittest.TestCase):
     def test_threads_need_an_approver(self):
         with self.assertRaises(forge.ForgeError):
             forge.Forge(GH, gh=github()).threads()
+
+
+class ClosingRequestTest(unittest.TestCase):
+    @contextmanager
+    def for_forge(self, home, bodies):
+        if home == GH:
+            gh = FakeGh(prs=[tma.pr(n, []) for n in bodies], bodies=bodies)
+            yield forge.Forge(GH, gh=gh)
+        else:
+            mrs = {n: {"approved_by": [], "description": body} for n, body in bodies.items()}
+            with mock.patch.object(backlog, "_call", gitlab_call({}, mrs)):
+                yield forge.Forge(GL, token="t")
+
+    def test_extra_closing_references_refuse_selection_and_merge_without_writing(self):
+        for home in (GH, GL):
+            for body in ("Fixes #3\nFixes #99", "Closes #99\nResolves #3", "resolved #3\nclosed #99"):
+                with self.subTest(home=home, body=body), self.for_forge(home, {21: body}) as f:
+                    with self.assertRaises(forge.ForgeError):
+                        f.closing_request(f.key(3))
+                    for commit in (False, True):
+                        with mock.patch.object(forge.merge_approved, "merge_head") as merge:
+                            with self.assertRaises(forge.ForgeError):
+                                f.merge(21, commit=commit, issue_key=f.key(3))
+                            merge.assert_not_called()
+
+    def test_newest_request_must_close_only_the_assigned_issue(self):
+        bodies = {20: "Closes #3", 21: "Fixes #3\nResolves #3\nSee #99",
+                  22: "Fixes #3\nFixes #99", 23: "Fixes #99", 24: "See #3"}
+        for home in (GH, GL):
+            with self.subTest(home=home), self.for_forge(home, bodies) as f:
+                self.assertEqual(f.closing_request(f.key(3)).number, 21)
+                self.assertEqual(f.closing_request(f.key(3), f.requests()).number, 21)
 
 
 class MergeTest(unittest.TestCase):

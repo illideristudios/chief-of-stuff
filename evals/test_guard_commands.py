@@ -52,6 +52,41 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
+    def test_comment_mutation_flags_are_denied(self):
+        for group in ('issue', 'pr'):
+            for flags in ('--delete-last --yes', '--edit-last --body replacement',
+                          '--edit-last --create-if-none --body replacement',
+                          '--create-if-none --edit-last=true --body replacement',
+                          '--delete-last=true --yes', '--edit-last=false --body replacement'):
+                for prefix in (f'gh {group} comment 12',
+                               f'env FLAG=yes gh -R owner/repo {group} comment 12',
+                               f'gh {group} --repo owner/repo comment 12'):
+                    command = f'{prefix} {flags}'
+                    with self.subTest(command=command):
+                        self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
+    def test_glab_note_mutations_are_denied(self):
+        for command in ('glab mr note delete 99 12', 'glab mr note update 99 12 --message replacement',
+                        'glab mr note --message replacement update 99 12',
+                        'glab mr note -R owner/repo delete 99 12 --yes',
+                        'glab mr note 12 --resolve thread', 'glab mr note 12 --unresolve thread',
+                        'glab mr note resolve thread 12', 'glab mr note reopen thread 12'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
+    def test_additive_comments_remain_allowed(self):
+        for group in ('issue', 'pr'):
+            for flags in ('--body feedback', '-b feedback', '--body-file feedback.txt', '-F feedback.txt', '--editor'):
+                command = f'gh {group} comment 12 {flags}'
+                with self.subTest(command=command):
+                    self.assertIsNone(denial_reason(command, ("main", "develop")))
+        for command in ('glab mr note 12 --message feedback', 'glab issue note 12 -m feedback',
+                        'glab mr note create 12 --message feedback', 'glab mr note -m feedback',
+                        'glab mr note --message delete', 'glab mr note --message=feedback',
+                        'glab mr note --message feedback 12'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
     def test_rebase_execution_options_are_opaque(self):
         for command in ('git rebase -x "gh pr merge 12" HEAD~1',
                         'git rebase --exec "gh pr merge 12" HEAD~1',
@@ -68,6 +103,23 @@ class CommandTest(unittest.TestCase):
                         'git filter-branch --tree-filter true HEAD'):
             with self.subTest(command=command):
                 self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
+
+    def test_forge_clone_forwarded_flags_use_git_clone_checks(self):
+        for client in ('gh', 'glab'):
+            for flags in ('--config core.sshCommand="sh -c \'gh pr merge 12; exit 1\' --"',
+                          '-c core.sshCommand=true', '-ccore.sshCommand=true',
+                          '--config=core.sshCommand=true', '--config credential.helper=true',
+                          '--config=protocol.ext.allow=always', 'ext::true', 'fd::3'):
+                for prefix in (f'{client} repo clone owner/repo dest',
+                               f'env FLAG=yes {client} -R owner/repo repo clone owner/repo',
+                               f'{client} repo --repo owner/repo clone owner/repo dest'):
+                    command = f'{prefix} -- {flags}'
+                    with self.subTest(command=command):
+                        self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
+            for flags in ('--depth 1', '--branch feature --single-branch', '--quiet', ''):
+                command = f'{client} repo clone owner/repo dest -- {flags}'
+                with self.subTest(command=command):
+                    self.assertIsNone(denial_reason(command, ("main", "develop")))
 
     def test_pr_create_requires_an_explicit_nonempty_head(self):
         for command in ('gh pr create --title x --body y', 'gh pr create',
@@ -235,6 +287,43 @@ class CommandTest(unittest.TestCase):
     def test_fallback_matches_guarded_program_words(self):
         for command in ('echo $github $gitlab $legit $hubcap',
                         'cat $(ls github*.txt)'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_tokenization_errors_cannot_hide_inline_interpreters(self):
+        commands = (
+            'python3 -c \'import os;print("$");os.system(chr(103)+chr(104)+" pr merge 12")\'',
+            '/usr/bin/python3.14 -c\'print("$")\'',
+            'env FLAG=yes /usr/bin/pypy3 -c \'print("`")\'',
+            'python3 -c \'print(1)',
+            'python3 -c \'print("\x00")\'',
+            '\'py\'thon3 "-c" \'print("$")\'',
+            'perl -ne \'print "$x"\'', 'ruby -we \'puts "$"\'',
+            'nodejs -p \'"$"\'', 'php --run=\'echo "$x";\'',
+            'lua -e \'print("$")\'', 'Rscript -e \'print("$")\'',
+            'osascript -e \'return "$"\'', 'deno eval \'"$"\'',
+            'bun --eval=\'"$"\'', 'pwsh -Command \'Write-Output "$x"\'',
+            'echo $HOME; python3 -c "print(1)"',
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
+        for command in ('python3 script.py "$HOME"', 'node script.js "$HOME"'):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_bun_print_and_deno_eval_are_opaque(self):
+        for command in ('bun -p "1 + 1"', 'bun -p\'1 + 1\'', 'bun -ip "1 + 1"',
+                        'bun --print "1 + 1"', 'bun --print="1 + 1"',
+                        'env FLAG=yes /usr/local/bin/bun -p "1 + 1"',
+                        'bun1.2 -p "1 + 1"', 'bun -p \'"$"\'',
+                        'bun --print=\'"$"\'', 'bun -e "1 + 1"',
+                        'deno eval "1 + 1"', 'deno eval --print "1 + 1"',
+                        'deno eval -p "1 + 1"', 'deno eval \'"$"\'',
+                        'env FLAG=yes /usr/local/bin/deno eval "1 + 1"'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
+        for command in ('bun script.js', 'bun run script.js', 'deno run script.ts', 'deno --version'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 

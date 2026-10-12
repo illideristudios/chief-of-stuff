@@ -1,7 +1,7 @@
 """Pure command judgements for the worker guard, using a deliberately limited shell grammar.
 
 No command here is executed. Quotes and shell chains are tokenized; known launch wrappers are unwrapped.
-Unsupported syntax fails closed only when the raw text names a guarded program or forge API host.
+Unsupported syntax fails closed when the raw text names a guarded program, forge API host or inline interpreter.
 The guard is a rail, not a sandbox: engine merge verification remains the authority (design 9).
 """
 from __future__ import annotations
@@ -20,6 +20,11 @@ FORGE_API = re.compile(r"\b(?:api|uploads)\.github\.com\b|/api/(?:graphql|v3|v4)
 GUARDED_TEXT = re.compile(r"\b(?:gh|glab|git|hub)\b|\bgitlab\.com\b|" + FORGE_API.pattern, re.I)
 # Keep operators separate from quoted/escaped words: shlex alone discards that distinction.
 SHELL_TOKEN = re.compile(r'''(?P<operator>[;&|()<>\n]+)|(?P<word>(?:[^\s;&|()<>'"\\]|\\.|'[^']*'|"(?:\\.|[^"\\])*")+)''')
+# Versioned names, attached flags and bundles share one table in parsing and the raw-text fallback.
+INTERPRETERS = ((r"(?:python|pypy|perl|ruby|node(?:js)?)[\d.]*", "cep"), (r"php[\d.]*", "rBRE"),
+                (r"(?:lua(?:jit)?|julia|swift|Rscript|osascript|deno)[\d.]*", "e"),
+                (r"bun[\d.]*", "ep"),
+                (r"pwsh|powershell", "cC"))
 # Only known reads and worker writes may reach a forge. New CLI verbs fail closed.
 FORGE_ALLOWED = {
     "gh": {
@@ -220,14 +225,22 @@ def _pr_create_denied(flags: list[str], protected: tuple[str, ...]) -> bool:
     return _push_denied(["origin", head], protected)
 
 
-def _forge_denied(args: list[str], client: str, protected: tuple[str, ...]) -> bool:
-    # Bundles can hide protected flags; require separate short flags and values or long forms.
-    if any(arg.startswith("-") and not arg.startswith("--") and len(arg) > 2 for arg in args):
-        return True
+def _forge_denied(args: list[str], client: str, protected: tuple[str, ...], depth: int) -> bool:
+    client_args = args
     args = _global_args(args, {"-R", "--repo", "--hostname"}, {"--help", "--version"})
     if not args:
         return False
     group, rest = args[0], args[1:]
+    if group == "repo":
+        rest = _global_args(rest, {"-R", "--repo"}, set())
+        if rest[:1] == ["clone"] and "--" in rest:
+            # Both forge clients forward everything after -- to git clone, including execution configuration.
+            forwarded = rest[rest.index("--") + 1:]
+            if _one(["git", "clone", *forwarded], protected, depth + 1):
+                return True
+    # Bundles can hide protected flags; require separate short flags and values or long forms.
+    if any(arg.startswith("-") and not arg.startswith("--") and len(arg) > 2 for arg in client_args):
+        return True
     if group == "api":
         # Prefer subcommands. API writes are too general to prove they leave engine-owned state alone.
         method = None
@@ -256,6 +269,19 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...]) -> b
     verb, flags = rest[0], rest[1:]
     if verb not in allowed:
         return True
+    if group in {"issue", "pr", "mr"} and verb in {"comment", "note"}:
+        # The shared identity's earlier comments and discussion state belong to the user.
+        if any(flag.split("=", 1)[0] in {"--delete-last", "--edit-last", "--create-if-none",
+                                       "--resolve", "--unresolve"} for flag in flags):
+            return True
+        if client == "glab" and group == "mr":
+            # glab accepts note flags before its nested verb; skip their values, including message text.
+            note_args = _global_args(flags, {"-R", "--repo", "-m", "--message", "--attach", "--reply",
+                                             "--file", "--line", "--old-line"},
+                                    {"--help", "-h", "--yes", "-y", "--unique", "--internal",
+                                     "--resolvable", "--resolvable=true", "--resolvable=false"})
+            if note_args and note_args[0] in {"delete", "update", "resolve", "reopen", "draft"}:
+                return True
     if group == "pr" and verb == "review":
         # Approval is the user's and a change request holds the merge (reconcile); findings go through the report.
         if any(flag.split("=", 1)[0] in {"--approve", "--request-changes"}
@@ -283,6 +309,22 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...]) -> b
 NESTED_WORD = re.compile(r"(?<![\w.-])(?:gh|glab|git|hub|sh|bash|zsh|dash|eval)(?![\w.])")
 
 
+def _inline_interpreter(name: str, args: list[str]) -> bool:
+    return any(re.fullmatch(names, name) and any(
+        a.split("=", 1)[0] in {"--eval", "--print", "--run", "--process-begin", "--process-code", "--process-end"}
+        or a == "eval"  # deno eval, bun eval
+        or a.startswith("-") and not a.startswith("--") and re.search(f"[{letters}]", a) for a in args)
+        for names, letters in INTERPRETERS)
+
+
+def _inline_interpreter_text(command: str) -> bool:
+    # Parsing already failed: scan conservatively, including wrappers, broken quotes and quoted/escaped flags.
+    # These words cannot prove a command safe; they only recognise opaque code without a literal forge name.
+    text = command.replace("\\\n", "").translate(str.maketrans("", "", "'\"\\"))
+    words = re.findall(r"[^\s;&|()<>`]+", text)
+    return any(_inline_interpreter(PurePosixPath(word).name, words[i + 1:]) for i, word in enumerate(words))
+
+
 def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if depth > 8:
         raise Unparsed()
@@ -304,18 +346,12 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
         raise Unparsed()
     # Versioned names too: python3.14, pypy3, perl5.36, nodejs. A program can assemble `gh` at runtime, so no word check.
     # Attached and bundled forms too: python3 -c'...', perl -ne, node -p. Each entry: names, inline-code short flags.
-    for names, letters in ((r"(?:python|pypy|perl|ruby|node(?:js)?)[\d.]*", "cep"), (r"php[\d.]*", "rBRE"),
-                           (r"(?:lua(?:jit)?|julia|swift|Rscript|osascript|deno|bun)[\d.]*", "e"),
-                           (r"pwsh|powershell", "cC")):
-        if re.fullmatch(names, name) and any(
-                a.split("=", 1)[0] in {"--eval", "--print", "--run", "--process-begin", "--process-code", "--process-end"}
-                or a == "eval"  # deno eval, bun eval
-                or a.startswith("-") and not a.startswith("--") and re.search(f"[{letters}]", a) for a in args):
-            raise Opaque()
+    if _inline_interpreter(name, args):
+        raise Opaque()
     if re.fullmatch(r"[gmn]?awk", name) and not any(a == "-f" or a.startswith(("-f", "--file")) for a in args):
         raise Opaque()  # the first operand is an inline program with system()
     if name in {"gh", "glab"}:
-        return _forge_denied(args, name, protected)
+        return _forge_denied(args, name, protected, depth)
     if name == "git":
         args = _global_args(args, {"-C", "--git-dir", "--work-tree"}, {"--no-pager", "--paginate"})
         if not args:
@@ -396,4 +432,5 @@ def denial_reason(command: str, protected_branches: tuple[str, ...]) -> str | No
     except Opaque:
         return UNPARSED
     except (ValueError, TypeError, RecursionError):
-        return UNPARSED if not isinstance(command, str) or GUARDED_TEXT.search(command) else None
+        return UNPARSED if (not isinstance(command, str) or GUARDED_TEXT.search(command)
+                            or _inline_interpreter_text(command)) else None
