@@ -32,6 +32,11 @@ class ClosesTest(unittest.TestCase):
         self.assertEqual(fr.closes("Closes other/repo#99"), ("other/repo#99",))
         self.assertEqual(fr.closes("Resolves #3\nSee other/repo#99"), ("#3",))
 
+    def test_closes_accepts_an_optional_colon_after_the_keyword(self):
+        self.assertEqual(fr.closes("Closes: other/repo#99"), ("other/repo#99",))
+        self.assertEqual(fr.closes("Fixes #12\nCloses: other/repo#99"), ("#12", "other/repo#99"))
+        self.assertEqual(fr.closes("Closes: #10"), ("#10",))
+
 
 if __name__ == "__main__":
     unittest.main()
