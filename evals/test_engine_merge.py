@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "evals"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import backlog  # noqa: E402
+import engine  # noqa: E402
 import engine_merge  # noqa: E402
 import forge  # noqa: E402
 import policy  # noqa: E402
@@ -58,7 +59,7 @@ class ExecutorTest(unittest.TestCase):
     def planned(self):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
         actions = reconcile.plan([item], policies=self.p, free_slots=0, now=datetime.fromisoformat(self.at),
-                                 **engine_merge.planning_inputs(self.db, [item]))
+                                 **engine._planning_inputs(self.db, [item]))
         self.assertEqual(actions, [reconcile.Merge(self.key)])
         self.action = actions[0]
 
@@ -300,7 +301,9 @@ class ExecutorTest(unittest.TestCase):
         self.refused("review has not run")
 
     def execute(self):
-        return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p)
+        item = next(i for i in self.db.items() if i.issue_key == self.key)
+        return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p,
+                                    inputs=engine._planning_inputs(self.db, [item]))
 
     def message(self):
         entries = self.db.log(self.key)

@@ -45,7 +45,17 @@ class FakeForge:
         self.kanban, self.github = None, True
 
     def snapshots(self):
-        return [dict(row) for row in self.rows]
+        return [self.snapshot(row["issue_key"]) for row in self.rows]
+
+    def snapshot(self, issue_key, *, issue=None, request=None):
+        row = next(r for r in self.rows if r["issue_key"] == issue_key)
+        return {**dict(row), "stage_mark": None}
+
+    def mark(self, number):
+        return f"#{number}"
+
+    def mark_for_stage(self, stage):
+        return None
 
     def write_stage(self, number, stage, expected=None, commit=False):
         self.writes.append((number, stage, expected, commit))

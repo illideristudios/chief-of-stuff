@@ -32,6 +32,22 @@ class Decision(Protocol):
     answer: str | None
 
 
+def review_findings(state: Mapping[str, object], history: Sequence[Segment]) -> dict[str, int] | None:
+    """Severity counts from the latest completed review, or None when unknown or stale."""
+    latest = max((s for s in history if s.stage == "review" and s.ended_at),
+                 key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
+    record = state.get("review_findings")
+    # TODO #639: replace this attempt-keyed resume bridge with structured findings from the latest review.
+    # Forge approval and threads have no severity counts; neither means a worker reported zero findings.
+    if latest is None or latest.outcome != "done" or not isinstance(record, dict):
+        return None
+    counts = record.get("counts")
+    if (record.get("attempt") != latest.attempt or not isinstance(counts, dict)
+            or any(k not in SEVERITIES or type(v) is not int or v < 0 for k, v in counts.items())):
+        return None
+    return counts
+
+
 @dataclass(frozen=True)
 class Dispatch:
     issue_key: str
@@ -104,6 +120,9 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
     return any(counts.get(severity, 0) > 0 for severity in blocking)
 
 
+_BACKOFF = frozenset({"quota", "unknown"})
+
+
 def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     if stage == "review":
@@ -120,9 +139,6 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
                                              and _time(s.started_at) >= review for s in history)
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")
-_BACKOFF = frozenset({"quota", "unknown"})
-
-
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 

@@ -81,8 +81,27 @@ class KeyTest(unittest.TestCase):
         self.assertEqual(forge.Forge(GH).key(7), "github:example/app#7")
         self.assertEqual(forge.Forge(GL).key(5), "gitlab:gitlab.example.test/team/app#5")
 
+    def test_mark_names_a_github_pull_or_gitlab_merge_request(self):
+        self.assertEqual(forge.Forge(GH).mark(21), "#21")
+        self.assertEqual(forge.Forge(GL).mark(5), "!5")
+
 
 class GitHubTest(unittest.TestCase):
+    def test_snapshot_is_one_issue_row_with_its_stage_mark(self):
+        row = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshot("github:example/app#3")
+        self.assertEqual(row, {
+            "issue_key": "github:example/app#3", "title": "Fix the parser", "forge_state": "open",
+            "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready",
+            "stage_mark": "stage: review",
+        })
+
+    def test_snapshots_call_snapshot_for_each_issue(self):
+        adapter = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github())
+        with mock.patch.object(forge.Forge, "snapshot", wraps=adapter.snapshot) as one:
+            adapter.snapshots()
+        self.assertEqual([c.args[0] for c in one.call_args_list],
+                         ["github:example/app#3", "github:example/app#4"])
+
     def test_snapshots_report_configured_human_review_label(self):
         gh = FakeGh(issues=[gh_issue(1, "held", ["stage: review", "needs human"]),
                             gh_issue(2, "free", ["stage: review", "other hold"])])
@@ -98,7 +117,7 @@ class GitHubTest(unittest.TestCase):
                             prs=[tma.pr(21, reviews)], bodies={21: "Closes #3"})
                 snapshot, = forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots()
                 self.assertEqual((snapshot["review_state"], snapshot["merge_state"]), ("changes_requested", "ready"))
-                item = store.WorkItem(**snapshot)
+                item = store.WorkItem(**{k: v for k, v in snapshot.items() if k != "stage_mark"})
                 for stage in ("review", "merge"):
                     item.stage = stage
                     self.assertEqual(tr.reconcile.plan([item],
@@ -128,14 +147,16 @@ class GitHubTest(unittest.TestCase):
         got = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshots()
         self.assertEqual(got, [
             {"issue_key": "github:example/app#3", "title": "Fix the parser", "forge_state": "open", "stage": "review",
-             "human_review": False, "review_state": "approved", "merge_state": "ready"},
+             "human_review": False, "review_state": "approved", "merge_state": "ready",
+             "stage_mark": "stage: review"},
             {"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open", "stage": "doing",
-             "human_review": False, "review_state": "", "merge_state": ""},
+             "human_review": False, "review_state": "", "merge_state": "", "stage_mark": "stage: doing"},
         ])
 
     def test_what_was_not_configured_is_left_out_so_a_sync_never_blanks_it(self):
         got = forge.Forge(GH, gh=github()).snapshots()
-        self.assertEqual([sorted(s) for s in got], [["forge_state", "issue_key", "merge_state", "title"]] * 2)
+        self.assertEqual([sorted(s) for s in got],
+                         [["forge_state", "issue_key", "merge_state", "stage_mark", "title"]] * 2)
 
     def test_a_failed_read_is_an_error_never_an_empty_forge(self):
         for broken in (("issue", "list"), ("pr", "list"), ("api", "graphql")):
@@ -286,9 +307,10 @@ class GitLabTest(unittest.TestCase):
     def test_snapshots_carry_identity_stage_review_and_merge_state(self):
         self.assertEqual(self.forge.snapshots(), [
             {"issue_key": "gitlab:gitlab.example.test/team/app#3", "title": "Fix the parser", "forge_state": "open",
-             "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready"},
+             "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready",
+             "stage_mark": "stage: review"},
             {"issue_key": "gitlab:gitlab.example.test/team/app#4", "title": "Add a flag", "forge_state": "open",
-             "stage": "", "human_review": False, "review_state": "", "merge_state": ""},
+             "stage": "", "human_review": False, "review_state": "", "merge_state": "", "stage_mark": ""},
         ])
 
     def test_a_failed_read_is_an_error_never_an_empty_forge(self):

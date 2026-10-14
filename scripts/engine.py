@@ -31,6 +31,21 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def _planning_inputs(store: Any, items: list) -> dict:
+    """Read the same issue context for the engine pass and merge recheck."""
+    segments = {item.issue_key: store.segments(item.issue_key) for item in items}
+    states = {item.issue_key: _resume(store, item.issue_key) for item in items}
+    return {
+        "segments": segments,
+        "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
+                        or getattr(item, "issue_type", None) for item in items},
+        "open_findings": {key: counts for key, history in segments.items()
+                          if (counts := reconcile.review_findings(states[key], history)) is not None},
+        "rooms": {key: state.get("room") for key, state in states.items()},
+        "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
+    }
+
+
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
     result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None, commit=True)
     if not result.ok:
@@ -93,8 +108,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             **engine_merge.planning_inputs(store, items))
+                             **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
+    by_key = {item.issue_key: item for item in items}
     for action in actions:
         key = action.issue_key
         try:
@@ -109,7 +125,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
-                elif engine_merge.execute(action, forge, store, at, policies=policies):
+                elif engine_merge.execute(action, forge, store, at, policies=policies,
+                                         inputs=_planning_inputs(store, [by_key[key]])):
                     stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
