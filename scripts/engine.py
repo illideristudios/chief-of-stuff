@@ -20,6 +20,7 @@ import policy
 import reconcile
 import settings
 import slots
+import store_access
 import supervisor
 from forge_port import ForgeError
 from workspace import worktrees_dir
@@ -189,7 +190,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
-            db = supervisor.migrated_store(root)
+            db = store_access.migrated_store(root, engine_owned=True)
             try:
                 while True:
                     failed = False

@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import issue_gate
+import store_access
 import supervisor
 
 
@@ -24,11 +25,12 @@ def main(argv: list[str] | None = None) -> int:
         _, _, source = supervisor.workspace_forge(root)
         if source is None:
             result = issue_gate.start(None, None, args.title)
+        elif not args.commit:  # a preview writes nothing, so it never opens or migrates the store
+            result = issue_gate.start(source, None, args.title, body=args.body, issue=args.issue)
         else:
-            db = supervisor.migrated_store(root)
+            db = store_access.migrated_store(root)
             try:
-                result = issue_gate.start(source, db, args.title, body=args.body,
-                                          issue=args.issue, commit=args.commit)
+                result = issue_gate.start(source, db, args.title, body=args.body, issue=args.issue, commit=True)
             finally:
                 db.engine.dispose()
         if result.refused:

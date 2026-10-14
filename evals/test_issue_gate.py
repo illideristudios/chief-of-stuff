@@ -168,8 +168,19 @@ class WorkMainTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertIn("would create: Add a flag", out)
         self.assertEqual((self.gh.all_calls, self.items()), ([], []))
+        state = supervisor.state_dir(self.root)
+        self.assertEqual((self.root / "store.db").exists() or (state / "migrate.lock").exists(), False,
+                         "a preview must not create, migrate or lock the store")
+
+    def test_existing_issue_preview_does_not_open_the_store(self):
+        self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])
+        with mock.patch.object(store, "migrate") as migrated:
+            self.assertEqual(self.run_work("--issue", "3")[0], 0)
+        migrated.assert_not_called()
+        self.assertFalse((self.root / "store.db").exists())
 
     def test_a_running_engine_does_not_block_intake(self):
+        store.migrate(self.root / "store.db")  # a live engine has already migrated it
         with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"):
             code, out, err = self.run_work("--commit")
         self.assertEqual(code, 0, err)
@@ -181,14 +192,34 @@ class WorkMainTest(unittest.TestCase):
         def migrate(db_path):
             with self.assertRaises(supervisor.ServiceError), supervisor.lock(path):
                 pass
-            store.migrate(db_path)
+            real_migrate(db_path)
 
-        with mock.patch.object(supervisor, "migrate", side_effect=migrate) as migrated:
-            code, _, err = self.run_work()
+        real_migrate = store.migrate
+        with mock.patch.object(store, "migrate", side_effect=migrate) as migrated:
+            code, _, err = self.run_work("--commit")
         self.assertEqual(code, 0, err)
         migrated.assert_called_once_with(self.root.resolve() / "store.db")
         with supervisor.lock(path):
             pass
+
+    def test_a_current_store_is_not_migrated_again_even_with_a_live_engine(self):
+        store.migrate(self.root / "store.db")
+        with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"), \
+             mock.patch.object(store, "migrate") as migrated:
+            code, _, err = self.run_work("--commit")
+        self.assertEqual(code, 0, err)
+        migrated.assert_not_called()
+        self.assertEqual(len(self.items()), 1)
+
+    def test_a_stale_store_is_not_migrated_under_a_live_engine(self):
+        (self.root / "store.db").write_bytes(b"")  # no alembic_version: behind head
+        with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"), \
+             mock.patch.object(store, "migrate") as migrated:
+            code, _, err = self.run_work("--commit")
+        self.assertEqual(code, 1)
+        self.assertIn("engine is running", err)
+        migrated.assert_not_called()
+        self.assertEqual(self.gh.all_calls, [], "nothing is filed when the store cannot open")
 
     def test_closed_issue_refuses_preview_and_commit_without_a_row(self):
         self.gh = tf.FakeGh(issues=[{**tf.gh_issue(3, "Fix the parser"), "state": "CLOSED"}])

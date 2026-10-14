@@ -235,12 +235,14 @@ class InitWorkspaceTest(unittest.TestCase):
         self.assertEqual(created, ["PLAN", "HOLD"])
         self.assertNotIn("main", labels)
 
-    def test_project_mode_provisions_only_the_hold_label(self):
+    def test_existing_project_mode_settings_refuse_until_the_engine_reads_project_status(self):
+        # engine.main refuses [kanban.github_project] (#627), so a preserved Project-mode file is not engine-ready.
         (self.root / "chief-of-stuff.toml").write_text(
             _engine_ready_kanban(["PLAN"], "HOLD", project=True, terminal=["main"]))
-        with mock.patch.object(init.backlog, "ensure_labels", return_value=()) as ensure:
-            self.assertEqual(self.run_init()[0], 0)
-        self.assertEqual(ensure.call_args.args[1], ("HOLD",))
+        code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("github_project", err)
+        self.assertFalse((self.root / "CLAUDE.md").exists())
 
     def test_a_hold_label_the_forge_refuses_is_reported_and_init_still_succeeds(self):
         (self.root / "chief-of-stuff.toml").write_text(_engine_ready_kanban(["00 - PLAN"], "HOLD"))

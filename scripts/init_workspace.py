@@ -97,6 +97,8 @@ def _require_engine_ready(config) -> None:
     """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
     if config.kanban is None:
         raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
+    if config.kanban.github_project is not None:  # engine.main refuses it until Project Status snapshot reads land (#627)
+        raise InitError("existing settings use [kanban.github_project], which the engine cannot run yet (#627)")
     unmapped = sorted(set(workflow_stages(load_policy()))
                       - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
     if unmapped:
@@ -104,7 +106,7 @@ def _require_engine_ready(config) -> None:
 
 
 def _configured_labels(settings: Path, new_settings: str) -> dict[str, str]:
-    """Label -> kind from the existing settings, else the new text; Project mode only needs the hold label."""
+    """Label -> kind from the existing settings, else the new text."""
     try:
         data = tomllib.loads(settings.read_text() if settings.exists() else new_settings)
     except (OSError, tomllib.TOMLDecodeError, ValueError):
@@ -113,9 +115,8 @@ def _configured_labels(settings: Path, new_settings: str) -> dict[str, str]:
     if not isinstance(kanban, dict):
         return {}
     labels = {}
-    if "github_project" not in kanban:
-        # terminal_stages are workflow names (label_for → None), not forge labels.
-        labels.update((label.strip(), "stage") for label in kanban.get("stages", []))
+    # terminal_stages are workflow names (label_for → None), not forge labels.
+    labels.update((label.strip(), "stage") for label in kanban.get("stages", []))
     label = kanban.get("human_review_label", "")
     if isinstance(label, str) and label.strip():
         labels[label.strip()] = "hold"

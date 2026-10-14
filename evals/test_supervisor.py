@@ -209,5 +209,21 @@ class AgentTest(SupervisorTest):
         self.assertNotIn("Traceback", errors.getvalue())
 
 
+class BasePythonTest(unittest.TestCase):
+    def test_supervisor_and_notify_service_import_without_the_engine_venv_packages(self):
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        code = ("import sys; sys.modules.update(sqlalchemy=None, alembic=None); sys.path.insert(0, sys.argv[1]); "
+                "import supervisor, notify_service")
+        result = subprocess.run([sys.executable, "-c", code, str(scripts)], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class ManifestTest(unittest.TestCase):
+    def test_marketplace_version_matches_the_plugin_manifest(self):
+        plugin = Path(__file__).resolve().parent.parent / ".claude-plugin"
+        marketplace = json.loads((plugin / "marketplace.json").read_text())["plugins"][0]["version"]
+        self.assertEqual(marketplace, json.loads((plugin / "plugin.json").read_text())["version"])
+
+
 if __name__ == "__main__":
     unittest.main()

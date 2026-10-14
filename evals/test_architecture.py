@@ -33,7 +33,7 @@ DRAWS_NOTHING = (
     "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
-    "one_shot_report", "flow", "sync_page_theme", "store",
+    "one_shot_report", "flow", "sync_page_theme", "store", "store_access",
     "model_port",
     "claude_adapter",
     "policy",

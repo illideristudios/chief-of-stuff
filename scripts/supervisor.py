@@ -18,7 +18,6 @@ from pathlib import Path
 import forge
 import settings
 import shell_setup
-from store import Store, migrate
 from workspace import settings_path
 
 RELEASE = Path(__file__).resolve().parent.parent
@@ -56,14 +55,6 @@ def workspace_forge(root: Path) -> tuple[str, settings.Settings, forge.Forge | N
     config = settings.load(root, settings_path(text))
     source = forge.for_workspace(root, approver=config.workflow.approver or "", kanban=config.kanban)
     return text, config, source
-
-
-def migrated_store(root: Path) -> Store:
-    """Take migrate.lock, migrate store.db, and return an open Store (caller disposes)."""
-    path = root / "store.db"
-    with lock(state_dir(root) / "migrate.lock", wait=True):
-        migrate(path)
-    return Store(path)
 
 
 @contextmanager
