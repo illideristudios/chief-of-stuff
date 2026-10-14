@@ -599,7 +599,7 @@ class WorkerTest(unittest.TestCase):
             self.launch()
         request = start.call_args.args[0]
         env = start.call_args.kwargs["env"]
-        self.assertEqual(request.plugin_dirs, (str(guard.parent), str(guard)))
+        self.assertEqual(request.plugin_dirs, (str(guard),))
         self.assertEqual(env["CHIEF_OF_STUFF_WORKSPACE"], str(self.root))
         self.assertEqual(env["CHIEF_ISSUE_KEY"], KEY)
         self.assertEqual(env["CHIEF_STAGE"], "implement")
@@ -610,9 +610,8 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(env["CHIEF_PYTHON"], sys.executable)
         self.assertEqual(env["CHIEF_PROTECTED_BRANCHES"], '["main", "master", "develop"]')
         argv = claude_adapter.argv(request, "claude", [])
-        self.assertEqual(argv[argv.index("--plugin-dir") + 1], request.plugin_dirs[0])
-        prepared = {"argv": argv, "cwd": str(self.tree), "session_id": request.session_id, "env": env}
-        self.assertEqual(prepared["env"]["CHIEF_ISSUE_KEY"], KEY)
+        self.assertEqual([argv[i + 1] for i, x in enumerate(argv) if x == "--plugin-dir"], [str(guard)])
+        self.assertEqual(env["CHIEF_ISSUE_KEY"], KEY)
 
     def test_worker_launch_refuses_without_the_guard_plugin(self):
         with mock.patch.object(worker.guard_binding, "guard_plugin_dir", return_value=None), \

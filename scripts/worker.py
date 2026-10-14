@@ -180,8 +180,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     plugin = guard_binding.guard_plugin_dir()
     if plugin is None:
         raise RuntimeError("worker launch requires the guard/ plugin beside scripts/")
-    # chief-of-stuff plugin root (as one_shot), then the guard plugin.
-    plugin_dirs = (str(Path(__file__).resolve().parent.parent), str(plugin))
+    plugin_dirs = (str(plugin),)
     env = {"CHIEF_OF_STUFF_WORKSPACE": str(root.resolve()),
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock()))}
