@@ -35,11 +35,13 @@ def command(request: Request, claude_as_profile: str = "") -> list[str]:
     return login_argv(argv(request, binary, lead))
 
 
-def start(request: Request, run_dir: Path, *, claude_as_profile: str = "") -> subprocess.Popen:
+def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
+          env: dict[str, str] | None = None) -> subprocess.Popen:
     """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
     prepared = command(request, claude_as_profile)
     (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
-                                                    "session_id": request.session_id}))
+                                                    "session_id": request.session_id,
+                                                    "env": env or {}}))
     try:
         with (run_dir / "runner.stderr").open("w") as errors:
             return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
@@ -72,7 +74,7 @@ def _worker(run_dir: Path) -> None:
     prepared = json.loads((run_dir / "command.json").read_text())
     with (run_dir / "stdout").open("w") as stdout, (run_dir / "stderr").open("w") as stderr:
         try:
-            process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env=clean_env(),
+            process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env={**clean_env(), **prepared.get("env", {})},
                                        stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
             _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
                                              "session_id": prepared["session_id"]})

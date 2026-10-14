@@ -590,6 +590,28 @@ class WorkerTest(unittest.TestCase):
             self.assertIn(token, command)
         self.assertNotIn("--safe-mode", command)
 
+    def test_worker_launch_carries_plugin_root_and_workspace_env(self):
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch()
+        request = start.call_args.args[0]
+        self.assertEqual(request.plugin_dirs, (str(Path(worker.__file__).resolve().parent.parent),))
+        self.assertEqual(start.call_args.kwargs["env"], {"CHIEF_OF_STUFF_WORKSPACE": str(self.root)})
+        argv = claude_adapter.argv(request, "claude", [])
+        self.assertEqual(argv[argv.index("--plugin-dir") + 1], request.plugin_dirs[0])
+
+    def test_adapter_runner_gives_the_host_the_launch_env(self):
+        run = self.root / "run"
+        run.mkdir()
+        out = self.root / "seen"
+        code = f"import os; open({str(out)!r}, 'w').write(os.environ['CHIEF_OF_STUFF_WORKSPACE'])"
+        (run / "command.json").write_text(json.dumps({
+            "argv": [sys.executable, "-c", code], "cwd": str(self.root), "session_id": "s",
+            "env": {"CHIEF_OF_STUFF_WORKSPACE": "/ws"}}))
+        claude_adapter._worker(run)
+        self.assertEqual(out.read_text(), "/ws")
+
     def test_agent_effort_profile_are_passed_to_adapter(self):
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Agent: specialist task\n")

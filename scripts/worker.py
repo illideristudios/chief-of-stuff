@@ -177,8 +177,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     run_dir.mkdir(parents=True)
     session_id = str(uuid.uuid4())
     request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
-                      cwd=str(tree), worker=True, agent=_declared_agent(root, actor.agent or ""))
-    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile)
+                      cwd=str(tree), worker=True, agent=_declared_agent(root, actor.agent or ""),
+                      plugin_dirs=(str(Path(__file__).resolve().parent.parent),))  # same plugin root as one_shot
+    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile,
+                                  env={"CHIEF_OF_STUFF_WORKSPACE": str(root.resolve())})
     try:
         deadline = time.monotonic() + 5
         while not (run_dir / "started.json").exists():
