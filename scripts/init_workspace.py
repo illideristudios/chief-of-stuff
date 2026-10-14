@@ -17,7 +17,7 @@ import issue_gate  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
-from settings import SettingsError, load as load_settings
+from settings import SettingsError, load as load_settings, load_policy, workflow_stages
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -79,10 +79,10 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
 def settings_text(launcher: str, mode: str = "interactive") -> str:
     text = f'[notify]\nadapter = "off"\n\n[workers]\nlauncher = "{launcher}"\nmode = "{mode}"\n\n# [repos]\n# alder = "<path>"  # #54: name -> path, relative to the workspace root; `worktree --clone alder`\n'
     # The engine needs a label for every stage in the shipped workflow before it can start.
-    text += ('\n[kanban]\n'
-             'stages = ["stage: plan", "stage: implement", "stage: review", "stage: fix", "stage: merge"]\n'
-             'human_review_label = "needs human"\n'
-             '\n[kanban.map]\nplan = 0\nimplement = 1\nreview = 2\nfix = 3\nmerge = 4\n')
+    stages = workflow_stages(load_policy())
+    labels = ", ".join(f'"stage: {s}"' for s in stages)
+    mapping = "\n".join(f"{s} = {i}" for i, s in enumerate(stages))
+    text += f'\n[kanban]\nstages = [{labels}]\nhuman_review_label = "needs human"\n\n[kanban.map]\n{mapping}\n'
     # #111: uncomment to pick models from the TOML; without [models], chief-of-stuff-models.md applies.
     text += ('\n# [models.deep]\n# rotation = ["claude:opus@high", "codex:<model-id>@high"]\n'
              '# [models.implement]\n# rotation = ["claude:sonnet@medium", "codex:<model-id>@medium"]\n'
@@ -91,6 +91,16 @@ def settings_text(launcher: str, mode: str = "interactive") -> str:
     text += '\n# [pages]\n# workers = 4\n'
     tomllib.loads(text)
     return text
+
+
+def _require_engine_ready(config) -> None:
+    """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
+    if config.kanban is None:
+        raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
+    unmapped = sorted(set(workflow_stages(load_policy()))
+                      - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
+    if unmapped:
+        raise InitError(f"existing settings [kanban.map] has no label for workflow stage {', '.join(unmapped)}")
 
 
 def _configured_labels(settings: Path, new_settings: str) -> dict[str, str]:
@@ -181,9 +191,10 @@ def main(argv: list[str] | None = None) -> int:
             if not settings.is_file():
                 raise InitError(f"{settings} is not a settings file")
             try:
-                load_settings(root, settings.name)
+                existing_settings = load_settings(root, settings.name)
             except SettingsError as exc:
                 raise InitError(f"existing settings are invalid: {exc}") from None
+            _require_engine_ready(existing_settings)
         new_settings = settings_text(args.launcher, args.worker_mode)
         # Provision the workspace's configured labels before its first stage or hold write.
         forge = (backlog.GitHubBacklog(args.github_repo) if args.github_repo else

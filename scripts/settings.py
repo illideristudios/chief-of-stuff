@@ -419,3 +419,10 @@ def load_policy(path: Path = POLICY) -> policy.Policies:
         return policy.parse(tomllib.loads(Path(path).read_text()))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise policy.PolicyError(f"{path}: {e}") from None
+
+
+def workflow_stages(policies: policy.Policies) -> list[str]:
+    """Every stage a shipped workflow can visit; init and the engine share this set."""
+    stages = {s for w in policies.workflows.values() for e in w.edges for s in (e.source, e.target)}
+    stages |= {w.start for w in policies.workflows.values()}
+    return sorted(stages)

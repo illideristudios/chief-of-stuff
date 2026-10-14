@@ -548,3 +548,9 @@ class GraphSettingsTest(unittest.TestCase):
                     'max_nodes = true\n'):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 self.load(base + bad)
+
+
+class WorkflowStagesTest(unittest.TestCase):
+    def test_shipped_policy_stages_are_sorted_and_complete(self):
+        self.assertEqual(st.workflow_stages(st.load_policy()),
+                         ["fix", "implement", "merge", "plan", "review"])

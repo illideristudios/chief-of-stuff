@@ -20,7 +20,19 @@ import engine  # noqa: E402
 import issue_gate  # noqa: E402
 import kanban  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
-from settings import _models, load as load_settings  # noqa: E402
+from settings import _models, load as load_settings, load_policy, workflow_stages  # noqa: E402
+
+
+def _engine_ready_kanban(stages: list[str], hold: str, *, project: bool = False,
+                         terminal: list[str] | None = None) -> str:
+    """Existing settings the engine can start: every shipped workflow stage is mapped (or terminal)."""
+    mapping = "\n".join(f"{s} = {min(i, len(stages) - 1)}" for i, s in enumerate(workflow_stages(load_policy())))
+    text = (f'[kanban]\nstages = {json.dumps(stages)}\nhuman_review_label = "{hold}"\n'
+            + (f'terminal_stages = {json.dumps(terminal)}\n' if terminal else "")
+            + f'[kanban.map]\n{mapping}\n')
+    if project:
+        text += '[kanban.github_project]\nowner = "owner"\nnumber = 1\n'
+    return text
 
 
 class InitWorkspaceTest(unittest.TestCase):
@@ -160,15 +172,31 @@ class InitWorkspaceTest(unittest.TestCase):
 
     def test_existing_settings_are_kept(self):
         settings = self.root / "chief-of-stuff.toml"
-        settings.write_text('[workers]\nlauncher = "tmux"\n')
+        body = '[workers]\nlauncher = "tmux"\n' + _engine_ready_kanban(
+            ["stage: plan", "stage: implement", "stage: review", "stage: fix", "stage: merge"], "needs human")
+        settings.write_text(body)
         self.assertEqual(self.run_init()[0], 0)
-        self.assertEqual(settings.read_text(), '[workers]\nlauncher = "tmux"\n')
+        self.assertEqual(settings.read_text(), body)
+
+    def test_existing_settings_without_kanban_refuse(self):
+        (self.root / "chief-of-stuff.toml").write_text('[workers]\nlauncher = "tmux"\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("[kanban]", err)
+        self.assertFalse((self.root / "CLAUDE.md").exists())
+
+    def test_existing_settings_with_incomplete_workflow_map_refuse(self):
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[kanban]\nstages = ["stage: plan"]\nhuman_review_label = "needs human"\n[kanban.map]\nplan = 0\n')
+        code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("[kanban.map]", err)
+        self.assertFalse((self.root / "CLAUDE.md").exists())
 
     def test_init_provisions_a_configured_hold_label(self):
         # #566: init creates the hold label the settings configure, so no hold dies on a label the forge never saw.
         (self.root / "chief-of-stuff.toml").write_text(
-            '[kanban]\nstages = ["00 - PLAN"]\nhuman_review_label = "!! - HUMAN REVIEW REQUIRED"\n'
-            '[kanban.map]\nplan = 0\n')
+            _engine_ready_kanban(["00 - PLAN"], "!! - HUMAN REVIEW REQUIRED"))
         labels = []
 
         def gh(args):
@@ -187,8 +215,7 @@ class InitWorkspaceTest(unittest.TestCase):
     def test_gitlab_provisions_configured_stage_and_hold_labels_not_terminal_stages(self):
         # terminal_stages are workflow names, not forge labels — init must not create "main".
         (self.root / "chief-of-stuff.toml").write_text(
-            '[kanban]\nstages = ["PLAN", "BUILD"]\nterminal_stages = ["main"]\n'
-            'human_review_label = "HOLD"\n[kanban.map]\nplan = 0\nimplement = 1\n')
+            _engine_ready_kanban(["PLAN", "BUILD"], "HOLD", terminal=["main"]))
         labels, created = ["BUILD"], []
 
         def call(method, url, token, timeout, payload=None):
@@ -210,15 +237,13 @@ class InitWorkspaceTest(unittest.TestCase):
 
     def test_project_mode_provisions_only_the_hold_label(self):
         (self.root / "chief-of-stuff.toml").write_text(
-            '[kanban]\nstages = ["PLAN"]\nterminal_stages = ["main"]\nhuman_review_label = "HOLD"\n'
-            '[kanban.map]\nplan = 0\n[kanban.github_project]\nowner = "owner"\nnumber = 1\n')
+            _engine_ready_kanban(["PLAN"], "HOLD", project=True, terminal=["main"]))
         with mock.patch.object(init.backlog, "ensure_labels", return_value=()) as ensure:
             self.assertEqual(self.run_init()[0], 0)
         self.assertEqual(ensure.call_args.args[1], ("HOLD",))
 
     def test_a_hold_label_the_forge_refuses_is_reported_and_init_still_succeeds(self):
-        (self.root / "chief-of-stuff.toml").write_text(
-            '[kanban]\nstages = ["00 - PLAN"]\nhuman_review_label = "HOLD"\n[kanban.map]\nplan = 0\n')
+        (self.root / "chief-of-stuff.toml").write_text(_engine_ready_kanban(["00 - PLAN"], "HOLD"))
         with mock.patch.object(init.backlog, "token", return_value=""):
             code, out, err = self.run_init("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app")
         self.assertEqual(code, 0)
@@ -226,8 +251,7 @@ class InitWorkspaceTest(unittest.TestCase):
 
     def test_dry_run_prints_the_hold_label_it_would_create(self):
         (self.root / "chief-of-stuff.toml").write_text(
-            '[kanban]\nstages = ["00 - PLAN"]\nhuman_review_label = "!! - HUMAN REVIEW REQUIRED"\n'
-            '[kanban.map]\nplan = 0\n')
+            _engine_ready_kanban(["00 - PLAN"], "!! - HUMAN REVIEW REQUIRED"))
         with mock.patch.object(init.backlog, "ensure_labels") as ensure:
             code, out, _ = self.run_init("--dry-run", "--github-repo", "owner/repo")
         ensure.assert_not_called()
