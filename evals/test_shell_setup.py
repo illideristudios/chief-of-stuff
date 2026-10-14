@@ -36,6 +36,11 @@ class ShellSetupTest(unittest.TestCase):
             self.assertEqual(shell.login_argv(["/bin/echo", "two words"]),
                              ["/bin/fish", "-lic", "exec $argv", "/bin/echo", "two words"])
 
+    def test_clean_env_keeps_every_chief_key(self):
+        """#658: the worker guard binds from CHIEF_* variables; stripping any one leaves it unbound."""
+        source = {"CHIEF_ROOT": "/r", "CHIEF_ISSUE_KEY": "k", "CHIEF_PROTECTED_BRANCHES": "[]", "OTHER": "x"}
+        self.assertEqual(shell.clean_env(source), {k: v for k, v in source.items() if k != "OTHER"})
+
     def test_bad_configured_shell_is_reported(self):
         with self.assertRaises(shell.ShellError):
             shell.login_shell({"SHELL": "/missing/shell"})
