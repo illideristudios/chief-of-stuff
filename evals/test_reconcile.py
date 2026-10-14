@@ -118,6 +118,13 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement", outcome="failed")]),
                          [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
+    def test_quota_and_unknown_outcomes_do_not_spend_the_retry_budget(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=0))
+        for outcome in ("quota", "unknown"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(self.plan(history=[Segment("implement", outcome=outcome)]),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+
     def test_work_starting_at_first_review_end_counts_as_rework(self):
         item = replace(Item(), stage="review", review_state="changes_requested")
         history = [Segment("implement", started_at=NOW - timedelta(hours=6),

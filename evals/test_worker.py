@@ -80,8 +80,8 @@ class WorkerTest(unittest.TestCase):
     def test_assignment_has_fixed_header_row_issue_job_and_persona_rules(self):
         persona = SimpleNamespace(role="builder", rules=("Tests first.",))
         row = self.db.items()[0]
-        prompt = worker.compose(row, "Forge title", "Issue body", "implement", persona)
-        self.assertTrue(prompt.startswith(worker.HEADER))
+        prompt = worker.dispatch_prompt.compose_issue(row, "Forge title", "Issue body", "implement", persona)
+        self.assertTrue(prompt.startswith(worker.dispatch_prompt.ISSUE_HEADER))
         for text in (KEY, row.title, "Forge title", "Issue body", "implement", "builder", "Tests first.",
                      "commit small and often, never merge"):
             self.assertIn(text, prompt)
@@ -89,21 +89,28 @@ class WorkerTest(unittest.TestCase):
     def test_assignment_refuses_peer_row(self):
         self.db.upsert_item(KEY, title="Build (via peer)")
         with self.assertRaisesRegex(ValueError, "via"):
-            worker.compose(self.db.items()[0], "title", "body", "implement", self.persona)
+            worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona)
 
     def test_implement_assignment_requires_delivery_before_reporting_done(self):
-        prompt = worker.compose(self.db.items()[0], "title", "body", "implement", self.persona)
+        prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona)
         self.assertIn(worker.dispatch_prompt.COMMITS, prompt)
         self.assertIn("Closes #1", prompt)
         self.assertIn("before reporting done", prompt)
-        review = worker.compose(self.db.items()[0], "title", "body", "review", self.persona)
+        review = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "review", self.persona)
         self.assertNotIn(worker.dispatch_prompt.COMMITS, review)
 
     def test_fix_assignment_pushes_existing_request_before_reporting_done(self):
-        prompt = worker.compose(self.db.items()[0], "title", "body", "fix", self.persona)
+        prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "fix", self.persona)
         self.assertIn("push the existing request branch", prompt)
         self.assertIn("do not open a new request", prompt)
         self.assertIn("before reporting done", prompt)
+
+    def test_review_assignment_names_code_review_skill_and_report_rule(self):
+        prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "review", self.persona)
+        self.assertIn("Review: run the extras:code-review skill on the request; report findings and do not fix.",
+                      prompt)
+        self.assertIn(worker.dispatch_prompt.REVIEW_RULE, prompt)
+        self.assertIn("review-report.md", prompt)
 
     def test_launch_implement_and_fix_receive_workspace_architecture(self):
         self.p.stages["fix"] = self.p.stages["implement"]
@@ -131,8 +138,8 @@ class WorkerTest(unittest.TestCase):
             with self.subTest(text=text):
                 if text is not None:
                     (self.root / "CLAUDE.md").write_text(text)
-                prompt = worker.compose(self.db.items()[0], "title", "body", "implement",
-                                        self.persona, root=self.root)
+                prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement",
+                                                             self.persona, root=self.root)
                 self.assertNotIn("Architecture:", prompt)
 
     def test_runner_spawn_failure_allows_retry_on_the_same_tree_and_attempt(self):
@@ -424,6 +431,18 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn("resets in 2 hours", quota["reset"])
                     self.assertEqual(quota["retry_at"], (NOW + timedelta(hours=2, minutes=1)).isoformat())
 
+    def test_collect_unknown_backs_off_like_quota(self):
+        run = self.launched()
+        (run / "stdout").write_text("not json")
+        (run / "stderr").write_text("connection reset")
+        (run / "exit.json").write_text(json.dumps({"exit_code": 1}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        seg = self.db.segments(KEY)[0]
+        self.assertEqual(seg.outcome, "unknown")
+        self.assertEqual(self.db.resume(KEY)["quota"]["retry_at"],
+                         (NOW + timedelta(minutes=2)).isoformat())
+
     def test_alive_worker_stays_open(self):
         self.launched()
         with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
@@ -450,8 +469,10 @@ class WorkerTest(unittest.TestCase):
         (run / "exit.json").write_text('{"exit_code": 1}')
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW)
-        self.assertEqual(self.db.segments()[-1].outcome, "failed")
+        # No JSON envelope is a retryable unknown (Codex P1), not a hard failed.
+        self.assertEqual(self.db.segments()[-1].outcome, "unknown")
         self.assertIn("adapter error", self.db.log(KEY)[-1].message)
+        self.assertIn("retry_at", self.db.resume(KEY)["quota"])
 
     def test_empty_identity_is_an_unreadable_record_not_a_live_worker(self):
         self.launched()
@@ -570,6 +591,8 @@ class WorkerTest(unittest.TestCase):
         self.assertNotIn("--safe-mode", command)
 
     def test_agent_effort_profile_are_passed_to_adapter(self):
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Agent: specialist task\n")
         self.p.personas["builder"] = SimpleNamespace(name="builder", role="build", rules=(),
                                                        agent="specialist", model="opus", effort="high")
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
@@ -580,6 +603,18 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(used, ("opus", "high"))
         self.assertEqual(start.call_args.args[0].agent, "specialist")
         self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
+
+    def test_undeclared_agent_is_omitted_so_default_agent_runs(self):
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Agent: implementer task\n")
+        self.p.personas["builder"] = SimpleNamespace(name="builder", role="build", rules=(),
+                                                       agent="specialist", model="opus", effort="")
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "implement", 1, "builder", store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge)
+        self.assertEqual(start.call_args.args[0].agent, "")
 
     def test_adapter_worker_argv_enables_tools_and_named_agent(self):
         request = worker.Request("prompt", worker=True, agent="specialist", effort="high")
@@ -598,11 +633,12 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("headRefName", gh.call_args.args[0][-1])
 
     def test_quota_reset_formats_and_backoff(self):
-        self.assertEqual(worker.retry_at("resets at 5pm.", NOW), NOW + timedelta(hours=17))
-        self.assertEqual(worker.retry_at("resets in about four hours.", NOW), NOW + timedelta(hours=4))
-        self.assertEqual(worker.retry_at("reset at 2000-01-01T02:00:00Z", NOW), NOW + timedelta(hours=2))
-        self.assertEqual(worker.retry_at("unknown", NOW, 4), NOW + timedelta(minutes=8))
-        self.assertEqual(worker.retry_at("reset at 2000-99-99T02:00:00Z", NOW), NOW + timedelta(minutes=1))
+        from model_port import retry_at
+        self.assertEqual(retry_at("resets at 5pm.", NOW), NOW + timedelta(hours=17))
+        self.assertEqual(retry_at("resets in about four hours.", NOW), NOW + timedelta(hours=4))
+        self.assertEqual(retry_at("reset at 2000-01-01T02:00:00Z", NOW), NOW + timedelta(hours=2))
+        self.assertEqual(retry_at("unknown", NOW, 4), NOW + timedelta(minutes=8))
+        self.assertEqual(retry_at("reset at 2000-99-99T02:00:00Z", NOW), NOW + timedelta(minutes=1))
 
 
 class IdentityTest(unittest.TestCase):
