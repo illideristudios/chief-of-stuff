@@ -1,7 +1,8 @@
 """The reload check every served page carries (injected by pages.py at serve time, not written into the file).
 
 It polls the file's Last-Modified with a HEAD every 5 s and when the tab is shown again (a hidden tab's timers are
-throttled). A change reloads the page, except while the user has unsaved input in a form (typing, a picked option): then it shows one notice with a button.
+throttled). A change reloads the page, except while the user has unsaved input in a form (typing, a picked option): then it shows one notice with a button, a polite live region so assistive tech hears it.
+The timer's own reload cannot announce before it navigates; focus in a field always takes the notice path instead.
 """
 
 import json
@@ -32,7 +33,7 @@ SNIPPET = """<script>
       });});}
   function notice(){
     if(document.getElementById('page-changed'))return;
-    var n=document.createElement('div');n.id='page-changed';n.setAttribute('role','status');
+    var n=document.createElement('div');n.id='page-changed';n.setAttribute('role','status');n.setAttribute('aria-live','polite');
     n.style.cssText='position:fixed;right:16px;bottom:16px;z-index:99999;padding:8px 12px;background:#222;color:#fff;font:14px/1.4 system-ui,sans-serif;border-radius:6px';
     n.textContent='This page changed. ';
     var b=document.createElement('button');b.textContent='Reload';b.onclick=function(){location.reload();};

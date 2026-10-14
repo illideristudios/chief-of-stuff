@@ -50,7 +50,7 @@ const control = c => {
                         inForm: true, formAttr: false}, c);
 };
 function el(tag) {
-  const n = {tagName: tag.toUpperCase(), style: {}, children: [], _text: '', setAttribute() {},
+  const n = {tagName: tag.toUpperCase(), style: {}, children: [], _text: '', attrs: {}, setAttribute(k, v) { this.attrs[k] = v; },
              appendChild(c) { this.children.push(c); }};
   Object.defineProperty(n, 'textContent', {
     get() { return this._text; },
@@ -110,7 +110,7 @@ const sandbox = {document, location, fetch, setInterval: f => intervals.push(f),
     if (step.visible) { (listeners.visibilitychange || []).forEach(f => f()); await flush(); }
     if (step.click && notices[0] && notices[0].children[0]) notices[0].children[0].onclick();
   }
-  return Object.assign({reloads, notices: notices.length}, badFetch.length ? {badFetch} : {});
+  return Object.assign({reloads, notices: notices.length}, scenario.attrs && notices[0] ? {attrs: notices[0].attrs} : {}, badFetch.length ? {badFetch} : {});
 }
 (async () => {
   const out = [];
@@ -292,6 +292,11 @@ class ReloadSnippetInNodeTest(unittest.TestCase):
         for (name, (_, want)), result in zip(SCENARIOS.items(), grade(self.snippet), strict=True):
             with self.subTest(name):
                 self.assertEqual(result, want)
+
+    def test_the_notice_is_a_polite_live_region_so_assistive_tech_hears_it(self):
+        # The auto-reload cannot announce before it navigates; the notice (shown when typing blocks it) must be heard.
+        [got] = run_node(self.snippet, [changed({"tick": 1}, controls=[typed()], attrs=True)])
+        self.assertEqual(got["attrs"], {"role": "status", "aria-live": "polite"})
 
     def test_every_mutant_dies(self):
         for name, old, new in MUTANTS:
