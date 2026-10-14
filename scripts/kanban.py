@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime
-import json
 from dataclasses import dataclass
 from pathlib import Path
 import sys
@@ -171,74 +170,6 @@ def sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, sta
     if set(verified["labels"]) != set(after(current, delta)):
         return Sync(ref, stage, delta, error="GitLab labels differ after update; reconcile before continuing")
     return Sync(ref, stage, delta, done=True)
-
-
-def _gh_json(gh, args: list[str]):
-    code, stdout, stderr = gh(args)
-    if code:
-        return None, stderr.strip() or f"gh exited {code}"
-    try:
-        return json.loads(stdout), ""
-    except ValueError:
-        return None, "gh did not answer with JSON"
-
-
-def _github_issue(gh, ref: backlog.IssueRef):
-    row, error = _gh_json(gh, ["issue", "view", str(ref.number), "-R", ref.repo,
-                               "--json", "labels,state,url"])
-    if error:
-        return (), error
-    if not isinstance(row, dict) or not isinstance(row.get("labels"), list):
-        return (), "GitHub issue has no readable labels"
-    return tuple(str(x["name"]) for x in row["labels"] if isinstance(x, dict) and "name" in x), ""
-
-
-def add_human_hold(ref: backlog.IssueRef, home: backlog.Backlog | backlog.GitHubBacklog,
-                   config: Kanban, *, gh=None, token: str | None = None) -> str:
-    """Add only the review hold; leave the numbered stage and Project Status untouched.
-
-    Return an error string, or empty string when the hold is verified. This is used when a
-    one-shot worker exits unfinished, including after partial edits.
-    """
-    label = config.human_review_label
-    if ref.host == backlog.GITHUB:
-        gh = gh or backlog.run_gh
-        current, error = _github_issue(gh, ref)
-        if error or label in _canonical(config, current):
-            return error
-        # #566: the hold is the point — a label the repo has never seen is created, not refused.
-        for made in backlog.ensure_labels(backlog.GitHubBacklog(ref.repo), (label,), commit=True, gh=gh):
-            if made.error:
-                return made.error
-        code, _, stderr = gh(["issue", "edit", str(ref.number), "-R", ref.repo, "--add-label", label])
-        if code:
-            return stderr.strip() or f"gh exited {code}"
-        updated, error = _github_issue(gh, ref)
-        return error or ("GitHub review hold was not applied" if label not in _canonical(config, updated) else "")
-    if not isinstance(home, backlog.Backlog) or ref.host != backlog.home_of(home)[0]:
-        return "issue host does not match the configured backlog"
-    project = home if home.project == ref.repo else home.sibling(ref.repo)
-    secret = token if token is not None else backlog.token(project)
-    if not secret:
-        return home.missing_token
-    url = f"{project.issues_url}/{ref.number}"
-    row, _, error = backlog._get(url, secret, backlog.TIMEOUT)
-    if error:
-        return error
-    if not isinstance(row, dict) or not isinstance(row.get("labels"), list):
-        return "GitLab issue has no readable labels"
-    if label in row["labels"]:
-        return ""
-    # #566: the hold is the point — a label the project has never seen is created, not refused.
-    for made in backlog.ensure_labels(project, (label,), token=secret, commit=True):
-        if made.error:
-            return made.error
-    _, _, error = backlog._call("PUT", url, secret, backlog.TIMEOUT, {"add_labels": label})
-    if error:
-        return error
-    updated, _, error = backlog._get(url, secret, backlog.TIMEOUT)
-    return error or ("GitLab review hold was not applied" if not isinstance(updated, dict) or
-                     label not in updated.get("labels", []) else "")
 
 
 def _github_label_delta(config: Kanban, current: tuple[str, ...], stage: str, keep_hold: bool = False) -> Delta:

@@ -1074,7 +1074,7 @@ class RunTest(unittest.TestCase):
         # A stop a fresh run fixes is the coordinator's to relaunch, not the user's to review (#68).
         fake = self._fake('status: relaunch\nreason: target PR merged before work began\nchanges: none\n',
                           write_partial=False)
-        with mock.patch.object(one_shot.kanban, "add_human_hold") as hold, \
+        with mock.patch.object(one_shot.forge, "add_human_hold") as hold, \
              mock.patch.object(one_shot.backlog, "comment") as comment:
             self.assertEqual(self._run(fake), 1)
         hold.assert_not_called()
@@ -1120,7 +1120,7 @@ class RunTest(unittest.TestCase):
         """One launch of a worker that wrote `stderr`; returns the exit code and the hold and comment mocks."""
         fake = self._fake(result, exit_code=exit_code, write_partial=write_partial, commit_partial=commit_partial,
                           stderr=stderr, during=during)
-        with mock.patch.object(one_shot.kanban, "add_human_hold", return_value="") as hold, \
+        with mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             return self._run(fake, tree, model=model, runtime=runtime), hold, comment
 
@@ -1183,7 +1183,7 @@ class RunTest(unittest.TestCase):
         # #566: the report alone loses a hold failure between runs; the Log keeps it where the audit reads it.
         self._with_an_issue_and_kanban()
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: none\n', write_partial=False)
-        with mock.patch.object(one_shot.kanban, "add_human_hold",
+        with mock.patch.object(one_shot.forge, "add_human_hold",
                                return_value="missing label in GitHub: !! - HUMAN REVIEW REQUIRED") as hold, \
              mock.patch.object(one_shot.backlog, "comment",
                                return_value=SimpleNamespace(done=True, error="")) as comment:
@@ -2020,7 +2020,7 @@ class RunTest(unittest.TestCase):
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: changed parser\n')
         with mock.patch.object(one_shot, "resolve", return_value=str(fake)), \
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
-             mock.patch.object(one_shot.kanban, "add_human_hold", return_value="") as hold, \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=self.tree, name="worker01", runtime="codex", agent_type=None,
@@ -2050,7 +2050,7 @@ class RunTest(unittest.TestCase):
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: changed parser\n')
         with mock.patch.object(one_shot, "resolve", return_value=str(fake)), \
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
-             mock.patch.object(one_shot.kanban, "add_human_hold", return_value=""), \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value=""), \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree, name="worker01",
                          runtime="codex", agent_type=None, model="", effort="", dry_run=False)

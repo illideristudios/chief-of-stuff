@@ -84,7 +84,7 @@ class HumanHoldTest(unittest.TestCase):
                 return 0, json.dumps([{"name": FLOW.human_review_label}]), ""
             return 0, "", ""
 
-        self.assertEqual(kanban.add_human_hold(ref, backlog.GitHubBacklog("team/repo"), FLOW, gh=gh), "")
+        self.assertEqual(forge.add_human_hold(ref, backlog.GitHubBacklog("team/repo"), FLOW, gh=gh), "")
         edits = [cmd for cmd in calls if cmd[:2] == ["issue", "edit"]]
         self.assertEqual(edits, [["issue", "edit", "9", "-R", "team/repo", "--add-label",
                                   FLOW.human_review_label]])
@@ -94,10 +94,10 @@ class HumanHoldTest(unittest.TestCase):
         ref = backlog.IssueRef("team/app", 7, "labs.example.test")
         before = {"labels": ["03 - BUILD", "kind::code"]}
         after = {"labels": [*before["labels"], FLOW.human_review_label]}
-        with mock.patch.object(kanban.backlog, "_get", side_effect=[(before, {}, ""), (after, {}, "")]), \
-             mock.patch.object(kanban.backlog, "existing_labels", return_value=({FLOW.human_review_label}, "")), \
-             mock.patch.object(kanban.backlog, "_call", return_value=(after, {}, "")) as write:
-            self.assertEqual(kanban.add_human_hold(ref, home, FLOW, token="test"), "")
+        with mock.patch.object(forge.backlog, "_get", side_effect=[(before, {}, ""), (after, {}, "")]), \
+             mock.patch.object(forge.backlog, "existing_labels", return_value=({FLOW.human_review_label}, "")), \
+             mock.patch.object(forge.backlog, "_call", return_value=(after, {}, "")) as write:
+            self.assertEqual(forge.add_human_hold(ref, home, FLOW, token="test"), "")
         self.assertEqual(write.call_args.args[-1], {"add_labels": FLOW.human_review_label})
 
     def test_gitlab_holds_an_issue_in_another_project_on_the_same_host(self):
@@ -105,10 +105,10 @@ class HumanHoldTest(unittest.TestCase):
         ref = backlog.IssueRef("team/other", 7, "labs.example.test")
         before = {"labels": ["03 - BUILD"]}
         after = {"labels": [*before["labels"], FLOW.human_review_label]}
-        with mock.patch.object(kanban.backlog, "_get", side_effect=[(before, {}, ""), (after, {}, "")]) as read, \
-             mock.patch.object(kanban.backlog, "existing_labels", return_value=({FLOW.human_review_label}, "")) as labels, \
-             mock.patch.object(kanban.backlog, "_call", return_value=(after, {}, "")) as write:
-            self.assertEqual(kanban.add_human_hold(ref, home, FLOW, token="test"), "")
+        with mock.patch.object(forge.backlog, "_get", side_effect=[(before, {}, ""), (after, {}, "")]) as read, \
+             mock.patch.object(forge.backlog, "existing_labels", return_value=({FLOW.human_review_label}, "")) as labels, \
+             mock.patch.object(forge.backlog, "_call", return_value=(after, {}, "")) as write:
+            self.assertEqual(forge.add_human_hold(ref, home, FLOW, token="test"), "")
         issue = "https://labs.example.test/api/v4/projects/team%2Fother/issues/7"
         self.assertEqual(read.call_args_list[0].args[0], issue)
         self.assertEqual(write.call_args.args[1], issue)
@@ -132,7 +132,7 @@ class HumanHoldTest(unittest.TestCase):
                 labels.append(args[2])
             return 0, "", ""
 
-        self.assertEqual(kanban.add_human_hold(ref, backlog.GitHubBacklog("team/repo"), FLOW, gh=gh), "")
+        self.assertEqual(forge.add_human_hold(ref, backlog.GitHubBacklog("team/repo"), FLOW, gh=gh), "")
         self.assertIn(["label", "create", FLOW.human_review_label, "-R", "team/repo", "--color", "428bca"], calls)
         self.assertEqual(calls[-1][:2], ["issue", "view"])  # the hold is verified after it lands
 
@@ -143,11 +143,11 @@ class HumanHoldTest(unittest.TestCase):
         before = {"labels": ["03 - BUILD", "kind::code"]}
         held = {"labels": [*before["labels"], FLOW.human_review_label]}
         writes = []
-        with mock.patch.object(kanban.backlog, "_get", side_effect=[(before, {}, ""), (held, {}, "")]), \
-             mock.patch.object(kanban.backlog, "existing_labels", return_value=({"03 - BUILD"}, "")), \
-             mock.patch.object(kanban.backlog, "_call",
+        with mock.patch.object(forge.backlog, "_get", side_effect=[(before, {}, ""), (held, {}, "")]), \
+             mock.patch.object(forge.backlog, "existing_labels", return_value=({"03 - BUILD"}, "")), \
+             mock.patch.object(forge.backlog, "_call",
                                side_effect=lambda *a: (writes.append(a) or (held, {}, ""))):
-            self.assertEqual(kanban.add_human_hold(ref, home, FLOW, token="test"), "")
+            self.assertEqual(forge.add_human_hold(ref, home, FLOW, token="test"), "")
         self.assertEqual([c[4] for c in writes], [{"name": FLOW.human_review_label, "color": "#428bca"},
                                                   {"add_labels": FLOW.human_review_label}])
 

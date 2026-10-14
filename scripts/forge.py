@@ -479,6 +479,61 @@ class Forge:
         return kanban.sync_gitlab(self.home, ref, self.kanban, stage, token=self.token, commit=commit, expected_stage=expected,
                                   initialize=expected is None)
 
+    def add_human_hold(self, number: int) -> str:
+        """Add only the review hold; leave the numbered stage and Project Status untouched."""
+        if self.kanban is None:
+            return "no [kanban] stage labels configured"
+        host, repo = home_of(self.home)
+        return add_human_hold(IssueRef(repo, number, host), self.home, self.kanban, gh=self.gh, token=self.token)
+
+
+def add_human_hold(ref: backlog.IssueRef, home: backlog.Backlog | backlog.GitHubBacklog,
+                   config: Kanban, *, gh=None, token: str | None = None) -> str:
+    """Add only the review hold; leave the numbered stage and Project Status untouched.
+
+    Return an error string, or empty string when the hold is verified. This is used when a
+    one-shot worker exits unfinished, including after partial edits.
+    """
+    label = config.human_review_label
+    if ref.host == backlog.GITHUB:
+        gh = gh or backlog.run_gh
+        current, error = _github_issue(gh, ref)
+        if error or label in kanban._canonical(config, current):
+            return error
+        # #566: the hold is the point — a label the repo has never seen is created, not refused.
+        for made in backlog.ensure_labels(backlog.GitHubBacklog(ref.repo), (label,), commit=True, gh=gh):
+            if made.error:
+                return made.error
+        code, _, stderr = gh(["issue", "edit", str(ref.number), "-R", ref.repo, "--add-label", label])
+        if code:
+            return stderr.strip() or f"gh exited {code}"
+        updated, error = _github_issue(gh, ref)
+        return error or ("GitHub review hold was not applied" if label not in kanban._canonical(config, updated) else "")
+    if not isinstance(home, backlog.Backlog) or ref.host != backlog.home_of(home)[0]:
+        return "issue host does not match the configured backlog"
+    project = home if home.project == ref.repo else home.sibling(ref.repo)
+    secret = token if token is not None else backlog.token(project)
+    if not secret:
+        return home.missing_token
+    url = f"{project.issues_url}/{ref.number}"
+    row, _, error = backlog._get(url, secret, backlog.TIMEOUT)
+    if error:
+        return error
+    if not isinstance(row, dict) or not isinstance(row.get("labels"), list):
+        return "GitLab issue has no readable labels"
+    if label in row["labels"]:
+        return ""
+    # #566: the hold is the point — a label the project has never seen is created, not refused.
+    for made in backlog.ensure_labels(project, (label,), token=secret, commit=True):
+        if made.error:
+            return made.error
+    _, _, error = backlog._call("PUT", url, secret, backlog.TIMEOUT, {"add_labels": label})
+    if error:
+        return error
+    updated, _, error = backlog._get(url, secret, backlog.TIMEOUT)
+    return error or ("GitLab review hold was not applied" if not isinstance(updated, dict) or
+                     label not in updated.get("labels", []) else "")
+
 
 def for_workspace(root: Path | str, **options: Any) -> Forge | None:
     """The forge the workspace's `Backlog:` line names, or None when it has none."""
