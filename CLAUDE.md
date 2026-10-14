@@ -10,6 +10,7 @@ A versioned coordinator for Claude Code, Codex CLI, Cursor CLI, and Antigravity 
 - **No shell scripts.** Harness code, shims, mocks, and probes are Python (or another real language). Shell appears only as a one-line command someone types.
 - **Fixtures are templates.** `{{today}}`, `{{yesterday}}`, `{{tomorrow}}`, `{{tz}}`, `{{now_hhmm}}`, `{{now±Nh}}` (`|local`, `|hhmm`), `{{dotgit}}` (a `.git` dir name, since git cannot track one), and `{{live_pid}}` (a pid alive for the whole run) in file names and contents. No hardcoded dates. An unknown token fails the run.
 - **Fixtures are generic.** No data from any workspace that uses this agent — no patient data, no program documents, no real deploy names.
+- **Only the architecture agent changes the architecture docs.** `architecture/ARCHITECTURE.md` and `architecture/compliance.md` are changed by the architecture agent (`frank-lloyd-aight`) and by no other agent. That includes placing a new script in §4, recording or closing a gap, and rewriting a section to match code. Every other agent reads them, leaves them out of its changes, and reports to the architecture agent where code and document disagree. The architecture agent changes no code.
 
 ## Architecture
 
