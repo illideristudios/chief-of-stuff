@@ -177,6 +177,19 @@ class CommandTest(unittest.TestCase):
                 self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
         self.assertIsNone(denial_reason('glab mr create --title x --description y', ("main", "develop")))
 
+    def test_glab_mr_create_description_quick_actions_are_denied(self):
+        for command in ('glab mr create --title x --description /merge',
+                        'glab mr create --title x --description="/label ~bug"',
+                        'glab mr create -t x -d "LGTM\n/merge"',
+                        'glab mr create --title x --description=/close',
+                        'glab mr create --title x --description-file note.md',
+                        'glab mr create --title x --description-file=-',
+                        'glab mr create --title x --description -'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+        self.assertIsNone(denial_reason(
+            'glab mr create --title x --description "see /merge in the docs"', ("main", "develop")))
+
     def test_project_membership_writes_are_denied(self):
         for command in ('gh pr create --head feat/x --title x --body y --project Roadmap',
                         'gh pr create --head feat/x --title x --body y -p Roadmap',

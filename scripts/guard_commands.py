@@ -243,6 +243,26 @@ def _glab_note_denied(flags: list[str]) -> bool:
     return False
 
 
+def _glab_mr_create_description_denied(flags: list[str]) -> bool:
+    """Quick actions in MR descriptions mutate forge state; file-sourced descriptions are opaque."""
+    i = 0
+    while i < len(flags):
+        flag = flags[i]
+        i += 1
+        if flag == "--description-file" or flag.startswith("--description-file="):
+            return True
+        if flag in {"-d", "--description"}:
+            value = flags[i] if i < len(flags) else ""
+            i += 1
+        elif flag.startswith(("--description=", "-d=")):
+            value = flag.split("=", 1)[1]
+        else:
+            continue
+        if value == "-" or GLAB_QUICK_ACTION.search(value):
+            return True
+    return False
+
+
 def _pr_create_denied(flags: list[str], protected: tuple[str, ...]) -> bool:
     # Consume value flags so a title or body containing --head cannot stand in for the branch option.
     values = {"--head", "-H", "--title", "-t", "--body", "-b", "--body-file", "-F", "--base", "-B",
@@ -351,7 +371,8 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...], dept
         return _pr_create_denied(flags, protected)
     if client == "glab" and group == "mr" and verb == "create":
         # --fill also sets push to true in glab.
-        return any(flag.split("=", 1)[0] in {"--push", "--fill", "-f"} for flag in flags)
+        return (any(flag.split("=", 1)[0] in {"--push", "--fill", "-f"} for flag in flags)
+                or _glab_mr_create_description_denied(flags))
     return False
 
 

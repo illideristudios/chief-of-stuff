@@ -1,15 +1,12 @@
-"""Worker launch environment and plugin location. The complete contract is in guard/README.md."""
+"""Worker launch environment binding. The complete contract is in guard/README.md."""
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 import json
 import os
 from pathlib import Path
-import sys
 from typing import Mapping
-
-import clock
 
 DEFAULT_PROTECTED_BRANCHES = ("main", "master", "develop")
 
@@ -55,23 +52,3 @@ class Binding:
                        tuple(branches))
         except KeyError as exc:
             raise ValueError(f"missing worker binding: {exc.args[0]}") from None
-
-
-def guard_plugin_dir() -> Path:
-    return Path(__file__).resolve().parents[1] / "guard"
-
-
-def guard_env(issue_key: str, stage: str, attempt: int, session_id: str, root: Path | str, *,
-              protected_branches: tuple[str, ...] = DEFAULT_PROTECTED_BRANCHES) -> dict[str, str]:
-    """Overlay on the worker environment. Called by an engine already running in its supervised venv.
-
-    Keep sys.executable's spelling: resolving a venv Python symlink loses the venv's dependencies.
-    The engine supplies its forge default and protected branches when they differ from the defaults.
-    """
-    binding = Binding(issue_key, stage, attempt, session_id, Path(root).resolve(),
-                      clock.system().astimezone(timezone.utc), protected_branches)
-    return {"CHIEF_ISSUE_KEY": binding.issue_key, "CHIEF_STAGE": binding.stage,
-            "CHIEF_ATTEMPT": str(binding.attempt), "CHIEF_SESSION_ID": binding.session_id,
-            "CHIEF_LAUNCHED_AT": binding.launched_at.isoformat(),
-            "CHIEF_ROOT": str(binding.root), "CHIEF_PYTHON": sys.executable,
-            "CHIEF_PROTECTED_BRANCHES": json.dumps(binding.protected_branches)}

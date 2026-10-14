@@ -37,6 +37,13 @@ class ClosesTest(unittest.TestCase):
         self.assertEqual(fr.closes("Fixes #12\nCloses: other/repo#99"), ("#12", "other/repo#99"))
         self.assertEqual(fr.closes("Closes: #10"), ("#10",))
 
+    def test_closes_records_url_form_github_issue_refs(self):
+        self.assertEqual(fr.closes("Fixes https://github.com/other/repo/issues/99"),
+                         ("other/repo#99",))
+        self.assertEqual(fr.closes("Fixes #12\nFixes https://github.com/other/repo/issues/99"),
+                         ("#12", "other/repo#99"))
+        self.assertEqual(fr.closes("Closes: https://github.com/o/app/issues/3"), ("o/app#3",))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -50,6 +50,7 @@ DRAWS_NOTHING = (
     "cleanup",
     "engine",
     "guard_commands",  # Entities: pure shell command gate judgements.
+    "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
     "guard_binding",  # Frameworks and Drivers: launch env and plugin paths.
     "worker_guard",  # Frameworks and Drivers: command hook JSON and store access.
     "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
@@ -180,6 +181,11 @@ class DependencyRuleTest(unittest.TestCase):
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_commands", set(),
+                         frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
+
+    def test_guard_rules_import_no_other_script_or_io(self) -> None:
+        self.assertEqual(import_graph(SCRIPTS)["guard_rules"], set())
+        self.assertEqual(forbidden_reach(SCRIPTS, "guard_rules", set(),
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
 
     def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:

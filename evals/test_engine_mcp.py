@@ -25,9 +25,15 @@ class MCPTest(unittest.TestCase):
         self.db = store.Store(self.root / "store.db")
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, title="A widget", stage="review")
+        from datetime import datetime, timezone
         import engine_mcp
         import guard_binding
-        self.env = guard_binding.guard_env(KEY, "review", 2, "session-two", self.root)
+        self.env = {
+            "CHIEF_ISSUE_KEY": KEY, "CHIEF_STAGE": "review", "CHIEF_ATTEMPT": "2",
+            "CHIEF_SESSION_ID": "session-two", "CHIEF_ROOT": str(self.root),
+            "CHIEF_LAUNCHED_AT": datetime.now(timezone.utc).isoformat(),
+            "CHIEF_PYTHON": sys.executable,
+        }
         self.tools = engine_mcp.EngineTools(guard_binding.Binding.from_env(self.env), self.db)
 
     def test_tools_store_environment_identity_and_return_ids(self):

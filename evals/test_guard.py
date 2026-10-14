@@ -9,8 +9,6 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
-
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import store
@@ -205,25 +203,13 @@ class GuardTest(unittest.TestCase):
                 self.denied("git status")
                 self.assertEqual(self.hook("Stop")["decision"], "block")
 
-    def test_guard_env_uses_the_engine_clock_for_each_launch(self):
-        import guard_binding
-        for instant in (datetime(2026, 10, 11, 12, tzinfo=timezone.utc),
-                        datetime(2026, 10, 11, 13, tzinfo=timezone.utc)):
-            with self.subTest(instant=instant), patch("clock.system", return_value=instant):
-                env = guard_binding.guard_env(KEY, "implement", 2, "session-two", self.root)
-                self.assertEqual(env["CHIEF_LAUNCHED_AT"], instant.isoformat())
-                self.assertEqual(guard_binding.Binding.from_env(env).launched_at, instant)
-
     def test_plugin_uses_engine_python_and_exposes_launch_contract(self):
         import guard_binding
-        self.assertEqual(guard_binding.guard_plugin_dir(), ROOT / "guard")
         import start_coordinator
         shipped = start_coordinator.files(ROOT)
         for name in ("guard/.mcp.json", "guard/hooks/hooks.json", "guard/.claude-plugin/plugin.json"):
-            self.assertIn(ROOT / name, shipped)  # installed releases carry the plugin guard_plugin_dir names
-        env = guard_binding.guard_env(KEY, "implement", 2, "session-two", self.root)
-        self.assertEqual(env["CHIEF_PYTHON"], sys.executable)
-        self.assertEqual(guard_binding.Binding.from_env(env).issue_key, KEY)
+            self.assertIn(ROOT / name, shipped)
+        self.assertEqual(guard_binding.Binding.from_env(self.env).issue_key, KEY)
         config = json.loads((ROOT / "guard/.mcp.json").read_text())
         self.assertEqual(config["engine"]["command"], "${CHIEF_PYTHON}")
         hooks = json.loads((ROOT / "guard/hooks/hooks.json").read_text())["hooks"]

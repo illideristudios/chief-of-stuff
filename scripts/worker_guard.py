@@ -1,12 +1,12 @@
 """Python command hooks for the purpose-built worker guard (design 9 and 11)."""
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import sys
 
 from guard_binding import Binding
 from guard_commands import denial_reason
+from guard_rules import permission_ask, resume_state, stop_allowed
 from store import Store
 
 RELAY = "Call the engine MCP ask tool instead. An ask is not an approval. Report blocked, then stop and wait."
@@ -38,30 +38,23 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
     db = Store(binding.store_path)
     try:
         if event_name == "PermissionRequest":
-            context = json.dumps({"tool_name": event.get("tool_name"), "tool_input": event.get("tool_input")})
+            question, context = permission_ask(event)
             ask_id = db.add_ask(binding.issue_key, binding.stage, binding.attempt, binding.session_id,
-                                f"Permission requested for {event.get('tool_name', 'tool')}", [], context)
+                                question, [], context)
             # Already recorded: asking again through the MCP tool would duplicate it.
             return _deny(event_name, f"Recorded permission ask {ask_id}. An ask is not an approval. "
                                      "Report blocked, then stop and wait.")
         if event_name == "Stop":
             reports = db.reports(binding.issue_key, stage=binding.stage, attempt=binding.attempt,
                                  session_id=binding.session_id)
-            if any(datetime.fromisoformat(report.created_at) >= binding.launched_at for report in reports):
+            if stop_allowed(reports, binding.launched_at):
                 return {}
             return _deny(event_name, "Call the engine MCP report tool for this run before stopping (done, failed or blocked).")
         if event_name == "SessionStart":
             item = next((i for i in db.items() if i.issue_key == binding.issue_key), None)
             if item is None:
                 raise ValueError("bound issue is missing from the engine store")
-            state = {"issue_key": binding.issue_key, "title": item.title, "stage": binding.stage,
-                     "attempt": binding.attempt, "session_id": binding.session_id, "forge_stage": item.stage,
-                     "asks": [{"id": a.id, "stage": a.stage, "attempt": a.attempt, "session_id": a.session_id,
-                               "question": a.question, "options": a.options, "context": a.context, "answer": a.answer}
-                              for a in db.asks(binding.issue_key)],
-                     "reports": [{"id": r.id, "stage": r.stage, "attempt": r.attempt, "session_id": r.session_id,
-                                  "outcome": r.outcome, "summary": r.summary, "findings": r.findings}
-                                 for r in db.reports(binding.issue_key)]}
+            state = resume_state(binding, item, db.asks(binding.issue_key), db.reports(binding.issue_key))
             return {"hookSpecificOutput": {"hookEventName": event_name, "additionalContext": json.dumps(state)}}
         raise ValueError(f"unknown hook event: {event_name}")
     finally:

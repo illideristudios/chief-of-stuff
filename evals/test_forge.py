@@ -366,7 +366,10 @@ class ClosingRequestTest(unittest.TestCase):
     def test_cross_repository_closing_references_refuse_selection_and_merge(self):
         for home in (GH, GL):
             for body in ("Fixes #3\nFixes other/repo#99", "Closes other/repo#99\nResolves #3",
-                         "fixed other/repo#99", "Fixes o/app#3", "Fixes #3\nCloses: other/repo#99"):
+                         "fixed other/repo#99", "Fixes o/app#3", "Fixes #3\nCloses: other/repo#99",
+                         "Fixes #3\nFixes https://github.com/other/repo/issues/99",
+                         "Closes https://github.com/other/repo/issues/99\nResolves #3",
+                         "fixed https://github.com/o/app/issues/3"):
                 with self.subTest(home=home, body=body), self.for_forge(home, {21: body}) as f:
                     with self.assertRaises(forge.ForgeError):
                         f.closing_request(f.key(3))
