@@ -12,6 +12,7 @@ from typing import Any
 import claude_adapter
 import clock as engine_clock
 import dispatch_prompt
+import guard_binding
 import make_worktree
 import process_status
 import supervisor
@@ -176,11 +177,18 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         run_dir.rename(run_dir.with_name(f"{run_dir.name}-refused-{uuid.uuid4()}"))
     run_dir.mkdir(parents=True)
     session_id = str(uuid.uuid4())
+    plugin = guard_binding.guard_plugin_dir()
+    if plugin is None:
+        raise RuntimeError("worker launch requires the guard/ plugin beside scripts/")
+    # chief-of-stuff plugin root (as one_shot), then the guard plugin.
+    plugin_dirs = (str(Path(__file__).resolve().parent.parent), str(plugin))
+    env = {"CHIEF_OF_STUFF_WORKSPACE": str(root.resolve()),
+           **guard_binding.guard_env(guard_binding.Binding(
+               issue_key, stage, attempt, session_id, root.resolve(), clock()))}
     request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=_declared_agent(root, actor.agent or ""),
-                      plugin_dirs=(str(Path(__file__).resolve().parent.parent),))  # same plugin root as one_shot
-    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile,
-                                  env={"CHIEF_OF_STUFF_WORKSPACE": str(root.resolve())})
+                      plugin_dirs=plugin_dirs)
+    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
     try:
         deadline = time.monotonic() + 5
         while not (run_dir / "started.json").exists():

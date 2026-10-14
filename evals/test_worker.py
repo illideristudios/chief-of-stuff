@@ -590,27 +590,48 @@ class WorkerTest(unittest.TestCase):
             self.assertIn(token, command)
         self.assertNotIn("--safe-mode", command)
 
-    def test_worker_launch_carries_plugin_root_and_workspace_env(self):
+    def test_worker_launch_attaches_guard_plugin_and_chief_binding(self):
+        guard = (Path(worker.guard_binding.__file__).resolve().parent.parent / "guard").resolve()
+        self.assertTrue(guard.is_dir())
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             self.launch()
         request = start.call_args.args[0]
-        self.assertEqual(request.plugin_dirs, (str(Path(worker.__file__).resolve().parent.parent),))
-        self.assertEqual(start.call_args.kwargs["env"], {"CHIEF_OF_STUFF_WORKSPACE": str(self.root)})
+        env = start.call_args.kwargs["env"]
+        self.assertEqual(request.plugin_dirs, (str(guard.parent), str(guard)))
+        self.assertEqual(env["CHIEF_OF_STUFF_WORKSPACE"], str(self.root))
+        self.assertEqual(env["CHIEF_ISSUE_KEY"], KEY)
+        self.assertEqual(env["CHIEF_STAGE"], "implement")
+        self.assertEqual(env["CHIEF_ATTEMPT"], "1")
+        self.assertEqual(env["CHIEF_ROOT"], str(self.root))
+        self.assertEqual(env["CHIEF_SESSION_ID"], request.session_id)
+        self.assertEqual(env["CHIEF_LAUNCHED_AT"], NOW.isoformat())
+        self.assertEqual(env["CHIEF_PYTHON"], sys.executable)
+        self.assertEqual(env["CHIEF_PROTECTED_BRANCHES"], '["main", "master", "develop"]')
         argv = claude_adapter.argv(request, "claude", [])
         self.assertEqual(argv[argv.index("--plugin-dir") + 1], request.plugin_dirs[0])
+        prepared = {"argv": argv, "cwd": str(self.tree), "session_id": request.session_id, "env": env}
+        self.assertEqual(prepared["env"]["CHIEF_ISSUE_KEY"], KEY)
 
-    def test_adapter_runner_gives_the_host_the_launch_env(self):
+    def test_worker_launch_refuses_without_the_guard_plugin(self):
+        with mock.patch.object(worker.guard_binding, "guard_plugin_dir", return_value=None), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(RuntimeError, "guard/ plugin"):
+                self.launch()
+        start.assert_not_called()
+
+    def test_adapter_runner_gives_the_host_the_chief_env(self):
         run = self.root / "run"
         run.mkdir()
         out = self.root / "seen"
-        code = f"import os; open({str(out)!r}, 'w').write(os.environ['CHIEF_OF_STUFF_WORKSPACE'])"
+        code = f"import os; open({str(out)!r}, 'w').write(os.environ['CHIEF_ISSUE_KEY'])"
         (run / "command.json").write_text(json.dumps({
             "argv": [sys.executable, "-c", code], "cwd": str(self.root), "session_id": "s",
-            "env": {"CHIEF_OF_STUFF_WORKSPACE": "/ws"}}))
+            "env": {"CHIEF_ISSUE_KEY": KEY}}))
         claude_adapter._worker(run)
-        self.assertEqual(out.read_text(), "/ws")
+        self.assertEqual(out.read_text(), KEY)
 
     def test_agent_effort_profile_are_passed_to_adapter(self):
         (self.root / "CLAUDE.md").write_text(

@@ -15,7 +15,7 @@ from typing import Any, Iterator
 
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, select, update
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, delete, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -90,6 +90,31 @@ class Resume(Base):
     __tablename__ = "resume"
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"), primary_key=True)
     data: Mapped[Any] = mapped_column(JSON)
+
+
+class WorkerRecord:
+    """Launch identity on every worker record; records never update another run's row."""
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"))
+    stage: Mapped[str] = mapped_column(String)
+    attempt: Mapped[int] = mapped_column(Integer)
+    session_id: Mapped[str] = mapped_column(String)
+    created_at: Mapped[str] = mapped_column(String)
+
+
+class Report(WorkerRecord, Base):
+    __tablename__ = "report"
+    outcome: Mapped[str] = mapped_column(String)
+    summary: Mapped[str] = mapped_column(String)
+    findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+
+
+class Ask(WorkerRecord, Base):
+    __tablename__ = "ask"
+    question: Mapped[str] = mapped_column(String)
+    options: Mapped[list[str]] = mapped_column(JSON)
+    context: Mapped[str] = mapped_column(String)
+    answer: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
 def migrate(path: Path | str) -> None:
@@ -173,6 +198,12 @@ class Store:
                                            Segment.attempt == attempt, Segment.ended_at.is_(None))
                       .values(ended_at=ended_at, outcome=outcome))
 
+    def drop_segment(self, issue_key: str, stage: str, attempt: int) -> None:
+        """Remove a segment that never started (a reservation whose launch failed)."""
+        with self.session() as s:
+            s.execute(delete(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                            Segment.attempt == attempt))
+
     def segments(self, issue_key: str | None = None) -> list[Segment]:
         stmt = select(Segment).order_by(Segment.id)
         if issue_key is not None:
@@ -211,6 +242,36 @@ class Store:
         with self.session() as s:
             row = s.get(Resume, issue_key)
             return row.data if row else None
+
+    # Worker reports are append-only, including late reports from older attempts.
+    def add_report(self, issue_key: str, stage: str, attempt: int, session_id: str,
+                   outcome: str, summary: str, findings: list[dict[str, Any]]) -> int:
+        with self.session() as s:
+            row = Report(issue_key=issue_key, stage=stage, attempt=attempt, session_id=session_id,
+                         outcome=outcome, summary=summary, findings=findings, created_at=self._stamp())
+            s.add(row)
+            s.flush()
+            return row.id
+
+    def reports(self, issue_key: str, *, stage: str | None = None, attempt: int | None = None,
+                session_id: str | None = None) -> list[Report]:
+        stmt = select(Report).where(Report.issue_key == issue_key)
+        for key, value in (("stage", stage), ("attempt", attempt), ("session_id", session_id)):
+            if value is not None:
+                stmt = stmt.where(getattr(Report, key) == value)
+        return self._all(stmt.order_by(Report.attempt, Report.id))
+
+    def add_ask(self, issue_key: str, stage: str, attempt: int, session_id: str,
+                question: str, options: list[str], context: str) -> int:
+        with self.session() as s:
+            row = Ask(issue_key=issue_key, stage=stage, attempt=attempt, session_id=session_id,
+                      question=question, options=options, context=context, created_at=self._stamp())
+            s.add(row)
+            s.flush()
+            return row.id
+
+    def asks(self, issue_key: str) -> list[Ask]:
+        return self._all(select(Ask).where(Ask.issue_key == issue_key).order_by(Ask.id))
 
     def _all(self, stmt: Any) -> list[Any]:
         with self.session() as s:
