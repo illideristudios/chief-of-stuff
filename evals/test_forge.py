@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
 
@@ -320,7 +321,7 @@ class StageWriteBackTest(unittest.TestCase):
     def test_a_configured_project_writes_status_not_labels(self):
         # Encoded the pre-decision bug: forge stripped github_project and wrote labels anyway.
         gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={})
-        got = forge.Forge(GH, kanban=BOARD, gh=gh).write_stage(4, "doing", commit=True)
+        got = forge.Forge(GH, kanban=BOARD, gh=gh).write_stage(4, "doing", initialize=True, commit=True)
         self.assertTrue(got.done, got.error)
         self.assertTrue(any(c[:2] == ["project", "item-edit"] for c in gh.all_calls), gh.all_calls)
         self.assertEqual(gh.status[f"https://github.com/{REPO}/issues/4"], "Doing")
@@ -383,7 +384,7 @@ class StageWriteBackTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 gh = FakeGh(issues=[gh_issue(4, "Legacy issue", ["stage: doing", "bug"])])
                 f = forge.Forge(GH, kanban=BOARD, gh=gh)
-                got = f.write_stage(4, "review", expected=expected, commit=True)
+                got = f.write_stage(4, "review", expected=expected, initialize=expected is None, commit=True)
                 self.assertTrue(got.done, got.error)
                 self.assertEqual(f.snapshots()[0]["stage"], "review")
                 self.assertEqual(gh.issues[4]["labels"], [{"name": "bug"}])
@@ -402,7 +403,7 @@ class StageWriteBackTest(unittest.TestCase):
     def test_stage_round_trips_through_project_status_including_terminal(self):
         gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={})
         f = forge.Forge(GH, kanban=BOARD, gh=gh)
-        self.assertTrue(f.write_stage(4, "review", commit=True).done, "init")
+        self.assertTrue(f.write_stage(4, "review", initialize=True, commit=True).done, "init")
         self.assertEqual(f.snapshots()[0]["stage"], "review")
         self.assertTrue(f.write_stage(4, "done", expected="review", commit=True).done)
         self.assertEqual(f.snapshots()[0]["stage"], "done")
@@ -410,7 +411,7 @@ class StageWriteBackTest(unittest.TestCase):
     def test_stage_round_trips_through_labels_including_terminal(self):
         gh = FakeGh(issues=[gh_issue(4, "Add a flag")])
         f = forge.Forge(GH, kanban=FLOW, gh=gh)
-        self.assertTrue(f.write_stage(4, "review", commit=True).done)
+        self.assertTrue(f.write_stage(4, "review", initialize=True, commit=True).done)
         self.assertEqual(f.snapshots()[0]["stage"], "review")
         self.assertTrue(f.write_stage(4, "done", expected="review", commit=True).done)
         self.assertEqual(f.snapshots()[0]["stage"], "done")
@@ -451,8 +452,8 @@ class StageWriteBackTest(unittest.TestCase):
     def test_a_new_issue_takes_its_first_stage_but_a_moved_card_is_not_overwritten(self):
         gh = FakeGh(issues=[gh_issue(5, "new"), gh_issue(6, "moved by hand", ["stage: review"])])
         f = forge.Forge(GH, kanban=FLOW, gh=gh)
-        self.assertTrue(f.write_stage(5, "ready", commit=True).done)
-        self.assertIn("reconcile", f.write_stage(6, "doing", commit=True).error)
+        self.assertTrue(f.write_stage(5, "ready", initialize=True, commit=True).done)
+        self.assertIn("reconcile", f.write_stage(6, "doing", initialize=True, commit=True).error)
 
     def test_no_stage_labels_configured_is_refused(self):
         self.assertIn("[kanban]", forge.Forge(GH, gh=github()).write_stage(3, "review").error)
@@ -535,6 +536,42 @@ def gl_issue(iid, title, labels=(), description="", state="opened"):
             "description": description}
 
 
+class ClosingRequestTest(unittest.TestCase):
+    def test_only_a_request_closing_solely_the_assigned_issue_is_selected(self):
+        for home in (GH, GL):
+            f = forge.Forge(home, token="t")
+            for closes in (("#3", "other/repo#99"), ("other/repo#99", "#3"), ("o/app#3",), ("other/repo#3",),
+                           ("https://github.com/o/app/issues/3",), ("#3", "#4"), ()):
+                with self.subTest(home=home, closes=closes):
+                    with self.assertRaises(forge.ForgeError):
+                        f.closing_request(f.key(3), [SimpleNamespace(number=21, closes=closes)])
+            got = f.closing_request(f.key(3), [SimpleNamespace(number=21, closes=("#3",)),
+                                               SimpleNamespace(number=22, closes=("#3",)),
+                                               SimpleNamespace(number=23, closes=("#4",))])
+            self.assertEqual(got.number, 22)
+
+    def test_snapshots_and_merges_ignore_qualified_refs_instead_of_crashing_or_matching(self):
+        issues = {3: gl_issue(3, "Closed", state="closed"), 4: gl_issue(4, "Open")}
+        call = gitlab_call(issues, {5: {"approved_by": [], "description": "Closes other/app#4"}},
+                           merged={6: {"description": "Closes other/app#4"}})
+        with mock.patch.object(backlog, "_call", call):
+            self.assertEqual([s["merge_state"] for s in forge.Forge(GL, token="t").snapshots()], ["", ""])
+
+
+class SetStageInitializeTest(unittest.TestCase):
+    def test_an_empty_or_missing_expected_stage_never_initializes(self):
+        for expected in (None, ""):
+            with self.subTest(expected=expected), mock.patch.object(forge, "_sync_github") as sync:
+                forge.Forge(GH, kanban=FLOW, gh=FakeGh(issues=[])).write_stage(4, "review", expected=expected, commit=True)
+            self.assertIs(sync.call_args.kwargs["initialize"], False)
+
+    def test_initialize_is_passed_through_when_the_caller_sets_it(self):
+        gh = FakeGh(issues=[gh_issue(4, "Add a flag")])
+        self.assertTrue(forge.Forge(GH, kanban=FLOW, gh=gh).write_stage(4, "review", initialize=True, commit=True).done)
+        gh = FakeGh(issues=[gh_issue(4, "Add a flag")])
+        self.assertIn("--initialize", forge.Forge(GH, kanban=FLOW, gh=gh).write_stage(4, "review", commit=True).error)
+
+
 class GitLabTest(unittest.TestCase):
     def test_open_and_merged_requests_scope_url_and_project_closing_references(self):
         for ref, expected in (("https://gitlab.example.test/Team/App/-/issues/3", True),
@@ -546,7 +583,8 @@ class GitLabTest(unittest.TestCase):
                                    {5: {"approved_by": [], "description": f"Closes {ref}"}},
                                    merged={6: {"description": f"Closes {ref}"}})
                 with mock.patch.object(backlog, "_call", call):
-                    self.assertEqual(self.forge.requests()[0].closes, ("#3",) if expected else ())
+                    got = self.forge.requests()[0].closes
+                    self.assertEqual(got == ("#3",), expected)
                     self.assertEqual(self.forge.snapshots()[0]["merge_state"], "merged" if expected else "")
 
     def test_snapshot_bounds_closed_history_without_following_all_pages(self):
@@ -639,7 +677,7 @@ class GitLabTest(unittest.TestCase):
         issues = {4: gl_issue(4, "Add a flag")}
         with mock.patch.object(backlog, "_call", gitlab_call(issues, {})):
             f = forge.Forge(GL, kanban=FLOW, token="t")
-            self.assertTrue(f.write_stage(4, "review", commit=True).done)
+            self.assertTrue(f.write_stage(4, "review", initialize=True, commit=True).done)
             self.assertEqual(f.snapshots()[0]["stage"], "review")
             self.assertTrue(f.write_stage(4, "done", expected="review", commit=True).done)
             self.assertEqual(f.snapshots()[0]["stage"], "done")

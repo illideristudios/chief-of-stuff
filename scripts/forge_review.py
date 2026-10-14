@@ -25,13 +25,20 @@ GITLAB_WAITING = frozenset({"skipped", "pending", "created", "waiting_for_resour
 # Forge mergeability still being computed — not a settled blocker (#430).
 SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown", "approvals_syncing", "preparing"})
 REQUEST_LIMIT = backlog.PER_PAGE  # one page; readers page until short, and refuse a full MAX_PAGES read as whole
-# `Closes: #3` (GitHub) and `Closes #3, #4 and #5` (GitLab). Body parsing remains a fallback alongside GitHub's links.
-_REFS = r":?\s+(?:issues?\s+)?(#\d+(?:(?:\s*,\s*|\s*,?\s+and\s+)#\d+)*)"
-CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)" + _REFS)
+# `Closes: #3`, `owner/repo#3` and `https://github.com/owner/repo/issues/3` (GitHub); `Closes #3, #4 and #5` (GitLab).
+# Body parsing remains a fallback alongside GitHub's links. Foreign refs are kept so selection can fail closed on them.
+_GITHUB_REF = r"https://github\.com/[\w.-]+/[\w.-]+/issues/\d+|[\w.-]+/[\w.-]+#\d+|#\d+"
 _GITLAB_REF = r"https?://[^\s,<>]+?/-/issues/\d+|[\w.-]+(?:/[\w.-]+)+#\d+|#\d+"
-_GITLAB_REFS = r":?\s+(?:issues?\s+)?((?:" + _GITLAB_REF + r")(?:(?:\s*,\s*|\s*,?\s+and\s+)(?:" + _GITLAB_REF + r"))*)"
+
+
+def _closing(keywords: str, ref: str) -> re.Pattern:
+    return re.compile(r"(?i)\b(?:" + keywords + r"):?\s+(?:issues?\s+)?((?:" + ref + r")(?:(?:\s*,\s*|\s*,?\s+and\s+)(?:"
+                      + ref + r"))*)")
+
+
+CLOSES = _closing(r"close[sd]?|fix(?:e[sd])?|resolve[sd]?", _GITHUB_REF)
 # GitLab's default closing pattern adds the -ing forms and implement; GitHub does not close on them.
-GITLAB_CLOSES = re.compile(r"(?i)\b(?:clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing)|implement(?:s|ed|ing)?)" + _GITLAB_REFS)
+GITLAB_CLOSES = _closing(r"clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing)|implement(?:s|ed|ing)?", _GITLAB_REF)
 
 
 def gitlab_pipeline_status(status: str | None) -> str:
@@ -47,39 +54,37 @@ def scrub(text: str) -> str:
     return "".join(c for c in text if c.isprintable())
 
 
-def closes(body: str | None, gitlab: bool = False, *, project: str = "", host: str = "") -> tuple[str, ...]:
-    """The local issue refs a request's body closes, in order, once each. Qualified GitLab refs need project/host."""
-    if not gitlab:
-        return tuple(dict.fromkeys(ref for refs in CLOSES.findall(body or "") for ref in re.findall(r"#\d+", refs)))
+def closes(body: str | None, gitlab: bool = False, *, project: str = "", host: str = "", repo: str = "") -> tuple[str, ...]:
+    """The issue refs a request's body closes, in order, once each: `#N` for this repository (`project` on GitLab, or
+    `repo` on GitHub when given), any other ref verbatim, as `owner/repo#N` where the URL names one."""
     found = []
-    for refs in GITLAB_CLOSES.findall(body or ""):
-        for ref in re.findall(_GITLAB_REF, refs, re.IGNORECASE):
-            if ref.startswith("#"):
-                found.append(ref)
-            elif "://" in ref:
+    for refs in (GITLAB_CLOSES if gitlab else CLOSES).findall(body or ""):
+        for ref in re.findall(_GITLAB_REF if gitlab else _GITHUB_REF, refs, re.IGNORECASE):
+            if "://" in ref:
                 url = urlsplit(ref)
-                configured = urlsplit(host)
-                prefix = configured.path.rstrip("/") + "/"
-                if (host and url.scheme.casefold() == configured.scheme.casefold()
-                        and url.netloc.casefold() == configured.netloc.casefold() and url.path.startswith(prefix)):
-                    path, number = url.path[len(prefix):].rsplit("/-/issues/", 1)
-                    if path.casefold() == project.casefold():
-                        found.append(f"#{number}")
-            else:
-                path, number = ref.rsplit("#", 1)
-                if path.casefold() == project.casefold():
-                    found.append(f"#{number}")
+                if not gitlab:
+                    ref = url.path[1:].replace("/issues/", "#")
+                else:
+                    configured = urlsplit(host)
+                    prefix = configured.path.rstrip("/") + "/"
+                    if not (host and url.scheme.casefold() == configured.scheme.casefold()
+                            and url.netloc.casefold() == configured.netloc.casefold() and url.path.startswith(prefix)):
+                        found.append(ref)  # another host: kept whole so selection refuses it
+                        continue
+                    ref = url.path[len(prefix):].replace("/-/issues/", "#")
+            path, _, number = ref.rpartition("#")
+            local = project if gitlab else repo
+            found.append(f"#{number}" if not path or (local and path.casefold() == local.casefold()) else ref)
     return tuple(dict.fromkeys(found))
 
 
 def github_closes(pr: dict, repo: str) -> tuple[str, ...]:
-    """Union body closing keywords with Development links, keeping links to this repository only."""
-    found = list(closes(pr.get("body")))
+    """Union body closing keywords with Development links; a link to another repository stays qualified."""
+    found = list(closes(pr.get("body"), repo=repo))
     for issue in pr.get("closingIssuesReferences") or []:
         repository = issue.get("repository") or {}
-        owner = (repository.get("owner") or {}).get("login", "")
-        if f"{owner}/{repository.get('name', '')}".casefold() == repo.casefold():
-            found.append(f"#{issue['number']}")
+        qualified = f"{(repository.get('owner') or {}).get('login', '')}/{repository.get('name', '')}"
+        found.append(f"#{issue['number']}" if qualified.casefold() == repo.casefold() else f"{qualified}#{issue['number']}")
     return tuple(dict.fromkeys(found))
 
 

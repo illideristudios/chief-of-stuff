@@ -10,6 +10,7 @@ empty forge.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -24,6 +25,8 @@ import review_threads
 from backlog_ref import Backlog, GitHubBacklog, IssueRef, backlog_from_config, home_of
 from forge_port import ForgeError
 from settings import Kanban
+
+_LOCAL_CLOSE = re.compile(r"#\d+")  # a closing ref for this repository; anything else is qualified or foreign
 
 
 def _gh_json(gh, args: list[str]):
@@ -352,16 +355,16 @@ class Forge:
             for row in rows:  # inside the guard: a malformed row is a forge read error, not a crash
                 refs = (forge_review.github_closes(row, self.home.repo) if self.github else
                         forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
-                for ref in refs:
-                    closed.add(int(ref[1:]))
+                closed.update(int(ref[1:]) for ref in refs if _LOCAL_CLOSE.fullmatch(ref))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
         return closed
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
-        """The newest open request closing the issue, as snapshots report for rework."""
+        """The newest open request closing only the assigned issue; extra or cross-repo closing refs are unsafe to merge."""
         found = self.requests() if requests is None else requests
-        closing = [r for r in found if any(self.key(int(ref[1:])) == issue_key for ref in r.closes)]
+        closing = [r for r in found if r.closes and all(
+            _LOCAL_CLOSE.fullmatch(ref) and self.key(int(ref[1:])) == issue_key for ref in r.closes)]
         if not closing:
             raise ForgeError(f"no open request closes {issue_key}")
         return max(closing, key=lambda r: r.number)
@@ -393,7 +396,8 @@ class Forge:
         # shortcut: several requests closing one issue (rework) report the newest; key by (issue, attempt) when M3 segments need each
         for r in sorted(self.requests(), key=lambda r: r.number):
             for ref in r.closes:
-                latest[int(ref[1:])] = r
+                if _LOCAL_CLOSE.fullmatch(ref):
+                    latest[int(ref[1:])] = r
         merged = self._merged_closes()
         statuses: dict[str, str | None] = {}
         if self.kanban is not None and self.kanban.github_project is not None and self.github:
@@ -465,19 +469,20 @@ class Forge:
         return backlog.create(self.home, title, body=body, labels=labels, token=self.token, commit=commit, gh=self.gh,
                               parent=parent, blocked_by=blocked_by)
 
-    def write_stage(self, number: int, stage: str, expected: str | None = None, commit: bool = False) -> kanban.Sync:
+    def write_stage(self, number: int, stage: str, expected: str | None = None, commit: bool = False,
+                    initialize: bool = False) -> kanban.Sync:
         """Move the issue's stage (label, or GitHub Project Status when configured), leaving its other labels.
-        `expected` is the stage the store last wrote; with none, initialize a blank issue or migrate its legacy label
-        into Project Status. A card moved by hand is reported, never overwritten."""
+        `expected` is the stage the store last wrote; `initialize` starts a blank issue or migrates its legacy label into
+        Project Status, and is never inferred from a missing `expected`. A card moved by hand is reported, never overwritten."""
         host, repo = home_of(self.home)
         ref = IssueRef(repo, number, host)
         if self.kanban is None:
             return kanban.Sync(ref, stage, error="no [kanban] stage labels configured")
         if self.github:
             return _sync_github(ref, self.kanban, stage, gh=self.gh, commit=commit, expected_stage=expected,
-                                initialize=expected is None)
+                                initialize=initialize)
         return kanban.sync_gitlab(self.home, ref, self.kanban, stage, token=self.token, commit=commit, expected_stage=expected,
-                                  initialize=expected is None)
+                                  initialize=initialize)
 
     def add_human_hold(self, number: int) -> str:
         """Add only the review hold; leave the numbered stage and Project Status untouched."""

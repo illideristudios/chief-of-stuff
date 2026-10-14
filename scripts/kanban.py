@@ -259,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
         elif ref.host == backlog.GITHUB:
             import forge  # CLI only: Project/label writes live on the forge gateway
             result = forge.Forge(backlog.GitHubBacklog(ref.repo), kanban=settings.kanban).write_stage(
-                ref.number, stage, expected=args.from_stage, commit=args.commit)
+                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit)
         elif isinstance(cfg.backlog, backlog.Backlog):
             result = sync_gitlab(cfg.backlog, ref, settings.kanban, stage, commit=args.commit,
                                  expected_stage=args.from_stage, initialize=args.initialize)

@@ -46,7 +46,7 @@ class FakeForge:
     def snapshots(self):
         return [dict(row) for row in self.rows]
 
-    def write_stage(self, number, stage, expected=None, commit=False):
+    def write_stage(self, number, stage, expected=None, commit=False, initialize=False):
         self.writes.append((number, stage, expected, commit))
         next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))["stage"] = stage
         return SimpleNamespace(ok=True, done=True, error="")
@@ -235,6 +235,14 @@ class EngineTest(unittest.TestCase):
         self.findings(counts={"minor": 1})
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
         self.assertEqual(self.forge.writes[-1], (1, "implement", "review", True))
+
+    def test_the_engine_initializes_only_when_the_store_has_no_prior_stage(self):
+        for prior, initialize in (("", True), ("review", False)):
+            with self.subTest(prior=prior):
+                forge = mock.Mock()
+                forge.write_stage.return_value = SimpleNamespace(ok=True, error="")
+                engine._write_stage(forge, mock.Mock(), KEY, "implement", prior)
+                self.assertIs(forge.write_stage.call_args.kwargs["initialize"], initialize)
 
     def test_stage_write_failure_is_logged_and_retried_before_planning(self):
         self.run_pass()

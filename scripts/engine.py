@@ -48,7 +48,8 @@ def _findings(store: Any, key: str, history: list) -> dict[str, int] | None:
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
-    result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None, commit=True)
+    result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None,
+                               initialize=not expected, commit=True)
     if not result.ok:
         raise ForgeError(result.error)
     fields: dict[str, Any] = {"stage": stage}
