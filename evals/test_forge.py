@@ -363,6 +363,19 @@ class ClosingRequestTest(unittest.TestCase):
                 self.assertEqual(f.closing_request(f.key(3)).number, 21)
                 self.assertEqual(f.closing_request(f.key(3), f.requests()).number, 21)
 
+    def test_cross_repository_closing_references_refuse_selection_and_merge(self):
+        for home in (GH, GL):
+            for body in ("Fixes #3\nFixes other/repo#99", "Closes other/repo#99\nResolves #3",
+                         "fixed other/repo#99", "Fixes o/app#3"):
+                with self.subTest(home=home, body=body), self.for_forge(home, {21: body}) as f:
+                    with self.assertRaises(forge.ForgeError):
+                        f.closing_request(f.key(3))
+                    for commit in (False, True):
+                        with mock.patch.object(forge.merge_approved, "merge_head") as merge:
+                            with self.assertRaises(forge.ForgeError):
+                                f.merge(21, commit=commit, issue_key=f.key(3))
+                            merge.assert_not_called()
+
 
 class MergeTest(unittest.TestCase):
     def test_a_failed_state_read_after_a_successful_github_merge_is_unknown(self):

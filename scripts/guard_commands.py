@@ -223,6 +223,26 @@ def _push_denied(args: list[str], protected: tuple[str, ...]) -> bool:
     return False
 
 
+def _glab_note_denied(flags: list[str]) -> bool:
+    """Quick actions in note text mutate forge state; file-sourced notes are opaque."""
+    i = 0
+    while i < len(flags):
+        flag = flags[i]
+        i += 1
+        if flag in {"--file", "-F"} or flag.startswith(("--file=", "-F=")):
+            return True
+        if flag in {"-m", "--message"}:
+            value = flags[i] if i < len(flags) else ""
+            i += 1
+        elif flag.startswith(("--message=", "-m=")):
+            value = flag.split("=", 1)[1]
+        else:
+            continue
+        if GLAB_QUICK_ACTION.search(value):
+            return True
+    return False
+
+
 def _pr_create_denied(flags: list[str], protected: tuple[str, ...]) -> bool:
     # Consume value flags so a title or body containing --head cannot stand in for the branch option.
     values = {"--head", "-H", "--title", "-t", "--body", "-b", "--body-file", "-F", "--base", "-B",
@@ -301,6 +321,8 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...], dept
         if any(flag.split("=", 1)[0] in {"--delete-last", "--edit-last", "--create-if-none",
                                        "--resolve", "--unresolve"} for flag in flags):
             return True
+        if client == "glab" and verb == "note" and _glab_note_denied(flags):
+            return True
         if client == "glab" and group == "mr":
             # glab accepts note flags before its nested verb; skip their values, including message text.
             note_args = _global_args(flags, {"-R", "--repo", "-m", "--message", "--attach", "--reply",
@@ -334,6 +356,8 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...], dept
 
 
 NESTED_WORD = re.compile(r"(?<![\w.-])(?:gh|glab|git|hub|sh|bash|zsh|dash|eval)(?![\w.])")
+# GitLab quick actions run from note text; a leading /word on a line changes forge state.
+GLAB_QUICK_ACTION = re.compile(r"(?m)^\s*/\w+")
 
 
 def _inline_interpreter(name: str, args: list[str]) -> bool:
@@ -399,6 +423,10 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
         if args[0] == "config":
             # Values such as core.sshCommand, alias.* and *.helper run later inside allowed verbs. Reads only.
             return _config_denied(args[1:])
+        if args[0] == "grep" and any(
+                a.split("=", 1)[0] in {"-O", "--open-files-in-pager"}
+                or a.startswith("-") and not a.startswith("--") and "O" in a for a in args[1:]):
+            raise Opaque()  # -O/--open-files-in-pager runs a pager command on matches
         # An unknown subcommand can be an alias containing an engine-owned verb.
         if args[0] not in {"status", "diff", "log", "show", "rev-parse", "symbolic-ref", "branch", "checkout", "switch",
                            "add", "commit", "restore", "reset", "fetch", "pull", "rebase", "cherry-pick", "stash", "tag",

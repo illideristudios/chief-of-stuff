@@ -10,6 +10,7 @@ raises ForgeError: an empty answer would read as an empty forge.
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -22,6 +23,8 @@ import review_threads
 from backlog_ref import Backlog, GitHubBacklog, IssueRef, backlog_from_config, home_of
 from forge_port import ForgeError
 from settings import Kanban
+
+_LOCAL_CLOSE = re.compile(r"#\d+")
 
 
 @dataclass(frozen=True)
@@ -60,9 +63,10 @@ class Forge:
             raise ForgeError(f"requests: {exc}") from exc
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
-        """The newest open request closing only the assigned issue; extra closing refs are unsafe to merge."""
+        """The newest open request closing only the assigned issue; extra or cross-repo closing refs are unsafe to merge."""
         found = self.requests() if requests is None else requests
-        closing = [r for r in found if r.closes and all(self.key(int(ref[1:])) == issue_key for ref in r.closes)]
+        closing = [r for r in found if r.closes and all(
+            _LOCAL_CLOSE.fullmatch(ref) and self.key(int(ref[1:])) == issue_key for ref in r.closes)]
         if not closing:
             raise ForgeError(f"no open request closes {issue_key}")
         return max(closing, key=lambda r: r.number)
@@ -88,7 +92,8 @@ class Forge:
         # shortcut: several requests closing one issue (rework) report the newest; key by (issue, attempt) when M3 segments need each
         for r in sorted(self.requests(), key=lambda r: r.number):
             for ref in r.closes:
-                latest[int(ref[1:])] = r
+                if _LOCAL_CLOSE.fullmatch(ref):
+                    latest[int(ref[1:])] = r
         out = []
         for one in sorted(got.issues, key=lambda i: i.iid):
             r = latest.get(one.iid)

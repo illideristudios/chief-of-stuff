@@ -25,7 +25,8 @@ GITLAB_WAITING = frozenset({"skipped", "pending", "created", "waiting_for_resour
 # Forge mergeability still being computed — not a settled blocker (#430).
 SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown", "approvals_syncing", "preparing"})
 REQUEST_LIMIT = backlog.PER_PAGE  # one page; readers page until short, and refuse a full MAX_PAGES read as whole
-CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(#\d+)")
+# Same-repo `#N` and GitHub's `owner/repo#N`. Selection rejects any non-`#N` form.
+CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+((?:[\w.-]+/[\w.-]+)?#\d+)")
 
 
 def gitlab_pipeline_status(status: str | None) -> str:

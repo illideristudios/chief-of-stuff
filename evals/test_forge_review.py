@@ -26,5 +26,12 @@ class GitLabPipelineEvidenceTest(unittest.TestCase):
         self.assertEqual(dataclasses.replace(r, head=tmr.OLD, threads=0).verdict, "stale pipeline")
 
 
+class ClosesTest(unittest.TestCase):
+    def test_closes_records_same_repo_and_cross_repository_refs(self):
+        self.assertEqual(fr.closes("Fixes #3\nFixes other/repo#99"), ("#3", "other/repo#99"))
+        self.assertEqual(fr.closes("Closes other/repo#99"), ("other/repo#99",))
+        self.assertEqual(fr.closes("Resolves #3\nSee other/repo#99"), ("#3",))
+
+
 if __name__ == "__main__":
     unittest.main()

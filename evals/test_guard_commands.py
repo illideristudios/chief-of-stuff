@@ -83,9 +83,19 @@ class CommandTest(unittest.TestCase):
         for command in ('glab mr note 12 --message feedback', 'glab issue note 12 -m feedback',
                         'glab mr note create 12 --message feedback', 'glab mr note -m feedback',
                         'glab mr note --message delete', 'glab mr note --message=feedback',
-                        'glab mr note --message feedback 12'):
+                        'glab mr note --message feedback 12',
+                        'glab issue note 12 --message "see /close in the docs"'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
+
+    def test_glab_note_quick_actions_are_denied(self):
+        for command in ('glab issue note 12 --message /close', 'glab mr note 12 --message /merge',
+                        'glab issue note 12 --message="/approve"', 'glab mr note 12 -m "/label ~bug"',
+                        'glab issue note 12 --message "LGTM\n/close"',
+                        'glab mr note 12 --message=/close',
+                        'glab issue note 12 --file note.md', 'glab mr note 12 --file=note.md'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
 
     def test_rebase_execution_options_are_opaque(self):
         for command in ('git rebase -x "gh pr merge 12" HEAD~1',
@@ -96,6 +106,16 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
         self.assertIsNone(denial_reason('git rebase origin/develop', ("main", "develop")))
+
+    def test_git_grep_pager_options_are_opaque(self):
+        for command in ('git grep -O"sh -c \'gh pr merge 12; exit 1\' --" needle',
+                        'git grep -O less needle', 'git grep -Oless needle',
+                        'git grep --open-files-in-pager=less needle',
+                        'git grep --open-files-in-pager less needle',
+                        'git --no-pager grep -O less needle'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), UNPARSED)
+        self.assertIsNone(denial_reason('git grep needle', ("main", "develop")))
 
     def test_other_git_command_runners_remain_denied(self):
         for command in ('git bisect run true', 'git submodule foreach true',
