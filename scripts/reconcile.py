@@ -131,7 +131,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         review = max((s for s in completed if s.stage == "review" and s.outcome == "done"),
                      key=lambda s: _time(s.started_at), default=None)
         if review is None or any(s.stage not in ("review", "merge")
-                                 and _time(s.started_at) >= _time(review.started_at) for s in completed):
+                                 and _time(s.ended_at) > _time(review.started_at) for s in completed):
             return _work(key, "review", workflow, history, policies, room)
     elif item.review_state != "approved":
         return Wait(key, "review has not run")

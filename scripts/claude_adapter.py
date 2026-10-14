@@ -56,11 +56,17 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
 
 def cancel(process: subprocess.Popen) -> None:
     """A refused start must leave no detached runner or host behind."""
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    process.wait(timeout=5)
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    raise RuntimeError(f"runner {process.pid} survived SIGKILL; not cancelled")
 
 
 def _write(run_dir: Path, name: str, record: dict) -> None:
