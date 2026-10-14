@@ -8,6 +8,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 from urllib.parse import parse_qs, urlsplit
@@ -18,6 +19,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import backlog  # noqa: E402
 import forge  # noqa: E402
+import kanban  # noqa: E402
 import store  # noqa: E402
 import test_merge_approved as tma  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 import test_merge_ready as tmr  # noqa: E402
@@ -866,6 +868,367 @@ class GitLabMergeTest(unittest.TestCase):
         self.assertEqual(writes[0][2], {"sha": tma.HEAD})
         self.assertEqual(landed, [])
 
+
+
+# Stage map used by GitHub Project write-back tests moved from test_kanban.
+BOARD_FLOW = Kanban(
+    stages=("00 - PLAN", "01 - PLAN REVIEW", "02 - TEST", "03 - BUILD", "04 - REVIEW", "05 - FIX"),
+    human_review_label="!! - HUMAN REVIEW REQUIRED",
+    stage_map={"plan": 0, "plan review": 1, "test": 2, "implement": 3,
+               "review": 4, "triage": 4, "fix": 5, "verify": 4, "merge": 4},
+    hold_stages=("plan review", "triage", "merge"),
+    terminal_stages=("main",),
+)
+
+class GitHubProjectWriteTest(unittest.TestCase):
+    def setUp(self):
+        self.ref = backlog.IssueRef("example/app", 7)
+        self.item_url = self.ref.url
+        self.config = Kanban(BOARD_FLOW.stages, BOARD_FLOW.human_review_label, BOARD_FLOW.stage_map,
+                             BOARD_FLOW.hold_stages, BOARD_FLOW.terminal_stages,
+                             GitHubProject("example", 3, "Status", ("Plan", "Plan Review", "Test", "Build", "Review", "Fix")))
+        self.labels = ["kind::code"]
+        self.status = "Plan"
+        self.present = True
+        self.calls = []
+
+    def gh(self, args):
+        self.calls.append(args)
+        validate_project_cli(args)
+        if args[:2] == ["issue", "view"]:
+            return 0, json.dumps({"state": "OPEN", "url": self.ref.url,
+                "labels": [{"name": x} for x in self.labels]}), ""
+        if args[:2] == ["label", "list"]:
+            return 0, json.dumps([{"name": x} for x in (*self.config.stages, self.config.human_review_label)]), ""
+        if args[:2] == ["project", "field-list"]:
+            opts = [*self.config.github_project.options, *self.config.terminal_stages]
+            return 0, json.dumps({"fields": [{"id": "PVTSSF_status", "name": self.config.github_project.field, "options":
+                [{"id": f"option_{x}", "name": x} for x in opts]}]}), ""
+        if args[:2] == ["project", "view"]:
+            return 0, json.dumps({"id": "PVT_board"}), ""
+        if args[:2] == ["project", "item-list"]:
+            field = self.config.github_project.field
+            items = ([{"id": "PVTI_issue", "content": {"url": self.item_url},
+                       field[0].lower() + field[1:]: self.status}] if self.present else [])
+            return 0, json.dumps({"items": items, "totalCount": len(items)}), ""
+        if args[:2] == ["project", "item-add"]:
+            self.present = True
+            return 0, json.dumps({"id": "PVTI_issue"}), ""
+        if args[:2] == ["project", "item-edit"]:
+            assert args[args.index("--id") + 1] == "PVTI_issue"
+            assert args[args.index("--project-id") + 1] == "PVT_board"
+            assert args[args.index("--field-id") + 1] == "PVTSSF_status"
+            option = args[args.index("--single-select-option-id") + 1]
+            self.status = next(x for x in (*self.config.github_project.options, *self.config.terminal_stages)
+                               if f"option_{x}" == option)
+            return 0, "{}", ""
+        if args[:2] == ["issue", "edit"]:
+            if "--add-label" in args:
+                self.labels += args[args.index("--add-label") + 1].split(",")
+            if "--remove-label" in args:
+                self.labels = [x for x in self.labels if x not in args[args.index("--remove-label") + 1].split(",")]
+            return 0, "", ""
+        raise AssertionError(args)
+
+    def test_project_preview_reads_status_without_writing(self):
+        got = forge._sync_github(self.ref, self.config, "plan review", gh=self.gh)
+        self.assertTrue(got.ok)
+        self.assertFalse(got.done)
+        self.assertEqual(got.project_status, "Plan Review")
+        self.assertEqual(got.delta.add, (BOARD_FLOW.human_review_label,))
+        self.assertFalse(any(args[1] in ("item-edit", "item-add", "edit") for args in self.calls))
+
+    def test_project_preview_matches_issue_urls_case_insensitively(self):
+        for repo, item_repo in (("Example/App", "example/app"), ("example/app", "Example/App")):
+            with self.subTest(repo=repo, item_repo=item_repo):
+                self.ref = backlog.issue_ref("#7", backlog.GitHubBacklog(repo))
+                self.item_url = f"https://github.com/{item_repo}/issues/7"
+                got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh)
+                self.assertTrue(got.ok, got.error)
+                self.assertEqual(got.current_status, "Plan")
+                self.assertFalse(got.project_add)
+
+    def test_project_commit_does_not_readd_issue_with_mixed_case_repo(self):
+        self.ref = backlog.issue_ref("#7", backlog.GitHubBacklog("Example/App"))
+        got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh, commit=True,
+                                 expected_stage="plan")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.current_status, "Plan")
+        self.assertEqual(self.status, "Build")
+        self.assertFalse(got.project_add)
+        self.assertFalse(any(a[:2] == ["project", "item-add"] for a in self.calls))
+
+    def test_project_commit_sets_status_and_hold_then_verifies(self):
+        got = forge._sync_github(self.ref, self.config, "plan review", gh=self.gh, commit=True,
+                                 expected_stage="plan")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "Plan Review")
+        self.assertEqual(self.labels, ["kind::code", BOARD_FLOW.human_review_label])
+        self.assertLess(next(i for i, a in enumerate(self.calls) if a[:2] == ["issue", "edit"]),
+                        next(i for i, a in enumerate(self.calls) if a[:2] == ["project", "item-edit"]))
+
+    def test_project_can_add_issue_before_setting_status(self):
+        self.present = False
+        got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh, commit=True,
+                                 initialize=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "Build")
+        self.assertTrue(got.project_add)
+        self.assertTrue(any(a[:2] == ["project", "item-add"] for a in self.calls))
+
+    def test_project_transition_migrates_the_recorded_legacy_label(self):
+        for present in (False, True):
+            with self.subTest(present=present):
+                self.present, self.status = present, None
+                self.labels = ["kind::code", "00 - PLAN"]
+                self.calls = []
+                got = forge._sync_github(self.ref, self.config, "plan review", gh=self.gh,
+                                         commit=True, expected_stage="plan")
+                self.assertTrue(got.done, got.error)
+                self.assertEqual(self.status, "Plan Review")
+                self.assertEqual(self.labels, ["kind::code", BOARD_FLOW.human_review_label])
+                writes = [a[:2] for a in self.calls if a[1] in ("item-add", "item-edit", "edit")]
+                self.assertEqual(writes, ([['project', 'item-add']] if not present else []) +
+                                 [["project", "item-edit"], ["issue", "edit"]])
+
+    def test_project_initialize_migrates_a_single_legacy_label(self):
+        self.present, self.status = False, None
+        self.labels = ["kind::code", "02 - TEST", BOARD_FLOW.human_review_label]
+        got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh,
+                                 commit=True, initialize=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "Build")
+        self.assertEqual(self.labels, ["kind::code", BOARD_FLOW.human_review_label])
+
+    def test_project_refuses_legacy_label_mismatch_or_multiple_stage_labels(self):
+        for labels, expected, initialize in (
+                (["02 - TEST"], "plan", False),
+                (["00 - PLAN", "02 - TEST"], "plan", False),
+                (["00 - PLAN", "02 - TEST"], None, True)):
+            with self.subTest(labels=labels, expected=expected, initialize=initialize):
+                self.present, self.status = False, None
+                self.labels, self.calls = labels.copy(), []
+                got = forge._sync_github(self.ref, self.config, "plan review", gh=self.gh,
+                                         commit=True, expected_stage=expected, initialize=initialize)
+                self.assertIn("changed outside the tracker", got.error)
+                self.assertFalse(any(a[1] in ("item-add", "item-edit", "edit") for a in self.calls))
+                self.assertEqual(self.labels, labels)
+
+    def test_failed_project_migration_keeps_the_legacy_stage_label(self):
+        self.present, self.status = False, None
+        self.labels = ["kind::code", "00 - PLAN"]
+
+        def gh(args):
+            if args[:2] == ["project", "item-edit"]:
+                return 1, "", "status update failed"
+            return self.gh(args)
+
+        got = forge._sync_github(self.ref, self.config, "plan review", gh=gh,
+                                 commit=True, expected_stage="plan")
+        self.assertEqual(got.error, "status update failed")
+        self.assertIn("00 - PLAN", self.labels)
+        self.assertFalse(any(a[:2] == ["issue", "edit"] for a in self.calls))
+
+    def test_a_retry_finishes_labels_after_status_was_written(self):
+        for status, labels, expected in (("Plan Review", [BOARD_FLOW.human_review_label], "plan review"),
+                                         (None, ["00 - PLAN"], "plan")):
+            with self.subTest(expected=expected):
+                self.status, self.labels, self.calls = status, ["kind::code", *labels], []
+                failed = []
+
+                def gh(args):
+                    if args[:2] == ["issue", "edit"] and not failed:
+                        failed.append(args)
+                        return 1, "", "label edit failed"
+                    return self.gh(args)
+
+                first = forge._sync_github(self.ref, self.config, "implement", gh=gh, commit=True,
+                                           expected_stage=expected)
+                self.assertEqual(first.error, "label edit failed")
+                self.assertEqual(self.status, "Build")
+                got = forge._sync_github(self.ref, self.config, "implement", gh=gh, commit=True,
+                                         expected_stage=expected)
+                self.assertTrue(got.done, got.error)
+                self.assertEqual(self.labels, ["kind::code"])
+
+    def test_terminal_stage_sets_status_named_like_the_stage(self):
+        # Cleared Status before #627; terminal must round-trip through Project Status.
+        self.status = "Review"
+        got = forge._sync_github(self.ref, self.config, "main", gh=self.gh, commit=True,
+                                 expected_stage="review")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "main")
+        self.assertTrue(any(a[:2] == ["project", "item-edit"] for a in self.calls))
+
+    def test_missing_terminal_project_option_says_to_create_it_without_writing(self):
+        self.status = "Review"
+
+        def gh(args):
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"id": "PVTSSF_status", "name": "Status", "options": []}]}), ""
+            return self.gh(args)
+
+        got = forge._sync_github(self.ref, self.config, "main", gh=gh, commit=True, expected_stage="review")
+        self.assertIn("create", got.error)
+        self.assertIn("main", got.error)
+        self.assertFalse(any(a[:2] in (["project", "item-edit"], ["issue", "edit"]) for a in self.calls))
+
+    def test_missing_terminal_issue_label_says_to_create_it_without_writing(self):
+        self.config = BOARD_FLOW
+        self.labels = ["04 - REVIEW", "kind::code"]
+        got = forge._sync_github(self.ref, self.config, "main", gh=self.gh, commit=True, expected_stage="review")
+        self.assertIn("create", got.error)
+        self.assertIn("main", got.error)
+        self.assertFalse(any(a[:2] == ["issue", "edit"] for a in self.calls))
+
+    def test_terminal_issue_label_transition_when_provisioned(self):
+        self.config = BOARD_FLOW
+        self.labels = ["04 - REVIEW", "kind::code"]
+
+        def gh(args):
+            if args[:2] == ["label", "list"]:
+                return 0, json.dumps([{"name": x} for x in (*BOARD_FLOW.stages, *BOARD_FLOW.terminal_stages)]), ""
+            return self.gh(args)
+
+        got = forge._sync_github(self.ref, self.config, "main", gh=gh, commit=True, expected_stage="review")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(set(self.labels), {"main", "kind::code"})
+
+    def test_github_labels_exist_case_insensitively(self):
+        for wanted, present in (("main", "Main"), ("03 - BUILD", "03 - build")):
+            with self.subTest(wanted=wanted, present=present):
+                gh = mock.Mock(return_value=(0, json.dumps([{"name": present}]), ""))
+                self.assertEqual(forge._github_labels_exist(gh, self.ref, (wanted,)), "")
+
+    def test_a_differently_cased_managed_label_is_the_configured_one(self):
+        self.labels = ["Main", "kind::code"]
+
+        def gh(args):
+            if args[:2] == ["label", "list"]:
+                return 0, json.dumps([{"name": "Main"}]), ""
+            return self.gh(args)
+
+        labels_only = replace(self.config, github_project=None)
+        got = forge._sync_github(self.ref, labels_only, "main", gh=gh, commit=True, expected_stage="main")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(set(self.labels), {"Main", "kind::code"})
+        self.assertEqual(kanban.drift(labels_only, ("Main",), "main"), "")
+
+    def test_missing_github_label_preserves_configured_name(self):
+        gh = mock.Mock(return_value=(0, json.dumps([{"name": "Main"}]), ""))
+        error = forge._github_labels_exist(gh, self.ref, ("main", "03 - BUILD"))
+        self.assertEqual(error, "missing label in GitHub: 03 - BUILD; "
+                               "create the label(s) 03 - BUILD before syncing")
+
+    def test_a_launcher_hold_moves_with_its_project_status(self):
+        self.labels = ["kind::code", BOARD_FLOW.human_review_label]
+        self.status = "Test"
+        got = forge._sync_github(self.ref, self.config, "review", gh=self.gh, commit=True, expected_stage="test")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "Review")
+        self.assertIn(BOARD_FLOW.human_review_label, self.labels)
+
+    def test_status_is_read_without_new_item_list_flags(self):
+        got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh)
+        self.assertTrue(got.ok, got.error)
+        self.assertEqual(got.current_status, "Plan")
+        call = next(a for a in self.calls if a[:2] == ["project", "item-list"])
+        self.assertEqual(call, ["project", "item-list", "3", "--owner", "example",
+                                "--format", "json", "--limit", "5000"])
+
+    def test_project_commit_uses_node_ids(self):
+        got = forge._sync_github(self.ref, self.config, "implement", gh=self.gh, commit=True,
+                                 expected_stage="plan")
+        self.assertTrue(got.done, got.error)
+        call = next(a for a in self.calls if a[:2] == ["project", "item-edit"])
+        self.assertEqual(call, ["project", "item-edit", "--id", "PVTI_issue", "--project-id", "PVT_board",
+                                "--field-id", "PVTSSF_status", "--single-select-option-id", "option_Build"])
+
+    def test_project_item_list_at_limit_is_refused_unless_total_count_says_it_is_whole(self):
+        for total in (None, 5000, 5001):
+            row = {"items": [{"content": {"url": self.ref.url}, "status": "Plan"}] * 5000}
+            if total is not None:
+                row["totalCount"] = total
+            with self.subTest(total=total):
+                def gh(args):
+                    return (0, json.dumps(row), "") if args[:2] == ["project", "item-list"] else self.gh(args)
+
+                items, error = forge._project_items(gh, self.config.github_project)
+                if total == 5000:
+                    self.assertEqual((error, items), ("", {self.ref.url: "Plan"}))
+                else:
+                    self.assertEqual(items, {})
+                    self.assertIn("truncated", error)
+
+    def test_project_reads_refuse_truncated_field_metadata(self):
+        for total in (None, 100, 101):
+            status = {"id": "PVTSSF_status", "name": self.config.github_project.field}
+            fields = {"fields": [{"id": "PVTF_other", "name": "Other"}] * 99 + [status]}
+            if total is not None:
+                fields["totalCount"] = total
+
+            def gh(args):
+                if args[:2] == ["project", "field-list"]:
+                    return 0, json.dumps(fields), ""
+                return self.gh(args)
+
+            with self.subTest(total=total):
+                statuses, error = forge._project_items(gh, self.config.github_project)
+                item, status, item_error = forge._project_item(gh, self.config.github_project, self.ref)
+                if total == 100:
+                    self.assertEqual((statuses, error), ({self.ref.url: "Plan"}, ""))
+                    self.assertEqual((status, item_error), ("Plan", ""))
+                else:
+                    self.assertEqual(statuses, {})
+                    self.assertEqual((item, status), (None, None))
+                    self.assertIn("field list was truncated", error)
+                    self.assertIn("field list was truncated", item_error)
+
+    def test_project_reads_refuse_a_missing_configured_field(self):
+        def gh(args):
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"id": "PVTF_other", "name": "Other"}], "totalCount": 1}), ""
+            return self.gh(args)
+
+        statuses, error = forge._project_items(gh, self.config.github_project)
+        self.assertEqual(statuses, {})
+        self.assertIn(f"no field named {self.config.github_project.field}", error)
+
+    def test_project_field_list_at_limit_is_refused_unless_total_count_says_it_is_whole(self):
+        status = {"id": "PVTSSF_status", "name": "Status", "options": [{"id": "option_Build", "name": "Build"}]}
+        for total in (None, 100, 101):
+            row = {"fields": [{"id": "PVTF_other", "name": "Other"}] * 99 + [status]}
+            if total is not None:
+                row["totalCount"] = total
+            with self.subTest(total=total):
+                got = forge._project_option_ids(lambda args: (0, json.dumps(row), ""),
+                                                 self.config.github_project, "Build")
+                if total == 100:
+                    self.assertEqual(got, ("PVTSSF_status", "option_Build", ""))
+                else:
+                    self.assertIn("truncated", got[2])
+
+    def test_issue_label_mode_uses_add_remove_without_project(self):
+        self.config = BOARD_FLOW
+        self.labels = ["00 - PLAN", "kind::code"]
+        got = forge._sync_github(self.ref, self.config, "plan review", gh=self.gh, commit=True,
+                                 expected_stage="plan")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(set(self.labels), {"01 - PLAN REVIEW", BOARD_FLOW.human_review_label, "kind::code"})
+        self.assertFalse(any(a[:1] == ["project"] for a in self.calls))
+
+    def test_project_manual_status_change_is_reported(self):
+        self.status = "Fix"
+        got = forge._sync_github(self.ref, self.config, "plan review", gh=self.gh, commit=True,
+                                 expected_stage="plan")
+        self.assertIn("changed outside the tracker", got.error)
+        self.assertFalse(any(args[1] in ("item-edit", "edit") for args in self.calls))
+
+    def test_invalid_prior_stage_is_refused_without_writing(self):
+        got = forge._sync_github(self.ref, self.config, "plan review", gh=self.gh, commit=True,
+                                 expected_stage="invented")
+        self.assertIn("unmapped prior stage", got.error)
+        self.assertFalse(self.calls)
 
 if __name__ == "__main__":
     unittest.main()
