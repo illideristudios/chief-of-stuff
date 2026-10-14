@@ -13,10 +13,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
+from forge import project_option_ids  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
-from settings import SettingsError, load as load_settings
+from settings import Kanban, SettingsError, load as load_settings
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -85,35 +86,48 @@ def settings_text(launcher: str, mode: str = "interactive") -> str:
     return text
 
 
-def _configured_hold_label(settings: Path, new_settings: str) -> str:
-    """The hold label the workspace will run with: the existing settings file's, else the new text's (#566)."""
-    try:
-        data = tomllib.loads(settings.read_text() if settings.exists() else new_settings)
-    except (OSError, tomllib.TOMLDecodeError, ValueError):
-        return ""
-    kanban = data.get("kanban")
-    label = kanban.get("human_review_label", "") if isinstance(kanban, dict) else ""
-    return label.strip() if isinstance(label, str) else ""
-
-
-def provision_hold_label(forge, label: str, dry: bool) -> tuple[str, str]:
-    """Create the configured hold label on the forge when it has never seen it, via backlog.ensure_labels (#566).
+def provision_labels(forge, labels: tuple[str, ...], kind: str, dry: bool) -> tuple[str, str]:
+    """Create configured labels on the forge when it has never seen them, via backlog.ensure_labels (#566).
 
     Dry-run prints the intent and touches nothing. A forge that refuses is reported and init still succeeds —
-    the first hold attempt reports the label again if it never lands.
+    the first sync attempt reports the label again if it never lands.
     """
-    if forge is None or not label:
+    if forge is None or not labels:
         return "", ""
     where = forge.repo if isinstance(forge, backlog.GitHubBacklog) else forge.project
     if dry:
-        return f"would create the hold label {label} on {where}", ""
+        return "\n".join(f"would create the {kind} label {label} on {where}" for label in labels), ""
     try:
-        made = backlog.ensure_labels(forge, (label,), commit=True)
+        made = backlog.ensure_labels(forge, labels, commit=True)
     except (BacklogError, OSError) as exc:
-        return "", f"hold label not created on {where}: {exc}"
-    out = " ".join(f"hold label {w.what} created on {where}" for w in made if w.done)
+        return "", f"{kind} label not created on {where}: {exc}"
+    out = " ".join(f"{kind} label {w.what} created on {where}" for w in made if w.done)
     pending = "; ".join(w.error for w in made if w.error)
-    return out, f"hold label not created on {where}: {pending}" if pending else ""
+    return out, f"{kind} label not created on {where}: {pending}" if pending else ""
+
+
+def provision_kanban(forge, config: Kanban | None, dry: bool) -> tuple[str, str]:
+    """Provision stage and terminal labels, or check the manually created Project options, plus the hold."""
+    if forge is None or config is None:
+        return "", ""
+    hold_out, hold_err = provision_labels(forge, (config.human_review_label,), "hold", dry)
+    project = config.github_project if isinstance(forge, backlog.GitHubBacklog) else None
+    if project is None:
+        stage_out, stage_err = provision_labels(forge, (*config.stages, *config.terminal_stages), "stage", dry)
+    else:
+        options = (*project.options, *config.terminal_stages)
+        stage_out, stage_err = "", ""
+        if dry:
+            stage_out = (f"would check GitHub Project {project.owner}/{project.number} {project.field} options: "
+                         f"{', '.join(options)}; create any missing options before syncing")
+        else:
+            errors = []
+            for option in options:
+                _, _, error = project_option_ids(backlog.run_gh, project, option)
+                if error:
+                    errors.append(error)
+            stage_err = "; ".join(errors)
+    return "\n".join(x for x in (hold_out, stage_out) if x), "\n".join(x for x in (hold_err, stage_err) if x)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -158,20 +172,19 @@ def main(argv: list[str] | None = None) -> int:
             raise InitError(f"{claude} already has a ## Coordinator block")
         settings = root / "chief-of-stuff.toml"
         guidance = guidance_destination(root)
+        board = None
         if settings.exists():
             if not settings.is_file():
                 raise InitError(f"{settings} is not a settings file")
             try:
-                load_settings(root, settings.name)
+                board = load_settings(root, settings.name).kanban
             except SettingsError as exc:
                 raise InitError(f"existing settings are invalid: {exc}") from None
         new_settings = settings_text(args.launcher, args.worker_mode)
-        # #566: with a backlog named, create the [kanban] hold label the workspace will run with, so no
-        # review hold ever dies on a label the forge has not seen.
+        # Provision all configured marks, including terminal stages, before the workspace needs to sync them.
         forge = (backlog.GitHubBacklog(args.github_repo) if args.github_repo else
                  backlog.Backlog(args.gitlab_host, args.gitlab_project) if args.gitlab_host else None)
-        label_out, label_err = provision_hold_label(
-            forge, _configured_hold_label(settings, new_settings), args.dry_run)
+        label_out, label_err = provision_kanban(forge, board, args.dry_run)
         if args.dry_run:
             print(f"would {'append to' if claude.exists() else 'create'}: {claude}\n{block}")
             print(f"would {'keep existing' if settings.exists() else 'create'}: {settings}")

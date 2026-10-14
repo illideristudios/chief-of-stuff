@@ -108,9 +108,38 @@ class Kanban:
     github_project: GitHubProject | None = None
 
     def label_for(self, stage: str) -> str | None:
+        # Terminal stages leave a mark named like the stage so a rebuild can round-trip (#627).
         if stage in self.terminal_stages:
-            return None
+            return stage
         return self.stages[self.stage_map[stage]]
+
+    def status_for(self, stage: str) -> str | None:
+        """GitHub Project Status option for a tracker stage; None when no project is configured."""
+        if self.github_project is None:
+            return None
+        if stage in self.terminal_stages:
+            return stage
+        return self.github_project.options[self.stage_map[stage]]
+
+    def stage_for_label(self, labels: tuple[str, ...]) -> str:
+        """The tracker stage those labels encode. A mark shared by stages reads as the first of them; the engine keeps its
+        stored stage when it shares that mark (#651). Marks for two different columns are refused."""
+        names = {label.casefold() for label in labels}
+        hits = [s for s in (*self.stage_map, *self.terminal_stages) if self.label_for(s).casefold() in names]
+        if not hits:
+            return ""
+        if len({self.label_for(s).casefold() for s in hits}) > 1:
+            raise ValueError(f"labels map to more than one stage: {', '.join(hits)}")
+        return hits[0]
+
+    def stage_for_status(self, option: str | None) -> str:
+        """The tracker stage a Status option encodes; an unknown option is refused."""
+        if not option:
+            return ""
+        hits = [s for s in (*self.stage_map, *self.terminal_stages) if self.status_for(s) == option]
+        if not hits:
+            raise ValueError(f"unknown project Status option: {option}")
+        return hits[0]  # a shared option reads as its first stage, as stage_for_label does
 
     def holds(self, stage: str) -> bool:
         return stage in self.hold_stages
@@ -304,16 +333,45 @@ def _lane(name: str, table) -> Lane:
     return Lane(tuple(stages), tuple(gates))
 
 
+def _github_project(table, stages: list[str], terminal: list[str]) -> GitHubProject:
+    if not isinstance(table, dict):
+        raise SettingsError("[kanban.github_project] must be a table")
+    owner, number, field_name = table.get("owner"), table.get("number"), table.get("field", "Status")
+    options = table.get("options", stages)
+    if not isinstance(owner, str) or not owner.strip() or type(number) is not int or number <= 0:
+        raise SettingsError("[kanban.github_project] needs an owner and positive project number")
+    if not isinstance(field_name, str) or not field_name.strip():
+        raise SettingsError("[kanban.github_project] field must be a name")
+    if (not isinstance(options, list) or len(options) != len(stages)
+            or any(not isinstance(x, str) or not x.strip() for x in options)
+            or len(set(options)) != len(options)):
+        raise SettingsError("[kanban.github_project] options must match stages in order and be unique")
+    if set(terminal) & set(options):
+        raise SettingsError("[kanban.github_project] options must not collide with terminal_stages")
+    return GitHubProject(owner, number, field_name, tuple(options))
+
+
+def _project_ref(value) -> dict:
+    """`owner/number` shorthand for [kanban.github_project]."""
+    if not isinstance(value, str) or "/" not in value:
+        raise SettingsError('[kanban] project must be "owner/number"')
+    owner, _, number = value.partition("/")
+    if not owner.strip() or not number.isdigit() or int(number) <= 0:
+        raise SettingsError('[kanban] project must be "owner/number"')
+    return {"owner": owner.strip(), "number": int(number)}
+
+
 def _kanban(table) -> Kanban:
     if not isinstance(table, dict):
         raise SettingsError("[kanban] must be a table")
     stages = table.get("stages")
     if not isinstance(stages, list) or not stages or any(not isinstance(x, str) or not x.strip() for x in stages):
         raise SettingsError("[kanban] stages must be a non-empty list of labels")
-    if len(stages) != len(set(stages)) or any("," in label for label in stages):
+    fold = {label.casefold() for label in stages}  # forges compare label names case-insensitively
+    if len(stages) != len(fold) or any("," in label for label in stages):
         raise SettingsError("[kanban] stages must be unique")
     human = table.get("human_review_label")
-    if not isinstance(human, str) or not human.strip() or human in stages or "," in human:
+    if not isinstance(human, str) or not human.strip() or human.casefold() in fold or "," in human:
         raise SettingsError("[kanban] human_review_label must be distinct from stage labels")
     mapping = table.get("map")
     if not isinstance(mapping, dict) or not mapping:
@@ -324,22 +382,19 @@ def _kanban(table) -> Kanban:
     holds, terminal = table.get("hold_stages", []), table.get("terminal_stages", [])
     if not isinstance(holds, list) or not all(isinstance(x, str) for x in holds) or not set(holds) <= set(mapping):
         raise SettingsError("[kanban] hold_stages must be mapped stages")
-    if not isinstance(terminal, list) or not all(isinstance(x, str) and x.strip() for x in terminal) or set(terminal) & set(mapping):
-        raise SettingsError("[kanban] terminal_stages must be distinct from mapped stages")
+    if (not isinstance(terminal, list) or not all(isinstance(x, str) and x.strip() for x in terminal)
+            or len(terminal) != len({x.casefold() for x in terminal}) or any("," in x for x in terminal)
+            or human.casefold() in {x.casefold() for x in terminal} or set(terminal) & set(mapping)
+            or {x.casefold() for x in terminal} & fold):
+        raise SettingsError("[kanban] terminal_stages must be unique, comma-free labels distinct from "
+                            "human_review_label, mapped stages and board labels")
     project = None
+    if "github_project" in table and "project" in table:
+        raise SettingsError("[kanban] set github_project or project, not both")
     if "github_project" in table:
-        github = table["github_project"]
-        if not isinstance(github, dict):
-            raise SettingsError("[kanban.github_project] must be a table")
-        owner, number, field_name = github.get("owner"), github.get("number"), github.get("field", "Status")
-        options = github.get("options", stages)
-        if not isinstance(owner, str) or not owner.strip() or type(number) is not int or number <= 0:
-            raise SettingsError("[kanban.github_project] needs an owner and positive project number")
-        if not isinstance(field_name, str) or not field_name.strip():
-            raise SettingsError("[kanban.github_project] field must be a name")
-        if not isinstance(options, list) or len(options) != len(stages) or any(not isinstance(x, str) or not x.strip() for x in options):
-            raise SettingsError("[kanban.github_project] options must match stages in order")
-        project = GitHubProject(owner, number, field_name, tuple(options))
+        project = _github_project(table["github_project"], stages, terminal)
+    elif "project" in table:
+        project = _github_project(_project_ref(table["project"]), stages, terminal)
     return Kanban(tuple(stages), human, mapping, tuple(holds), tuple(terminal), project)
 
 

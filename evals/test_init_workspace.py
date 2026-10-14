@@ -113,8 +113,57 @@ class InitWorkspaceTest(unittest.TestCase):
         with mock.patch.object(init.backlog, "run_gh", gh):
             code, out, err = self.run_init("--github-repo", "owner/repo")
         self.assertEqual(code, 0, err)
-        self.assertEqual(labels, ["!! - HUMAN REVIEW REQUIRED"])
+        self.assertEqual(labels, ["!! - HUMAN REVIEW REQUIRED", "00 - PLAN"])
         self.assertIn("hold label !! - HUMAN REVIEW REQUIRED created on owner/repo", out)
+
+    def test_init_provisions_stage_and_terminal_labels_on_both_forges(self):
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[kanban]\nstages = ["00 - PLAN"]\nhuman_review_label = "HOLD"\n'
+            'terminal_stages = ["main"]\n[kanban.map]\nplan = 0\n')
+        for args in (("--github-repo", "owner/repo"),
+                     ("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app")):
+            with self.subTest(args=args), mock.patch.object(init.backlog, "ensure_labels", return_value=[]) as ensure:
+                code, _, err = self.run_init(*args)
+                (self.root / "CLAUDE.md").unlink()
+                self.assertEqual(code, 0, err)
+                names = [name for c in ensure.call_args_list for name in c.args[1]]
+                self.assertEqual(names, ["HOLD", "00 - PLAN", "main"])
+
+    def test_init_checks_project_options_including_terminal_and_reports_missing_main(self):
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[kanban]\nstages = ["00 - PLAN"]\nhuman_review_label = "HOLD"\n'
+            'terminal_stages = ["main"]\n[kanban.map]\nplan = 0\n'
+            '[kanban.github_project]\nowner = "owner"\nnumber = 12\noptions = ["Planning"]\n')
+        calls = []
+
+        def gh(args):
+            calls.append(args)
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"id": "F", "name": "Status", "options": [
+                    {"id": "P", "name": "Planning"}]}]}), ""
+            raise AssertionError(args)
+
+        with mock.patch.object(init.backlog, "ensure_labels", return_value=[]) as ensure, \
+             mock.patch.object(init.backlog, "run_gh", gh):
+            code, _, err = self.run_init("--github-repo", "owner/repo")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([name for c in ensure.call_args_list for name in c.args[1]], ["HOLD"])
+        self.assertTrue(calls)
+        self.assertIn("main", err)
+        self.assertIn("create", err)
+
+    def test_dry_run_names_terminal_marks_in_label_and_project_modes(self):
+        path = self.root / "chief-of-stuff.toml"
+        base = ('[kanban]\nstages = ["00 - PLAN"]\nhuman_review_label = "HOLD"\n'
+                'terminal_stages = ["main"]\n[kanban.map]\nplan = 0\n')
+        for project in (False, True):
+            path.write_text(base + ('[kanban.github_project]\nowner = "owner"\nnumber = 12\n'
+                                    'options = ["Planning"]\n' if project else ""))
+            with self.subTest(project=project), mock.patch.object(init.backlog, "run_gh") as gh:
+                code, out, err = self.run_init("--dry-run", "--github-repo", "owner/repo")
+            self.assertEqual(code, 0, err)
+            self.assertIn("main", out)
+            gh.assert_not_called()
 
     def test_a_hold_label_the_forge_refuses_is_reported_and_init_still_succeeds(self):
         (self.root / "chief-of-stuff.toml").write_text(
