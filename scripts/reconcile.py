@@ -108,7 +108,7 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     if stage == "review":
         return Review(key, attempt)
-    rounds = attempt - 1
+    rounds = attempt - 1 - sum(s.stage == stage and s.outcome == "quota" for s in history)
     if any(e.target == stage for e in workflow.next("review")):
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)
@@ -116,7 +116,8 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
             # Attempts started at or after the first completed review are rework.
             initial = max((s.attempt for s in history if s.stage == stage
                            and (not s.started_at or _time(s.started_at) < review)), default=0)
-            rounds = attempt - initial
+            rounds = attempt - initial - sum(s.stage == stage and s.outcome == "quota" and s.started_at
+                                             and _time(s.started_at) >= review for s in history)
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
