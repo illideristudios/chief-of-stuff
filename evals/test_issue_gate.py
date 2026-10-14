@@ -176,7 +176,6 @@ class WorkMainTest(unittest.TestCase):
         self.assertEqual(len(self.items()), 1)
 
     def test_migration_holds_the_migrate_lock_and_releases_it_afterward(self):
-        work = importlib.import_module("work")
         path = supervisor.state_dir(self.root) / "migrate.lock"
 
         def migrate(db_path):
@@ -184,7 +183,7 @@ class WorkMainTest(unittest.TestCase):
                 pass
             store.migrate(db_path)
 
-        with mock.patch.object(work, "migrate", side_effect=migrate) as migrated:
+        with mock.patch.object(supervisor, "migrate", side_effect=migrate) as migrated:
             code, _, err = self.run_work()
         self.assertEqual(code, 0, err)
         migrated.assert_called_once_with(self.root.resolve() / "store.db")

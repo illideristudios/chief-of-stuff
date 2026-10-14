@@ -22,8 +22,7 @@ import settings
 import slots
 import supervisor
 from forge_port import ForgeError
-from store import Store, migrate
-from workspace import settings_path, worktrees_dir
+from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 
@@ -174,10 +173,7 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     try:
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
-            claude = root / "CLAUDE.md"
-            text = claude.read_text() if claude.is_file() else ""
-            config = settings.load(root, settings_path(text))
-            source = forge.for_workspace(root, approver=config.workflow.approver or "", kanban=config.kanban)
+            text, config, source = supervisor.workspace_forge(root)
             if source is None:
                 refused = issue_gate.start(None, None, "")
                 raise ValueError(f"{refused.refused}\n{refused.setup}")
@@ -187,17 +183,13 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("[kanban.github_project] requires Project Status snapshot reads (#627)")
             policies = settings.load_policy()
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
-            stages = {s for w in policies.workflows.values() for e in w.edges for s in (e.source, e.target)}
-            stages |= {w.start for w in policies.workflows.values()}
-            unmapped = sorted(stages - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
+            unmapped = sorted(set(settings.workflow_stages(policies))
+                              - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
             if unmapped:
                 raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
-            path = root / "store.db"
-            with supervisor.lock(supervisor.state_dir(root) / "migrate.lock", wait=True):  # `work` migrates too
-                migrate(path)
-            db = Store(path)
+            db = supervisor.migrated_store(root)
             try:
                 while True:
                     failed = False

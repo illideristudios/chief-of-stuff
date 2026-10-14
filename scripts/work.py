@@ -7,12 +7,8 @@ import argparse
 import sys
 from pathlib import Path
 
-import forge
 import issue_gate
-import settings
 import supervisor
-from store import Store, migrate
-from workspace import settings_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -25,18 +21,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root = args.root.resolve()
     try:
-        claude = root / "CLAUDE.md"
-        text = claude.read_text() if claude.is_file() else ""
-        config = settings.load(root, settings_path(text))
-        source = forge.for_workspace(root, approver=config.workflow.approver or "", kanban=config.kanban)
+        _, _, source = supervisor.workspace_forge(root)
         if source is None:
             result = issue_gate.start(None, None, args.title)
         else:
-            path = root / "store.db"
-            # The live engine holds engine.lock for its whole run; migrations take their own short lock.
-            with supervisor.lock(supervisor.state_dir(root) / "migrate.lock", wait=True):
-                migrate(path)
-            db = Store(path)
+            db = supervisor.migrated_store(root)
             try:
                 result = issue_gate.start(source, db, args.title, body=args.body,
                                           issue=args.issue, commit=args.commit)
