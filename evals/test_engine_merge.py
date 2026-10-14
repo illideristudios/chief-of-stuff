@@ -145,6 +145,15 @@ class ExecutorTest(unittest.TestCase):
         self.gh.issues[3]["labels"] = [{"name": "stage: doing"}]
         self.refused("dispatch required")
 
+    def test_a_stage_label_shared_with_an_earlier_stage_keeps_the_stored_stage(self):
+        board = tf.Kanban(stages=("stage: doing", "stage: review"), human_review_label="needs human",
+                          stage_map={"implement": 0, "review": 1, "merge": 0})
+        self.forge = forge.Forge(tf.GH, kanban=board, gh=self.gh)
+        self.gh.issues[3]["labels"] = [{"name": "stage: doing"}]
+        self.planned()
+        self.assertTrue(self.execute())
+        self.assertEqual(len(self.gh.merges), 1)
+
     def at_unlabelled_merge_stage(self, stage="merge"):
         board = tf.Kanban(stages=("stage: doing", "stage: review"), human_review_label="needs human",
                           stage_map={"implement": 0, "review": 1}, terminal_stages=("merge",))

@@ -31,8 +31,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
             # Expected mark is gone; adopt the observed stage for re-plan and merge's final read.
             item.stage = snap["stage"]
             stage_mark = snap["stage_mark"] or ""
-        elif stage_mark and "stage" in snap:
-            item.stage = snap["stage"]
+        # Mark unchanged: keep item.stage, since a label several stages share decodes to the first of them.
         if "human_review" in snap:
             item.human_review = snap["human_review"]
         item.merge_state = request.verdict
