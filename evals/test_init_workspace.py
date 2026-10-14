@@ -184,7 +184,8 @@ class InitWorkspaceTest(unittest.TestCase):
         self.assertEqual(labels, ["00 - PLAN", "!! - HUMAN REVIEW REQUIRED"])
         self.assertIn("hold label !! - HUMAN REVIEW REQUIRED created on owner/repo", out)
 
-    def test_gitlab_provisions_configured_stage_terminal_and_hold_labels(self):
+    def test_gitlab_provisions_configured_stage_and_hold_labels_not_terminal_stages(self):
+        # terminal_stages are workflow names, not forge labels — init must not create "main".
         (self.root / "chief-of-stuff.toml").write_text(
             '[kanban]\nstages = ["PLAN", "BUILD"]\nterminal_stages = ["main"]\n'
             'human_review_label = "HOLD"\n[kanban.map]\nplan = 0\nimplement = 1\n')
@@ -204,7 +205,8 @@ class InitWorkspaceTest(unittest.TestCase):
             code, _, err = self.run_init("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app",
                                          "--gitlab-token-env", "TEAM_GITLAB_TOKEN")
         self.assertEqual(code, 0, err)
-        self.assertEqual(created, ["PLAN", "main", "HOLD"])
+        self.assertEqual(created, ["PLAN", "HOLD"])
+        self.assertNotIn("main", labels)
 
     def test_project_mode_provisions_only_the_hold_label(self):
         (self.root / "chief-of-stuff.toml").write_text(

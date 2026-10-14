@@ -104,8 +104,8 @@ def _configured_labels(settings: Path, new_settings: str) -> dict[str, str]:
         return {}
     labels = {}
     if "github_project" not in kanban:
-        for key, kind in (("stages", "stage"), ("terminal_stages", "terminal")):
-            labels.update((label.strip(), kind) for label in kanban.get(key, []))
+        # terminal_stages are workflow names (label_for → None), not forge labels.
+        labels.update((label.strip(), "stage") for label in kanban.get("stages", []))
     label = kanban.get("human_review_label", "")
     if isinstance(label, str) and label.strip():
         labels[label.strip()] = "hold"
