@@ -72,7 +72,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
-    worker.collect(store, root, clock)
+    worker.collect(store, root, clock, trees)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:

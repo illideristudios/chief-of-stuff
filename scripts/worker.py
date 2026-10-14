@@ -16,6 +16,7 @@ import guard_binding
 import make_worktree
 import process_status
 import supervisor
+from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import Failure, Request, retry_at
 
 _runners: dict[str, Any] = {}
@@ -172,6 +173,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 raise RuntimeError("prepared review tree does not match the request head")
     if run_dir.resolve().is_relative_to(tree.resolve()):
         raise RuntimeError("engine run directory must be outside the worker tree")
+    # Read before touching evidence: an unreadable forge refuses the start, never launches with defaults only.
+    protected = tuple(dict.fromkeys((*guard_binding.DEFAULT_PROTECTED_BRANCHES, *forge.protected_branches())))
     # A failed start may be retried at the same attempt. Preserve its evidence under a unique sibling.
     if run_dir.exists():
         run_dir.rename(run_dir.with_name(f"{run_dir.name}-refused-{uuid.uuid4()}"))
@@ -183,7 +186,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     plugin_dirs = (str(plugin),)
     env = {"CHIEF_OF_STUFF_WORKSPACE": str(root.resolve()),
            **guard_binding.guard_env(guard_binding.Binding(
-               issue_key, stage, attempt, session_id, root.resolve(), clock()))}
+               issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
     request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=_declared_agent(root, actor.agent or ""),
                       plugin_dirs=plugin_dirs)
@@ -216,7 +219,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     return actor.model, actor.effort or ""
 
 
-def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system) -> None:
+def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
+            trees: Path | None = None) -> None:
     """Finish every exited or lost open segment, using only the engine's run directory."""
     for segment in store.segments():
         if segment.ended_at is not None:
@@ -230,6 +234,14 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             if not isinstance(runs, dict):
                 raise ValueError("unreadable run records")
             record = runs.get(f"{segment.stage}-{segment.attempt}")
+            if record is None and trees is not None:
+                # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.
+                record = _existing_run(data, _run_dir(root, key, segment.stage, segment.attempt),
+                                       segment.stage, segment.attempt, trees, clock)
+                if record is not None:
+                    _save_run(store, key, segment.stage, segment.attempt, record)
+                    data = _resume(store, key)
+                    record = data["runs"][f"{segment.stage}-{segment.attempt}"]
             if not isinstance(record, dict):
                 raise ValueError("missing run record")
             if (type(record.get("pid")) is not int or record["pid"] <= 0

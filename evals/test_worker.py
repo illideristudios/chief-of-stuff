@@ -44,7 +44,8 @@ class WorkerTest(unittest.TestCase):
         self.persona = self.p.personas["builder"]
         self.forge = SimpleNamespace(
             issue=lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Forge title", body="Issue body")),
-            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"))
+            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"),
+            protected_branches=lambda: ("trunk", "main"))
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
@@ -608,10 +609,46 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(env["CHIEF_SESSION_ID"], request.session_id)
         self.assertEqual(env["CHIEF_LAUNCHED_AT"], NOW.isoformat())
         self.assertEqual(env["CHIEF_PYTHON"], sys.executable)
-        self.assertEqual(env["CHIEF_PROTECTED_BRANCHES"], '["main", "master", "develop"]')
+        self.assertEqual(env["CHIEF_PROTECTED_BRANCHES"], '["main", "master", "develop", "trunk"]')
         argv = claude_adapter.argv(request, "claude", [])
         self.assertEqual([argv[i + 1] for i, x in enumerate(argv) if x == "--plugin-dir"], [str(guard)])
         self.assertEqual(env["CHIEF_ISSUE_KEY"], KEY)
+
+    def test_unreadable_protected_branches_refuse_the_start(self):
+        def broken():
+            raise worker.ForgeError("protected branches: rate limited")
+        self.forge.protected_branches = broken
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(worker.ForgeError, "protected branches"):
+                self.launch()
+        start.assert_not_called()
+
+    def test_collect_recovers_a_reservation_whose_run_record_was_never_saved(self):
+        for exited in (False, True):
+            with self.subTest(exited=exited):
+                if self.db.resume(KEY):
+                    self.db.engine.dispose()
+                    self.setUp()
+                run = self.launched()
+                data = self.db.resume(KEY)
+                saved = data.pop("runs")["implement-1"]
+                self.db.set_resume(KEY, data)
+                if exited:
+                    (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+                    (run / "stderr").write_text("")
+                    (run / "exit.json").write_text('{"exit_code": 0}')
+                with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+                    worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+                segment = self.db.segments()[0]
+                self.assertEqual(segment.outcome, "done" if exited else None)
+                self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["session_id"], saved["session_id"])
+                self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
+
+    def test_collect_still_fails_a_reservation_with_no_start_evidence(self):
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.segments()[0].outcome, "failed")
 
     def test_worker_launch_refuses_without_the_guard_plugin(self):
         with mock.patch.object(worker.guard_binding, "guard_plugin_dir", return_value=None), \
