@@ -490,17 +490,14 @@ class MainTest(unittest.TestCase):
         passed.assert_not_called()
         self.assertIn("plan", errors.getvalue())
 
-    def test_github_project_refuses_startup_until_project_status_is_read(self):
+    def test_github_project_starts_now_that_snapshots_read_project_status(self):
         path = self.root / "settings.toml"
         path.write_text(path.read_text() + '\n[kanban.github_project]\nowner = "example"\nnumber = 3\n')
-        errors = io.StringIO()
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
-             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
-            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
-        passed.assert_not_called()
-        self.assertFalse((self.root / "store.db").exists())
-        self.assertIn("[kanban.github_project]", errors.getvalue())
-        self.assertIn("#627", errors.getvalue())
+             mock.patch.object(engine, "run_pass") as passed:
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        passed.assert_called_once()
+        self.assertTrue((self.root / "store.db").exists())
 
     def test_default_interval_is_sixty_seconds(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

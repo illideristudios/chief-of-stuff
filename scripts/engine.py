@@ -181,8 +181,6 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("no Backlog: line; configure the workspace backlog before running the engine")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
-            if config.kanban.github_project is not None:
-                raise ValueError("[kanban.github_project] requires Project Status snapshot reads (#627)")
             policies = settings.load_policy()
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
             stages = {s for w in policies.workflows.values() for e in w.edges for s in (e.source, e.target)}

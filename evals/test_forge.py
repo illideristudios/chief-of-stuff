@@ -1191,7 +1191,7 @@ class GitHubProjectWriteTest(unittest.TestCase):
                 def gh(args):
                     return (0, json.dumps(row), "") if args[:2] == ["project", "item-list"] else self.gh(args)
 
-                items, error = forge._project_items(gh, self.config.github_project)
+                items, error = forge.project_items(gh, self.config.github_project)
                 if total == 5000:
                     self.assertEqual((error, items), ("", {self.ref.url: "Plan"}))
                 else:
@@ -1211,7 +1211,7 @@ class GitHubProjectWriteTest(unittest.TestCase):
                 return self.gh(args)
 
             with self.subTest(total=total):
-                statuses, error = forge._project_items(gh, self.config.github_project)
+                statuses, error = forge.project_items(gh, self.config.github_project)
                 item, status, item_error = forge._project_item(gh, self.config.github_project, self.ref)
                 if total == 100:
                     self.assertEqual((statuses, error), ({self.ref.url: "Plan"}, ""))
@@ -1228,7 +1228,7 @@ class GitHubProjectWriteTest(unittest.TestCase):
                 return 0, json.dumps({"fields": [{"id": "PVTF_other", "name": "Other"}], "totalCount": 1}), ""
             return self.gh(args)
 
-        statuses, error = forge._project_items(gh, self.config.github_project)
+        statuses, error = forge.project_items(gh, self.config.github_project)
         self.assertEqual(statuses, {})
         self.assertIn(f"no field named {self.config.github_project.field}", error)
 

@@ -358,7 +358,7 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         status = None
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
-                project_items, project_error = forge._project_items(
+                project_items, project_error = forge.project_items(
                     gh or backlog.run_gh, config.github_project)
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))

@@ -454,7 +454,7 @@ class AuditTest(unittest.TestCase):
         issues = {n: backlog.Issue(n, f"Build {n}", "opened", ()) for n in (7, 8)}
         project_items = {backlog.IssueRef("example/app", n).url: FLOW.stages[3] for n in (7, 8)}
         with mock.patch.object(audit_tasks, "issue_states", return_value=issues), \
-             mock.patch.object(forge, "_project_items", return_value=(project_items, "")) as items:
+             mock.patch.object(forge, "project_items", return_value=(project_items, "")) as items:
             self.assertEqual(audit_tasks.kanban_faults(tasks, cfg, mixed), [])
         items.assert_called_once()
 
@@ -467,7 +467,7 @@ class AuditTest(unittest.TestCase):
         issue = backlog.Issue(7, "Build it", "opened", ())
         project_items = {"https://github.com/example/app/issues/7": FLOW.stages[3]}
         with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}), \
-             mock.patch.object(forge, "_project_items", return_value=(project_items, "")):
+             mock.patch.object(forge, "project_items", return_value=(project_items, "")):
             self.assertEqual(audit_tasks.kanban_faults([task], cfg, mixed), [])
 
     def test_rows_sharing_an_issue_expect_the_furthest_stage_only(self):

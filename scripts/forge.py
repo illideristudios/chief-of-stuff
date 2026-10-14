@@ -84,7 +84,8 @@ def _project_status(item, project):
     return str(value) if value is not None else None
 
 
-def _project_items(gh, project):
+def project_items(gh, project):
+    """URL → Status option for every issue item in the Project (empty Status is None)."""
     items, error = _project_rows(gh, project)
     return {url: _project_status(item, project) for url, item in items.items()}, error
 
@@ -401,7 +402,7 @@ class Forge:
         merged = self._merged_closes()
         statuses: dict[str, str | None] = {}
         if self.kanban is not None and self.kanban.github_project is not None and self.github:
-            statuses, error = _project_items(self.gh, self.kanban.github_project)
+            statuses, error = project_items(self.gh, self.kanban.github_project)
             if error:
                 raise ForgeError(f"project status: {error}")
         out = []
