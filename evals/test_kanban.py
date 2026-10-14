@@ -19,6 +19,7 @@ import backlog  # noqa: E402
 import audit_tasks  # noqa: E402
 import forge  # noqa: E402
 import kanban  # noqa: E402
+import kanban_cli  # noqa: E402
 from evals.project_cli import validate as validate_project_cli  # noqa: E402
 from settings import GitHubProject, Kanban  # noqa: E402
 
@@ -308,7 +309,7 @@ class CliTest(unittest.TestCase):
                              kanban.Delta(("01 - PLAN REVIEW",), ("00 - PLAN",)))
         output = io.StringIO()
         with mock.patch.object(kanban, "sync_gitlab", return_value=result) as sync, redirect_stdout(output):
-            self.assertEqual(kanban.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7"]), 0)
+            self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7"]), 0)
         self.assertFalse(sync.call_args.kwargs["commit"])
         self.assertIn("would update", output.getvalue())
 
@@ -326,7 +327,7 @@ class CliTest(unittest.TestCase):
         self._two_rows_on_issue_7()
         err = io.StringIO()
         with redirect_stderr(err):
-            code = kanban.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7"])
+            code = kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7"])
         self.assertEqual(code, 2)
         self.assertIn("Feature", err.getvalue())
         self.assertIn("Fix pipeline", err.getvalue())
@@ -338,7 +339,7 @@ class CliTest(unittest.TestCase):
         self._two_rows_on_issue_7()
         with mock.patch.object(kanban, "sync_gitlab", return_value=result) as sync, \
                 redirect_stdout(io.StringIO()):
-            self.assertEqual(kanban.main(
+            self.assertEqual(kanban_cli.main(
                 ["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7", "--task", "Fix pipeline"]), 0)
         self.assertEqual(sync.call_count, 1)
         self.assertEqual(sync.call_args.args[3], "plan review")
@@ -350,7 +351,7 @@ class CliTest(unittest.TestCase):
         self._two_rows_on_issue_7()
         with mock.patch.object(kanban, "sync_gitlab", return_value=result) as sync, \
                 redirect_stdout(io.StringIO()):
-            self.assertEqual(kanban.main(
+            self.assertEqual(kanban_cli.main(
                 ["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7", "--task", "12"]), 0)
         self.assertEqual(sync.call_count, 1)
         self.assertEqual(sync.call_args.args[3], "plan")
@@ -359,7 +360,7 @@ class CliTest(unittest.TestCase):
         self._two_rows_on_issue_7()
         err = io.StringIO()
         with redirect_stderr(err):
-            code = kanban.main(
+            code = kanban_cli.main(
                 ["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7", "--task", "Nobody"])
         self.assertEqual(code, 2)
         self.assertIn("Nobody", err.getvalue())
@@ -372,7 +373,7 @@ class CliTest(unittest.TestCase):
         for arg in ("7", "#7"):
             with mock.patch.object(kanban, "sync_gitlab", return_value=result) as sync, \
                     redirect_stdout(io.StringIO()):
-                self.assertEqual(kanban.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", arg]), 0)
+                self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", arg]), 0)
             sync.assert_called_once()
             seen.append(sync.call_args)
         self.assertEqual(seen[0], seen[1])
@@ -380,9 +381,9 @@ class CliTest(unittest.TestCase):
     def test_commit_requires_one_issue_and_prior_stage(self):
         output = io.StringIO()
         with redirect_stdout(output):
-            self.assertNotEqual(kanban.main(["--root", str(self.root), "--date", "2026-09-25", "--commit"]), 0)
+            self.assertNotEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--commit"]), 0)
         with redirect_stdout(output):
-            self.assertNotEqual(kanban.main(["--root", str(self.root), "--date", "2026-09-25",
+            self.assertNotEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25",
                                              "--issue", "#7", "--commit"]), 0)
 
     def test_completed_task_can_be_selected_to_clear_final_stage(self):
@@ -392,9 +393,9 @@ class CliTest(unittest.TestCase):
                              kanban.Delta(remove=("01 - PLAN REVIEW",)))
         output = io.StringIO()
         with mock.patch.object(kanban, "sync_gitlab", return_value=result) as sync, redirect_stdout(output):
-            self.assertEqual(kanban.main(["--root", str(self.root), "--date", "2026-09-25"]), 0)
+            self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25"]), 0)
             self.assertEqual(output.getvalue().strip(), "[]")
-            self.assertEqual(kanban.main(["--root", str(self.root), "--date", "2026-09-25",
+            self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25",
                                           "--issue", "#7"]), 0)
         sync.assert_called_once()
 

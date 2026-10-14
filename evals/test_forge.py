@@ -1239,7 +1239,7 @@ class GitHubProjectWriteTest(unittest.TestCase):
             if total is not None:
                 row["totalCount"] = total
             with self.subTest(total=total):
-                got = forge._project_option_ids(lambda args: (0, json.dumps(row), ""),
+                got = forge.project_option_ids(lambda args: (0, json.dumps(row), ""),
                                                  self.config.github_project, "Build")
                 if total == 100:
                     self.assertEqual(got, ("PVTSSF_status", "option_Build", ""))

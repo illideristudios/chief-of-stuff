@@ -13,7 +13,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
-from forge import _project_option_ids  # noqa: E402
+from forge import project_option_ids  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
@@ -123,7 +123,7 @@ def provision_kanban(forge, config: Kanban | None, dry: bool) -> tuple[str, str]
         else:
             errors = []
             for option in options:
-                _, _, error = _project_option_ids(backlog.run_gh, project, option)
+                _, _, error = project_option_ids(backlog.run_gh, project, option)
                 if error:
                     errors.append(error)
             stage_err = "; ".join(errors)

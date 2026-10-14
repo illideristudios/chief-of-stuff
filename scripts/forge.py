@@ -114,7 +114,7 @@ def _project_fields(gh, project):
     return fields, ""
 
 
-def _project_option_ids(gh, project, value: str | None):
+def project_option_ids(gh, project, value: str | None):
     fields, error = _project_fields(gh, project)
     if error:
         return None, None, error
@@ -192,7 +192,7 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         legacy = old_status is None and single_mark
         wanted = config.status_for(stage)
         if wanted:
-            field_id, option_id, error = _project_option_ids(gh, project, wanted)
+            field_id, option_id, error = project_option_ids(gh, project, wanted)
             if error:
                 return kanban.Sync(ref, stage, delta, error=error)
     project_add = bool(project and not present and wanted is not None)
@@ -233,7 +233,7 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         if present and item_id is None:
             return kanban.Sync(ref, stage, delta, error="GitHub Project item has no readable node ID")
         if field_id is None:
-            field_id, option_id, error = _project_option_ids(gh, project, wanted)
+            field_id, option_id, error = project_option_ids(gh, project, wanted)
             if error:
                 return kanban.Sync(ref, stage, delta, error=error)
         row, error = _gh_json(gh, ["project", "view", str(project.number), "--owner", project.owner,

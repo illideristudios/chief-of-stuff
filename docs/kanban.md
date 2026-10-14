@@ -67,13 +67,13 @@ Project reads refuse truncated item or field metadata, including Projects with m
 Preview all active tracker issues:
 
 ```sh
-python3 scripts/kanban.py --root /path/to/workspace --date YYYY-MM-DD
+python3 scripts/kanban_cli.py --root /path/to/workspace --date YYYY-MM-DD
 ```
 
 Sync a single transition after recording the new tracker stage:
 
 ```sh
-python3 scripts/kanban.py --root /path/to/workspace --date YYYY-MM-DD --issue '#42' --from-stage implement --commit
+python3 scripts/kanban_cli.py --root /path/to/workspace --date YYYY-MM-DD --issue '#42' --from-stage implement --commit
 ```
 
 For an issue that has no stage yet, preview it and replace `--from-stage` with `--initialize`. A commit always names one issue. A completed task is excluded from the bulk preview, but can be selected by `--issue` to replace its numbered board stage with its terminal mark, such as `main`. If a board stage changed after the coordinator last observed it, the updater refuses the write and the coordinator reconciles it with the user. Existing `kind::`, `severity::`, and other unrelated labels survive every move.
