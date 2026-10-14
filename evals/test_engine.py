@@ -196,6 +196,22 @@ class EngineTest(unittest.TestCase):
         self.assertIn("spawn failed", self.db.log(KEY)[-1].message)
         self.cleanup.assert_called_once()
 
+    def test_session_launch_policy_is_refused_not_silently_adapted(self):
+        self.p = policy.parse({
+            "default_workflow": "standard",
+            "policy": {"launch": "session"},
+            "personas": {"builder": {"role": "implements", "model": "example"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"implement": {"persona": "builder"}, "review": {"persona": "critic"}, "merge": {}},
+            "workflows": {"standard": {"start": "implement", "edges": [
+                {"from": "implement", "to": "review"}, {"from": "review", "to": "merge"},
+            ]}},
+        })
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.db.segments(), [])
+        self.assertIn("launch=session is not supported", self.db.log(KEY)[-1].message)
+
     def test_repeated_wait_logs_once_but_a_changed_reason_logs_again(self):
         self.forge.rows[0]["stage"] = "outside"
         self.run_pass()

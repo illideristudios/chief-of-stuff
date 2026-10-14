@@ -40,10 +40,16 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "") -> su
     prepared = command(request, claude_as_profile)
     (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
                                                     "session_id": request.session_id}))
-    with (run_dir / "runner.stderr").open("w") as errors:
-        return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
-                                 request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=errors, env=clean_env(), start_new_session=True)
+    try:
+        with (run_dir / "runner.stderr").open("w") as errors:
+            return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
+                                     request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=errors, env=clean_env(), start_new_session=True)
+    except Exception:
+        # No runner exists to produce started/exit evidence; allow this attempt to be retried.
+        (run_dir / "command.json").unlink(missing_ok=True)
+        (run_dir / "runner.stderr").unlink(missing_ok=True)
+        raise
 
 
 def cancel(process: subprocess.Popen) -> None:

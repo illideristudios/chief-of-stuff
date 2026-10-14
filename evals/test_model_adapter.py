@@ -83,6 +83,20 @@ class ArgvTest(unittest.TestCase):
         self.assertNotIn("--session-id", got)
 
 
+class StartTest(unittest.TestCase):
+    def test_runner_spawn_failure_removes_launch_evidence_and_reraises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            error = OSError("runner spawn failed")
+            with mock.patch.object(claude_adapter, "command", return_value=["/fake"]), \
+                 mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=error):
+                with self.assertRaises(OSError) as raised:
+                    claude_adapter.start(Request(prompt="p", session_id=SID), run_dir)
+            self.assertIs(raised.exception, error)
+            self.assertFalse((run_dir / "command.json").exists())
+            self.assertFalse((run_dir / "runner.stderr").exists())
+
+
 class ClassifyTest(unittest.TestCase):
     """The spike: judge by exit code, `is_error` and parseability together, never by `subtype`."""
 

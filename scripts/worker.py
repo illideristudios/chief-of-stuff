@@ -17,6 +17,7 @@ import make_worktree
 import process_status
 import supervisor
 from model_port import Failure, Request
+from workspace import architecture_document
 
 HEADER = """# Assignment
 
@@ -31,16 +32,22 @@ JOBS = {"implement": "Implement the issue and verify it with tests.",
 _runners: dict[str, Any] = {}
 
 
-def compose(row: Any, title: str, body: str, stage: str, persona: Any) -> str:
-    """Pure assignment from a store row and forge issue, never a peer session's instructions (E3)."""
+def compose(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None) -> str:
+    """Assignment from a store row, forge issue and workspace, never a peer session's instructions (E3)."""
     key = dispatch_prompt._clean("issue key", row.issue_key)
     name = dispatch_prompt._clean("store title", row.title)
     delivery = (f"{dispatch_prompt.COMMITS}\nPut `Closes #{key.rpartition('#')[2]}` in the pull/merge request body "
                 "before reporting done.\n" if stage == "implement" else "")
+    if stage == "fix":
+        delivery = ("Commits: Commit the fixes and verify them with tests, then push the existing request branch "
+                    "before reporting done; do not open a new request. Report its URL and head sha.\n")
+    document = architecture_document(root) if root is not None and stage in ("implement", "fix") else None
+    architecture = f"Architecture: {document}; read it before changing code.\n" if document else ""
     return (f"{HEADER}\nIssue: {key}\nStore title: {name}\nStage: {stage}\n"
             f"Job: {JOBS.get(stage, persona.role)}\nPersona: {persona.role}\n"
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
+            + architecture
             + f"\n## Forge issue\n\n{title}\n\n{body}\n")
 
 
@@ -138,7 +145,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
-    assignment = compose(row, got.issue.title, got.issue.body, stage, actor)
+    assignment = compose(row, got.issue.title, got.issue.body, stage, actor, root=root)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -278,13 +285,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     raise ValueError("incomplete run identity")
                 try:
                     alive = process_status.identity(record["pid"], record["session_id"], host=True)
+                    if alive == record["identity"]:
+                        continue
+                    # The runner may be between wait() and its atomic exit write.
+                    if process_status.identity(record["runner_pid"], record["session_id"]) == record["runner_identity"]:
+                        continue
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
-                    continue
-                if alive == record["identity"]:
-                    continue
-                # The runner may be between wait() and its atomic exit write.
-                if process_status.identity(record["runner_pid"], record["session_id"]) == record["runner_identity"]:
                     continue
                 raise ValueError("missing adapter exit record")
             code = _exit_code(run_dir)

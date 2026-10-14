@@ -99,6 +99,59 @@ class WorkerTest(unittest.TestCase):
         review = worker.compose(self.db.items()[0], "title", "body", "review", self.persona)
         self.assertNotIn(worker.dispatch_prompt.COMMITS, review)
 
+    def test_fix_assignment_pushes_existing_request_before_reporting_done(self):
+        prompt = worker.compose(self.db.items()[0], "title", "body", "fix", self.persona)
+        self.assertIn("push the existing request branch", prompt)
+        self.assertIn("do not open a new request", prompt)
+        self.assertIn("before reporting done", prompt)
+
+    def test_launch_implement_and_fix_receive_workspace_architecture(self):
+        self.p.stages["fix"] = self.p.stages["implement"]
+        (self.root / "CLAUDE.md").write_text(
+            "## Architecture\n- Canonical document: `design/ARCHITECTURE.md`; see `other.md`.\n")
+        # A worker checkout's declaration must not replace the workspace's document.
+        (self.tree / "CLAUDE.md").write_text(
+            "## Architecture\n- Canonical document: `wrong.md`\n")
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.make_worktree, "git", return_value=(0, "work/issue-1-implement-1")), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            for stage in ("implement", "fix"):
+                with self.subTest(stage=stage):
+                    self.launch(stage)
+                    prompt = start.call_args.args[0].prompt
+                    self.assertIn(f"Architecture: {self.root / 'design/ARCHITECTURE.md'}", prompt)
+                    self.assertIn("read it before changing code", prompt)
+                    self.assertNotIn("wrong.md", prompt)
+
+    def test_assignment_omits_architecture_without_a_canonical_document(self):
+        for text in (None, "", "## Coordinator\n- Canonical document: `wrong.md`\n",
+                     "## Architecture\n- Architecture directory: `design/`\n",
+                     "## Architecture\n- Canonical document: not a backticked path\n"):
+            with self.subTest(text=text):
+                if text is not None:
+                    (self.root / "CLAUDE.md").write_text(text)
+                prompt = worker.compose(self.db.items()[0], "title", "body", "implement",
+                                        self.persona, root=self.root)
+                self.assertNotIn("Architecture:", prompt)
+
+    def test_runner_spawn_failure_allows_retry_on_the_same_tree_and_attempt(self):
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+             mock.patch.object(claude_adapter, "command", return_value=["/fake"]), \
+             mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=OSError("spawn failed")):
+            with self.assertRaisesRegex(OSError, "spawn failed"):
+                self.launch()
+        self.assertEqual(self.db.segments(), [])
+        self.assertFalse(self.db.resume(KEY).get("runs"))
+        with mock.patch.object(worker.make_worktree, "build") as rebuild, \
+             mock.patch.object(worker.make_worktree, "git", return_value=(0, "work/issue-1-implement-1")), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch()
+        build.assert_called_once()
+        rebuild.assert_not_called()
+        self.assertEqual(start.call_args.args[0].cwd, str(self.tree))
+
     def test_verification_failure_records_no_segment_or_run(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
@@ -458,6 +511,22 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.process_status, "identity", side_effect=RuntimeError("ps blocked")):
             worker.collect(self.db, self.root, lambda: NOW)
         self.assertIsNone(self.db.segments()[0].ended_at)
+
+    def test_unavailable_runner_view_waits_then_collects_durable_completion(self):
+        run = self.launched()
+        for error in (OSError("ps failed"), RuntimeError("ps blocked")):
+            with self.subTest(error=error):
+                with mock.patch.object(worker.process_status, "identity", side_effect=[None, error]):
+                    worker.collect(self.db, self.root, lambda: NOW)
+                segment = self.db.segments()[-1]
+                self.assertIsNone(segment.ended_at)
+                self.assertIsNone(segment.outcome)
+                self.assertEqual(self.db.log(KEY)[-1].message, f"worker identity unverified: {error}")
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        self.assertEqual(self.db.segments()[-1].outcome, "done")
 
     def test_collect_refuses_evidence_redirected_inside_the_tree(self):
         self.launched()
