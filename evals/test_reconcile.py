@@ -133,14 +133,16 @@ class ReconcileTest(unittest.TestCase):
         again = Segment("review", 2, started_at=NOW - timedelta(minutes=50), ended_at=NOW - timedelta(minutes=40))
         item = replace(Item(), stage="review", review_state="changes_requested")
         for outcome, expected in (("quota", reconcile.Dispatch(KEY, "implement", "builder", 3)),
+                                  ("unknown", reconcile.Dispatch(KEY, "implement", "builder", 3)),
                                   ("failed", reconcile.Escalate(KEY, "retry limit reached for implement"))):
             with self.subTest(outcome=outcome, rework=True):
                 self.assertEqual(self.plan(item, [initial, review, replace(rework, outcome=outcome), again], {"minor": 1}),
                                  [expected])
         self.p = replace(self.p, base=policy.Policy(retry_limit=0))
-        with self.subTest(rework=False):
-            self.assertEqual(self.plan(history=[Segment("implement", outcome="quota")]),
-                             [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        for outcome in ("quota", "unknown"):
+            with self.subTest(outcome=outcome, rework=False):
+                self.assertEqual(self.plan(history=[Segment("implement", outcome=outcome)]),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 2)])
 
     def test_work_starting_at_first_review_end_counts_as_rework(self):
         item = replace(Item(), stage="review", review_state="changes_requested")
