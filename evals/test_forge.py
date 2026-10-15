@@ -832,6 +832,26 @@ class MergeTest(unittest.TestCase):
             21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
         self.assertEqual(len(gh.merges), 1)
 
+    def test_project_mode_merge_accepts_status_without_stage_labels(self):
+        # Project mode stores the stage in Status; stage labels are stripped from the issue.
+        issue = gh_issue(3, "Fix the parser", ["bug"])
+        gh = FakeGh(issues=[issue, gh_issue(4, "Add a flag", ["stage: doing"])],
+                    prs=[tma.pr(21, [tma.review("robin", "APPROVED")])], bodies={21: "Closes #3"},
+                    status={issue["url"]: "Review"})
+        forge.Forge(GH, approver="robin", kanban=BOARD, gh=gh).merge(
+            21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
+        self.assertEqual(len(gh.merges), 1)
+
+    def test_project_mode_merge_refuses_when_status_moved(self):
+        issue = gh_issue(3, "Fix the parser", ["bug"])
+        gh = FakeGh(issues=[issue, gh_issue(4, "Add a flag", ["stage: doing"])],
+                    prs=[tma.pr(21, [tma.review("robin", "APPROVED")])], bodies={21: "Closes #3"},
+                    status={issue["url"]: "Doing"})
+        with self.assertRaisesRegex(forge.ForgeError, "left its stage"):
+            forge.Forge(GH, approver="robin", kanban=BOARD, gh=gh).merge(
+                21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
+        self.assertEqual(gh.merges, [])
+
     def test_a_head_moved_after_verification_fails_the_pinned_merge(self):
         gh = tmr.github_gh([21])
         landed = []

@@ -547,13 +547,18 @@ class Forge:
             if self.kanban and self.kanban.human_review_label in got.issue.labels:
                 raise ForgeError(f"{issue_key} is held for human review on the forge")
             if stage_mark is not None and self.kanban:
-                try:  # conflicting stage labels are refused here as the snapshot decode refuses them
-                    observed = self.kanban.stage_for_label(got.issue.labels)
+                try:  # same decode as snapshot: Project Status when configured, else labels
+                    statuses = None
+                    if self.kanban.github_project is not None and self.github:
+                        statuses, error = project_items(self.gh, self.kanban.github_project)
+                        if error:
+                            raise ForgeError(f"project status: {error}")
+                    observed = self._stage(got.issue, statuses)
                 except ValueError as exc:
                     raise ForgeError(f"{issue_key} left its stage since the policy check: {exc}") from exc
                 if stage_mark == "" and observed:
                     raise ForgeError(f"{issue_key} left its stage since the policy check: a mapped stage label appeared")
-                if stage_mark and stage_mark.casefold() not in {n.casefold() for n in got.issue.labels}:
+                if stage_mark and (self.mark_for_stage(observed) or "").casefold() != stage_mark.casefold():
                     raise ForgeError(f"{issue_key} left its stage since the policy check: {stage_mark} is gone")
         evidence = f"{mark} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
         if not commit:
