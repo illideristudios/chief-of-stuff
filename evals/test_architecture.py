@@ -293,6 +293,14 @@ def migration_paths() -> dict[str, Path]:
             for p in root.rglob("*.py")}
 
 
+def circle_target(name: str) -> str:
+    """Map an import name to a circle-graph key; migrations keep their path form."""
+    raw = name.removeprefix("scripts.")
+    if raw == "migrations" or raw.startswith("migrations."):
+        return raw.replace(".", "/")
+    return raw.split(".")[0]
+
+
 def circle_graph() -> dict[str, set[str]]:
     """Import graph over top-level scripts/, store migrations, and root launchers.
 
@@ -303,12 +311,12 @@ def circle_graph() -> dict[str, set[str]]:
     targets = {p.stem for p in SCRIPTS.glob("*.py")} | LAUNCHERS | set(migrations)
     graph: dict[str, set[str]] = {}
     for path in SCRIPTS.glob("*.py"):
-        graph[path.stem] = ({script(name) for name in imports(path)} & targets) - {path.stem}
+        graph[path.stem] = ({circle_target(name) for name in imports(path)} & targets) - {path.stem}
     for key, path in migrations.items():
-        graph[key] = ({script(name) for name in imports(path)} & targets) - {key}
+        graph[key] = ({circle_target(name) for name in imports(path)} & targets) - {key}
     for stem in LAUNCHERS:
         path = ROOT / f"{stem}.py"
-        graph[stem] = ({script(name) for name in imports(path)} & targets) - {stem}
+        graph[stem] = ({circle_target(name) for name in imports(path)} & targets) - {stem}
     return graph
 
 
@@ -370,6 +378,12 @@ class DependencyRuleTest(unittest.TestCase):
     def test_a_migration_import_of_a_driver_is_outward(self) -> None:
         graph = {"migrations/env": {"process_status"}, "process_status": set()}
         self.assertEqual(outward_imports(graph), {"migrations/env→process_status"})
+
+    def test_circle_target_keeps_migration_path_keys(self) -> None:
+        self.assertEqual(circle_target("migrations.env"), "migrations/env")
+        self.assertEqual(circle_target("scripts.migrations.versions.0001_initial"),
+                         "migrations/versions/0001_initial")
+        self.assertEqual(circle_target("forge.client"), "forge")
 
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
