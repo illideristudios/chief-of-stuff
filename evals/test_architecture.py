@@ -211,6 +211,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
         "audit_tasks", "inbox", "flow",
+        "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }
 CIRCLE_RANK = {"entities": 0, "use_cases": 1, "adapters": 2, "drivers": 3}
@@ -260,6 +261,8 @@ OUTWARD_IMPORTS = frozenset({
 
 
 LAUNCHERS = frozenset({"chief_of_stuff", "start_coordinator"})
+# §4 Drivers: JSON hook manifests (not importable modules; still in the circle inventory).
+DRIVER_HOOKS = frozenset({"hooks/hooks.json", "guard/hooks/hooks.json"})
 
 
 def circle_graph() -> dict[str, set[str]]:
@@ -296,11 +299,13 @@ def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
 
 
 class DependencyRuleTest(unittest.TestCase):
-    def test_every_script_and_launcher_is_in_exactly_one_circle(self) -> None:
-        scripts = {p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS)
+    def test_every_script_launcher_and_hook_is_in_exactly_one_circle(self) -> None:
+        inventory = {p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS) | set(DRIVER_HOOKS)
         listed = {name for names in CIRCLES.values() for name in names}
-        self.assertEqual(sorted(scripts - listed), [], "unclassified module")
-        self.assertEqual(sorted(listed - scripts), [], "circle entry with no file")
+        self.assertEqual(sorted(inventory - listed), [], "unclassified module")
+        self.assertEqual(sorted(listed - inventory), [], "circle entry with no file")
+        for path in DRIVER_HOOKS:
+            self.assertTrue((ROOT / path).is_file(), path)
         overlap = [name for name, n in ((n, sum(n in s for s in CIRCLES.values())) for n in listed) if n > 1]
         self.assertEqual(overlap, [])
 
