@@ -158,7 +158,8 @@ class ExecutorTest(unittest.TestCase):
         board = tf.Kanban(stages=("stage: doing", "stage: review"), human_review_label="needs human",
                           stage_map={"implement": 0, "review": 1}, terminal_stages=("merge",))
         self.forge = forge.Forge(tf.GH, kanban=board, gh=self.gh)
-        self.gh.issues[3]["labels"] = [{"name": "bug"}]
+        # Terminal stages leave a literal mark (the stage name); a blank stage has none.
+        self.gh.issues[3]["labels"] = [{"name": "bug"}] + ([{"name": stage}] if stage else [])
         self.db.upsert_item(self.key, stage=stage)
         if not stage:
             self.p.workflows["standard"] = policy.Workflow("standard", "merge")
@@ -168,12 +169,14 @@ class ExecutorTest(unittest.TestCase):
     def test_a_terminal_stage_moved_to_implementation_after_planning_refuses(self):
         self.at_unlabelled_merge_stage()
         self.gh.issues[3]["labels"] = [{"name": "stage: doing"}]
-        self.refused("left its stage")
+        self.refused("dispatch required")
 
-    def test_a_terminal_stage_moved_to_completed_review_after_planning_refuses(self):
+    def test_a_terminal_stage_moved_to_completed_review_after_planning_keeps_merge_when_eligible(self):
+        # A different mapped mark adopts the forge stage; review + approved + ready is still a Merge.
         self.at_unlabelled_merge_stage()
         self.gh.issues[3]["labels"] = [{"name": "stage: review"}]
-        self.refused("left its stage")
+        self.assertTrue(self.execute())
+        self.assertEqual(len(self.gh.merges), 1)
 
     def test_a_blank_merge_stage_with_a_stage_label_added_after_planning_refuses(self):
         self.at_unlabelled_merge_stage("")

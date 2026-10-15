@@ -319,7 +319,9 @@ class Forge:
         """The label merge verifies for a stage; '' when the stage has none; None without kanban."""
         if self.kanban is None:
             return None
-        return self.kanban.label_for(stage) if stage in self.kanban.stage_map else ""
+        if stage in self.kanban.stage_map or stage in self.kanban.terminal_stages:
+            return self.kanban.label_for(stage)
+        return ""
 
     # reads
     def issues(self, state: str = backlog.OPEN, *, limit: int | None = None) -> backlog.Fetch:
@@ -413,7 +415,12 @@ class Forge:
                                 "forge_state": "open" if issue.state == backlog.OPEN else "closed",
                                 "stage_mark": None}
         if self.kanban is not None:
-            snap["stage"] = self._stage(issue)
+            statuses: dict[str, str | None] | None = None
+            if self.kanban.github_project is not None and self.github:
+                statuses, error = project_items(self.gh, self.kanban.github_project)
+                if error:
+                    raise ForgeError(f"project status: {error}")
+            snap["stage"] = self._stage(issue, statuses)
             snap["human_review"] = self.kanban.human_review_label in issue.labels
             snap["stage_mark"] = self.mark_for_stage(snap["stage"])
         if self.approver:
@@ -546,7 +553,7 @@ class Forge:
                     raise ForgeError(f"{issue_key} left its stage since the policy check: {exc}") from exc
                 if stage_mark == "" and observed:
                     raise ForgeError(f"{issue_key} left its stage since the policy check: a mapped stage label appeared")
-                if stage_mark and stage_mark not in got.issue.labels:
+                if stage_mark and stage_mark.casefold() not in {n.casefold() for n in got.issue.labels}:
                     raise ForgeError(f"{issue_key} left its stage since the policy check: {stage_mark} is gone")
         evidence = f"{mark} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
         if not commit:
