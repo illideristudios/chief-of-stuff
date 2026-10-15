@@ -15,6 +15,7 @@ from pathlib import Path
 
 import backlog
 import dispatch_prompt
+import forge
 import git_trees
 import git_view
 import kanban
@@ -413,7 +414,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     hold_error = ""
     if status == "human_review" and ref:
         if settings.kanban:
-            error = kanban.add_human_hold(ref, cfg.backlog, settings.kanban)
+            error = forge.add_human_hold(ref, cfg.backlog, settings.kanban)
             if error:
                 hold_error = error
                 errors.append(f"review hold: {error}")

@@ -18,12 +18,12 @@ import init_workspace as init  # noqa: E402
 import install_model_guidance as guidance  # noqa: E402
 import engine  # noqa: E402
 import issue_gate  # noqa: E402
-import kanban  # noqa: E402
+import forge  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 from settings import _models, load as load_settings, load_policy, workflow_stages  # noqa: E402
 
 
-def _engine_ready_kanban(stages: list[str], hold: str, *, project: bool = False,
+def _engine_ready_kanban(stages: list[str], hold: str, *, project: bool | list[str] = False,
                          terminal: list[str] | None = None) -> str:
     """Existing settings the engine can start: every shipped workflow stage is mapped (or terminal)."""
     mapping = "\n".join(f"{s} = {min(i, len(stages) - 1)}" for i, s in enumerate(workflow_stages(load_policy())))
@@ -31,7 +31,8 @@ def _engine_ready_kanban(stages: list[str], hold: str, *, project: bool = False,
             + (f'terminal_stages = {json.dumps(terminal)}\n' if terminal else "")
             + f'[kanban.map]\n{mapping}\n')
     if project:
-        text += '[kanban.github_project]\nowner = "owner"\nnumber = 1\n'
+        options = f"options = {json.dumps(project)}\n" if isinstance(project, list) else ""
+        text += f'[kanban.github_project]\nowner = "owner"\nnumber = 12\n{options}'
     return text
 
 
@@ -93,8 +94,8 @@ class InitWorkspaceTest(unittest.TestCase):
             code, _, err = self.run_init()
             self.assertEqual(code, 0, err)
             config = load_settings(self.root, "chief-of-stuff.toml").kanban
-            self.assertEqual(labels, [*config.stages, config.human_review_label])
-            result = kanban.sync_github(init.backlog.IssueRef("owner/repo", 1),
+            self.assertEqual(labels, [config.human_review_label, *config.stages])
+            result = forge._sync_github(init.backlog.IssueRef("owner/repo", 1),
                                         config, "plan", gh=gh, initialize=True, commit=True)
         self.assertTrue(result.done, result.error)
         self.assertEqual(issue_labels, ["stage: plan"])
@@ -209,11 +210,57 @@ class InitWorkspaceTest(unittest.TestCase):
         with mock.patch.object(init.backlog, "run_gh", gh):
             code, out, err = self.run_init("--github-repo", "owner/repo")
         self.assertEqual(code, 0, err)
-        self.assertEqual(labels, ["00 - PLAN", "!! - HUMAN REVIEW REQUIRED"])
+        self.assertEqual(labels, ["!! - HUMAN REVIEW REQUIRED", "00 - PLAN"])
         self.assertIn("hold label !! - HUMAN REVIEW REQUIRED created on owner/repo", out)
 
-    def test_gitlab_provisions_configured_stage_and_hold_labels_not_terminal_stages(self):
-        # terminal_stages are workflow names, not forge labels — init must not create "main".
+        self.assertEqual(labels, ["!! - HUMAN REVIEW REQUIRED", "00 - PLAN"])
+        self.assertIn("hold label !! - HUMAN REVIEW REQUIRED created on owner/repo", out)
+
+    def test_init_provisions_stage_and_terminal_labels_on_both_forges(self):
+        (self.root / "chief-of-stuff.toml").write_text(
+            _engine_ready_kanban(["00 - PLAN"], "HOLD", terminal=["main"]))
+        for args in (("--github-repo", "owner/repo"),
+                     ("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app")):
+            with self.subTest(args=args), mock.patch.object(init.backlog, "ensure_labels", return_value=[]) as ensure:
+                code, _, err = self.run_init(*args)
+                (self.root / "CLAUDE.md").unlink()
+                self.assertEqual(code, 0, err)
+                names = [name for c in ensure.call_args_list for name in c.args[1]]
+                self.assertEqual(names, ["HOLD", "00 - PLAN", "main"])
+
+    def test_init_checks_project_options_including_terminal_and_reports_missing_main(self):
+        (self.root / "chief-of-stuff.toml").write_text(
+            _engine_ready_kanban(["00 - PLAN"], "HOLD", project=["Planning"], terminal=["main"]))
+        calls = []
+
+        def gh(args):
+            calls.append(args)
+            if args[:2] == ["project", "field-list"]:
+                return 0, json.dumps({"fields": [{"id": "F", "name": "Status", "options": [
+                    {"id": "P", "name": "Planning"}]}]}), ""
+            raise AssertionError(args)
+
+        with mock.patch.object(init.backlog, "ensure_labels", return_value=[]) as ensure, \
+             mock.patch.object(init.backlog, "run_gh", gh):
+            code, _, err = self.run_init("--github-repo", "owner/repo")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([name for c in ensure.call_args_list for name in c.args[1]], ["HOLD"])
+        self.assertTrue(calls)
+        self.assertIn("main", err)
+        self.assertIn("create", err)
+
+    def test_dry_run_names_terminal_marks_in_label_and_project_modes(self):
+        path = self.root / "chief-of-stuff.toml"
+        for project in (False, True):
+            path.write_text(_engine_ready_kanban(["00 - PLAN"], "HOLD", project=["Planning"] if project else None,
+                                                 terminal=["main"]))
+            with self.subTest(project=project), mock.patch.object(init.backlog, "run_gh") as gh:
+                code, out, err = self.run_init("--dry-run", "--github-repo", "owner/repo")
+            self.assertEqual(code, 0, err)
+            self.assertIn("main", out)
+            gh.assert_not_called()
+
+    def test_gitlab_provisions_the_configured_token_env_labels_in_order(self):
         (self.root / "chief-of-stuff.toml").write_text(
             _engine_ready_kanban(["PLAN", "BUILD"], "HOLD", terminal=["main"]))
         labels, created = ["BUILD"], []
@@ -232,24 +279,25 @@ class InitWorkspaceTest(unittest.TestCase):
             code, _, err = self.run_init("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app",
                                          "--gitlab-token-env", "TEAM_GITLAB_TOKEN")
         self.assertEqual(code, 0, err)
-        self.assertEqual(created, ["PLAN", "HOLD"])
-        self.assertNotIn("main", labels)
+        self.assertEqual(created, ["HOLD", "PLAN", "main"])
 
-    def test_existing_project_mode_settings_refuse_until_the_engine_reads_project_status(self):
-        # engine.main refuses [kanban.github_project] (#627), so a preserved Project-mode file is not engine-ready.
-        (self.root / "chief-of-stuff.toml").write_text(
-            _engine_ready_kanban(["PLAN"], "HOLD", project=True, terminal=["main"]))
+    def test_existing_project_mode_settings_are_kept_and_init_succeeds(self):
+        # The engine reads Project Status snapshots now, so a preserved Project-mode file is engine-ready.
+        path = self.root / "chief-of-stuff.toml"
+        path.write_text(_engine_ready_kanban(["PLAN"], "HOLD", project=True, terminal=["main"]))
+        before = path.read_text()
         code, _, err = self.run_init()
-        self.assertEqual(code, 1)
-        self.assertIn("github_project", err)
-        self.assertFalse((self.root / "CLAUDE.md").exists())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(path.read_text(), before)
+        self.assertTrue((self.root / "CLAUDE.md").exists())
 
     def test_a_hold_label_the_forge_refuses_is_reported_and_init_still_succeeds(self):
         (self.root / "chief-of-stuff.toml").write_text(_engine_ready_kanban(["00 - PLAN"], "HOLD"))
         with mock.patch.object(init.backlog, "token", return_value=""):
             code, out, err = self.run_init("--gitlab-host", "https://labs.example.test", "--gitlab-project", "team/app")
         self.assertEqual(code, 0)
-        self.assertIn("kanban labels not created on team/app", err)
+        self.assertIn("hold label not created on team/app", err)
+        self.assertIn("stage label not created on team/app", err)
 
     def test_dry_run_prints_the_hold_label_it_would_create(self):
         (self.root / "chief-of-stuff.toml").write_text(

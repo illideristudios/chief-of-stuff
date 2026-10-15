@@ -345,6 +345,13 @@ merge = 4
 
 
 class KanbanSettingsTest(unittest.TestCase):
+    def test_terminal_stages_are_unique_safe_managed_labels(self):
+        # Forges compare label names case-insensitively, so a case-only variant collides too.
+        for names in ('["main", "main"]', '["!! - HUMAN REVIEW REQUIRED"]', '["main,done"]', '["00 - PLAN"]',
+                      '["main", "Main"]', '["!! - human review required"]', '["00 - plan"]'):
+            with self.subTest(names=names), self.assertRaisesRegex(st.SettingsError, "terminal_stages"):
+                self.load(KANBAN.replace('terminal_stages = ["main"]', f'terminal_stages = {names}'))
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -363,7 +370,19 @@ class KanbanSettingsTest(unittest.TestCase):
         self.assertEqual(cfg.label_for("fix"), "05 - FIX")
         self.assertTrue(cfg.holds("triage"))
         self.assertFalse(cfg.holds("review"))
-        self.assertIsNone(cfg.label_for("main"))
+        # Terminal stages leave a forge mark named like the stage so a rebuild can round-trip (#627).
+        self.assertEqual(cfg.label_for("main"), "main")
+
+    def test_stage_labels_round_trip_case_insensitively(self):
+        cfg = self.load(KANBAN).kanban
+        for label, stage in (("Main", "main"), ("03 - build", "implement")):
+            with self.subTest(label=label):
+                self.assertEqual(cfg.stage_for_label((label, "kind::code")), stage)
+
+    def test_different_stage_labels_are_refused_regardless_of_case(self):
+        cfg = self.load(KANBAN).kanban
+        with self.assertRaisesRegex(ValueError, "more than one stage"):
+            cfg.stage_for_label(("Main", "03 - build"))
 
     def test_invalid_mapping_is_refused(self):
         for bad in (
@@ -389,9 +408,17 @@ options = ["Plan", "Plan Review", "Test", "Build", "Review", "Fix"]
 
     def test_invalid_github_project_is_refused(self):
         for extra in ('owner = ""\nnumber = 7', 'owner = "org"\nnumber = 0',
-                      'owner = "org"\nnumber = 7\noptions = ["one"]'):
+                      'owner = "org"\nnumber = 7\noptions = ["one"]',
+                      'owner = "org"\nnumber = 7\noptions = ["Plan", "Plan", "Test", "Build", "Review", "Fix"]'):
             with self.subTest(extra=extra), self.assertRaises(st.SettingsError):
                 self.load(KANBAN + "\n[kanban.github_project]\n" + extra + "\n")
+
+    def test_project_shorthand_owner_number_is_accepted(self):
+        text = KANBAN.replace('terminal_stages = ["main"]',
+                              'terminal_stages = ["main"]\nproject = "example-org/7"')
+        cfg = self.load(text).kanban.github_project
+        self.assertEqual((cfg.owner, cfg.number, cfg.field), ("example-org", 7, "Status"))
+        self.assertEqual(cfg.options[0], "00 - PLAN")
 
 
 MODELS = '''[models.deep]

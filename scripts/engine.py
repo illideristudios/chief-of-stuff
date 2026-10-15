@@ -49,7 +49,8 @@ def _findings(store: Any, key: str, history: list) -> dict[str, int] | None:
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
-    result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None, commit=True)
+    result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None,
+                               initialize=not expected, commit=True)
     if not result.ok:
         raise ForgeError(result.error)
     fields: dict[str, Any] = {"stage": stage}
@@ -180,8 +181,6 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"{refused.refused}\n{refused.setup}")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
-            if config.kanban.github_project is not None:
-                raise ValueError("[kanban.github_project] requires Project Status snapshot reads (#627)")
             policies = settings.load_policy()
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
             unmapped = sorted(set(settings.workflow_stages(policies))

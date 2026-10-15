@@ -35,7 +35,7 @@ COMMANDS = {
     "board": "scripts/render_board.py",
     "inbox": "scripts/inbox.py",
     "backlog": "scripts/backlog.py",
-    "kanban": "scripts/kanban.py",
+    "kanban": "scripts/kanban_cli.py",
     "notify": "scripts/notify_service.py",
     "health": "scripts/probe_health.py",
     "pages": "scripts/pages.py",

@@ -47,7 +47,7 @@ class FakeForge:
     def snapshots(self):
         return [dict(row) for row in self.rows]
 
-    def write_stage(self, number, stage, expected=None, commit=False):
+    def write_stage(self, number, stage, expected=None, commit=False, initialize=False):
         self.writes.append((number, stage, expected, commit))
         next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))["stage"] = stage
         return SimpleNamespace(ok=True, done=True, error="")
@@ -236,6 +236,14 @@ class EngineTest(unittest.TestCase):
         self.findings(counts={"minor": 1})
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
         self.assertEqual(self.forge.writes[-1], (1, "implement", "review", True))
+
+    def test_the_engine_initializes_only_when_the_store_has_no_prior_stage(self):
+        for prior, initialize in (("", True), ("review", False)):
+            with self.subTest(prior=prior):
+                forge = mock.Mock()
+                forge.write_stage.return_value = SimpleNamespace(ok=True, error="")
+                engine._write_stage(forge, mock.Mock(), KEY, "implement", prior)
+                self.assertIs(forge.write_stage.call_args.kwargs["initialize"], initialize)
 
     def test_stage_write_failure_is_logged_and_retried_before_planning(self):
         self.run_pass()
@@ -495,17 +503,14 @@ class MainTest(unittest.TestCase):
         passed.assert_not_called()
         self.assertIn("plan", errors.getvalue())
 
-    def test_github_project_refuses_startup_until_project_status_is_read(self):
+    def test_github_project_starts_now_that_snapshots_read_project_status(self):
         path = self.root / "settings.toml"
         path.write_text(path.read_text() + '\n[kanban.github_project]\nowner = "example"\nnumber = 3\n')
-        errors = io.StringIO()
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
-             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
-            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 2)
-        passed.assert_not_called()
-        self.assertFalse((self.root / "store.db").exists())
-        self.assertIn("[kanban.github_project]", errors.getvalue())
-        self.assertIn("#627", errors.getvalue())
+             mock.patch.object(engine, "run_pass") as passed:
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        passed.assert_called_once()
+        self.assertTrue((self.root / "store.db").exists())
 
     def test_default_interval_is_sixty_seconds(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

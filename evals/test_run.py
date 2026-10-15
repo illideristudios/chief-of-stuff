@@ -995,7 +995,7 @@ class GitIsNotANewFileTest(unittest.TestCase):
 class AllowedToolsTest(unittest.TestCase):
     def test_pinned_coordinator_scripts_are_runnable(self) -> None:
         allowed = " ".join(run.ALLOWED)
-        for script in ("probe_health.py", "audit_tasks.py", "backlog.py", "inbox.py", "kanban.py", "process_status.py"):
+        for script in ("probe_health.py", "audit_tasks.py", "backlog.py", "inbox.py", "kanban_cli.py", "process_status.py"):
             self.assertIn(script, allowed)
         self.assertNotIn("Bash(git", allowed)
         self.assertNotIn("Bash(curl", allowed)
