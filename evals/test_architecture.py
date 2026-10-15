@@ -259,13 +259,22 @@ OUTWARD_IMPORTS = frozenset({
 })
 
 
+LAUNCHERS = frozenset({"chief_of_stuff", "start_coordinator"})
+
+
 def circle_graph() -> dict[str, set[str]]:
-    """Import graph over scripts/ plus the two root launchers named in §4."""
-    graph = import_graph(SCRIPTS)
-    stems = set(graph)
-    for stem in ("chief_of_stuff", "start_coordinator"):
+    """Import graph over top-level scripts/ plus the two root launchers named in §4.
+
+    Launchers are both sources and targets: an Entity that imports `chief_of_stuff`
+    must count as outward. Nested `scripts/migrations/` stays under store (§4), not here.
+    """
+    targets = {p.stem for p in SCRIPTS.glob("*.py")} | LAUNCHERS
+    graph: dict[str, set[str]] = {}
+    for path in SCRIPTS.glob("*.py"):
+        graph[path.stem] = ({script(name) for name in imports(path)} & targets) - {path.stem}
+    for stem in LAUNCHERS:
         path = ROOT / f"{stem}.py"
-        graph[stem] = ({script(name) for name in imports(path)} & stems) - {stem}
+        graph[stem] = ({script(name) for name in imports(path)} & targets) - {stem}
     return graph
 
 
@@ -288,24 +297,31 @@ def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
 
 class DependencyRuleTest(unittest.TestCase):
     def test_every_script_and_launcher_is_in_exactly_one_circle(self) -> None:
-        scripts = {p.stem for p in SCRIPTS.glob("*.py")} | {"chief_of_stuff", "start_coordinator"}
+        scripts = {p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS)
         listed = {name for names in CIRCLES.values() for name in names}
         self.assertEqual(sorted(scripts - listed), [], "unclassified module")
         self.assertEqual(sorted(listed - scripts), [], "circle entry with no file")
         overlap = [name for name, n in ((n, sum(n in s for s in CIRCLES.values())) for n in listed) if n > 1]
         self.assertEqual(overlap, [])
 
+    def test_nested_scripts_are_only_store_migrations(self) -> None:
+        # §4 places migrations with store (adapters); they are not separate circle stems.
+        nested = sorted(p.relative_to(SCRIPTS).as_posix()
+                        for p in SCRIPTS.rglob("*.py") if p.parent != SCRIPTS)
+        self.assertTrue(nested, "expected scripts/migrations/")
+        self.assertTrue(all(path.startswith("migrations/") for path in nested), nested)
+
     def test_inward_to_outward_imports_match_the_known_list(self) -> None:
         # §5: fail on a new outward import; the allowlist may only shrink.
         self.assertEqual(outward_imports(), set(OUTWARD_IMPORTS))
 
     def test_the_outward_check_sees_an_inner_import_of_an_outer_module(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            Path(tmp, "tracker.py").write_text("import forge\n", encoding="utf-8")
-            Path(tmp, "forge.py").write_text("", encoding="utf-8")
-            # Local CIRCLE override: reuse ranks via a one-off graph + MODULE_CIRCLE names.
-            graph = {"tracker": {"forge"}, "forge": set()}
-            self.assertEqual(outward_imports(graph), {"tracker→forge"})
+        graph = {"tracker": {"forge"}, "forge": set()}
+        self.assertEqual(outward_imports(graph), {"tracker→forge"})
+
+    def test_the_outward_check_sees_an_import_of_a_root_launcher(self) -> None:
+        graph = {"tracker": {"chief_of_stuff"}, "chief_of_stuff": set()}
+        self.assertEqual(outward_imports(graph), {"tracker→chief_of_stuff"})
 
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
