@@ -15,10 +15,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-import forge
-import settings
 import shell_setup
-from workspace import settings_path
 
 RELEASE = Path(__file__).resolve().parent.parent
 
@@ -46,15 +43,6 @@ def atomic_write(path: Path, data: bytes, mode: int | None = None):
 
 def state_dir(root: Path) -> Path:
     return root.resolve() / ".chief-of-stuff"
-
-
-def workspace_forge(root: Path) -> tuple[str, settings.Settings, forge.Forge | None]:
-    """CLAUDE.md text, settings, and the forge for this workspace (or None when there is no Backlog)."""
-    claude = root / "CLAUDE.md"
-    text = claude.read_text() if claude.is_file() else ""
-    config = settings.load(root, settings_path(text))
-    source = forge.for_workspace(root, approver=config.workflow.approver or "", kanban=config.kanban)
-    return text, config, source
 
 
 @contextmanager

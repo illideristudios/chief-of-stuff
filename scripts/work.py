@@ -8,8 +8,8 @@ import sys
 from pathlib import Path
 
 import issue_gate
+import startup
 import store_access
-import supervisor
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -22,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     root = args.root.resolve()
     try:
-        _, _, source = supervisor.workspace_forge(root)
+        _, _, source = startup.workspace_forge(root)
         if source is None:
             result = issue_gate.start(None, None, args.title)
         elif not args.commit:  # a preview writes nothing, so it never opens or migrates the store

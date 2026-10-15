@@ -45,6 +45,7 @@ DRAWS_NOTHING = (
     "performance",
     "performance_report",
     "supervisor",
+    "startup",
     "slots",
     "reconcile",
     "cleanup",

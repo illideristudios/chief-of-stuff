@@ -217,6 +217,17 @@ class BasePythonTest(unittest.TestCase):
         result = subprocess.run([sys.executable, "-c", code, str(scripts)], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_workspace_forge_lives_on_startup_not_supervisor(self):
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        if str(scripts) not in sys.path:
+            sys.path.insert(0, str(scripts))
+        import startup
+        import supervisor
+        self.assertTrue(hasattr(startup, "workspace_forge"))
+        self.assertFalse(hasattr(supervisor, "workspace_forge"))
+        self.assertNotIn("forge", supervisor.__dict__)
+        self.assertNotIn("settings", supervisor.__dict__)
+
 
 class ManifestTest(unittest.TestCase):
     def test_marketplace_version_matches_the_plugin_manifest(self):

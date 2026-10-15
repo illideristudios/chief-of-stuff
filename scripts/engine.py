@@ -20,6 +20,7 @@ import policy
 import reconcile
 import settings
 import slots
+import startup
 import store_access
 import supervisor
 from forge_port import ForgeError
@@ -175,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     try:
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
-            text, config, source = supervisor.workspace_forge(root)
+            text, config, source = startup.workspace_forge(root)
             if source is None:
                 refused = issue_gate.start(None, None, "")
                 raise ValueError(f"{refused.refused}\n{refused.setup}")
