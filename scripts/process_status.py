@@ -70,6 +70,32 @@ def process_exists(pid: int) -> bool:
         return False
 
 
+def identity(pid: int, session_id: str, *, host: bool = False) -> str | None:
+    """A live process's birth time, only when its command carries this run's session id (#53, #551).
+
+    An unavailable process view raises: it must never count as verified or as proof of completion.
+    """
+    if not process_exists(pid):
+        return None
+    try:
+        probe = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "stat=,lstart=,command="],
+                               capture_output=True, text=True, timeout=3)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ps timed out verifying worker identity") from exc
+    if probe.returncode and not probe.stdout.strip():
+        if not process_exists(pid):
+            return None
+        raise RuntimeError("ps cannot verify worker identity")
+    fields = probe.stdout.strip().split(None, 6)
+    if len(fields) != 7:
+        raise RuntimeError("ps returned no worker identity")
+    if fields[0].startswith("Z") or session_id not in fields[6].split():
+        return None
+    if host and "-lic" in fields[6].split()[:3]:
+        return None  # shell setup is not a started host; wait for its exec
+    return " ".join(fields[1:6])
+
+
 def pidfile_runs(trees: Path) -> list[tuple[Path, int, str]]:
     """(worktree, pid, task) from every readable pid file, live pid or not: the one parser of the pid files. `one_shot_runs`
     keeps the live ones; adoption (#99) inspects the rest. The file is untrusted: opened without blocking or following a

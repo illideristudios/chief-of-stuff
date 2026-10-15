@@ -56,6 +56,12 @@ DRAWS_NOTHING = (
     "reconcile",
     "cleanup",
     "engine",
+    "worker",
+    "guard_commands",  # Entities: pure shell command gate judgements.
+    "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
+    "guard_binding",  # Frameworks and Drivers: launch env and plugin paths.
+    "worker_guard",  # Frameworks and Drivers: command hook JSON and store access.
+    "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
     "work",
 )
 

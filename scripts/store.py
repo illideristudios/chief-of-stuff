@@ -17,7 +17,7 @@ from typing import Any, Iterator
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, select, update
+from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, delete, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -208,6 +208,19 @@ class Store:
                 if v is not None}
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
+
+    def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
+        """Complete only an existing open segment, without altering its start or actor."""
+        with self.session() as s:
+            s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                           Segment.attempt == attempt, Segment.ended_at.is_(None))
+                      .values(ended_at=ended_at, outcome=outcome))
+
+    def drop_segment(self, issue_key: str, stage: str, attempt: int) -> None:
+        """Remove a segment that never started (a reservation whose launch failed)."""
+        with self.session() as s:
+            s.execute(delete(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                            Segment.attempt == attempt))
 
     def segments(self, issue_key: str | None = None) -> list[Segment]:
         stmt = select(Segment).order_by(Segment.id)

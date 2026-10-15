@@ -118,6 +118,13 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement", outcome="failed")]),
                          [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
+    def test_quota_and_unknown_outcomes_do_not_spend_the_retry_budget(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=0))
+        for outcome in ("quota", "unknown"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(self.plan(history=[Segment("implement", outcome=outcome)]),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+
     def test_work_starting_at_first_review_end_counts_as_rework(self):
         item = replace(Item(), stage="review", review_state="changes_requested")
         history = [Segment("implement", started_at=NOW - timedelta(hours=6),
@@ -233,6 +240,15 @@ class ReconcileTest(unittest.TestCase):
     def test_policy_satisfied_work_merges_without_an_interrupt_or_slot(self):
         item = replace(Item(), stage="review", review_state="approved", merge_state="ready")
         self.assertEqual(self.plan(item, [Segment("review")], {}, slots=0), [reconcile.Merge(KEY)])
+
+    def test_work_that_ended_after_the_review_started_was_not_reviewed(self):
+        # Overlap: the segment started before the review but ended after it began, so the review never saw it.
+        item = replace(Item(), stage="review", review_state="approved", merge_state="ready")
+        history = [Segment("implement", started_at=NOW - timedelta(hours=3), ended_at=NOW - timedelta(minutes=30)),
+                   Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW - timedelta(minutes=10))]
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+        history[0] = replace(history[0], ended_at=history[1].started_at)
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Merge(KEY)])
 
     def test_completed_review_without_forge_approval_merges(self):
         history = [Segment("implement"), Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)]

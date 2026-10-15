@@ -6,6 +6,7 @@ The guard is a rail, not a sandbox: engine merge verification remains the author
 """
 from __future__ import annotations
 
+from fnmatch import fnmatchcase
 from pathlib import PurePosixPath
 import re
 import shlex
@@ -218,7 +219,9 @@ def _push_denied(args: list[str], protected: tuple[str, ...]) -> bool:
         return True
     for ref in positional[1:]:
         destination = ref.lstrip("+").rsplit(":", 1)[-1].removeprefix("refs/heads/")
-        if not destination or destination in {*protected, "HEAD"} or any(c in destination for c in "*?[]~^"):
+        # Protected names may be forge wildcards such as release/*.
+        if (not destination or destination == "HEAD" or any(c in destination for c in "*?[]~^")
+                or any(fnmatchcase(destination, pattern) for pattern in protected)):
             return True
     return False
 

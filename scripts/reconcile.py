@@ -98,11 +98,14 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
     return any(counts.get(severity, 0) > 0 for severity in blocking)
 
 
+_BACKOFF = frozenset({"quota", "unknown"})
+
+
 def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     if stage == "review":
         return Review(key, attempt)
-    rounds = attempt - 1
+    rounds = attempt - 1 - sum(s.stage == stage and s.outcome in _BACKOFF for s in history)
     if any(e.target == stage for e in workflow.next("review")):
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)
@@ -110,7 +113,8 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
             # Attempts started at or after the first completed review are rework.
             initial = max((s.attempt for s in history if s.stage == stage
                            and (not s.started_at or _time(s.started_at) < review)), default=0)
-            rounds = attempt - initial
+            rounds = attempt - initial - sum(s.stage == stage and s.outcome in _BACKOFF and s.started_at
+                                             and _time(s.started_at) >= review for s in history)
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
@@ -127,7 +131,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         review = max((s for s in completed if s.stage == "review" and s.outcome == "done"),
                      key=lambda s: _time(s.started_at), default=None)
         if review is None or any(s.stage not in ("review", "merge")
-                                 and _time(s.started_at) >= _time(review.started_at) for s in completed):
+                                 and _time(s.ended_at) > _time(review.started_at) for s in completed):
             return _work(key, "review", workflow, history, policies, room)
     elif item.review_state != "approved":
         return Wait(key, "review has not run")
@@ -195,7 +199,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
 def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], policies: Policies,
          issue_types: Mapping[str, str | None], free_slots: int, now: datetime,
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
-         rooms: Mapping[str, str] | None = None) -> list[Action]:
+         rooms: Mapping[str, str] | None = None,
+         quota_resets: Mapping[str, datetime] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
@@ -207,6 +212,10 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         raise ValueError("free_slots must be a non-negative integer")
     actions = []
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
+        reset = (quota_resets or {}).get(item.issue_key)
+        if reset is not None and _time(reset) > now and item.forge_state != "closed":
+            actions.append(Wait(item.issue_key, "quota reset pending"))
+            continue
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key))
         if isinstance(action, (Dispatch, Review)):

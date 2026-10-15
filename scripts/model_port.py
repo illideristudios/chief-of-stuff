@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from typing import Any, Callable, Sequence
 
 
@@ -23,6 +24,8 @@ class Request:
     # The worker launch profile: plugin dirs (the guard plugin, D9). Empty is a judgement call: no tools, no plugins.
     plugin_dirs: tuple[str, ...] = ()
     timeout_s: float | None = None
+    worker: bool = False  # workers have tools and workspace context even before the guard plugin is installed
+    agent: str = ""
 
 
 @dataclass(frozen=True)
@@ -61,6 +64,30 @@ def quota_reset(text: str) -> str | None:
             reset = re.search(r"\bresets?\b(?:[^\".]|\.(?!\s|$))*(?:\.(?=\s|$))?", line, re.IGNORECASE)
             return reset.group()[:80].rstrip() if reset else ""
     return None
+
+
+def retry_at(reset: str, now: datetime, stops: int = 1) -> datetime:
+    """Known reset times, else bounded exponential backoff for the spike's retryable unknown."""
+    iso = re.search(r"\d{4}-\d\d-\d\d[T ]\d\d:\d\d(?::\d\d)?(?:Z|[+-]\d\d:\d\d)", reset)
+    if iso:
+        try:
+            return max(now, datetime.fromisoformat(iso[0]))
+        except ValueError:
+            pass
+    relative = re.search(r"in\s+(?:about\s+)?(\d+|one|two|three|four)\s+(minutes?|hours?)", reset, re.I)
+    if relative:
+        words = {"one": 1, "two": 2, "three": 3, "four": 4}
+        value = words.get(relative[1].lower()) or int(relative[1])
+        try:
+            return now + timedelta(seconds=value * (3600 if relative[2].lower().startswith("hour") else 60))
+        except OverflowError:
+            pass
+    at = re.search(r"at\s+(\d{1,2})(?::(\d\d))?\s*(am|pm)\b", reset, re.I)
+    if at and 1 <= int(at[1]) <= 12 and int(at[2] or 0) < 60:
+        when = now.replace(hour=int(at[1]) % 12 + (12 if at[3].lower() == "pm" else 0),
+                           minute=int(at[2] or 0), second=0, microsecond=0)
+        return when if when > now else when + timedelta(days=1)
+    return now + timedelta(seconds=min(3600, 60 * 2 ** min(stops - 1, 6)))
 
 
 def rotate(call: Model, request: Request, models: Sequence[tuple[str, str]]) -> Reply | Failure:

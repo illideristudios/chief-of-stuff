@@ -189,7 +189,7 @@ class ClaimTest(unittest.TestCase):
                     max_concurrency=1, launch=_noop, clock=lambda: PINNED)
         self.assertEqual(slots.running(self.db), 1)
 
-    def test_contending_claim_waits_while_launch_holds_the_lock(self) -> None:
+    def test_launch_runs_outside_the_lock_but_its_slot_stays_reserved(self) -> None:
         in_launch = threading.Event()
         release = threading.Event()
 
@@ -205,21 +205,23 @@ class ClaimTest(unittest.TestCase):
         holder.start()
         self.assertTrue(in_launch.wait(5))
 
+        # A contender gets past the flock while the holder is still launching, and sees the reserved slot.
         contender = threading.Thread(
             target=slots.claim,
             kwargs=dict(trees=self.trees, store=self.db, issue_key=KEY, stage="review",
                         attempt=1, max_concurrency=2, launch=_noop),
         )
         contender.start()
-        contender.join(0.3)
-        self.assertTrue(contender.is_alive())
-        self.assertEqual(slots.running(self.db), 0)
+        contender.join(5)
+        self.assertFalse(contender.is_alive())
+        self.assertEqual(slots.running(self.db), 2)
+        with self.assertRaises(ValueError):  # cap 2 is full: holder's reservation still counts
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="merge", attempt=1,
+                        max_concurrency=2, launch=_noop)
 
         release.set()
         holder.join(5)
-        contender.join(5)
         self.assertFalse(holder.is_alive())
-        self.assertFalse(contender.is_alive())
         self.assertEqual(slots.running(self.db), 2)
 
     def test_two_claims_for_the_last_slot_exactly_one_wins(self) -> None:

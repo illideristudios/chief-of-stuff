@@ -9,8 +9,12 @@ parseability together, never `subtype` alone.
 from __future__ import annotations
 
 import json
+import os
+import signal
 import subprocess
+import sys
 import uuid
+from pathlib import Path
 
 import runtimes
 from model_port import Failure, Reply, Request, quota_reset
@@ -19,21 +23,84 @@ from shell_setup import ShellError, clean_env, login_argv, resolve
 RUNTIME = runtimes.get("claude")
 
 
+def command(request: Request, claude_as_profile: str = "") -> list[str]:
+    """Resolve the registry's host through shell setup and build exact login argv."""
+    if request.session_id and not request.resume and not _is_uuid(request.session_id):
+        raise ShellError(f"session_id {request.session_id!r} must be a UUID to start a session")
+    program, lead = runtimes.program(RUNTIME.name, claude_as_profile)
+    binary = resolve(program)
+    if not binary:
+        why = f"; claude_as_profile {claude_as_profile!r} needs it" if claude_as_profile else ""
+        raise ShellError(f"`{program}` is not on the login shell's PATH{why}")
+    return login_argv(argv(request, binary, lead))
+
+
+def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
+          env: dict[str, str] | None = None) -> subprocess.Popen:
+    """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
+    prepared = command(request, claude_as_profile)
+    (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
+                                                    "session_id": request.session_id,
+                                                    "env": env or {}}))
+    try:
+        with (run_dir / "runner.stderr").open("w") as errors:
+            return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
+                                     request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=errors, env=clean_env(), start_new_session=True)
+    except Exception:
+        # No runner exists to produce started/exit evidence; allow this attempt to be retried.
+        (run_dir / "command.json").unlink(missing_ok=True)
+        (run_dir / "runner.stderr").unlink(missing_ok=True)
+        raise
+
+
+def cancel(process: subprocess.Popen) -> None:
+    """A refused start must leave no detached runner or host behind."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            pass
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            pass
+    raise RuntimeError(f"runner {process.pid} survived SIGKILL; not cancelled")
+
+
+def _write(run_dir: Path, name: str, record: dict) -> None:
+    path = run_dir / name
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(record))
+    temporary.replace(path)
+
+
+def _worker(run_dir: Path) -> None:
+    prepared = json.loads((run_dir / "command.json").read_text())
+    with (run_dir / "stdout").open("w") as stdout, (run_dir / "stderr").open("w") as stderr:
+        try:
+            process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env={**clean_env(), **prepared.get("env", {})},
+                                       stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+            _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
+                                             "session_id": prepared["session_id"]})
+            code = process.wait()
+        except OSError as exc:
+            stderr.write(str(exc))
+            code = 127
+    _write(run_dir, "exit.json", {"exit_code": code})
+
+
 def call(request: Request, *, claude_as_profile: str = "") -> Reply | Failure:
     """The model port for Claude. Bind the profile with `functools.partial` to get a `model_port.Model`."""
     if request.session_id and not request.resume and not _is_uuid(request.session_id):
         return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
-    program, lead = runtimes.program(RUNTIME.name, claude_as_profile)
     try:
-        binary = resolve(program)
-        if not binary:  # never a bare `claude` in place of a missing `claude-as` (E12)
-            why = f"; claude_as_profile {claude_as_profile!r} needs it" if claude_as_profile else ""
-            return Failure("missing_program", f"`{program}` is not on the login shell's PATH{why}")
-        command = login_argv(argv(request, binary, lead))
+        prepared = command(request, claude_as_profile)
     except ShellError as exc:
         return Failure("missing_program", str(exc))
     try:
-        done = subprocess.run(command, env=clean_env(), cwd=request.cwd, stdin=subprocess.DEVNULL,
+        done = subprocess.run(prepared, env=clean_env(), cwd=request.cwd, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=request.timeout_s)
     except subprocess.TimeoutExpired:
         return Failure("unknown", f"no answer within {request.timeout_s}s")
@@ -54,8 +121,12 @@ def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
         out.append("--no-session-persistence")
     for path in request.plugin_dirs:
         out += ["--plugin-dir", path]
-    if not request.plugin_dirs:  # design 9: a judgement call runs without tools, hooks, plugins or CLAUDE.md
+    if request.agent:
+        out += ["--agent", request.agent]
+    if not request.plugin_dirs and not request.worker:  # judgement calls have no tools or workspace context
         out += ["--tools", "", "--safe-mode"]
+    if request.worker:  # a PR branch's own settings, hooks and MCP servers would run as this user
+        out += ["--setting-sources", "user", "--strict-mcp-config"]
     return out + ["--", request.prompt]
 
 
@@ -90,3 +161,7 @@ def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
     if "Not logged in" in said:
         return Failure("auth", said)
     return Failure("error", said or f"exit {exit_code}")
+
+
+if __name__ == "__main__":
+    _worker(Path(sys.argv[2]))

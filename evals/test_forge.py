@@ -907,6 +907,37 @@ class GitLabMergeTest(unittest.TestCase):
         self.assertEqual(landed, [])
 
 
+class ProtectedBranchesTest(unittest.TestCase):
+    def test_github_reports_default_and_protected_branches(self):
+        def gh(args, input_text=None):
+            if args[:2] == ["api", f"repos/{REPO}"]:
+                return 0, "trunk\n", ""
+            if args[:2] == ["api", f"repos/{REPO}/branches?protected=true&per_page=100"]:
+                return 0, "release\ntrunk\n", ""
+            return 1, "", "unexpected"
+        self.assertEqual(forge.Forge(GH, gh=gh).protected_branches(), ("trunk", "release"))
+
+    def test_gitlab_reports_default_and_protected_branches(self):
+        base = GL.api(GL.project)
+
+        def call(method, url, token, timeout, payload=None):
+            if url == base:
+                return {"default_branch": "trunk"}, {}, ""
+            if url == f"{base}/protected_branches?per_page=100":
+                return [{"name": "release"}, {"name": "trunk"}], {}, ""
+            return None, {}, "unexpected"
+        with mock.patch.object(backlog, "_call", call):
+            self.assertEqual(forge.Forge(GL, token="t").protected_branches(), ("trunk", "release"))
+
+    def test_an_unreadable_answer_is_an_error_never_an_empty_list(self):
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).protected_branches()
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (0, "\n", "")).protected_branches()
+        with mock.patch.object(backlog, "_call", lambda *a, **k: (None, {}, "HTTP 500 from GitLab")):
+            with self.assertRaises(forge.ForgeError):
+                forge.Forge(GL, token="t").protected_branches()
+
 
 # Stage map used by GitHub Project write-back tests moved from test_kanban.
 BOARD_FLOW = Kanban(

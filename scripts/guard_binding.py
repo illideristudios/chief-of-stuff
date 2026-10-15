@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Mapping
 
@@ -52,3 +53,24 @@ class Binding:
                        tuple(branches))
         except KeyError as exc:
             raise ValueError(f"missing worker binding: {exc.args[0]}") from None
+
+
+def guard_plugin_dir(release: Path | None = None) -> Path | None:
+    """Absolute path to `guard/` when it sits beside `scripts/` in the release, else None."""
+    root = Path(__file__).resolve().parent.parent if release is None else Path(release)
+    path = (root / "guard").resolve()
+    return path if path.is_dir() else None
+
+
+def guard_env(binding: Binding, *, python: str | None = None) -> dict[str, str]:
+    """Overlay for the adapter host: identity the guard hooks and MCP read, never rewrite."""
+    return {
+        "CHIEF_ISSUE_KEY": binding.issue_key,
+        "CHIEF_STAGE": binding.stage,
+        "CHIEF_ATTEMPT": str(binding.attempt),
+        "CHIEF_SESSION_ID": binding.session_id,
+        "CHIEF_ROOT": str(binding.root),
+        "CHIEF_LAUNCHED_AT": binding.launched_at.isoformat(),
+        "CHIEF_PYTHON": python if python is not None else sys.executable,
+        "CHIEF_PROTECTED_BRANCHES": json.dumps(list(binding.protected_branches)),
+    }
