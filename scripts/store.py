@@ -9,12 +9,14 @@ it changes, and a test holds these models to what the migrations build.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import sqlite3
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
