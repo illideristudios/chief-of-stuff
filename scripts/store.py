@@ -9,12 +9,14 @@ it changes, and a test holds these models to what the migrations build.
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+import sqlite3
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, UniqueConstraint, create_engine, delete, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -117,14 +119,30 @@ class Ask(WorkerRecord, Base):
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
-def migrate(path: Path | str) -> None:
-    """Enable WAL and bring the database at `path` to the latest revision. Call it once at engine start, never from
-    concurrent writers: journal-mode changes need an exclusive lock, and first-time migrations race to create tables."""
+def _config(path: Path | str) -> Config:
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
     cfg.attributes["metadata"] = Base.metadata
-    command.upgrade(cfg, "head")
+    return cfg
+
+
+def is_current(path: Path | str) -> bool:
+    """True when the database at `path` is already at the latest revision. Only reads, so it is safe beside a live writer."""
+    if not Path(path).exists():
+        return False
+    head = ScriptDirectory.from_config(_config(path)).get_current_head()
+    with closing(sqlite3.connect(path, timeout=30)) as conn:
+        try:
+            return conn.execute("SELECT version_num FROM alembic_version").fetchall() == [(head,)]
+        except sqlite3.OperationalError:  # no alembic_version table: never migrated
+            return False
+
+
+def migrate(path: Path | str) -> None:
+    """Enable WAL and bring the database at `path` to the latest revision. Call it once at engine start, never from
+    concurrent writers: journal-mode changes need an exclusive lock, and first-time migrations race to create tables."""
+    command.upgrade(_config(path), "head")
 
 
 class Store:
