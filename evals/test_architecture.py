@@ -76,18 +76,24 @@ PACKAGE_STYLE = ("start_coordinator.py", "chief_of_stuff.py", "evals/run.py")
 
 def imports(path: Path) -> set[str]:
     """Every module a file imports, at the top or inside a function. `from scripts import x` counts as `scripts.x`.
-    Package-relative forms (`from . import forge`, `from .forge import X`) count as the sibling stem."""
+    Package-relative forms (`from . import forge`, `from .forge import X`) count as the sibling stem.
+    `from scripts.migrations import env` counts as `scripts.migrations.env` (path key after circle_target)."""
     names: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module == "scripts":
-            names.update(f"scripts.{alias.name}" for alias in node.names)
+            names.update(f"scripts.{alias.name}" for alias in node.names if alias.name != "*")
         elif isinstance(node, ast.ImportFrom) and node.level:
             if node.module:
                 names.add(node.module.split(".")[0])
             else:
                 names.update(alias.name for alias in node.names if alias.name != "*")
+        elif isinstance(node, ast.ImportFrom) and node.module and (
+                node.module == "migrations" or node.module.startswith("migrations.")
+                or node.module.startswith("scripts.migrations")):
+            for alias in node.names:
+                names.add(node.module if alias.name == "*" else f"{node.module}.{alias.name}")
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module)
     return names
@@ -384,6 +390,13 @@ class DependencyRuleTest(unittest.TestCase):
         self.assertEqual(circle_target("scripts.migrations.versions.0001_initial"),
                          "migrations/versions/0001_initial")
         self.assertEqual(circle_target("forge.client"), "forge")
+
+    def test_from_scripts_migrations_import_alias_is_a_path_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "tracker.py")
+            path.write_text("from scripts.migrations import env\n", encoding="utf-8")
+            self.assertEqual(imports(path), {"scripts.migrations.env"})
+            self.assertEqual(circle_target("scripts.migrations.env"), "migrations/env")
 
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
