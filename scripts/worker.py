@@ -236,8 +236,12 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             record = runs.get(f"{segment.stage}-{segment.attempt}")
             if record is None and trees is not None:
                 # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.
-                record = _existing_run(data, _run_dir(root, key, segment.stage, segment.attempt),
-                                       segment.stage, segment.attempt, trees, clock)
+                run_dir = _run_dir(root, key, segment.stage, segment.attempt)
+                try:
+                    record = _existing_run(data, run_dir, segment.stage, segment.attempt, trees, clock)
+                except RuntimeError:
+                    # command.json without started.json (or incomplete identity): keep the reservation open.
+                    continue
                 if record is not None:
                     _save_run(store, key, segment.stage, segment.attempt, record)
                     data = _resume(store, key)

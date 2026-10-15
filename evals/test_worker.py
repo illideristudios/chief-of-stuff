@@ -678,6 +678,17 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["session_id"], saved["session_id"])
                 self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
 
+    def test_collect_keeps_a_command_only_start_reserved(self):
+        # Engine restart between Popen and started.json must not fail the reservation.
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        run.mkdir(parents=True)
+        (run / "command.json").write_text("{}")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        seg = self.db.segments(KEY)[0]
+        self.assertIsNone(seg.ended_at)
+        self.assertIsNone(seg.outcome)
+
     def test_collect_still_fails_a_reservation_with_no_start_evidence(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
