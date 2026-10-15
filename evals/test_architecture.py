@@ -75,13 +75,19 @@ PACKAGE_STYLE = ("start_coordinator.py", "chief_of_stuff.py", "evals/run.py")
 
 
 def imports(path: Path) -> set[str]:
-    """Every module a file imports, at the top or inside a function. `from scripts import x` counts as `scripts.x`."""
+    """Every module a file imports, at the top or inside a function. `from scripts import x` counts as `scripts.x`.
+    Package-relative forms (`from . import forge`, `from .forge import X`) count as the sibling stem."""
     names: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module == "scripts":
             names.update(f"scripts.{alias.name}" for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level:
+            if node.module:
+                names.add(node.module.split(".")[0])
+            else:
+                names.update(alias.name for alias in node.names if alias.name != "*")
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module)
     return names
@@ -261,8 +267,16 @@ OUTWARD_IMPORTS = frozenset({
 
 
 LAUNCHERS = frozenset({"chief_of_stuff", "start_coordinator"})
-# §4 Drivers: JSON hook manifests (not importable modules; still in the circle inventory).
-DRIVER_HOOKS = frozenset({"hooks/hooks.json", "guard/hooks/hooks.json"})
+
+
+def discovered_hooks() -> frozenset[str]:
+    """Every `hooks/hooks.json` under the repo root, excluding vendored trees."""
+    skip = {".venv", "_vendor", "node_modules", ".git"}
+    return frozenset(
+        p.relative_to(ROOT).as_posix()
+        for p in ROOT.glob("**/hooks/hooks.json")
+        if not skip.intersection(p.parts)
+    )
 
 
 def circle_graph() -> dict[str, set[str]]:
@@ -300,12 +314,12 @@ def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
 
 class DependencyRuleTest(unittest.TestCase):
     def test_every_script_launcher_and_hook_is_in_exactly_one_circle(self) -> None:
-        inventory = {p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS) | set(DRIVER_HOOKS)
+        hooks = discovered_hooks()
+        inventory = {p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS) | set(hooks)
         listed = {name for names in CIRCLES.values() for name in names}
         self.assertEqual(sorted(inventory - listed), [], "unclassified module")
         self.assertEqual(sorted(listed - inventory), [], "circle entry with no file")
-        for path in DRIVER_HOOKS:
-            self.assertTrue((ROOT / path).is_file(), path)
+        self.assertEqual({n for n in listed if n.endswith("hooks/hooks.json")}, set(hooks))
         overlap = [name for name, n in ((n, sum(n in s for s in CIRCLES.values())) for n in listed) if n > 1]
         self.assertEqual(overlap, [])
 
@@ -328,6 +342,12 @@ class DependencyRuleTest(unittest.TestCase):
     def test_the_outward_check_sees_an_import_of_a_root_launcher(self) -> None:
         graph = {"tracker": {"chief_of_stuff"}, "chief_of_stuff": set()}
         self.assertEqual(outward_imports(graph), {"tracker→chief_of_stuff"})
+
+    def test_imports_sees_package_relative_sibling_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "tracker.py")
+            path.write_text("from . import forge\nfrom .settings import load\n", encoding="utf-8")
+            self.assertEqual(imports(path), {"forge", "settings"})
 
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
