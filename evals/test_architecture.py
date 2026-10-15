@@ -304,12 +304,13 @@ class DependencyRuleTest(unittest.TestCase):
         overlap = [name for name, n in ((n, sum(n in s for s in CIRCLES.values())) for n in listed) if n > 1]
         self.assertEqual(overlap, [])
 
-    def test_nested_scripts_are_only_store_migrations(self) -> None:
-        # §4 places migrations with store (adapters); they are not separate circle stems.
+    def test_nested_scripts_are_only_migrations_or_vendor(self) -> None:
+        # §4 places migrations with store; _vendor is third-party. Neither is a circle stem.
+        allowed = ("migrations/", "_vendor/")
         nested = sorted(p.relative_to(SCRIPTS).as_posix()
                         for p in SCRIPTS.rglob("*.py") if p.parent != SCRIPTS)
-        self.assertTrue(nested, "expected scripts/migrations/")
-        self.assertTrue(all(path.startswith("migrations/") for path in nested), nested)
+        self.assertTrue(any(path.startswith("migrations/") for path in nested), nested)
+        self.assertEqual([path for path in nested if not path.startswith(allowed)], [])
 
     def test_inward_to_outward_imports_match_the_known_list(self) -> None:
         # §5: fail on a new outward import; the allowlist may only shrink.
