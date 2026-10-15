@@ -185,8 +185,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
             policies = settings.load_policy()
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
-            unmapped = sorted(set(settings.workflow_stages(policies))
-                              - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
+            unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:
                 raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
             trees = root / worktrees_dir(text)

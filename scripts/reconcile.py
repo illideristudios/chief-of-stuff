@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, Sequence
 
+from model_port import RETRYABLE
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
 
 
@@ -120,14 +121,11 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
     return any(counts.get(severity, 0) > 0 for severity in blocking)
 
 
-_BACKOFF = frozenset({"quota", "unknown"})
-
-
 def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     if stage == "review":
         return Review(key, attempt)
-    rounds = attempt - 1 - sum(s.stage == stage and s.outcome in _BACKOFF for s in history)
+    rounds = attempt - 1 - sum(s.stage == stage and s.outcome in RETRYABLE for s in history)
     if any(e.target == stage for e in workflow.next("review")):
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)
@@ -135,7 +133,7 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
             # Attempts started at or after the first completed review are rework.
             initial = max((s.attempt for s in history if s.stage == stage
                            and (not s.started_at or _time(s.started_at) < review)), default=0)
-            rounds = attempt - initial - sum(s.stage == stage and s.outcome in _BACKOFF and s.started_at
+            rounds = attempt - initial - sum(s.stage == stage and s.outcome in RETRYABLE and s.started_at
                                              and _time(s.started_at) >= review for s in history)
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")

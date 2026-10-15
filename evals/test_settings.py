@@ -364,6 +364,14 @@ class KanbanSettingsTest(unittest.TestCase):
     def test_absent_kanban_is_disabled(self):
         self.assertIsNone(self.load("").kanban)
 
+    def test_unmapped_stages_lists_workflow_stages_missing_from_the_map(self):
+        cfg = self.load(KANBAN).kanban
+        policies = st.load_policy()
+        self.assertEqual(st.unmapped_stages(cfg, policies), [])
+        thin = st.Kanban(stages=("only",), human_review_label="hold", stage_map={"implement": 0},
+                         terminal_stages=())
+        self.assertIn("review", st.unmapped_stages(thin, policies))
+
     def test_config_maps_fine_stages_and_hold_overlay(self):
         cfg = self.load(KANBAN).kanban
         self.assertEqual(cfg.label_for("implement"), "03 - BUILD")

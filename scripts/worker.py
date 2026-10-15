@@ -113,6 +113,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
     actor = policies.personas[name]
+    agent = _declared_agent(root, actor.agent or "")
     run_dir = _run_dir(root, issue_key, stage, attempt)
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
@@ -157,7 +158,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
         made = make_worktree.build(root, clone or root, str(trees), tree_name, branch,
-                                   actor.agent or actor.name, from_branch=from_branch)
+                                   agent, from_branch=from_branch)
         tree = made.path
         store.set_ownership(issue_key, str(tree))
         if stage != "review":
@@ -188,7 +189,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
     request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
-                      cwd=str(tree), worker=True, agent=_declared_agent(root, actor.agent or ""),
+                      cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
     runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
     try:

@@ -18,7 +18,8 @@ import issue_gate  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
-from settings import Kanban, SettingsError, _kanban as kanban_from_table, load as load_settings, load_policy, workflow_stages
+from settings import (Kanban, SettingsError, kanban_from_table, load as load_settings, load_policy,
+                      unmapped_stages, workflow_stages)
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -98,8 +99,7 @@ def _require_engine_ready(config) -> None:
     """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
     if config.kanban is None:
         raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
-    unmapped = sorted(set(workflow_stages(load_policy()))
-                      - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
+    unmapped = unmapped_stages(config.kanban, load_policy())
     if unmapped:
         raise InitError(f"existing settings [kanban.map] has no label for workflow stage {', '.join(unmapped)}")
 

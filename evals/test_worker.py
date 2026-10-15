@@ -732,11 +732,13 @@ class WorkerTest(unittest.TestCase):
             "## Coordinator\n- User: Robin\n- Agent: implementer task\n")
         self.p.personas["builder"] = SimpleNamespace(name="builder", role="build", rules=(),
                                                        agent="specialist", model="opus", effort="")
-        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             worker.launch(KEY, "implement", 1, "builder", store=self.db, root=self.root,
                           trees=self.trees, policies=self.p, forge=self.forge)
+        # Cut and request share the declared-only type; never actor.name ("builder").
+        self.assertEqual(build.call_args.args[5], "")
         self.assertEqual(start.call_args.args[0].agent, "")
 
     def test_adapter_worker_argv_enables_tools_and_named_agent(self):
