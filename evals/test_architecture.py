@@ -179,11 +179,14 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
     return []
 
 
+
+
+
+class DependencyRuleTest(unittest.TestCase):
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_commands", set(),
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
-
 
     def test_guard_rules_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_rules"], set())
@@ -191,7 +194,6 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
 
 
-class DependencyRuleTest(unittest.TestCase):
     def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:
         self.assertEqual(forbidden_reach(SCRIPTS, "reconcile",
                          {"store", "forge", "claude_adapter", "settings", "trio_gate"},
