@@ -388,6 +388,8 @@ def _kanban(table) -> Kanban:
             or {x.casefold() for x in terminal} & fold):
         raise SettingsError("[kanban] terminal_stages must be unique, comma-free labels distinct from "
                             "human_review_label, mapped stages and board labels")
+    if any(x != x.strip() for x in (*stages, human, *terminal)):  # forges trim names; sync needs the exact one
+        raise SettingsError("[kanban] stage, hold and terminal labels must not have leading or trailing whitespace")
     project = None
     if "github_project" in table and "project" in table:
         raise SettingsError("[kanban] set github_project or project, not both")

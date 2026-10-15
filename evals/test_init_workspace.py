@@ -291,6 +291,15 @@ class InitWorkspaceTest(unittest.TestCase):
         self.assertEqual(path.read_text(), before)
         self.assertTrue((self.root / "CLAUDE.md").exists())
 
+    def test_preserved_settings_with_a_padded_stage_label_refuse_before_provisioning(self):
+        (self.root / "chief-of-stuff.toml").write_text(_engine_ready_kanban([" stage: plan "], "HOLD"))
+        with mock.patch.object(init.backlog, "ensure_labels") as ensure:
+            code, _, err = self.run_init()
+        self.assertEqual(code, 1)
+        self.assertIn("whitespace", err)
+        ensure.assert_not_called()
+        self.assertFalse((self.root / "CLAUDE.md").exists())
+
     def test_a_hold_label_the_forge_refuses_is_reported_and_init_still_succeeds(self):
         (self.root / "chief-of-stuff.toml").write_text(_engine_ready_kanban(["00 - PLAN"], "HOLD"))
         with mock.patch.object(init.backlog, "token", return_value=""):
