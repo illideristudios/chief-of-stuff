@@ -93,8 +93,8 @@ def main(argv: list[str] | None = None) -> int:
             result = forge.Forge(backlog.GitHubBacklog(ref.repo), kanban=settings.kanban).write_stage(
                 ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit)
         elif isinstance(cfg.backlog, backlog.Backlog):
-            result = kanban.sync_gitlab(cfg.backlog, ref, settings.kanban, stage, commit=args.commit,
-                                 expected_stage=args.from_stage, initialize=args.initialize)
+            result = forge.Forge(cfg.backlog, kanban=settings.kanban).write_stage(
+                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit)
         else:
             result = kanban.Sync(ref, stage, error="no configured GitLab host for this issue")
         changed = result.delta.changed or result.project_add or result.current_status != result.project_status

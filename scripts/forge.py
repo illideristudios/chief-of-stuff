@@ -290,6 +290,70 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
                 project_status=wanted, project_add=project_add)
 
 
+def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, stage: str,
+                 *, token: str | None = None, commit: bool = False,
+                 expected_stage: str | None = None, initialize: bool = False,
+                 timeout: float = backlog.TIMEOUT) -> kanban.Sync:
+    """GitLab's add/remove update leaves unrelated issue labels untouched."""
+    if ref.host != backlog.home_of(cfg)[0]:
+        return kanban.Sync(ref, stage, error="issue host does not match the configured GitLab host")
+    try:
+        config.label_for(stage)
+    except KeyError:
+        return kanban.Sync(ref, stage, error=f"unmapped tracker stage: {stage}")
+    if expected_stage is not None:
+        try:
+            config.label_for(expected_stage)
+        except KeyError:
+            return kanban.Sync(ref, stage, error=f"unmapped prior stage: {expected_stage}")
+    project = cfg if cfg.project == ref.repo else cfg.sibling(ref.repo)
+    secret = token if token is not None else backlog.token(project)
+    if not secret:
+        return kanban.Sync(ref, stage, error=cfg.missing_token)
+    url = f"{project.issues_url}/{ref.number}"
+    row, _, error = backlog._get(url, secret, timeout)
+    if error:
+        return kanban.Sync(ref, stage, error=error)
+    if not isinstance(row, dict) or not isinstance(row.get("labels"), list):
+        return kanban.Sync(ref, stage, error="GitLab issue has no readable labels")
+    current = tuple(str(label) for label in row["labels"])
+    held = kanban.extra_hold(config, current, expected_stage)
+    delta = kanban.label_delta(config, current, stage, keep_hold=held)
+    managed = kanban._managed(config)
+    prior = frozenset(kanban.label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
+    hold = frozenset({config.human_review_label})
+    desired = set(kanban.after(current, delta)) & managed
+    if commit:
+        error = kanban._guard(frozenset(current) & managed, desired, (prior, prior | hold),
+                              expected_stage=expected_stage, initialize=initialize, blanks=(frozenset(), hold))
+        if error:
+            return kanban.Sync(ref, stage, delta, error=error)
+    if not delta.changed:
+        return kanban.Sync(ref, stage, delta, done=True)
+    if not commit:
+        return kanban.Sync(ref, stage, delta)
+    have, error = backlog.existing_labels(project, token=secret, timeout=timeout)
+    if error:
+        return kanban.Sync(ref, stage, delta, error=error)
+    missing = set(delta.add) - have
+    if missing:
+        return kanban.Sync(ref, stage, delta, error=f"missing label in GitLab: {', '.join(sorted(missing))}; "
+                    f"create the label(s) {', '.join(sorted(missing))} before syncing")
+    payload = {}
+    if delta.add:
+        payload["add_labels"] = ",".join(delta.add)
+    if delta.remove:
+        payload["remove_labels"] = ",".join(delta.remove)
+    _, _, error = backlog._call("PUT", url, secret, timeout, payload)
+    if error:
+        return kanban.Sync(ref, stage, delta, error=error)
+    verified, _, error = backlog._get(url, secret, timeout)
+    if error or not isinstance(verified, dict) or not isinstance(verified.get("labels"), list):
+        return kanban.Sync(ref, stage, delta, error=error or "could not verify GitLab labels after update")
+    if set(verified["labels"]) != set(kanban.after(current, delta)):
+        return kanban.Sync(ref, stage, delta, error="GitLab labels differ after update; reconcile before continuing")
+    return kanban.Sync(ref, stage, delta, done=True)
+
 
 @dataclass(frozen=True)
 class Forge:
@@ -591,8 +655,8 @@ class Forge:
         if self.github:
             return _sync_github(ref, self.kanban, stage, gh=self.gh, commit=commit, expected_stage=expected,
                                 initialize=initialize)
-        return kanban.sync_gitlab(self.home, ref, self.kanban, stage, token=self.token, commit=commit, expected_stage=expected,
-                                  initialize=initialize)
+        return _sync_gitlab(self.home, ref, self.kanban, stage, token=self.token, commit=commit, expected_stage=expected,
+                            initialize=initialize)
 
     def add_human_hold(self, number: int) -> str:
         """Add only the review hold; leave the numbered stage and Project Status untouched."""
