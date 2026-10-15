@@ -1,6 +1,6 @@
 # Worker guard and engine channel
 
-The engine can load this directory with `--plugin-dir`. `scripts.guard_binding` exposes `Binding` / `Binding.from_env` for the launch contract below. Launch helpers that build the overlay environment belong with worker launch integration (#631 / #663).
+The engine can load this directory with `--plugin-dir`. `scripts.guard_binding` exposes `Binding` / `Binding.from_env`, plus `guard_plugin_dir` and `guard_env` that `worker.launch` uses when this directory is present in the release.
 
 The launch environment is the only record identity. Hook input and MCP arguments cannot select a different issue, stage, attempt or session. This binding is a guard rail within the worker process, not an isolation boundary against a process that changes its own environment or database files. The engine remains the authority and independently checks state before merging.
 

@@ -1435,6 +1435,47 @@ class ReviewReportTest(unittest.TestCase):
                 self.assertIn(f"Review: if this task reviews a pull or merge request, write your report in the format of {self.TEMPLATE}", body)
 
 
+class ArchitectureAndReviewSkillTest(unittest.TestCase):
+    """C2/C3: review-stage assignments name extras:code-review; every compose carries Architecture: when declared."""
+
+    ARCH = CLAUDE + "\n## Architecture\n- Canonical document: `design/ARCHITECTURE.md`\n"
+    REVIEW_TRACKER = """# Tracker 2026-09-18
+
+## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| audit | Security audit | unassigned | open | 09:00 |  | S | build | review |  | Checklist: Security audit of the upload handler |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| Security audit | `src/a/` |
+
+## Log
+
+- 09:00 opened the day
+"""
+
+    def test_compose_adds_architecture_on_one_shot_and_interactive(self):
+        for one_shot in (True, False):
+            with self.subTest(one_shot=one_shot):
+                tmp, root = workspace(claude_md=self.ARCH)
+                self.addCleanup(tmp.cleanup)
+                body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree", one_shot=one_shot)
+                self.assertIn(f"Architecture: {(root / 'design/ARCHITECTURE.md').resolve()}; read it before changing code.",
+                              body)
+
+    def test_compose_review_stage_names_the_code_review_skill(self):
+        tmp, root = workspace(self.REVIEW_TRACKER, self.ARCH)
+        self.addCleanup(tmp.cleanup)
+        for one_shot in (True, False):
+            with self.subTest(one_shot=one_shot):
+                body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree", one_shot=one_shot)
+                self.assertIn(dp.CODE_REVIEW, body)
+
+
 class AgyRuntimeTest(unittest.TestCase):
     """An agy session cannot list sessions or message one: the mailbox is its only channel."""
 

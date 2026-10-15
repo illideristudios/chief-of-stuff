@@ -97,6 +97,17 @@ def settings_path(text: str) -> str | None:
     return _first_path(_bullets(_section(text, "## Coordinator"))[0].get("Settings", ""))
 
 
+def architecture_document(root: Path) -> Path | None:
+    """The canonical document's first backticked path, resolved against the workspace root."""
+    try:
+        text = (root / "CLAUDE.md").read_text()
+    except FileNotFoundError:
+        return None
+    value = _bullets(_section(text, "## Architecture"))[0].get("Canonical document", "")
+    match = re.search(r"`([^`]+)`", value)
+    return (root / match[1].strip()).resolve() if match else None
+
+
 def parse_coordinator(text: str, today: date) -> Config:
     body = _section(text, "## Coordinator")
     if not body:

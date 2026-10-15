@@ -252,7 +252,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          issue_types: Mapping[str, str | None], free_slots: int, now: datetime,
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
          rooms: Mapping[str, str] | None = None,
-         decisions: Mapping[str, Sequence[Decision]] | None = None) -> list[Action]:
+         decisions: Mapping[str, Sequence[Decision]] | None = None,
+         quota_resets: Mapping[str, datetime] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
@@ -265,6 +266,10 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         raise ValueError("free_slots must be a non-negative integer")
     actions = []
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
+        reset = (quota_resets or {}).get(item.issue_key)
+        if reset is not None and _time(reset) > now and item.forge_state != "closed":
+            actions.append(Wait(item.issue_key, "quota reset pending"))
+            continue
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
                        (decisions or {}).get(item.issue_key, ()))

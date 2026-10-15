@@ -385,6 +385,15 @@ class ReconcileTest(unittest.TestCase):
         item = replace(Item(), stage="merge", merge_state="ready")
         self.assertEqual(self.plan(item, [Segment("review")], {}, rooms={KEY: "lab"}), [reconcile.Merge(KEY)])
 
+    def test_work_that_ended_after_the_review_started_was_not_reviewed(self):
+        # Overlap: the segment started before the review but ended after it began, so the review never saw it.
+        item = replace(Item(), stage="review", review_state="approved", merge_state="ready")
+        history = [Segment("implement", started_at=NOW - timedelta(hours=3), ended_at=NOW - timedelta(minutes=30)),
+                   Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW - timedelta(minutes=10))]
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+        history[0] = replace(history[0], ended_at=history[1].started_at)
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Merge(KEY)])
+
     def test_completed_review_without_forge_approval_merges(self):
         history = [Segment("implement"), Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
         for stage in ("review", "merge"):

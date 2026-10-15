@@ -20,7 +20,8 @@ class ShellError(ValueError):
 
 def clean_env(source: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ if source is None else source
-    return {key: value for key, value in env.items() if key in KEEP}
+    # CHIEF_* is the engine's own channel (worker guard binding, #658); nothing else of the caller's passes.
+    return {key: value for key, value in env.items() if key in KEEP or key.startswith("CHIEF_")}
 
 
 def login_shell(source: dict[str, str] | None = None) -> str:

@@ -5,6 +5,8 @@ Every call runs `evals/fixtures/fake_claude.py`; no test here reaches a real mod
 
 import json
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -81,6 +83,45 @@ class ArgvTest(unittest.TestCase):
         got = claude_adapter.argv(Request(prompt="p", session_id="u1", resume=True), "/bin/claude", [])
         self.assertIn(["--resume", "u1"], [got[i:i + 2] for i in range(len(got))])
         self.assertNotIn("--session-id", got)
+
+
+class StartTest(unittest.TestCase):
+    def test_runner_spawn_failure_removes_launch_evidence_and_reraises(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            error = OSError("runner spawn failed")
+            with mock.patch.object(claude_adapter, "command", return_value=["/fake"]), \
+                 mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=error):
+                with self.assertRaises(OSError) as raised:
+                    claude_adapter.start(Request(prompt="p", session_id=SID), run_dir)
+            self.assertIs(raised.exception, error)
+            self.assertFalse((run_dir / "command.json").exists())
+            self.assertFalse((run_dir / "runner.stderr").exists())
+
+
+class CancelTest(unittest.TestCase):
+    def test_a_host_that_ignores_sigterm_is_killed_and_reaped(self):
+        process = mock.Mock(pid=4242)
+        process.wait.side_effect = [subprocess.TimeoutExpired("host", 5), 0]
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg:
+            claude_adapter.cancel(process)
+        self.assertEqual([c.args for c in killpg.call_args_list],
+                         [(4242, signal.SIGTERM), (4242, signal.SIGKILL)])
+        self.assertEqual(process.wait.call_count, 2)
+
+    def test_a_host_that_survives_sigkill_is_not_reported_cancelled(self):
+        process = mock.Mock(pid=4242)
+        process.wait.side_effect = subprocess.TimeoutExpired("host", 5)
+        with mock.patch.object(claude_adapter.os, "killpg"):
+            with self.assertRaises(RuntimeError):
+                claude_adapter.cancel(process)
+
+    def test_a_host_that_exits_on_sigterm_is_not_killed(self):
+        process = mock.Mock(pid=4242)
+        process.wait.return_value = 0
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg:
+            claude_adapter.cancel(process)
+        killpg.assert_called_once_with(4242, signal.SIGTERM)
 
 
 class ClassifyTest(unittest.TestCase):

@@ -478,6 +478,37 @@ class Forge:
         except ValueError as exc:
             raise ForgeError(f"stage: {exc}") from exc
 
+    def protected_branches(self) -> tuple[str, ...]:
+        """The repository's default branch, then its protected branches, for the worker guard. Unreadable raises."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                # shortcut: first 100 protected branches, branch rulesets not listed; paginate or read rulesets when a repo outgrows it
+                code, out, err = self.gh(["api", f"repos/{repo}", "--jq", ".default_branch"])
+                if code:
+                    raise RuntimeError(err.strip() or f"gh exited {code}")
+                names = [out.strip()]
+                code, out, err = self.gh(["api", f"repos/{repo}/branches?protected=true&per_page=100", "--jq", ".[].name"])
+                if code:
+                    raise RuntimeError(err.strip() or f"gh exited {code}")
+                names += out.split()
+            else:
+                base, token = self.home.api(), self._token()
+                project, _, err = backlog._call("GET", base, token, backlog.TIMEOUT)
+                if err:
+                    raise RuntimeError(err)
+                names = [project["default_branch"]]
+                rows, _, err = backlog._call("GET", f"{base}/protected_branches?per_page=100", token, backlog.TIMEOUT)
+                if err:
+                    raise RuntimeError(err)
+                names += [row["name"] for row in rows]
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"protected branches: {exc}") from exc
+        found = tuple(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
+        if not found or not names[0].strip():
+            raise ForgeError("protected branches: the forge reported no default branch")
+        return found
+
     # writes: preview unless commit
     def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None,
               head: str | None = None, stage_mark: str | None = None) -> str:

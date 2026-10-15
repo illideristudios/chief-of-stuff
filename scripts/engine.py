@@ -7,6 +7,8 @@ import argparse
 import sys
 import time
 from collections.abc import Callable
+from datetime import datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,7 @@ import slots
 import startup
 import store_access
 import supervisor
+import worker
 from forge_port import ForgeError
 from workspace import worktrees_dir
 
@@ -45,6 +48,8 @@ def _planning_inputs(store: Any, items: list) -> dict:
                           if (counts := reconcile.review_findings(states[key], history)) is not None},
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
+        "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
+                         if (quota := state.get("quota"))},
     }
 
 
@@ -72,6 +77,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
+    worker.collect(store, root, clock, trees)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -121,9 +127,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"
                 persona = action.persona if isinstance(action, reconcile.Dispatch) else policies.stages[stage].persona
+                if policies.resolve(persona=persona, stage=stage).launch == "session":
+                    # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
+                    raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
                 slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                             max_concurrency=max_concurrency, clock=clock,
-                            launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona)
+                            launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
@@ -157,11 +166,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     return actions
 
 
-def launch(issue_key: str, stage: str, attempt: int, persona: str | None) -> None:
-    """The production launch port is #631; a refusal must never record a worker start."""
-    raise NotImplementedError("worker launch is not wired yet (#631)")
-
-
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=Path("."), help="workspace holding store.db and CLAUDE.md")
@@ -188,6 +192,16 @@ def main(argv: list[str] | None = None) -> int:
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
             db = store_access.migrated_store(root, engine_owned=True)
+            # Match the forge repository to a configured clone; a repository workspace needs no [repos] entry.
+            repo = source.home.repo if getattr(source, "github", False) else getattr(getattr(source, "home", None), "project", "")
+            selected = config.repos.get(repo) or config.repos.get(repo.rpartition("/")[2])
+            if not selected and len(config.repos) == 1:
+                selected = next(iter(config.repos.values()))
+            if not selected and config.repos:
+                raise ValueError("no [repos] clone matches the workspace backlog")
+            launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
+                             clone=root / selected if selected else root,
+                             claude_as_profile=config.workers.claude_as_profile)
             try:
                 while True:
                     failed = False
