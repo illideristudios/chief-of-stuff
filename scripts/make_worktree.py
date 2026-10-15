@@ -85,9 +85,9 @@ def agent_types(claude_md: str) -> dict[str, str]:
 
 def check_type(claude_md: str, agent_type: str) -> None:
     """Check a declared type; empty type or empty list permits the default agent."""
+    types = agent_types(claude_md)  # always parse; bad lifetimes refuse even when type is omitted
     if not agent_type:
         return
-    types = agent_types(claude_md)
     if types and agent_type not in types:
         raise RefusedError(f"no agent type {agent_type!r} in the Coordinator block; it lists {', '.join(sorted(types))}")
 

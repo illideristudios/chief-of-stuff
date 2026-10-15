@@ -96,6 +96,10 @@ class AgentTypeTest(unittest.TestCase):
         # Undeclared agents omit --type; cut must not refuse "" against the declared list.
         mw.check_type(CLAUDE, "")
 
+    def test_empty_type_still_refuses_a_bad_lifetime(self):
+        with self.assertRaises(mw.RefusedError):
+            mw.check_type("## Coordinator\n\n- Agent: ghost immortal\n", "")
+
 
 class BranchNameTest(unittest.TestCase):
     """git's own answer, not a regex of mine."""
