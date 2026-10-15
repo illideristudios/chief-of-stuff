@@ -75,13 +75,25 @@ PACKAGE_STYLE = ("start_coordinator.py", "chief_of_stuff.py", "evals/run.py")
 
 
 def imports(path: Path) -> set[str]:
-    """Every module a file imports, at the top or inside a function. `from scripts import x` counts as `scripts.x`."""
+    """Every module a file imports, at the top or inside a function. `from scripts import x` counts as `scripts.x`.
+    Package-relative forms (`from . import forge`, `from .forge import X`) count as the sibling stem.
+    `from scripts.migrations import env` counts as `scripts.migrations.env` (path key after circle_target)."""
     names: set[str] = set()
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
         if isinstance(node, ast.Import):
             names.update(alias.name for alias in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module == "scripts":
-            names.update(f"scripts.{alias.name}" for alias in node.names)
+            names.update(f"scripts.{alias.name}" for alias in node.names if alias.name != "*")
+        elif isinstance(node, ast.ImportFrom) and node.level:
+            if node.module:
+                names.add(node.module.split(".")[0])
+            else:
+                names.update(alias.name for alias in node.names if alias.name != "*")
+        elif isinstance(node, ast.ImportFrom) and node.module and (
+                node.module == "migrations" or node.module.startswith("migrations.")
+                or node.module.startswith("scripts.migrations")):
+            for alias in node.names:
+                names.add(node.module if alias.name == "*" else f"{node.module}.{alias.name}")
         elif isinstance(node, ast.ImportFrom) and node.module:
             names.add(node.module)
     return names
@@ -185,10 +197,207 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
     return []
 
 
+# Section 4 circle table. Split modules (audit_tasks, inbox, flow) sit in the outermost circle
+# they occupy until the §8 split lands. Root launchers are Drivers.
+CIRCLES: dict[str, frozenset[str]] = {
+    "entities": frozenset({
+        "tracker", "md", "clock", "runtimes", "policy", "findings", "ownership", "orphans",
+        "estimate", "tracker_log", "tree_state", "guard_commands",
+    }),
+    "use_cases": frozenset({
+        "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
+        "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
+        "reconcile", "guard_rules", "performance",
+    }),
+    "adapters": frozenset({
+        "fragment", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
+        "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge",
+        "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
+        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots",
+        # §4: store's migrations/ — path keys, not top-level stems.
+        "migrations/env",
+        "migrations/versions/0001_initial",
+        "migrations/versions/0002_segment_runner",
+        "migrations/versions/0003_worker_channel",
+    }),
+    "drivers": frozenset({
+        "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
+        "startup", "store_access", "kanban_cli", "process_status", "session_exec", "spawn_session",
+        "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
+        "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
+        "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
+        "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
+        "audit_tasks", "inbox", "flow",
+        "hooks/hooks.json", "guard/hooks/hooks.json",
+    }),
+}
+CIRCLE_RANK = {"entities": 0, "use_cases": 1, "adapters": 2, "drivers": 3}
+MODULE_CIRCLE = {name: circle for circle, names in CIRCLES.items() for name in names}
 
+# Section 5: inward→outward imports known today. The set may only shrink; each entry is a compliance gap.
+OUTWARD_IMPORTS = frozenset({
+    "board_sources→process_status",
+    "decision_page→notify_service",
+    "dispatch_prompt→backlog_ref",
+    "dispatch_prompt→settings",
+    "dispatch_prompt→workspace",
+    "estimate→workspace",
+    "kanban→backlog",
+    "kanban→settings",
+    "merge_approved→backlog",
+    "merge_approved→forge_review",
+    "merge_approved→settings",
+    "merge_approved→workspace",
+    "merge_ready→backlog",
+    "merge_ready→forge_review",
+    "merge_ready→settings",
+    "merge_ready→workspace",
+    "module_graph→git_trees",
+    "one_shot→backlog",
+    "one_shot→forge",
+    "one_shot→git_trees",
+    "one_shot→git_view",
+    "one_shot→notify_service",
+    "one_shot→one_shot_report",
+    "one_shot→process_status",
+    "one_shot→settings",
+    "one_shot→shell_setup",
+    "one_shot→tracker_write",
+    "one_shot→workspace",
+    "one_shot_report→git_trees",
+    "review_threads→backlog",
+    "review_threads→forge_review",
+    "review_threads→settings",
+    "review_threads→workspace",
+    "task_forge→board_sources",
+    "task_forge→settings",
+    "tracker→backlog_ref",
+    "tracker→workspace",
+    "tree_claims→process_status",
+})
+
+
+LAUNCHERS = frozenset({"chief_of_stuff", "start_coordinator"})
+
+
+def discovered_hooks() -> frozenset[str]:
+    """Every `hooks/hooks.json` under the repo root, excluding vendored trees."""
+    skip = {".venv", "_vendor", "node_modules", ".git"}
+    return frozenset(
+        p.relative_to(ROOT).as_posix()
+        for p in ROOT.glob("**/hooks/hooks.json")
+        if not skip.intersection(p.parts)
+    )
+
+
+def migration_paths() -> dict[str, Path]:
+    """`migrations/…` key → file, for store's Adapter migrations (§4)."""
+    root = SCRIPTS / "migrations"
+    if not root.is_dir():
+        return {}
+    return {p.relative_to(SCRIPTS).as_posix().removesuffix(".py"): p
+            for p in root.rglob("*.py")}
+
+
+def circle_target(name: str) -> str:
+    """Map an import name to a circle-graph key; migrations keep their path form."""
+    raw = name.removeprefix("scripts.")
+    if raw == "migrations" or raw.startswith("migrations."):
+        return raw.replace(".", "/")
+    return raw.split(".")[0]
+
+
+def circle_graph() -> dict[str, set[str]]:
+    """Import graph over top-level scripts/, store migrations, and root launchers.
+
+    Launchers are both sources and targets. Migration modules use path keys under
+    `migrations/` and count as Adapters with store.
+    """
+    migrations = migration_paths()
+    targets = {p.stem for p in SCRIPTS.glob("*.py")} | LAUNCHERS | set(migrations)
+    graph: dict[str, set[str]] = {}
+    for path in SCRIPTS.glob("*.py"):
+        graph[path.stem] = ({circle_target(name) for name in imports(path)} & targets) - {path.stem}
+    for key, path in migrations.items():
+        graph[key] = ({circle_target(name) for name in imports(path)} & targets) - {key}
+    for stem in LAUNCHERS:
+        path = ROOT / f"{stem}.py"
+        graph[stem] = ({circle_target(name) for name in imports(path)} & targets) - {stem}
+    return graph
+
+
+def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
+    """`src→dst` for each direct import from an inner circle to an outer one."""
+    graph = circle_graph() if graph is None else graph
+    found: set[str] = set()
+    for src, deps in graph.items():
+        src_circle = MODULE_CIRCLE.get(src)
+        if src_circle is None:
+            continue
+        for dst in deps:
+            dst_circle = MODULE_CIRCLE.get(dst)
+            if dst_circle is None:
+                continue
+            if CIRCLE_RANK[src_circle] < CIRCLE_RANK[dst_circle]:
+                found.add(f"{src}→{dst}")
+    return found
 
 
 class DependencyRuleTest(unittest.TestCase):
+    def test_every_script_launcher_and_hook_is_in_exactly_one_circle(self) -> None:
+        hooks = discovered_hooks()
+        inventory = ({p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS) | set(hooks)
+                     | set(migration_paths()))
+        listed = {name for names in CIRCLES.values() for name in names}
+        self.assertEqual(sorted(inventory - listed), [], "unclassified module")
+        self.assertEqual(sorted(listed - inventory), [], "circle entry with no file")
+        self.assertEqual({n for n in listed if n.endswith("hooks/hooks.json")}, set(hooks))
+        overlap = [name for name, n in ((n, sum(n in s for s in CIRCLES.values())) for n in listed) if n > 1]
+        self.assertEqual(overlap, [])
+
+    def test_nested_scripts_are_only_migrations_or_vendor(self) -> None:
+        # Migrations are Adapter circle entries; _vendor is third-party and unlisted.
+        allowed = ("migrations/", "_vendor/")
+        nested = sorted(p.relative_to(SCRIPTS).as_posix()
+                        for p in SCRIPTS.rglob("*.py") if p.parent != SCRIPTS)
+        self.assertTrue(any(path.startswith("migrations/") for path in nested), nested)
+        self.assertEqual([path for path in nested if not path.startswith(allowed)], [])
+
+    def test_inward_to_outward_imports_match_the_known_list(self) -> None:
+        # §5: fail on a new outward import; the allowlist may only shrink.
+        self.assertEqual(outward_imports(), set(OUTWARD_IMPORTS))
+
+    def test_the_outward_check_sees_an_inner_import_of_an_outer_module(self) -> None:
+        graph = {"tracker": {"forge"}, "forge": set()}
+        self.assertEqual(outward_imports(graph), {"tracker→forge"})
+
+    def test_the_outward_check_sees_an_import_of_a_root_launcher(self) -> None:
+        graph = {"tracker": {"chief_of_stuff"}, "chief_of_stuff": set()}
+        self.assertEqual(outward_imports(graph), {"tracker→chief_of_stuff"})
+
+    def test_imports_sees_package_relative_sibling_names(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "tracker.py")
+            path.write_text("from . import forge\nfrom .settings import load\n", encoding="utf-8")
+            self.assertEqual(imports(path), {"forge", "settings"})
+
+    def test_a_migration_import_of_a_driver_is_outward(self) -> None:
+        graph = {"migrations/env": {"process_status"}, "process_status": set()}
+        self.assertEqual(outward_imports(graph), {"migrations/env→process_status"})
+
+    def test_circle_target_keeps_migration_path_keys(self) -> None:
+        self.assertEqual(circle_target("migrations.env"), "migrations/env")
+        self.assertEqual(circle_target("scripts.migrations.versions.0001_initial"),
+                         "migrations/versions/0001_initial")
+        self.assertEqual(circle_target("forge.client"), "forge")
+
+    def test_from_scripts_migrations_import_alias_is_a_path_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "tracker.py")
+            path.write_text("from scripts.migrations import env\n", encoding="utf-8")
+            self.assertEqual(imports(path), {"scripts.migrations.env"})
+            self.assertEqual(circle_target("scripts.migrations.env"), "migrations/env")
+
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_commands", set(),
