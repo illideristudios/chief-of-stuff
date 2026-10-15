@@ -36,19 +36,21 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _findings(store: Any, key: str, history: list) -> dict[str, int] | None:
-    latest = max((s for s in history if s.stage == "review" and s.ended_at),
-                 key=lambda s: (datetime.fromisoformat(s.started_at), s.attempt), default=None)
-    record = _resume(store, key).get("review_findings")
-    # TODO #639: replace this attempt-keyed resume bridge with structured findings from the latest review.
-    # Forge approval and threads have no severity counts; neither means a worker reported zero findings.
-    if latest is None or latest.outcome != "done" or not isinstance(record, dict):
-        return None
-    counts = record.get("counts")
-    if (record.get("attempt") != latest.attempt or not isinstance(counts, dict)
-            or any(k not in policy.SEVERITIES or type(v) is not int or v < 0 for k, v in counts.items())):
-        return None
-    return counts
+def _planning_inputs(store: Any, items: list) -> dict:
+    """Read the same issue context for the engine pass and merge recheck."""
+    segments = {item.issue_key: store.segments(item.issue_key) for item in items}
+    states = {item.issue_key: _resume(store, item.issue_key) for item in items}
+    return {
+        "segments": segments,
+        "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
+                        or getattr(item, "issue_type", None) for item in items},
+        "open_findings": {key: counts for key, history in segments.items()
+                          if (counts := reconcile.review_findings(states[key], history)) is not None},
+        "rooms": {key: state.get("room") for key, state in states.items()},
+        "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
+        "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
+                         if (quota := state.get("quota"))},
+    }
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
@@ -113,17 +115,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     store.add_log(item.issue_key, message, at)
 
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
-    segments = {item.issue_key: store.segments(item.issue_key) for item in items}
-    # The store does not yet cache issue types; use the default workflow for an unknown type.
-    issue_types = {item.issue_key: getattr(item, "issue_type", None) for item in items}
-    findings = {key: counts for key, history in segments.items()
-                if (counts := _findings(store, key, history)) is not None}
-    resets = {item.issue_key: datetime.fromisoformat(quota["retry_at"]) for item in items
-              if (quota := _resume(store, item.issue_key).get("quota"))}
-    actions = reconcile.plan(items, segments, policies, issue_types,
-                             slots.free_slots(max_concurrency, slots.running(store)), now, findings,
-                             quota_resets=resets)
+    actions = reconcile.plan(items, policies=policies,
+                             free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
+                             **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
+    by_key = {item.issue_key: item for item in items}
     for action in actions:
         key = action.issue_key
         try:
@@ -141,7 +137,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
-                elif engine_merge.execute(action, forge, store, at):
+                elif engine_merge.execute(action, forge, store, at, policies=policies,
+                                         inputs=_planning_inputs(store, [by_key[key]])):
                     stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)

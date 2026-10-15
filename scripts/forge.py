@@ -308,8 +308,18 @@ class Forge:
         host, repo = home_of(self.home)
         return f"github:{repo}#{number}" if self.github else f"gitlab:{host}/{repo}#{number}"
 
+    def mark(self, number: int) -> str:
+        """The forge's request mark: `#21` on GitHub, `!5` on GitLab."""
+        return f"#{number}" if self.github else f"!{number}"
+
     def _token(self) -> str:
         return self.token if self.token is not None else backlog.token(self.home)
+
+    def mark_for_stage(self, stage: str) -> str | None:
+        """The label merge verifies for a stage; '' when the stage has none; None without kanban."""
+        if self.kanban is None:
+            return None
+        return self.kanban.label_for(stage) if stage in self.kanban.stage_map else ""
 
     # reads
     def issues(self, state: str = backlog.OPEN, *, limit: int | None = None) -> backlog.Fetch:
@@ -381,6 +391,36 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"review threads: {exc}") from exc
 
+    def snapshot(self, issue_key: str, *, issue: Any | None = None,
+                 request: merge_ready.Request | None = None) -> dict[str, Any]:
+        """One issue's forge row (as `snapshots` builds), plus the observed stage label merge can verify.
+
+        A blank `stage_mark` means no mapped label; None means stage was not read (no kanban).
+        """
+        if issue is None:
+            got = self.issue(int(issue_key.rsplit("#", 1)[1]))
+            if not got.ok or got.issue is None:
+                raise ForgeError(f"issue: {got.error or 'not found'}")
+            issue = got.issue
+        if request is None:
+            latest: dict[int, merge_ready.Request] = {}
+            # shortcut: several requests closing one issue (rework) report the newest; key by (issue, attempt) when M3 segments need each
+            for r in sorted(self.requests(), key=lambda r: r.number):
+                for ref in r.closes:
+                    latest[int(ref[1:])] = r
+            request = latest.get(issue.iid)
+        snap: dict[str, Any] = {"issue_key": issue_key, "title": issue.title,
+                                "forge_state": "open" if issue.state == backlog.OPEN else "closed",
+                                "stage_mark": None}
+        if self.kanban is not None:
+            snap["stage"] = self._stage(issue)
+            snap["human_review"] = self.kanban.human_review_label in issue.labels
+            snap["stage_mark"] = self.mark_for_stage(snap["stage"])
+        if self.approver:
+            snap["review_state"] = request.approval if request else ""
+        snap["merge_state"] = request.verdict if request else ""
+        return snap
+
     def snapshots(self) -> list[dict[str, Any]]:
         """One `store.Store.sync_from_forge` row per open or recently updated closed issue. Stage and human hold are left out
         without kanban, and review state without an approver, so a sync never blanks what was not read. Recent completed
@@ -413,6 +453,7 @@ class Forge:
             if self.kanban is not None:
                 snap["stage"] = self._stage(one, statuses if self.kanban.github_project and self.github else None)
                 snap["human_review"] = self.kanban.human_review_label in one.labels
+                snap["stage_mark"] = self.mark_for_stage(snap["stage"])
             if self.approver:
                 snap["review_state"] = r.approval if r else ""
             if one.state == backlog.CLOSED and one.iid in merged:  # an open follow-up does not undo a merge
@@ -469,20 +510,45 @@ class Forge:
         return found
 
     # writes: preview unless commit
-    def merge(self, number: int, commit: bool = False, issue_key: str | None = None) -> str:
-        """Re-read readiness and the issue's closing request, then preview or report the verified head's merge outcome."""
-        mark = "#" if self.github else "!"
+    def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None,
+              head: str | None = None, stage_mark: str | None = None) -> str:
+        """Re-read readiness and the issue's closing request, then preview or report the verified head's merge outcome.
+        `approval`, `head` and the issue's `stage_mark` are what a policy check relied on; the final read must still
+        report them, and the issue must still be open. A blank `stage_mark` expects no mapped stage label;
+        None leaves the stage unchecked."""
+        mark = self.mark(number)
         found = self.requests()
         one = next((r for r in found if r.number == number), None)
         if one is None:
-            raise ForgeError(f"{mark}{number} is not an open request")
+            raise ForgeError(f"{mark} is not an open request")
         if issue_key is not None:
             selected = self.closing_request(issue_key, found)
             if selected.number != number:
-                raise ForgeError(f"{mark}{number} is no longer the newest request closing {issue_key}: {mark}{selected.number}")
+                raise ForgeError(f"{mark} is no longer the newest request closing {issue_key}: {self.mark(selected.number)}")
         if one.verdict != "ready":
-            raise ForgeError(f"not merged: {merge_ready.line(one, mark)}")
-        evidence = f"{mark}{number} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
+            raise ForgeError(f"not merged: {merge_ready.line(one, mark[:1])}")
+        if approval is not None and one.approval != approval:  # verdict leaves approval out
+            raise ForgeError(f"{mark} approval changed since the policy check: {approval} -> {one.approval}")
+        if head is not None and one.head != head:  # a push after the check is unreviewed code
+            raise ForgeError(f"{mark} head changed since the policy check: {head[:7]} -> {one.head[:7]}")
+        if issue_key is not None:  # a close or stage move during the policy check is a forge-side hold
+            got = self.issue(int(issue_key.rsplit("#", 1)[1]))
+            if not got.ok or got.issue is None:
+                raise ForgeError(f"issue: {got.error or 'not found'}")
+            if not got.issue.is_open:
+                raise ForgeError(f"{issue_key} is no longer open on the forge")
+            if self.kanban and self.kanban.human_review_label in got.issue.labels:
+                raise ForgeError(f"{issue_key} is held for human review on the forge")
+            if stage_mark is not None and self.kanban:
+                try:  # conflicting stage labels are refused here as the snapshot decode refuses them
+                    observed = self.kanban.stage_for_label(got.issue.labels)
+                except ValueError as exc:
+                    raise ForgeError(f"{issue_key} left its stage since the policy check: {exc}") from exc
+                if stage_mark == "" and observed:
+                    raise ForgeError(f"{issue_key} left its stage since the policy check: a mapped stage label appeared")
+                if stage_mark and stage_mark not in got.issue.labels:
+                    raise ForgeError(f"{issue_key} left its stage since the policy check: {stage_mark} is gone")
+        evidence = f"{mark} at {one.head} · pipeline {one.pipeline_id or '-'} on {one.pipeline_sha} · {one.url}"
         if not commit:
             return f"would merge {evidence}"
         _, repo = home_of(self.home)
@@ -490,9 +556,9 @@ class Forge:
             code, result = merge_approved.merge_head(one, self.home, self.github, repo, gh=self.gh,
                                                     call=backlog._call, token=None if self.github else self._token())
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"{mark}{number} not merged at {one.head}: {exc}") from exc
+            raise ForgeError(f"{mark} not merged at {one.head}: {exc}") from exc
         if code:
-            raise ForgeError(f"{mark}{number} not merged at {one.head}: {result or f'merge exited {code}'}")
+            raise ForgeError(f"{mark} not merged at {one.head}: {result or f'merge exited {code}'}")
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
 

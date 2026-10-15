@@ -144,8 +144,20 @@ class KeyTest(unittest.TestCase):
         self.assertEqual(forge.Forge(GH).key(7), "github:example/app#7")
         self.assertEqual(forge.Forge(GL).key(5), "gitlab:gitlab.example.test/team/app#5")
 
+    def test_mark_names_a_github_pull_or_gitlab_merge_request(self):
+        self.assertEqual(forge.Forge(GH).mark(21), "#21")
+        self.assertEqual(forge.Forge(GL).mark(5), "!5")
+
 
 class GitHubTest(unittest.TestCase):
+    def test_snapshot_is_one_issue_row_with_its_stage_mark(self):
+        row = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshot("github:example/app#3")
+        self.assertEqual(row, {
+            "issue_key": "github:example/app#3", "title": "Fix the parser", "forge_state": "open",
+            "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready",
+            "stage_mark": "stage: review",
+        })
+
     def test_merged_requests_union_sidebar_links_with_body_and_filter_other_repositories(self):
         from evals.test_forge_review import closing_issue
         gh = FakeGh(issues=[gh_issue(n, "Closed", state="CLOSED") for n in range(3, 9)],
@@ -206,7 +218,7 @@ class GitHubTest(unittest.TestCase):
                             prs=[tma.pr(21, reviews)], bodies={21: "Closes #3"})
                 snapshot, = forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots()
                 self.assertEqual((snapshot["review_state"], snapshot["merge_state"]), ("changes_requested", "ready"))
-                item = store.WorkItem(**snapshot)
+                item = store.WorkItem(**{k: v for k, v in snapshot.items() if k != "stage_mark"})
                 for stage in ("review", "merge"):
                     item.stage = stage
                     self.assertEqual(tr.reconcile.plan([item],
@@ -236,14 +248,16 @@ class GitHubTest(unittest.TestCase):
         got = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshots()
         self.assertEqual(got, [
             {"issue_key": "github:example/app#3", "title": "Fix the parser", "forge_state": "open", "stage": "review",
-             "human_review": False, "review_state": "approved", "merge_state": "ready"},
+             "human_review": False, "review_state": "approved", "merge_state": "ready",
+             "stage_mark": "stage: review"},
             {"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open", "stage": "doing",
-             "human_review": False, "review_state": "", "merge_state": ""},
+             "human_review": False, "review_state": "", "merge_state": "", "stage_mark": "stage: doing"},
         ])
 
     def test_what_was_not_configured_is_left_out_so_a_sync_never_blanks_it(self):
         got = forge.Forge(GH, gh=github()).snapshots()
-        self.assertEqual([sorted(s) for s in got], [["forge_state", "issue_key", "merge_state", "title"]] * 2)
+        self.assertEqual([sorted(s) for s in got],
+                         [["forge_state", "issue_key", "merge_state", "title"]] * 2)
 
     def test_a_failed_read_is_an_error_never_an_empty_forge(self):
         for broken in (("issue", "list"), ("pr", "list"), ("api", "graphql")):
@@ -332,7 +346,8 @@ class StageWriteBackTest(unittest.TestCase):
         gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={url: "Doing"})
         got = forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
         self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
-                                "stage": "doing", "human_review": False, "merge_state": ""}])
+                                "stage": "doing", "human_review": False, "stage_mark": "stage: doing",
+                                "merge_state": ""}])
 
     def test_snapshots_refuse_partial_project_fields_before_store_sync(self):
         issue = gh_issue(4, "Project issue", ["stage: ready"])
@@ -642,9 +657,10 @@ class GitLabTest(unittest.TestCase):
     def test_snapshots_carry_identity_stage_review_and_merge_state(self):
         self.assertEqual(self.forge.snapshots(), [
             {"issue_key": "gitlab:gitlab.example.test/team/app#3", "title": "Fix the parser", "forge_state": "open",
-             "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready"},
+             "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready",
+             "stage_mark": "stage: review"},
             {"issue_key": "gitlab:gitlab.example.test/team/app#4", "title": "Add a flag", "forge_state": "open",
-             "stage": "", "human_review": False, "review_state": "", "merge_state": ""},
+             "stage": "", "human_review": False, "review_state": "", "merge_state": "", "stage_mark": ""},
         ])
 
     def test_a_failed_read_is_an_error_never_an_empty_forge(self):
@@ -777,6 +793,23 @@ class MergeTest(unittest.TestCase):
         with self.assertRaisesRegex(forge.ForgeError, "red"):
             f.merge(21, commit=True)
         self.assertEqual(gh.merges, [])
+
+    def test_a_conflicting_stage_label_at_the_final_read_refuses_the_merge(self):
+        for expected, labels in (("stage: review", ["stage: review", "stage: doing"]),  # expected mark stays
+                                 ("", ["stage: doing", "stage: review"])):
+            with self.subTest(expected=expected):
+                gh = github()
+                gh.issues[3]["labels"] = [{"name": n} for n in labels]
+                with self.assertRaisesRegex(forge.ForgeError, "more than one stage"):
+                    forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).merge(
+                        21, commit=True, issue_key=f"github:{REPO}#3", stage_mark=expected)
+                self.assertEqual(gh.merges, [])
+
+    def test_an_unchanged_stage_label_still_merges_at_the_final_read(self):
+        gh = github()
+        forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).merge(
+            21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
+        self.assertEqual(len(gh.merges), 1)
 
     def test_a_head_moved_after_verification_fails_the_pinned_merge(self):
         gh = tmr.github_gh([21])

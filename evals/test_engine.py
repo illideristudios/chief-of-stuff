@@ -43,9 +43,21 @@ class FakeForge:
     def __init__(self):
         self.rows = [{"issue_key": KEY, "stage": "implement", "forge_state": "open", "merge_state": "ready"}]
         self.writes, self.merges = [], []
+        self.kanban, self.github = None, True
+        self.home = SimpleNamespace(repo=KEY.split(":", 1)[1].rsplit("#", 1)[0])
 
     def snapshots(self):
-        return [dict(row) for row in self.rows]
+        return [self.snapshot(row["issue_key"]) for row in self.rows]
+
+    def snapshot(self, issue_key, *, issue=None, request=None):
+        row = next(r for r in self.rows if r["issue_key"] == issue_key)
+        return {**dict(row), "stage_mark": None}
+
+    def mark(self, number):
+        return f"#{number}"
+
+    def mark_for_stage(self, stage):
+        return None
 
     def write_stage(self, number, stage, expected=None, commit=False, initialize=False):
         self.writes.append((number, stage, expected, commit))
@@ -53,9 +65,13 @@ class FakeForge:
         return SimpleNamespace(ok=True, done=True, error="")
 
     def closing_request(self, issue_key):
-        return SimpleNamespace(number=10)
+        return SimpleNamespace(number=10, verdict="ready", approval="", head=tf.tma.HEAD)
 
-    def merge(self, number, commit=False, issue_key=None):
+    def issue(self, number):
+        row = next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))
+        return SimpleNamespace(ok=True, issue=SimpleNamespace(is_open=row["forge_state"] == "open", labels=[]))
+
+    def merge(self, number, commit=False, issue_key=None, approval=None, head=None, stage_mark=None):
         self.merges.append((number, commit, issue_key))
         next(row for row in self.rows if row["issue_key"] == issue_key)["forge_state"] = "closed"
         return "merged #10"
@@ -143,7 +159,9 @@ class EngineTest(unittest.TestCase):
                 self.assertEqual(self.forge.writes, writes)
                 self.assertNotIn("pending_stage", self.db.resume(KEY))
                 self.assertEqual(self.db.log(KEY)[-1].message, message)
-                self.assertEqual(merge.call_args_list, [mock.call(10, commit=True, issue_key=KEY)] * attempt)
+                self.assertEqual(merge.call_args_list, [mock.call(10, commit=True, issue_key=KEY,
+                                                                 approval="", head=tf.tma.HEAD,
+                                                                 stage_mark=None)] * attempt)
 
     def test_queued_merge_keeps_stage_and_is_planned_again_next_pass(self):
         self.assert_unconfirmed_merge_keeps_review_stage("queued #10", "queued #10")
@@ -253,6 +271,17 @@ class EngineTest(unittest.TestCase):
             with self.subTest(resume=resume):
                 self.db.set_resume(KEY, resume)
                 self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "review findings are unknown")])
+        self.assertEqual(self.forge.merges, [])
+
+    def test_pending_decision_at_merge_prevents_a_merge_plan(self):
+        self.forge.rows[0]["stage"] = "merge"
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "review", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        self.findings()
+        self.db.add_decision(KEY, "design", "Split the parser?")
+        with mock.patch.object(engine.engine_merge, "execute") as merged:
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
+        merged.assert_not_called()
         self.assertEqual(self.forge.merges, [])
 
     def test_blocking_findings_follow_the_planned_fix_stage(self):
@@ -429,8 +458,8 @@ class EngineTest(unittest.TestCase):
         self.findings(attempt=2)
         with mock.patch.object(engine.reconcile, "plan", return_value=[]) as planned:
             self.run_pass()
-        self.assertEqual(planned.call_args.args[5], self.now)
-        self.assertEqual(planned.call_args.args[6], {KEY: {}})
+        self.assertEqual(planned.call_args.kwargs["now"], self.now)
+        self.assertEqual(planned.call_args.kwargs["open_findings"], {KEY: {}})
 
     def test_cleanup_failure_is_a_failed_pass_after_actions_run(self):
         self.cleanup.return_value = 1

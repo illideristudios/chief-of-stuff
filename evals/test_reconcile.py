@@ -34,6 +34,13 @@ class Segment:
     outcome: str | None = "done"
 
 
+@dataclass(frozen=True)
+class Decision:
+    answer: str | None = None
+    topic: str = "scope"
+    question: str = "Split the parser?"
+
+
 def policies():
     return policy.parse({
         "default_workflow": "standard",
@@ -118,10 +125,22 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement", outcome="failed")]),
                          [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
-    def test_quota_and_unknown_outcomes_do_not_spend_the_retry_budget(self):
+    def test_quota_outcomes_do_not_consume_the_retry_limit_the_way_failures_do(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        initial = Segment("implement", started_at=NOW - timedelta(hours=6), ended_at=NOW - timedelta(hours=5))
+        review = Segment("review", started_at=NOW - timedelta(hours=4), ended_at=NOW - timedelta(hours=3))
+        rework = Segment("implement", 2, started_at=NOW - timedelta(hours=2), ended_at=NOW - timedelta(hours=1))
+        again = Segment("review", 2, started_at=NOW - timedelta(minutes=50), ended_at=NOW - timedelta(minutes=40))
+        item = replace(Item(), stage="review", review_state="changes_requested")
+        for outcome, expected in (("quota", reconcile.Dispatch(KEY, "implement", "builder", 3)),
+                                  ("unknown", reconcile.Dispatch(KEY, "implement", "builder", 3)),
+                                  ("failed", reconcile.Escalate(KEY, "retry limit reached for implement"))):
+            with self.subTest(outcome=outcome, rework=True):
+                self.assertEqual(self.plan(item, [initial, review, replace(rework, outcome=outcome), again], {"minor": 1}),
+                                 [expected])
         self.p = replace(self.p, base=policy.Policy(retry_limit=0))
         for outcome in ("quota", "unknown"):
-            with self.subTest(outcome=outcome):
+            with self.subTest(outcome=outcome, rework=False):
                 self.assertEqual(self.plan(history=[Segment("implement", outcome=outcome)]),
                                  [reconcile.Dispatch(KEY, "implement", "builder", 2)])
 
@@ -179,6 +198,7 @@ class ReconcileTest(unittest.TestCase):
                 history.append(Segment("review", attempt + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
         self.assertEqual(self.plan(item, history, {"minor": 1}),
                          [reconcile.Escalate(KEY, "retry limit reached for fix")])
+        history.append(Segment("architect", started_at=history[-1].started_at, ended_at=NOW))
         self.assertEqual(self.plan(item, history, {}), [reconcile.Merge(KEY)])
 
     def test_review_edge_counts_every_repair_attempt_against_the_retry_limit(self):
@@ -240,6 +260,130 @@ class ReconcileTest(unittest.TestCase):
     def test_policy_satisfied_work_merges_without_an_interrupt_or_slot(self):
         item = replace(Item(), stage="review", review_state="approved", merge_state="ready")
         self.assertEqual(self.plan(item, [Segment("review")], {}, slots=0), [reconcile.Merge(KEY)])
+
+    def test_pending_decisions_block_merge_but_answered_decisions_do_not(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        for answer in (None, "", "   ", "Split the parser"):
+            with self.subTest(answer=answer):
+                actions = self.plan(item, [Segment("review")], {}, decisions={KEY: [Decision(answer)]})
+                self.assertEqual(actions, [reconcile.Merge(KEY)] if answer and answer.strip() else
+                                 [reconcile.Wait(KEY, "decision pending")])
+
+    def test_a_later_answer_resolves_an_earlier_pending_row_for_the_same_question(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        answered = [Decision(None), Decision("Split it")]
+        self.assertEqual(self.plan(item, [Segment("review")], {}, decisions={KEY: answered}), [reconcile.Merge(KEY)])
+        other = [Decision("Split it"), Decision(None, question="Rename it?")]
+        self.assertEqual(self.plan(item, [Segment("review")], {}, decisions={KEY: other}),
+                         [reconcile.Wait(KEY, "decision pending")])
+
+    def test_a_review_that_started_before_the_work_ended_does_not_count(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        implement = Segment("implement", started_at=NOW - timedelta(hours=3), ended_at=NOW - timedelta(minutes=30))
+        review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
+        self.assertNotIn(reconcile.Merge(KEY), self.plan(item, [implement, review], {}))
+
+    def test_required_architect_consultation_must_be_done_for_the_current_work(self):
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        item = replace(Item(), stage="merge", merge_state="ready")
+        implement = Segment("implement", started_at=NOW - timedelta(hours=3))
+        review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
+        for architect in (None, Segment("architect", outcome="failed"),
+                          Segment("architect", ended_at=None),
+                          Segment("architect", started_at=NOW - timedelta(hours=4)),
+                          # overlaps implement (ends NOW-1h): it could not see the final work
+                          Segment("architect", started_at=NOW - timedelta(hours=2), ended_at=NOW)):
+            with self.subTest(architect=architect):
+                history = [implement, review, *([architect] if architect else [])]
+                self.assertNotIn(reconcile.Merge(KEY), self.plan(item, history, {}))
+        for started_at in (NOW - timedelta(hours=1), NOW):
+            with self.subTest(started_at=started_at):
+                architect = Segment("architect", started_at=started_at, ended_at=NOW)
+                self.assertEqual(self.plan(item, [implement, review, architect], {}), [reconcile.Merge(KEY)])
+
+    def test_implement_stage_architect_policy_requires_consultation(self):
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"architect": True})
+        review = Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)
+        for stage in ("review", "merge"):
+            with self.subTest(stage=stage):
+                item = replace(Item(), stage=stage, merge_state="ready")
+                self.assertEqual(self.plan(item, [review], {}), [reconcile.Merge(KEY)])
+                history = [Segment("implement"), review]
+                self.assertEqual(self.plan(item, history, {}),
+                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
+                                 [reconcile.Merge(KEY)])
+
+    def test_implementer_persona_architect_policy_requires_consultation(self):
+        self.p.personas["builder"] = replace(self.p.personas["builder"], policy={"architect": True})
+        review = Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)
+        for stage in ("review", "merge"):
+            with self.subTest(stage=stage):
+                item = replace(Item(), stage=stage, merge_state="ready")
+                self.assertEqual(self.plan(item, [review], {}), [reconcile.Merge(KEY)])
+                history = [Segment("implement"), review]
+                self.assertEqual(self.plan(item, history, {}),
+                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
+                                 [reconcile.Merge(KEY)])
+
+    def test_an_architect_workflow_stage_follows_its_edge_after_a_done_segment(self):
+        self.p = policy.parse({
+            "default_workflow": "designed",
+            "personas": {"builder": {"role": "implements", "model": "example"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"architect": {"persona": "critic"}, "implement": {"persona": "builder"}},
+            "workflows": {"designed": {"start": "architect", "edges": [{"from": "architect", "to": "implement"}]}},
+        })
+        item = replace(Item(), stage="architect")
+        self.assertEqual(self.plan(item, [Segment("architect")], {}), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
+    def test_an_architect_workflow_stage_after_review_is_reviewed_again(self):
+        self.p = policy.parse({
+            "default_workflow": "designed",
+            "personas": {"builder": {"role": "implements", "model": "example"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"implement": {"persona": "builder"}, "review": {"persona": "critic"},
+                       "architect": {"persona": "critic"}, "merge": {}},
+            "workflows": {"designed": {"start": "implement", "edges": [
+                {"from": "implement", "to": "review"}, {"from": "review", "to": "architect"},
+                {"from": "architect", "to": "merge", "gate": "merge"}]}},
+        })
+        item = replace(Item(), stage="merge", review_state="none", merge_state="ready")
+        history = [Segment("implement", started_at=NOW - timedelta(hours=6), ended_at=NOW - timedelta(hours=5)),
+                   Segment("review", started_at=NOW - timedelta(hours=4), ended_at=NOW - timedelta(hours=3)),
+                   Segment("architect")]
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+
+    def test_review_architect_merge_reaches_merge_after_the_post_architect_review(self):
+        self.p.stages["architect"] = policy.Place("architect", "builder")
+        self.p.workflows["standard"] = policy.Workflow("standard", "review", (
+            policy.Edge("review", "architect"), policy.Edge("architect", "merge", "merge")))
+        item = replace(Item(), stage="review", review_state="none", merge_state="ready")
+        self.assertEqual(self.plan(item), [reconcile.Review(KEY, 1)])
+        history = [Segment("review", started_at=NOW - timedelta(hours=4),
+                           ended_at=NOW - timedelta(hours=3))]
+        self.assertEqual(self.plan(item, history, {"minor": 1}),
+                         [reconcile.Dispatch(KEY, "architect", "builder", 1)])
+        item = replace(item, stage="architect")
+        history.append(Segment("architect"))
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+        item = replace(item, stage="review")  # The engine records the dispatched review's stage.
+        history.append(Segment("review", 2, started_at=NOW - timedelta(minutes=30), ended_at=NOW))
+        for stage in ("review", "merge"):
+            for order in (history, history[::-1]):
+                with self.subTest(stage=stage, history=order):
+                    self.assertEqual(self.plan(replace(item, stage=stage), order, {}, slots=0),
+                                     [reconcile.Merge(KEY)])
+        self.p.stages["architect"] = policy.Place("architect", "builder", {"zach_gates": ("merge",)})
+        self.assertEqual(self.plan(item, history, {}),
+                         [reconcile.Ask(KEY, "merge", "gate requires Zach's approval")])
+
+    def test_architect_requirement_obeys_room_policy(self):
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        self.p.rooms["lab"] = policy.Place("lab", policy={"architect": False})
+        item = replace(Item(), stage="merge", merge_state="ready")
+        self.assertEqual(self.plan(item, [Segment("review")], {}, rooms={KEY: "lab"}), [reconcile.Merge(KEY)])
 
     def test_work_that_ended_after_the_review_started_was_not_reviewed(self):
         # Overlap: the segment started before the review but ended after it began, so the review never saw it.
