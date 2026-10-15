@@ -44,6 +44,7 @@ class FakeForge:
         self.rows = [{"issue_key": KEY, "stage": "implement", "forge_state": "open", "merge_state": "ready"}]
         self.writes, self.merges = [], []
         self.kanban, self.github = None, True
+        self.home = SimpleNamespace(repo=KEY.split(":", 1)[1].rsplit("#", 1)[0])
 
     def snapshots(self):
         return [self.snapshot(row["issue_key"]) for row in self.rows]
