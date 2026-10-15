@@ -158,6 +158,12 @@ class GitHubTest(unittest.TestCase):
             "stage_mark": "stage: review",
         })
 
+    def test_mark_for_stage_returns_the_literal_terminal_label(self):
+        f = forge.Forge(GH, kanban=FLOW, gh=github())
+        self.assertEqual(f.mark_for_stage("done"), "done")
+        self.assertEqual(f.mark_for_stage("review"), "stage: review")
+        self.assertEqual(f.mark_for_stage("unknown"), "")
+
     def test_merged_requests_union_sidebar_links_with_body_and_filter_other_repositories(self):
         from evals.test_forge_review import closing_issue
         gh = FakeGh(issues=[gh_issue(n, "Closed", state="CLOSED") for n in range(3, 9)],
@@ -348,6 +354,14 @@ class StageWriteBackTest(unittest.TestCase):
         self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
                                 "stage": "doing", "human_review": False, "stage_mark": "stage: doing",
                                 "merge_state": ""}])
+
+    def test_snapshot_reads_stage_from_project_status(self):
+        # Merge recheck uses snapshot(); Project mode stores the stage in Status, not labels.
+        url = gh_issue(4, "Add a flag")["url"]
+        gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={url: "Doing"})
+        row = forge.Forge(GH, kanban=BOARD, gh=gh).snapshot("github:example/app#4")
+        self.assertEqual(row["stage"], "doing")
+        self.assertEqual(row["stage_mark"], "stage: doing")
 
     def test_snapshots_refuse_partial_project_fields_before_store_sync(self):
         issue = gh_issue(4, "Project issue", ["stage: ready"])
@@ -810,6 +824,33 @@ class MergeTest(unittest.TestCase):
         forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).merge(
             21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
         self.assertEqual(len(gh.merges), 1)
+
+    def test_a_differently_cased_stage_label_still_merges_at_the_final_read(self):
+        gh = github()
+        gh.issues[3]["labels"] = [{"name": "Stage: Review"}, {"name": "bug"}]
+        forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).merge(
+            21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
+        self.assertEqual(len(gh.merges), 1)
+
+    def test_project_mode_merge_accepts_status_without_stage_labels(self):
+        # Project mode stores the stage in Status; stage labels are stripped from the issue.
+        issue = gh_issue(3, "Fix the parser", ["bug"])
+        gh = FakeGh(issues=[issue, gh_issue(4, "Add a flag", ["stage: doing"])],
+                    prs=[tma.pr(21, [tma.review("robin", "APPROVED")])], bodies={21: "Closes #3"},
+                    status={issue["url"]: "Review"})
+        forge.Forge(GH, approver="robin", kanban=BOARD, gh=gh).merge(
+            21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
+        self.assertEqual(len(gh.merges), 1)
+
+    def test_project_mode_merge_refuses_when_status_moved(self):
+        issue = gh_issue(3, "Fix the parser", ["bug"])
+        gh = FakeGh(issues=[issue, gh_issue(4, "Add a flag", ["stage: doing"])],
+                    prs=[tma.pr(21, [tma.review("robin", "APPROVED")])], bodies={21: "Closes #3"},
+                    status={issue["url"]: "Doing"})
+        with self.assertRaisesRegex(forge.ForgeError, "left its stage"):
+            forge.Forge(GH, approver="robin", kanban=BOARD, gh=gh).merge(
+                21, commit=True, issue_key=f"github:{REPO}#3", stage_mark="stage: review")
+        self.assertEqual(gh.merges, [])
 
     def test_a_head_moved_after_verification_fails_the_pinned_merge(self):
         gh = tmr.github_gh([21])
