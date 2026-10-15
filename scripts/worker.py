@@ -280,7 +280,15 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 else:
                     outcome, reason = "failed", reply.message
             else:
-                outcome = "done"
+                # A clean exit is not completion: the worker's own report for this session decides.
+                reports = store.reports(key, stage=segment.stage, attempt=segment.attempt,
+                                        session_id=record["session_id"])
+                if not reports:
+                    reason = "worker stopped without reporting an outcome"
+                elif reports[-1].outcome == "done":
+                    outcome = "done"
+                else:
+                    outcome, reason = reports[-1].outcome, reports[-1].summary
             if segment.stage == "review":
                 # This attempt's collected result always names the SHA pinned at launch.
                 record["result"] = {"reviewed_head": record.get("reviewed_head"),

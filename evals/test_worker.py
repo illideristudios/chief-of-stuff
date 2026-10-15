@@ -73,6 +73,8 @@ class WorkerTest(unittest.TestCase):
         text = "done" if outcome == "done" else "bad" if outcome == "failed" else "429 quota exceeded; resets in 2 hours"
         (run / "stdout").write_text(json.dumps({"is_error": outcome != "done", "result": text}))
         (run / "stderr").write_text("")
+        if outcome == "done":
+            self.report(run)
         (run / "exit.json").write_text(json.dumps({"exit_code": 0 if outcome == "done" else 1}))
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
@@ -200,6 +202,7 @@ class WorkerTest(unittest.TestCase):
         self.db.set_resume(KEY, data)
         (run / "stdout").write_text('{"is_error": false, "result": "reviewed"}')
         (run / "stderr").write_text("")
+        self.report(run, stage="review")
         (run / "exit.json").write_text('{"exit_code": 0}')
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
@@ -258,6 +261,7 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
                 (run / "stdout").write_text('{"is_error": false, "result": "done"}')
                 (run / "stderr").write_text("")
+                self.report(run)
                 (run / "exit.json").write_text('{"exit_code": 0}')
                 with mock.patch.object(worker.process_status, "identity", return_value=None):
                     worker.collect(self.db, self.root, lambda: NOW)
@@ -311,6 +315,8 @@ class WorkerTest(unittest.TestCase):
                     text = "429 quota exceeded; resets in 2 hours" if outcome == "quota" else outcome
                     (run / "stdout").write_text(json.dumps({"is_error": outcome != "done", "result": text}))
                     (run / "stderr").write_text("")
+                    if outcome == "done":
+                        self.report(run, stage=stage)
                     (run / "exit.json").write_text(json.dumps({"exit_code": 0 if outcome == "done" else 1}))
                     with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
                          mock.patch.object(worker.make_worktree, "git", return_value=(0, "head" if stage == "review" else record["branch"])) as git, \
@@ -356,6 +362,7 @@ class WorkerTest(unittest.TestCase):
         start.assert_not_called()
         (run / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run / "stderr").write_text("")
+        self.report(run)
         (run / "exit.json").write_text('{"exit_code": 0}')
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW)
@@ -431,6 +438,28 @@ class WorkerTest(unittest.TestCase):
                     quota = self.db.resume(KEY)["quota"]
                     self.assertIn("resets in 2 hours", quota["reset"])
                     self.assertEqual(quota["retry_at"], (NOW + timedelta(hours=2, minutes=1)).isoformat())
+
+    def report(self, run, outcome="done", stage="implement"):
+        session = json.loads((run / "started.json").read_text())["session_id"]
+        self.db.add_report(KEY, stage, 1, session, outcome, f"reported {outcome}", [])
+
+    def test_successful_host_takes_the_segment_outcome_from_its_session_report(self):
+        for outcome, expected in (("done", "done"), ("blocked", "blocked"), ("failed", "failed"), (None, "failed")):
+            with self.subTest(report=outcome):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                run = self.launched()
+                if outcome:
+                    self.report(run, outcome)
+                # A stale report from another session must not count.
+                self.db.add_report(KEY, "implement", 1, "other-session", "done", "stale", [])
+                (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
+                (run / "stderr").write_text("")
+                (run / "exit.json").write_text('{"exit_code": 0}')
+                with mock.patch.object(worker.process_status, "identity", return_value=None):
+                    worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+                self.assertEqual(self.db.segments(KEY)[0].outcome, expected)
 
     def test_collect_unknown_backs_off_like_quota(self):
         run = self.launched()
@@ -523,6 +552,7 @@ class WorkerTest(unittest.TestCase):
         run = self.launched()
         (run / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run / "stderr").write_text("")
+        self.report(run)
         (run / "exit.json").write_text('{"exit_code": 0}')
         with mock.patch.object(worker.process_status, "identity", return_value="another-birth-time"):
             worker.collect(self.db, self.root, lambda: NOW)
@@ -546,6 +576,7 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(self.db.log(KEY)[-1].message, f"worker identity unverified: {error}")
         (run / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run / "stderr").write_text("")
+        self.report(run)
         (run / "exit.json").write_text('{"exit_code": 0}')
         worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         self.assertEqual(self.db.segments()[-1].outcome, "done")
@@ -583,6 +614,7 @@ class WorkerTest(unittest.TestCase):
         start.assert_not_called()
         self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"], record)
         runner.wait(timeout=5)
+        self.report(Path(record["run_dir"]))
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         self.assertEqual(self.db.segments()[0].outcome, "done")
@@ -637,6 +669,7 @@ class WorkerTest(unittest.TestCase):
                 if exited:
                     (run / "stdout").write_text('{"is_error": false, "result": "done"}')
                     (run / "stderr").write_text("")
+                    self.report(run)
                     (run / "exit.json").write_text('{"exit_code": 0}')
                 with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
                     worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
