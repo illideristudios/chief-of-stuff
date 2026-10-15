@@ -256,8 +256,11 @@ def dispatch_ready_tasks(root: Path, day: str, tracker_path: Path, settings: Set
             first_repo = next(iter(settings.repos.values()))
             clone_repo = root / first_repo
 
+        declared = make_worktree.agent_types((root / "CLAUDE.md").read_text())
+        # Worktree --type is required; the worker gets it only when Agent: lines declare it (§9).
+        cut_type = "implementer" if not declared or "implementer" in declared else sorted(declared)[0]
         try:
-            make_worktree.build(root, clone_repo, trees_base, tree_name, branch_name, agent_type="implementer")
+            make_worktree.build(root, clone_repo, trees_base, tree_name, branch_name, agent_type=cut_type)
         except make_worktree.RefusedError as exc:
             dispatched.append(f"refused worktree for {t.label}: {exc}")
             continue
@@ -266,7 +269,9 @@ def dispatch_ready_tasks(root: Path, day: str, tracker_path: Path, settings: Set
         chief_bin = resolve_chief_bin(root)
 
         cmd = [sys.executable, str(chief_bin), "worker", "--one-shot", "--root", str(root),
-               "--task", t.label, "--cwd", str(tree_path), "--date", day]
+               "--task", t.label, "--cwd", str(tree_path), "--date", day, "--name", tree_name]
+        if cut_type in declared:
+            cmd += ["--type", cut_type]
 
         try:
             subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
