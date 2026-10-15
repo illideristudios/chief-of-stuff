@@ -117,6 +117,18 @@ class Ask(WorkerRecord, Base):
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+def is_current(path: Path | str) -> bool:
+    """True when the database at `path` is already at the latest revision. Only reads, so it is safe beside a live writer."""
+    if not Path(path).exists():
+        return False
+    head = ScriptDirectory.from_config(_config(path)).get_current_head()
+    with closing(sqlite3.connect(path, timeout=30)) as conn:
+        try:
+            return conn.execute("SELECT version_num FROM alembic_version").fetchall() == [(head,)]
+        except sqlite3.OperationalError:  # no alembic_version table: never migrated
+            return False
+
+
 def migrate(path: Path | str) -> None:
     """Enable WAL and bring the database at `path` to the latest revision. Call it once at engine start, never from
     concurrent writers: journal-mode changes need an exclusive lock, and first-time migrations race to create tables."""

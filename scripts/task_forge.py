@@ -154,4 +154,6 @@ def drifts(task: Task, kanban: Kanban | None, sources: board_sources.Sources, st
     # ponytail: labels only; a GitHub Project's Status is not in the sources, so a project board never drifts here.
     if kanban is None or kanban.github_project or issue is None or not stage or task.kind == "done":
         return False
+    if stage in kanban.terminal_stages:  # a merged change: the forge already answered, mark or not (#240)
+        return False
     return bool(kanban_tool.drift(kanban, issue.labels, stage, allow_extra_hold=task.kind == "waiting"))

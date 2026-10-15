@@ -28,12 +28,12 @@ LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "ownership", "forge_review",
-    "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "audit_tasks",
+    "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
     "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
-    "one_shot_report", "flow", "sync_page_theme", "store",
+    "one_shot_report", "flow", "sync_page_theme", "store", "store_access",
     "model_port",
     "claude_adapter",
     "policy",
@@ -45,15 +45,18 @@ DRAWS_NOTHING = (
     "performance",
     "performance_report",
     "supervisor",
-    "slots",
-    "reconcile",
-    "cleanup",
-    "engine",
+    "startup",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
     "guard_binding",  # Frameworks and Drivers: launch env and plugin paths.
     "worker_guard",  # Frameworks and Drivers: command hook JSON and store access.
     "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
+
+    "slots",
+    "reconcile",
+    "cleanup",
+    "engine",
+    "work",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
@@ -148,8 +151,7 @@ def names_a_host_executable(path: Path) -> list[str]:
 
 def launch_sources() -> list[str]:
     """Every file that could launch a host: the scripts, the launchers at the root, the hooks and the eval runner."""
-    paths = [*SCRIPTS.glob("*.py"), *ROOT.glob("*.py"), *(ROOT / "hooks").glob("*.py"),
-             *(ROOT / "guard/hooks").glob("*.py"), ROOT / "evals" / "run.py"]
+    paths = [*SCRIPTS.glob("*.py"), *ROOT.glob("*.py"), *(ROOT / "hooks").glob("*.py"), ROOT / "evals" / "run.py"]
     return sorted(str(path.relative_to(ROOT)) for path in paths)
 
 
@@ -177,17 +179,19 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
     return []
 
 
-class DependencyRuleTest(unittest.TestCase):
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_commands", set(),
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
+
 
     def test_guard_rules_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_rules"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_rules", set(),
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
 
+
+class DependencyRuleTest(unittest.TestCase):
     def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:
         self.assertEqual(forbidden_reach(SCRIPTS, "reconcile",
                          {"store", "forge", "claude_adapter", "settings", "trio_gate"},

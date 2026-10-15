@@ -9,7 +9,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import backlog
 import backlog_ref
@@ -25,11 +25,20 @@ GITLAB_WAITING = frozenset({"skipped", "pending", "created", "waiting_for_resour
 # Forge mergeability still being computed — not a settled blocker (#430).
 SETTLING = frozenset({"checking", "unchecked", "ci_still_running", "unknown", "approvals_syncing", "preparing"})
 REQUEST_LIMIT = backlog.PER_PAGE  # one page; readers page until short, and refuse a full MAX_PAGES read as whole
-# Same-repo `#N`, GitHub's `owner/repo#N`, and `https://github.com/owner/repo/issues/N`.
-# Selection rejects any non-`#N` form.
-CLOSES = re.compile(
-    r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?):?\s+"
-    r"(?:https://github\.com/([\w.-]+/[\w.-]+)/issues/(\d+)|((?:[\w.-]+/[\w.-]+)?#\d+))")
+# `Closes: #3`, `owner/repo#3` and `https://github.com/owner/repo/issues/3` (GitHub); `Closes #3, #4 and #5` (GitLab).
+# Body parsing remains a fallback alongside GitHub's links. Foreign refs are kept so selection can fail closed on them.
+_GITHUB_REF = r"https://github\.com/[\w.-]+/[\w.-]+/issues/\d+|[\w.-]+/[\w.-]+#\d+|#\d+"
+_GITLAB_REF = r"https?://[^\s,<>]+?/-/issues/\d+|[\w.-]+(?:/[\w.-]+)+#\d+|#\d+"
+
+
+def _closing(keywords: str, ref: str) -> re.Pattern:
+    return re.compile(r"(?i)\b(?:" + keywords + r"):?\s+(?:issues?\s+)?((?:" + ref + r")(?:(?:\s*,\s*|\s*,?\s+and\s+)(?:"
+                      + ref + r"))*)")
+
+
+CLOSES = _closing(r"close[sd]?|fix(?:e[sd])?|resolve[sd]?", _GITHUB_REF)
+# GitLab's default closing pattern adds the -ing forms and implement; GitHub does not close on them.
+GITLAB_CLOSES = _closing(r"clos(?:e[sd]?|ing)|fix(?:e[sd]|ing)?|resolv(?:e[sd]?|ing)|implement(?:s|ed|ing)?", _GITLAB_REF)
 
 
 def gitlab_pipeline_status(status: str | None) -> str:
@@ -45,13 +54,38 @@ def scrub(text: str) -> str:
     return "".join(c for c in text if c.isprintable())
 
 
-def closes(body: str | None) -> tuple[str, ...]:
-    """The issue refs a request's body closes (`Closes #3`), in order, once each."""
-    refs = []
-    for match in CLOSES.finditer(body or ""):
-        owner_repo, number, local = match.groups()
-        refs.append(f"{owner_repo}#{number}" if owner_repo else local)
-    return tuple(dict.fromkeys(refs))
+def closes(body: str | None, gitlab: bool = False, *, project: str = "", host: str = "", repo: str = "") -> tuple[str, ...]:
+    """The issue refs a request's body closes, in order, once each: `#N` for this repository (`project` on GitLab, or
+    `repo` on GitHub when given), any other ref verbatim, as `owner/repo#N` where the URL names one."""
+    found = []
+    for refs in (GITLAB_CLOSES if gitlab else CLOSES).findall(body or ""):
+        for ref in re.findall(_GITLAB_REF if gitlab else _GITHUB_REF, refs, re.IGNORECASE):
+            if "://" in ref:
+                url = urlsplit(ref)
+                if not gitlab:
+                    ref = url.path[1:].replace("/issues/", "#")
+                else:
+                    configured = urlsplit(host)
+                    prefix = configured.path.rstrip("/") + "/"
+                    if not (host and url.scheme.casefold() == configured.scheme.casefold()
+                            and url.netloc.casefold() == configured.netloc.casefold() and url.path.startswith(prefix)):
+                        found.append(ref)  # another host: kept whole so selection refuses it
+                        continue
+                    ref = url.path[len(prefix):].replace("/-/issues/", "#")
+            path, _, number = ref.rpartition("#")
+            local = project if gitlab else repo
+            found.append(f"#{number}" if not path or (local and path.casefold() == local.casefold()) else ref)
+    return tuple(dict.fromkeys(found))
+
+
+def github_closes(pr: dict, repo: str) -> tuple[str, ...]:
+    """Union body closing keywords with Development links; a link to another repository stays qualified."""
+    found = list(closes(pr.get("body"), repo=repo))
+    for issue in pr.get("closingIssuesReferences") or []:
+        repository = issue.get("repository") or {}
+        qualified = f"{(repository.get('owner') or {}).get('login', '')}/{repository.get('name', '')}"
+        found.append(f"#{issue['number']}" if qualified.casefold() == repo.casefold() else f"{qualified}#{issue['number']}")
+    return tuple(dict.fromkeys(found))
 
 
 def github_approval(reviews: list[dict], approver: str, head: str) -> str:
@@ -104,7 +138,7 @@ class Request:
     threads_cut_at: int = 0          # the count read when more threads lay behind it (a cut-off read is not a whole one)
     draft: bool = False
     merge_state: str = ""            # GitHub's mergeStateStatus; "" (GitLab) has none
-    closes: tuple[str, ...] = ()     # the issue refs its body closes, e.g. ("#3",)
+    closes: tuple[str, ...] = ()     # the local issue refs the request closes, e.g. ("#3",)
     pipeline_head: str | None = None  # source head covered by a merged-results pipeline; None compares pipeline_sha
 
     @property
@@ -181,7 +215,7 @@ class Request:
 def github_requests(repo: str, approver: str, gh=backlog.run_gh) -> list[Request]:
     # gh paginates under --limit; refuse a full GH_LIMIT answer as a partial list (#425).
     code, out, err = gh(["pr", "list", "-R", repo, "--state", "open", "--limit", str(backlog.GH_LIMIT), "--json",
-                         "number,title,url,headRefOid,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus,body"])
+                         "number,title,url,headRefOid,reviews,statusCheckRollup,mergeable,isDraft,mergeStateStatus,body,closingIssuesReferences"])
     if code != 0:
         raise RuntimeError(f"gh pr list: {err.strip() or code}")
     rows = json.loads(out)
@@ -192,7 +226,7 @@ def github_requests(repo: str, approver: str, gh=backlog.run_gh) -> list[Request
                     github_pipeline(p.get("statusCheckRollup") or []),
                     {"MERGEABLE": "yes", "CONFLICTING": "conflict"}.get(p.get("mergeable"), "unknown"), approver,
                     draft=bool(p.get("isDraft")), merge_state=p.get("mergeStateStatus") or "UNKNOWN",
-                    closes=closes(p.get("body")))
+                    closes=github_closes(p, repo))
             for p in rows]
 
 
@@ -233,5 +267,7 @@ def gitlab_requests(home: backlog.Backlog, project: str, approver: str, token: s
                            gitlab_pipeline_status(None if not head else head.get("status")),
                            "conflict" if mr.get("has_conflicts") else ("yes" if status == "mergeable" else status),
                            approver, str(head.get("id") or ""), pipe_sha,
-                           draft=bool(mr.get("draft")), closes=closes(mr.get("description")), pipeline_head=pipe_head))
+                           draft=bool(mr.get("draft")),
+                           closes=closes(mr.get("description"), gitlab=True, project=project, host=home.host),
+                           pipeline_head=pipe_head))
     return out

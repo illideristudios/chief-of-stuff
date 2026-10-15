@@ -26,7 +26,7 @@ class Started:
 
 def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None = None, commit: bool = False) -> Started:
     """`forge` is None when the workspace has no `Backlog:` line. With no `issue`, one is filed first; a supplied one must exist on
-    the forge, whose title the row takes. The row follows the issue, and nothing is written unless `commit`."""
+    the forge and be open. The row takes the forge's title and follows the issue; nothing is written unless `commit`."""
     if forge is None:
         return Started(refused="no `Backlog:` line, so no issue can be filed and no work starts", setup=SETUP)
     if issue is None:
@@ -40,6 +40,8 @@ def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None 
         found = forge.issue(issue)  # a supplied number is work only once the forge confirms the issue
         if not found.ok:
             return Started(refused=f"issue #{issue} not confirmed by the forge: {found.error}")
+        if found.issue.state == "closed":
+            return Started(refused=f"issue #{issue} is closed; reopen it before starting work")
         title = found.issue.title
         if not commit:
             return Started(preview=f"would start: {forge.key(issue)} {title}")

@@ -195,8 +195,12 @@ def _issue(row: dict) -> Issue:
     )
 
 
-def _gh_list(cfg: GitHubBacklog, state: str, fields: str, labels: tuple[str, ...], gh) -> tuple[list, str]:
-    args = ["issue", "list", "-R", cfg.repo, "--state", GH_STATE[state], "--json", fields, "--limit", str(GH_LIMIT)]
+def _gh_list(cfg: GitHubBacklog, state: str, fields: str, labels: tuple[str, ...], gh,
+             *, limit: int | None = None) -> tuple[list, str]:
+    args = ["issue", "list", "-R", cfg.repo, "--state", GH_STATE[state], "--json", fields,
+            "--limit", str(GH_LIMIT if limit is None else limit)]
+    if limit is not None:
+        args += ["--search", "sort:updated-desc"]
     for label in labels:
         args += ["--label", label]
     rc, out, err = gh(args)
@@ -208,9 +212,9 @@ def _gh_list(cfg: GitHubBacklog, state: str, fields: str, labels: tuple[str, ...
         return [], "GitHub did not answer with JSON"
     if not isinstance(rows, list):
         return [], "GitHub answered with something that is not a list of issues"
-    if len(rows) >= GH_LIMIT:
+    if limit is None and len(rows) >= GH_LIMIT:
         return [], f"{GH_LIMIT} issues or more; refusing to read a partial backlog as whole"
-    return rows, ""
+    return rows[:limit], ""
 
 
 def _gh_issue(row: dict) -> Issue:
@@ -226,10 +230,16 @@ def _gh_issue(row: dict) -> Issue:
 
 
 def issues(cfg: Backlog | GitHubBacklog, token: str | None = None, state: str = OPEN,
-           labels: tuple[str, ...] = (), per_page: int = PER_PAGE, timeout: float = TIMEOUT, gh=None) -> Fetch:
-    """Every page of `state` issues, or the reason there are none. Never a partial list read as whole."""
+           labels: tuple[str, ...] = (), per_page: int = PER_PAGE, timeout: float = TIMEOUT, gh=None,
+           *, limit: int | None = None) -> Fetch:
+    """Every page of `state` issues, or an explicit `limit` of the most recently updated issues.
+
+    Without a limit, refuse a truncated backlog rather than reading a partial list as whole.
+    """
+    if limit is not None and (type(limit) is not int or limit <= 0):
+        return Fetch(error="issue limit must be a positive integer")
     if isinstance(cfg, GitHubBacklog):
-        rows, error = _gh_list(cfg, state, GH_FIELDS, labels, gh or run_gh)
+        rows, error = _gh_list(cfg, state, GH_FIELDS, labels, gh or run_gh, limit=limit)
         return Fetch(error=error) if error else Fetch(issues=tuple(_gh_issue(r) for r in rows if isinstance(r, dict)))
     secret = token if token is not None else globals()["token"](cfg)
     if not secret:
@@ -237,7 +247,9 @@ def issues(cfg: Backlog | GitHubBacklog, token: str | None = None, state: str = 
     out: list[Issue] = []
     page = "1"
     for _ in range(MAX_PAGES):
-        query = {"state": state, "per_page": per_page, "page": page}
+        query = {"state": state, "per_page": per_page if limit is None else min(per_page, limit), "page": page}
+        if limit is not None:
+            query.update(order_by="updated_at", sort="desc")
         if labels:
             query["labels"] = ",".join(labels)
         body, headers, error = _get(f"{cfg.issues_url}?{urlencode(query)}", secret, timeout)
@@ -246,6 +258,8 @@ def issues(cfg: Backlog | GitHubBacklog, token: str | None = None, state: str = 
         if not isinstance(body, list):
             return Fetch(error="GitLab answered with something that is not a list of issues")
         out.extend(_issue(row) for row in body if isinstance(row, dict))
+        if limit is not None and len(out) >= limit:
+            return Fetch(issues=tuple(out[:limit]))
         page = (headers.get("x-next-page") or "").strip()
         if not page:
             return Fetch(issues=tuple(out))
