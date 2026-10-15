@@ -320,7 +320,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not body and not self.banner:
                 with path.open("rb"):  # GET would read it: an unreadable page is GET's 404, not a 200
                     pass
-                # inject always adds ENCODED; length matches GET without reading the file
+                # The injected HTTP date is fixed length; count the snippet without reading the file.
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(stat.st_size + len(page_reload.ENCODED)))
@@ -337,11 +337,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             note = ('<p role="alert" style="margin:0;padding:6px 16px;background:#c9533a;color:#fff;'
                     f'font:14px/1.4 system-ui,sans-serif">not re-rendered: {escape(self.banner)}</p>').encode()
             page = re.sub(rb"<body[^>]*>", lambda m: m[0] + note, page, count=1) if b"<body" in page else note + page
-        page = page_reload.inject(page)
+        last_modified = self.date_time_string(stamp)
+        page = page_reload.inject(page, last_modified)
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(page)))
-        self.send_header("Last-Modified", self.date_time_string(stamp))
+        self.send_header("Last-Modified", last_modified)
         self.end_headers()
         if body:
             self.wfile.write(page)

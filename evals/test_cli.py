@@ -54,9 +54,13 @@ class InstallTest(unittest.TestCase):
         self.assertIn("start", help_text)
         workspace = self.root / "workspace"
         workspace.mkdir()
+        gh = self.bin / "gh"
+        gh.write_text(f"#!{sys.executable}\nimport json\nprint(json.dumps([]))\n")
+        gh.chmod(0o755)
+        env = dict(os.environ, CHIEF_OF_STUFF_GH=str(gh))
         done = subprocess.run([str(command), "init", "--root", str(workspace), "--user", "Robin",
-                               "--timezone", "America/Chicago", "--worker-mode", "one-shot"],
-                              capture_output=True, text=True)
+                               "--timezone", "America/Chicago", "--worker-mode", "one-shot",
+                               "--github-repo", "owner/repo"], env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('mode = "one-shot"', (workspace / "chief-of-stuff.toml").read_text())
         guidance = workspace / "chief-of-stuff-models.md"
@@ -186,6 +190,50 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
             sys.executable,
             [sys.executable, str(ROOT / "scripts/install_model_guidance.py"), "--help"],
         )
+
+    def test_work_routes_to_the_store_backed_driver_and_forwards_intake_options(self):
+        venv_python = Path("/pin/venv/bin/python")
+        args = ["--root", "/workspace", "Add a flag", "--body", "why", "--issue", "3", "--commit"]
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=venv_python), \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["work", *args])
+        execv.assert_called_once_with(str(venv_python),
+            [str(venv_python), str(ROOT / "scripts/work.py"), *args])
+
+    def test_work_cli_files_an_issue_and_writes_the_engine_store(self):
+        import forge
+        import store
+        import work
+        from evals import test_forge as tf
+
+        gh = tf.FakeGh()
+        factory = forge.for_workspace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text("## Coordinator\n\n- Backlog: GitHub issues; repo example/app\n")
+
+            def exec_driver(python, argv):
+                self.assertEqual(argv[1], str(ROOT / "scripts/work.py"))
+                raise SystemExit(work.main(argv[2:]))
+
+            with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+                 mock.patch.object(supervisor, "ensure_venv", return_value=Path(sys.executable)), \
+                 mock.patch.object(cli.os, "execv", side_effect=exec_driver), \
+                 mock.patch.object(forge, "for_workspace", side_effect=lambda root, **opts: factory(root, gh=gh, **opts)), \
+                 mock.patch.object(sys, "stdout", io.StringIO()) as out:
+                with self.assertRaises(SystemExit) as done:
+                    cli.main(["work", "--root", str(root), "Add a flag", "--commit"])
+            self.assertEqual(done.exception.code, 0)
+            self.assertIn("github:example/app#101", out.getvalue())
+            db = store.Store(root / "store.db")
+            try:
+                self.assertEqual([(i.issue_key, i.title) for i in db.items()],
+                                 [("github:example/app#101", "Add a flag")])
+            finally:
+                db.engine.dispose()
+        self.assertEqual([c[:2] for c in gh.all_calls], [["issue", "create"]])
 
     def test_venv_failure_refuses_without_falling_back(self):
         buf = io.StringIO()

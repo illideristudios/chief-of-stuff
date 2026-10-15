@@ -32,7 +32,8 @@ class Refused(ValueError):
 
 
 def files(source: Path) -> list[Path]:
-    includes = [source / "agents", source / "skills", source / "scripts", source / "assets", source / ".claude-plugin", source / "hooks"]
+    includes = [source / "agents", source / "skills", source / "scripts", source / "assets", source / ".claude-plugin", source / "hooks",
+                source / "guard"]  # the worker guard plugin, passed to workers with --plugin-dir
     result = [source / "start_coordinator.py", source / "chief_of_stuff.py"]
     requirements = source / "requirements.txt"
     if requirements.is_file():

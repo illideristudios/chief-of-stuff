@@ -1,0 +1,9 @@
+{
+  "description": "Worker gates, engine relays and resume context",
+  "hooks": {
+    "PreToolUse": [{"matcher": "Bash|AskUserQuestion", "hooks": [{"type": "command", "command": "\"${CHIEF_PYTHON}\" \"${CLAUDE_PLUGIN_ROOT}/../scripts/worker_guard.py\" PreToolUse", "timeout": 10}]}],
+    "PermissionRequest": [{"hooks": [{"type": "command", "command": "\"${CHIEF_PYTHON}\" \"${CLAUDE_PLUGIN_ROOT}/../scripts/worker_guard.py\" PermissionRequest", "timeout": 40}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": "\"${CHIEF_PYTHON}\" \"${CLAUDE_PLUGIN_ROOT}/../scripts/worker_guard.py\" Stop", "timeout": 40}]}],
+    "SessionStart": [{"hooks": [{"type": "command", "command": "\"${CHIEF_PYTHON}\" \"${CLAUDE_PLUGIN_ROOT}/../scripts/worker_guard.py\" SessionStart", "timeout": 40}]}]
+  }
+}

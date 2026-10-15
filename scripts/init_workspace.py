@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add a minimal chief-of-stuff Coordinator block to a workspace."""
+"""Configure a workspace's forge, Coordinator block and engine settings."""
 
 from __future__ import annotations
 
@@ -13,10 +13,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
+from forge import project_option_ids  # noqa: E402
+import issue_gate  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
-from settings import SettingsError, load as load_settings
+from settings import Kanban, SettingsError, _kanban as kanban_from_table, load as load_settings, load_policy, workflow_stages
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -52,6 +54,8 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
             parse_backlog(backlog)
         except BacklogError as exc:
             raise InitError(str(exc)) from None
+    # Tracker paths and calendars remain inputs to current readers during the engine migration.
+    # Naming a tracker here creates no tracker tables, mailbox or TOON files.
     lines = ["## Coordinator", "", f"- User: {user.strip()}", f"- Daily log dir: `{daily_dir}`",
              f"- Tracker: `{daily_dir}<date>-tracker.md`", f"- Timezone: {timezone}",
              "- Calendars: none", "- Deadlines: none", f"- Worktrees: `{worktrees}`",
@@ -75,6 +79,11 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
 
 def settings_text(launcher: str, mode: str = "interactive") -> str:
     text = f'[notify]\nadapter = "off"\n\n[workers]\nlauncher = "{launcher}"\nmode = "{mode}"\n\n# [repos]\n# alder = "<path>"  # #54: name -> path, relative to the workspace root; `worktree --clone alder`\n'
+    # The engine needs a label for every stage in the shipped workflow before it can start.
+    stages = workflow_stages(load_policy())
+    labels = ", ".join(f'"stage: {s}"' for s in stages)
+    mapping = "\n".join(f"{s} = {i}" for i, s in enumerate(stages))
+    text += f'\n[kanban]\nstages = [{labels}]\nhuman_review_label = "needs human"\n\n[kanban.map]\n{mapping}\n'
     # #111: uncomment to pick models from the TOML; without [models], chief-of-stuff-models.md applies.
     text += ('\n# [models.deep]\n# rotation = ["claude:opus@high", "codex:<model-id>@high"]\n'
              '# [models.implement]\n# rotation = ["claude:sonnet@medium", "codex:<model-id>@medium"]\n'
@@ -85,35 +94,58 @@ def settings_text(launcher: str, mode: str = "interactive") -> str:
     return text
 
 
-def _configured_hold_label(settings: Path, new_settings: str) -> str:
-    """The hold label the workspace will run with: the existing settings file's, else the new text's (#566)."""
-    try:
-        data = tomllib.loads(settings.read_text() if settings.exists() else new_settings)
-    except (OSError, tomllib.TOMLDecodeError, ValueError):
-        return ""
-    kanban = data.get("kanban")
-    label = kanban.get("human_review_label", "") if isinstance(kanban, dict) else ""
-    return label.strip() if isinstance(label, str) else ""
+def _require_engine_ready(config) -> None:
+    """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
+    if config.kanban is None:
+        raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
+    unmapped = sorted(set(workflow_stages(load_policy()))
+                      - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
+    if unmapped:
+        raise InitError(f"existing settings [kanban.map] has no label for workflow stage {', '.join(unmapped)}")
 
 
-def provision_hold_label(forge, label: str, dry: bool) -> tuple[str, str]:
-    """Create the configured hold label on the forge when it has never seen it, via backlog.ensure_labels (#566).
+def provision_labels(forge, labels: tuple[str, ...], kind: str, dry: bool) -> tuple[str, str]:
+    """Create configured labels on the forge when it has never seen them, via backlog.ensure_labels (#566).
 
     Dry-run prints the intent and touches nothing. A forge that refuses is reported and init still succeeds —
-    the first hold attempt reports the label again if it never lands.
+    the first sync attempt reports the label again if it never lands.
     """
-    if forge is None or not label:
+    if forge is None or not labels:
         return "", ""
     where = forge.repo if isinstance(forge, backlog.GitHubBacklog) else forge.project
     if dry:
-        return f"would create the hold label {label} on {where}", ""
+        return "\n".join(f"would create the {kind} label {label} on {where}" for label in labels), ""
     try:
-        made = backlog.ensure_labels(forge, (label,), commit=True)
+        made = backlog.ensure_labels(forge, labels, commit=True)
     except (BacklogError, OSError) as exc:
-        return "", f"hold label not created on {where}: {exc}"
-    out = " ".join(f"hold label {w.what} created on {where}" for w in made if w.done)
+        return "", f"{kind} label not created on {where}: {exc}"
+    out = " ".join(f"{kind} label {w.what} created on {where}" for w in made if w.done)
     pending = "; ".join(w.error for w in made if w.error)
-    return out, f"hold label not created on {where}: {pending}" if pending else ""
+    return out, f"{kind} label not created on {where}: {pending}" if pending else ""
+
+
+def provision_kanban(forge, config: Kanban | None, dry: bool) -> tuple[str, str]:
+    """Provision stage and terminal labels, or check the manually created Project options, plus the hold."""
+    if forge is None or config is None:
+        return "", ""
+    hold_out, hold_err = provision_labels(forge, (config.human_review_label,), "hold", dry)
+    project = config.github_project if isinstance(forge, backlog.GitHubBacklog) else None
+    if project is None:
+        stage_out, stage_err = provision_labels(forge, (*config.stages, *config.terminal_stages), "stage", dry)
+    else:
+        options = (*project.options, *config.terminal_stages)
+        stage_out, stage_err = "", ""
+        if dry:
+            stage_out = (f"would check GitHub Project {project.owner}/{project.number} {project.field} options: "
+                         f"{', '.join(options)}; create any missing options before syncing")
+        else:
+            errors = []
+            for option in options:
+                _, _, error = project_option_ids(backlog.run_gh, project, option)
+                if error:
+                    errors.append(error)
+            stage_err = "; ".join(errors)
+    return "\n".join(x for x in (hold_out, stage_out) if x), "\n".join(x for x in (hold_err, stage_err) if x)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -144,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             raise InitError("--gitlab-host requires --gitlab-project")
         if args.gitlab_project and not args.gitlab_host:
             raise InitError("--gitlab-project requires --gitlab-host")
+        if not args.github_repo and not args.gitlab_host:
+            raise InitError(f"choose --github-repo or --gitlab-host with --gitlab-project\n{issue_gate.SETUP}")
         if not ENV_NAME.fullmatch(args.gitlab_token_env):
             raise InitError("--gitlab-token-env must be an environment variable name")
         backlog_spec = (f"GitHub issues; repo {args.github_repo}" if args.github_repo else
@@ -158,20 +192,24 @@ def main(argv: list[str] | None = None) -> int:
             raise InitError(f"{claude} already has a ## Coordinator block")
         settings = root / "chief-of-stuff.toml"
         guidance = guidance_destination(root)
+        board = None
         if settings.exists():
             if not settings.is_file():
                 raise InitError(f"{settings} is not a settings file")
             try:
-                load_settings(root, settings.name)
+                existing_settings = load_settings(root, settings.name)
             except SettingsError as exc:
                 raise InitError(f"existing settings are invalid: {exc}") from None
+            _require_engine_ready(existing_settings)
+            board = existing_settings.kanban
         new_settings = settings_text(args.launcher, args.worker_mode)
-        # #566: with a backlog named, create the [kanban] hold label the workspace will run with, so no
-        # review hold ever dies on a label the forge has not seen.
+        if board is None:  # a fresh settings file provisions what its own template names
+            board = kanban_from_table(tomllib.loads(new_settings)["kanban"])
+        # Provision all configured marks, including terminal stages, before the workspace needs to sync them.
         forge = (backlog.GitHubBacklog(args.github_repo) if args.github_repo else
-                 backlog.Backlog(args.gitlab_host, args.gitlab_project) if args.gitlab_host else None)
-        label_out, label_err = provision_hold_label(
-            forge, _configured_hold_label(settings, new_settings), args.dry_run)
+                 backlog.Backlog(args.gitlab_host, args.gitlab_project, args.gitlab_token_env)
+                 if args.gitlab_host else None)
+        label_out, label_err = provision_kanban(forge, board, args.dry_run)
         if args.dry_run:
             print(f"would {'append to' if claude.exists() else 'create'}: {claude}\n{block}")
             print(f"would {'keep existing' if settings.exists() else 'create'}: {settings}")

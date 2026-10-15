@@ -28,6 +28,7 @@ import backlog  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 import board_sources  # noqa: E402
 import tracker_log  # noqa: E402
+import forge  # noqa: E402
 import kanban as kanban_tool  # noqa: E402
 import ownership  # noqa: E402
 import git_trees  # noqa: E402
@@ -357,16 +358,16 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         status = None
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
-                project_items, project_error = kanban_tool._project_items(
-                    gh or kanban_tool.backlog.run_gh, config.github_project)
+                project_items, project_error = forge.project_items(
+                    gh or backlog.run_gh, config.github_project)
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))
                 continue
-            if ref.url not in project_items:
+            if ref.url.casefold() not in project_items:
                 faults.append(KanbanFault(clip_name(furthest.label),
                                           "issue is absent from the configured GitHub Project"))
                 continue
-            status = project_items[ref.url]
+            status = project_items[ref.url.casefold()]
         issue_config = config if ref.host == GITHUB else replace(config, github_project=None)
         why = kanban_tool.drift(issue_config, found.labels, furthest.stage.strip(), project_status=status,
                                 allow_extra_hold=furthest.kind == "waiting")
