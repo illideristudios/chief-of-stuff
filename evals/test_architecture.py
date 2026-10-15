@@ -208,6 +208,11 @@ CIRCLES: dict[str, frozenset[str]] = {
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
         "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots",
+        # §4: store's migrations/ — path keys, not top-level stems.
+        "migrations/env",
+        "migrations/versions/0001_initial",
+        "migrations/versions/0002_segment_runner",
+        "migrations/versions/0003_worker_channel",
     }),
     "drivers": frozenset({
         "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
@@ -279,16 +284,28 @@ def discovered_hooks() -> frozenset[str]:
     )
 
 
-def circle_graph() -> dict[str, set[str]]:
-    """Import graph over top-level scripts/ plus the two root launchers named in §4.
+def migration_paths() -> dict[str, Path]:
+    """`migrations/…` key → file, for store's Adapter migrations (§4)."""
+    root = SCRIPTS / "migrations"
+    if not root.is_dir():
+        return {}
+    return {p.relative_to(SCRIPTS).as_posix().removesuffix(".py"): p
+            for p in root.rglob("*.py")}
 
-    Launchers are both sources and targets: an Entity that imports `chief_of_stuff`
-    must count as outward. Nested `scripts/migrations/` stays under store (§4), not here.
+
+def circle_graph() -> dict[str, set[str]]:
+    """Import graph over top-level scripts/, store migrations, and root launchers.
+
+    Launchers are both sources and targets. Migration modules use path keys under
+    `migrations/` and count as Adapters with store.
     """
-    targets = {p.stem for p in SCRIPTS.glob("*.py")} | LAUNCHERS
+    migrations = migration_paths()
+    targets = {p.stem for p in SCRIPTS.glob("*.py")} | LAUNCHERS | set(migrations)
     graph: dict[str, set[str]] = {}
     for path in SCRIPTS.glob("*.py"):
         graph[path.stem] = ({script(name) for name in imports(path)} & targets) - {path.stem}
+    for key, path in migrations.items():
+        graph[key] = ({script(name) for name in imports(path)} & targets) - {key}
     for stem in LAUNCHERS:
         path = ROOT / f"{stem}.py"
         graph[stem] = ({script(name) for name in imports(path)} & targets) - {stem}
@@ -315,7 +332,8 @@ def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
 class DependencyRuleTest(unittest.TestCase):
     def test_every_script_launcher_and_hook_is_in_exactly_one_circle(self) -> None:
         hooks = discovered_hooks()
-        inventory = {p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS) | set(hooks)
+        inventory = ({p.stem for p in SCRIPTS.glob("*.py")} | set(LAUNCHERS) | set(hooks)
+                     | set(migration_paths()))
         listed = {name for names in CIRCLES.values() for name in names}
         self.assertEqual(sorted(inventory - listed), [], "unclassified module")
         self.assertEqual(sorted(listed - inventory), [], "circle entry with no file")
@@ -324,7 +342,7 @@ class DependencyRuleTest(unittest.TestCase):
         self.assertEqual(overlap, [])
 
     def test_nested_scripts_are_only_migrations_or_vendor(self) -> None:
-        # §4 places migrations with store; _vendor is third-party. Neither is a circle stem.
+        # Migrations are Adapter circle entries; _vendor is third-party and unlisted.
         allowed = ("migrations/", "_vendor/")
         nested = sorted(p.relative_to(SCRIPTS).as_posix()
                         for p in SCRIPTS.rglob("*.py") if p.parent != SCRIPTS)
@@ -348,6 +366,10 @@ class DependencyRuleTest(unittest.TestCase):
             path = Path(tmp, "tracker.py")
             path.write_text("from . import forge\nfrom .settings import load\n", encoding="utf-8")
             self.assertEqual(imports(path), {"forge", "settings"})
+
+    def test_a_migration_import_of_a_driver_is_outward(self) -> None:
+        graph = {"migrations/env": {"process_status"}, "process_status": set()}
+        self.assertEqual(outward_imports(graph), {"migrations/env→process_status"})
 
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
