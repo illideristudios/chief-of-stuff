@@ -28,12 +28,12 @@ LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "ownership", "forge_review",
-    "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "audit_tasks",
+    "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
     "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
-    "one_shot_report", "flow", "sync_page_theme", "store",
+    "one_shot_report", "flow", "sync_page_theme", "store", "store_access",
     "model_port",
     "claude_adapter",
     "policy",
@@ -45,10 +45,12 @@ DRAWS_NOTHING = (
     "performance",
     "performance_report",
     "supervisor",
+    "startup",
     "slots",
     "reconcile",
     "cleanup",
     "engine",
+    "work",
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
