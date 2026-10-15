@@ -399,6 +399,31 @@ class CliTest(unittest.TestCase):
                                           "--issue", "#7"]), 0)
         sync.assert_called_once()
 
+    def test_a_sibling_gitlab_project_keeps_that_repo_on_the_forge(self):
+        # #681 regression: write_stage rebuilds IssueRef from Forge.home; home must be the sibling.
+        tracker = self.root / "daily" / "2026-09-25-tracker.md"
+        tracker.write_text(
+            "## Tasks\n| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Other | Other | worker | running 09:00 | 09:00 | | M | build | plan review | "
+            "https://labs.example.test/team/other/-/issues/7 | |\n")
+        result = kanban.Sync(backlog.IssueRef("team/other", 7, "labs.example.test"), "plan review",
+                             kanban.Delta(("01 - PLAN REVIEW",), ("00 - PLAN",)))
+        homes = []
+        real_init = forge.Forge.__init__
+
+        def remember(self, home, **kwargs):
+            homes.append(home)
+            return real_init(self, home, **kwargs)
+
+        with mock.patch.object(forge.Forge, "__init__", remember), \
+             mock.patch.object(forge.Forge, "write_stage", return_value=result), \
+             redirect_stdout(io.StringIO()):
+            self.assertEqual(kanban_cli.main(
+                ["--root", str(self.root), "--date", "2026-09-25", "--issue",
+                 "https://labs.example.test/team/other/-/issues/7"]), 0)
+        self.assertEqual([h.project for h in homes], ["team/other"])
+
 
 class AuditTest(unittest.TestCase):
     def test_audit_reports_label_drift_without_writing(self):
