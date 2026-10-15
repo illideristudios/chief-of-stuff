@@ -361,6 +361,11 @@ def _project_ref(value) -> dict:
     return {"owner": owner.strip(), "number": int(number)}
 
 
+def kanban_from_table(table) -> Kanban:
+    """Build a Kanban from a `[kanban]` TOML table (workspace settings or init)."""
+    return _kanban(table)
+
+
 def _kanban(table) -> Kanban:
     if not isinstance(table, dict):
         raise SettingsError("[kanban] must be a table")
@@ -483,3 +488,8 @@ def workflow_stages(policies: policy.Policies) -> list[str]:
     stages = {s for w in policies.workflows.values() for e in w.edges for s in (e.source, e.target)}
     stages |= {w.start for w in policies.workflows.values()}
     return sorted(stages)
+
+
+def unmapped_stages(kanban: Kanban, policies: policy.Policies) -> list[str]:
+    """Workflow stages with no `[kanban.map]` entry and no terminal mark; engine and init share this check."""
+    return sorted(set(workflow_stages(policies)) - set(kanban.stage_map) - set(kanban.terminal_stages))
