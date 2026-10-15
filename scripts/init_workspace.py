@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Add a minimal chief-of-stuff Coordinator block to a workspace."""
+"""Configure a workspace's forge, Coordinator block and engine settings."""
 
 from __future__ import annotations
 
@@ -14,10 +14,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
 from forge import project_option_ids  # noqa: E402
+import issue_gate  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
-from settings import Kanban, SettingsError, load as load_settings
+from settings import Kanban, SettingsError, _kanban as kanban_from_table, load as load_settings, load_policy, workflow_stages
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -53,6 +54,8 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
             parse_backlog(backlog)
         except BacklogError as exc:
             raise InitError(str(exc)) from None
+    # Tracker paths and calendars remain inputs to current readers during the engine migration.
+    # Naming a tracker here creates no tracker tables, mailbox or TOON files.
     lines = ["## Coordinator", "", f"- User: {user.strip()}", f"- Daily log dir: `{daily_dir}`",
              f"- Tracker: `{daily_dir}<date>-tracker.md`", f"- Timezone: {timezone}",
              "- Calendars: none", "- Deadlines: none", f"- Worktrees: `{worktrees}`",
@@ -76,6 +79,11 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
 
 def settings_text(launcher: str, mode: str = "interactive") -> str:
     text = f'[notify]\nadapter = "off"\n\n[workers]\nlauncher = "{launcher}"\nmode = "{mode}"\n\n# [repos]\n# alder = "<path>"  # #54: name -> path, relative to the workspace root; `worktree --clone alder`\n'
+    # The engine needs a label for every stage in the shipped workflow before it can start.
+    stages = workflow_stages(load_policy())
+    labels = ", ".join(f'"stage: {s}"' for s in stages)
+    mapping = "\n".join(f"{s} = {i}" for i, s in enumerate(stages))
+    text += f'\n[kanban]\nstages = [{labels}]\nhuman_review_label = "needs human"\n\n[kanban.map]\n{mapping}\n'
     # #111: uncomment to pick models from the TOML; without [models], chief-of-stuff-models.md applies.
     text += ('\n# [models.deep]\n# rotation = ["claude:opus@high", "codex:<model-id>@high"]\n'
              '# [models.implement]\n# rotation = ["claude:sonnet@medium", "codex:<model-id>@medium"]\n'
@@ -84,6 +92,16 @@ def settings_text(launcher: str, mode: str = "interactive") -> str:
     text += '\n# [pages]\n# workers = 4\n'
     tomllib.loads(text)
     return text
+
+
+def _require_engine_ready(config) -> None:
+    """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
+    if config.kanban is None:
+        raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
+    unmapped = sorted(set(workflow_stages(load_policy()))
+                      - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
+    if unmapped:
+        raise InitError(f"existing settings [kanban.map] has no label for workflow stage {', '.join(unmapped)}")
 
 
 def provision_labels(forge, labels: tuple[str, ...], kind: str, dry: bool) -> tuple[str, str]:
@@ -158,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
             raise InitError("--gitlab-host requires --gitlab-project")
         if args.gitlab_project and not args.gitlab_host:
             raise InitError("--gitlab-project requires --gitlab-host")
+        if not args.github_repo and not args.gitlab_host:
+            raise InitError(f"choose --github-repo or --gitlab-host with --gitlab-project\n{issue_gate.SETUP}")
         if not ENV_NAME.fullmatch(args.gitlab_token_env):
             raise InitError("--gitlab-token-env must be an environment variable name")
         backlog_spec = (f"GitHub issues; repo {args.github_repo}" if args.github_repo else
@@ -177,13 +197,18 @@ def main(argv: list[str] | None = None) -> int:
             if not settings.is_file():
                 raise InitError(f"{settings} is not a settings file")
             try:
-                board = load_settings(root, settings.name).kanban
+                existing_settings = load_settings(root, settings.name)
             except SettingsError as exc:
                 raise InitError(f"existing settings are invalid: {exc}") from None
+            _require_engine_ready(existing_settings)
+            board = existing_settings.kanban
         new_settings = settings_text(args.launcher, args.worker_mode)
+        if board is None:  # a fresh settings file provisions what its own template names
+            board = kanban_from_table(tomllib.loads(new_settings)["kanban"])
         # Provision all configured marks, including terminal stages, before the workspace needs to sync them.
         forge = (backlog.GitHubBacklog(args.github_repo) if args.github_repo else
-                 backlog.Backlog(args.gitlab_host, args.gitlab_project) if args.gitlab_host else None)
+                 backlog.Backlog(args.gitlab_host, args.gitlab_project, args.gitlab_token_env)
+                 if args.gitlab_host else None)
         label_out, label_err = provision_kanban(forge, board, args.dry_run)
         if args.dry_run:
             print(f"would {'append to' if claude.exists() else 'create'}: {claude}\n{block}")

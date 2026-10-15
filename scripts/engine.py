@@ -15,14 +15,16 @@ import cleanup
 import clock as engine_clock
 import engine_merge
 import forge
+import issue_gate
 import policy
 import reconcile
 import settings
 import slots
+import startup
+import store_access
 import supervisor
 from forge_port import ForgeError
-from store import Store, migrate
-from workspace import settings_path, worktrees_dir
+from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 
@@ -174,25 +176,21 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     try:
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
-            text = (root / "CLAUDE.md").read_text()
-            config = settings.load(root, settings_path(text))
-            source = forge.for_workspace(root, approver=config.workflow.approver or "", kanban=config.kanban)
+            text, config, source = startup.workspace_forge(root)
             if source is None:
-                raise ValueError("no Backlog: line; configure the workspace backlog before running the engine")
+                refused = issue_gate.start(None, None, "")
+                raise ValueError(f"{refused.refused}\n{refused.setup}")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
             policies = settings.load_policy()
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
-            stages = {s for w in policies.workflows.values() for e in w.edges for s in (e.source, e.target)}
-            stages |= {w.start for w in policies.workflows.values()}
-            unmapped = sorted(stages - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
+            unmapped = sorted(set(settings.workflow_stages(policies))
+                              - set(config.kanban.stage_map) - set(config.kanban.terminal_stages))
             if unmapped:
                 raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
-            path = root / "store.db"
-            migrate(path)
-            db = Store(path)
+            db = store_access.migrated_store(root, engine_owned=True)
             try:
                 while True:
                     failed = False

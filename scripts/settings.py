@@ -388,6 +388,8 @@ def _kanban(table) -> Kanban:
             or {x.casefold() for x in terminal} & fold):
         raise SettingsError("[kanban] terminal_stages must be unique, comma-free labels distinct from "
                             "human_review_label, mapped stages and board labels")
+    if any(x != x.strip() for x in (*stages, human, *terminal)):  # forges trim names; sync needs the exact one
+        raise SettingsError("[kanban] stage, hold and terminal labels must not have leading or trailing whitespace")
     project = None
     if "github_project" in table and "project" in table:
         raise SettingsError("[kanban] set github_project or project, not both")
@@ -474,3 +476,10 @@ def load_policy(path: Path = POLICY) -> policy.Policies:
         return policy.parse(tomllib.loads(Path(path).read_text()))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
         raise policy.PolicyError(f"{path}: {e}") from None
+
+
+def workflow_stages(policies: policy.Policies) -> list[str]:
+    """Every stage a shipped workflow can visit; init and the engine share this set."""
+    stages = {s for w in policies.workflows.values() for e in w.edges for s in (e.source, e.target)}
+    stages |= {w.start for w in policies.workflows.values()}
+    return sorted(stages)

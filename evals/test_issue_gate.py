@@ -4,6 +4,9 @@ exactly one store row keyed by it; a workspace with no `Backlog:` line is refuse
 from __future__ import annotations
 
 import sys
+import contextlib
+import importlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,6 +20,7 @@ import backlog  # noqa: E402
 import forge  # noqa: E402
 import issue_gate  # noqa: E402
 import store  # noqa: E402
+import supervisor  # noqa: E402
 import test_forge as tf  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 
 BLOCK = "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Timezone: UTC\n{backlog}\n## After\n"
@@ -56,6 +60,14 @@ class GateTest(unittest.TestCase):
     def test_a_supplied_issue_the_forge_does_not_confirm_is_refused_and_writes_no_row(self):
         got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Add a flag", issue=999999, commit=True)
         self.assertIn("#999999", got.refused)
+        self.assertEqual(self.store.items(), [])
+
+    def test_closed_gitlab_issue_is_refused_without_a_row(self):
+        row = {**tf.gl_issue(3, "Fix the parser"), "state": "closed"}
+        with mock.patch.object(backlog, "_call", return_value=(row, {}, "")):
+            got = issue_gate.start(forge.Forge(tf.GL, token="fixture-token"), self.store,
+                                   "Fix the parser", issue=3, commit=True)
+        self.assertIn("issue #3 is closed", got.refused)
         self.assertEqual(self.store.items(), [])
 
     def test_a_preview_of_work_on_an_existing_issue_writes_nothing(self):
@@ -102,6 +114,170 @@ class GateTest(unittest.TestCase):
                 self.assertIn("- Backlog: GitHub issues; repo OWNER/NAME", got.setup)
                 self.assertIn("chief-of-stuff init", got.setup)
                 self.assertEqual(self.store.items(), [])
+
+
+class WorkMainTest(unittest.TestCase):
+    """The registered work driver's real main builds the forge and the engine store."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "CLAUDE.md").write_text(BLOCK.format(backlog="- Backlog: GitHub issues; repo example/app") +
+                                             "\n")
+        self.gh = tf.FakeGh()
+
+    def run_work(self, *args):
+        work = importlib.import_module("work")
+        real_factory = forge.for_workspace
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(forge, "for_workspace", side_effect=lambda root, **opts:
+                               real_factory(root, gh=self.gh, **opts)), \
+             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = work.main(["--root", str(self.root), "Add a flag", *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def items(self):
+        if not (self.root / "store.db").exists():
+            return []
+        db = store.Store(self.root / "store.db")
+        try:
+            return [(i.issue_key, i.title) for i in db.items()]
+        finally:
+            db.engine.dispose()
+
+    def test_commit_files_before_writing_one_row_and_reuses_the_engine_store(self):
+        create = self.gh
+        def gh(args, input_text=None):
+            if args[:2] == ["issue", "create"]:
+                self.assertEqual(self.items(), [], "the store row must follow issue creation")
+                self.assertEqual(input_text, "why")
+            return create(args, input_text)
+        self.gh = gh
+        code, out, err = self.run_work("--body", "why", "--commit")
+        self.assertEqual(code, 0, err)
+        self.assertIn("github:example/app#101", out)
+        self.assertEqual(self.items(), [("github:example/app#101", "Add a flag")])
+        self.assertIn("--body-file", create.all_calls[0])
+        self.assertEqual(self.run_work("--issue", "101", "--commit")[0], 0)
+        self.assertEqual(len(self.items()), 1)
+        self.assertEqual([c[:2] for c in create.all_calls], [["issue", "create"], ["issue", "view"]])
+
+    def test_default_preview_files_nothing_and_writes_no_row(self):
+        code, out, err = self.run_work("--body", "why")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would create: Add a flag", out)
+        self.assertEqual((self.gh.all_calls, self.items()), ([], []))
+        state = supervisor.state_dir(self.root)
+        self.assertEqual((self.root / "store.db").exists() or (state / "migrate.lock").exists(), False,
+                         "a preview must not create, migrate or lock the store")
+
+    def test_existing_issue_preview_does_not_open_the_store(self):
+        self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])
+        with mock.patch.object(store, "migrate") as migrated:
+            self.assertEqual(self.run_work("--issue", "3")[0], 0)
+        migrated.assert_not_called()
+        self.assertFalse((self.root / "store.db").exists())
+
+    def test_a_running_engine_does_not_block_intake(self):
+        store.migrate(self.root / "store.db")  # a live engine has already migrated it
+        with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"):
+            code, out, err = self.run_work("--commit")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(self.items()), 1)
+
+    def test_migration_holds_the_migrate_lock_and_releases_it_afterward(self):
+        path = supervisor.state_dir(self.root) / "migrate.lock"
+
+        def migrate(db_path):
+            with self.assertRaises(supervisor.ServiceError), supervisor.lock(path):
+                pass
+            real_migrate(db_path)
+
+        real_migrate = store.migrate
+        with mock.patch.object(store, "migrate", side_effect=migrate) as migrated:
+            code, _, err = self.run_work("--commit")
+        self.assertEqual(code, 0, err)
+        migrated.assert_called_once_with(self.root.resolve() / "store.db")
+        with supervisor.lock(path):
+            pass
+
+    def test_a_current_store_is_not_migrated_again_even_with_a_live_engine(self):
+        store.migrate(self.root / "store.db")
+        with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"), \
+             mock.patch.object(store, "migrate") as migrated:
+            code, _, err = self.run_work("--commit")
+        self.assertEqual(code, 0, err)
+        migrated.assert_not_called()
+        self.assertEqual(len(self.items()), 1)
+
+    def test_a_stale_store_is_not_migrated_under_a_live_engine(self):
+        (self.root / "store.db").write_bytes(b"")  # no alembic_version: behind head
+        with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"), \
+             mock.patch.object(store, "migrate") as migrated:
+            code, _, err = self.run_work("--commit")
+        self.assertEqual(code, 1)
+        self.assertIn("engine is running", err)
+        migrated.assert_not_called()
+        self.assertEqual(self.gh.all_calls, [], "nothing is filed when the store cannot open")
+
+    def test_closed_issue_refuses_preview_and_commit_without_a_row(self):
+        self.gh = tf.FakeGh(issues=[{**tf.gh_issue(3, "Fix the parser"), "state": "CLOSED"}])
+        for args in ((), ("--commit",)):
+            with self.subTest(args=args):
+                code, out, err = self.run_work("--issue", "3", *args)
+                self.assertNotEqual(code, 0)
+                self.assertIn("issue #3 is closed", err)
+                self.assertEqual(out, "")
+                self.assertEqual(self.items(), [])
+
+    def test_existing_issue_is_confirmed_and_uses_the_forge_title(self):
+        self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])
+        code, out, err = self.run_work("--issue", "3")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would start: github:example/app#3 Fix the parser", out)
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.run_work("--issue", "3", "--commit")[0], 0)
+        self.assertEqual(self.items(), [("github:example/app#3", "Fix the parser")])
+        self.assertEqual([c[:2] for c in self.gh.all_calls], [["issue", "view"], ["issue", "view"]])
+
+    def test_missing_issue_and_failed_create_refuse_without_a_row(self):
+        for args in (("--issue", "999", "--commit"), ("--commit",)):
+            with self.subTest(args=args):
+                self.gh = tf.FakeGh(fail={("issue", "create")})
+                code, _, err = self.run_work(*args)
+                self.assertNotEqual(code, 0)
+                self.assertIn("refused:", err)
+                self.assertEqual(self.items(), [])
+
+    def test_no_backlog_offers_setup_and_creates_no_store(self):
+        (self.root / "CLAUDE.md").write_text(BLOCK.format(backlog=""))
+        for args in ((), ("--commit",)):
+            with self.subTest(args=args):
+                code, _, err = self.run_work(*args)
+                self.assertNotEqual(code, 0)
+                self.assertIn("no `Backlog:` line", err)
+                self.assertIn(issue_gate.SETUP, err)
+                self.assertFalse((self.root / "store.db").exists())
+                self.assertEqual(self.gh.all_calls, [])
+
+    def test_workspace_without_claude_md_offers_setup(self):
+        (self.root / "CLAUDE.md").unlink()
+        code, _, err = self.run_work("--commit")
+        self.assertNotEqual(code, 0)
+        self.assertIn(issue_gate.SETUP, err)
+        self.assertFalse((self.root / "store.db").exists())
+
+    def test_gitlab_main_uses_the_configured_forge(self):
+        (self.root / "CLAUDE.md").write_text(BLOCK.format(backlog=
+            "- Backlog: GitLab; host https://gitlab.example.test; project team/app; token env SOME_TOKEN"))
+        with mock.patch.dict("os.environ", {"SOME_TOKEN": "fixture-token"}), \
+             mock.patch.object(backlog, "_call", return_value=({"iid": 7}, {}, "")) as call:
+            code, out, err = self.run_work("--commit")
+        self.assertEqual(code, 0, err)
+        self.assertIn("gitlab:gitlab.example.test/team/app#7", out)
+        self.assertEqual(self.items(), [("gitlab:gitlab.example.test/team/app#7", "Add a flag")])
+        self.assertEqual(call.call_args.args[0], "POST")
 
 
 if __name__ == "__main__":

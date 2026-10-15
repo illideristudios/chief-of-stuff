@@ -395,6 +395,13 @@ class KanbanSettingsTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 self.load(bad)
 
+    def test_padded_labels_are_refused_because_provisioning_and_sync_must_agree_on_the_name(self):
+        for bad in (KANBAN.replace('"00 - PLAN"', '" 00 - PLAN"'),
+                    KANBAN.replace('human_review_label = "', 'human_review_label = " '),
+                    KANBAN.replace('terminal_stages = ["main"]', 'terminal_stages = ["main "]')):
+            with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "whitespace"):
+                self.load(bad)
+
     def test_github_project_options_can_use_different_status_names(self):
         extra = '''\n[kanban.github_project]
 owner = "example-org"
@@ -575,3 +582,9 @@ class GraphSettingsTest(unittest.TestCase):
                     'max_nodes = true\n'):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 self.load(base + bad)
+
+
+class WorkflowStagesTest(unittest.TestCase):
+    def test_shipped_policy_stages_are_sorted_and_complete(self):
+        self.assertEqual(st.workflow_stages(st.load_policy()),
+                         ["fix", "implement", "merge", "plan", "review"])
