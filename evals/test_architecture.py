@@ -185,10 +185,128 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
     return []
 
 
+# Section 4 circle table. Split modules (audit_tasks, inbox, flow) sit in the outermost circle
+# they occupy until the §8 split lands. Root launchers are Drivers.
+CIRCLES: dict[str, frozenset[str]] = {
+    "entities": frozenset({
+        "tracker", "md", "clock", "runtimes", "policy", "findings", "ownership", "orphans",
+        "estimate", "tracker_log", "tree_state", "guard_commands",
+    }),
+    "use_cases": frozenset({
+        "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
+        "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
+        "reconcile", "guard_rules", "performance",
+    }),
+    "adapters": frozenset({
+        "fragment", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
+        "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge",
+        "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
+        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots",
+    }),
+    "drivers": frozenset({
+        "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
+        "startup", "store_access", "kanban_cli", "process_status", "session_exec", "spawn_session",
+        "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
+        "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
+        "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
+        "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
+        "audit_tasks", "inbox", "flow",
+    }),
+}
+CIRCLE_RANK = {"entities": 0, "use_cases": 1, "adapters": 2, "drivers": 3}
+MODULE_CIRCLE = {name: circle for circle, names in CIRCLES.items() for name in names}
 
+# Section 5: inward→outward imports known today. The set may only shrink; each entry is a compliance gap.
+OUTWARD_IMPORTS = frozenset({
+    "board_sources→process_status",
+    "decision_page→notify_service",
+    "dispatch_prompt→backlog_ref",
+    "dispatch_prompt→settings",
+    "dispatch_prompt→workspace",
+    "estimate→workspace",
+    "kanban→backlog",
+    "kanban→settings",
+    "merge_approved→backlog",
+    "merge_approved→forge_review",
+    "merge_approved→settings",
+    "merge_approved→workspace",
+    "merge_ready→backlog",
+    "merge_ready→forge_review",
+    "merge_ready→settings",
+    "merge_ready→workspace",
+    "module_graph→git_trees",
+    "one_shot→backlog",
+    "one_shot→forge",
+    "one_shot→git_trees",
+    "one_shot→git_view",
+    "one_shot→notify_service",
+    "one_shot→one_shot_report",
+    "one_shot→process_status",
+    "one_shot→settings",
+    "one_shot→shell_setup",
+    "one_shot→tracker_write",
+    "one_shot→workspace",
+    "one_shot_report→git_trees",
+    "review_threads→backlog",
+    "review_threads→forge_review",
+    "review_threads→settings",
+    "review_threads→workspace",
+    "task_forge→board_sources",
+    "task_forge→settings",
+    "tracker→backlog_ref",
+    "tracker→workspace",
+    "tree_claims→process_status",
+})
+
+
+def circle_graph() -> dict[str, set[str]]:
+    """Import graph over scripts/ plus the two root launchers named in §4."""
+    graph = import_graph(SCRIPTS)
+    stems = set(graph)
+    for stem in ("chief_of_stuff", "start_coordinator"):
+        path = ROOT / f"{stem}.py"
+        graph[stem] = ({script(name) for name in imports(path)} & stems) - {stem}
+    return graph
+
+
+def outward_imports(graph: dict[str, set[str]] | None = None) -> set[str]:
+    """`src→dst` for each direct import from an inner circle to an outer one."""
+    graph = circle_graph() if graph is None else graph
+    found: set[str] = set()
+    for src, deps in graph.items():
+        src_circle = MODULE_CIRCLE.get(src)
+        if src_circle is None:
+            continue
+        for dst in deps:
+            dst_circle = MODULE_CIRCLE.get(dst)
+            if dst_circle is None:
+                continue
+            if CIRCLE_RANK[src_circle] < CIRCLE_RANK[dst_circle]:
+                found.add(f"{src}→{dst}")
+    return found
 
 
 class DependencyRuleTest(unittest.TestCase):
+    def test_every_script_and_launcher_is_in_exactly_one_circle(self) -> None:
+        scripts = {p.stem for p in SCRIPTS.glob("*.py")} | {"chief_of_stuff", "start_coordinator"}
+        listed = {name for names in CIRCLES.values() for name in names}
+        self.assertEqual(sorted(scripts - listed), [], "unclassified module")
+        self.assertEqual(sorted(listed - scripts), [], "circle entry with no file")
+        overlap = [name for name, n in ((n, sum(n in s for s in CIRCLES.values())) for n in listed) if n > 1]
+        self.assertEqual(overlap, [])
+
+    def test_inward_to_outward_imports_match_the_known_list(self) -> None:
+        # §5: fail on a new outward import; the allowlist may only shrink.
+        self.assertEqual(outward_imports(), set(OUTWARD_IMPORTS))
+
+    def test_the_outward_check_sees_an_inner_import_of_an_outer_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "tracker.py").write_text("import forge\n", encoding="utf-8")
+            Path(tmp, "forge.py").write_text("", encoding="utf-8")
+            # Local CIRCLE override: reuse ranks via a one-off graph + MODULE_CIRCLE names.
+            graph = {"tracker": {"forge"}, "forge": set()}
+            self.assertEqual(outward_imports(graph), {"tracker→forge"})
+
     def test_guard_command_judgements_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_commands"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "guard_commands", set(),
