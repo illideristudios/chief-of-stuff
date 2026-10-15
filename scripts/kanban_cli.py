@@ -93,7 +93,9 @@ def main(argv: list[str] | None = None) -> int:
             result = forge.Forge(backlog.GitHubBacklog(ref.repo), kanban=settings.kanban).write_stage(
                 ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit)
         elif isinstance(cfg.backlog, backlog.Backlog):
-            result = forge.Forge(cfg.backlog, kanban=settings.kanban).write_stage(
+            # write_stage rebuilds the IssueRef from Forge.home; keep a sibling project's repo.
+            home = cfg.backlog if ref.repo == cfg.backlog.project else cfg.backlog.sibling(ref.repo)
+            result = forge.Forge(home, kanban=settings.kanban).write_stage(
                 ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit)
         else:
             result = kanban.Sync(ref, stage, error="no configured GitLab host for this issue")
