@@ -205,6 +205,7 @@ REVIEW_PIPELINE_RULES = {
         'Reconcile a genuine manual board move with the user before syncing; report missing configuration for correction.',
         'Normal domain gates (including main-branch, suite and audit gates) are not harness defects.',
         'Transient API errors permit retry after recovery, including a partial Project Status/label sync; verify fresh state first.',
+        'Pending reconciliation or API recovery, explain next steps without tracker edits or log/kanban calls.',
         'An unexpected refusal on an authorized write follows Write authority and Refusal reports below.',
         'An audit reports drift but never moves cards.',
         'Note a `workflow` row has no issue and takes no sync.',
