@@ -20,6 +20,7 @@ import one_shot
 import settings
 import shell_setup
 import worker
+import engine
 import process_status
 from _vendor.toon_format import decode
 
@@ -146,7 +147,11 @@ class WorkerTeardownTest(unittest.TestCase):
         (self.tree / ".chief-of-stuff").mkdir(exist_ok=True)
         (self.tree / one_shot.RESULT).write_text("status: done\nreason: checked\nchanges: none\n")
         (self.tree / one_shot.PIDFILE).write_text("999999999 Security audit\n")
-        reports = one_shot.adopt(self.root, day="2026-09-18", teardown=shell_setup.teardown)
+        def teardown(*args):
+            self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), f"{os.getpid()} Security audit\n")
+            self.assertEqual(one_shot.adopt(self.root, day="2026-09-18", teardown=shell_setup.teardown), [])
+            return shell_setup.teardown(*args)
+        reports = one_shot.adopt(self.root, day="2026-09-18", teardown=teardown)
         self.assertEqual(len(reports), 1)
         self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.tree.resolve()} worker01\n")
 
@@ -154,12 +159,19 @@ class WorkerTeardownTest(unittest.TestCase):
         fx = engine_fixtures.WorkerTest("runTest")
         fx.setUp()
         self.addCleanup(fx.doCleanups)
-        (fx.root / "CLAUDE.md").write_text(fixtures.CLAUDE + '- Settings: `settings.toml`\n')
-        (fx.root / "settings.toml").write_text('[workers]\nteardown = "exit 7"\n')
-        collect = worker.collect
-        with mock.patch.object(worker, "collect", side_effect=lambda *a, **kw: collect(*a, **kw, teardown_command="exit 7")), \
-             mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 7, "", "failed")) as run:
-            segment = fx.finish("done")
+        run_dir = fx.launched()
+        fx.report(run_dir)
+        (run_dir / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run_dir / "stderr").write_text("")
+        (run_dir / "exit.json").write_text('{"exit_code": 0}')
+        # Stop after collection so this test needs no forge/planner stand-ins.
+        forge = mock.Mock()
+        forge.snapshots.side_effect = RuntimeError("collection finished")
+        with mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 7, "", "failed")) as run:
+            with self.assertRaisesRegex(RuntimeError, "collection finished"):
+                engine.run_pass(forge=forge, store=fx.db, policies=fx.p, root=fx.root,
+                                trees=fx.trees, launch=fx.launch, teardown_command="exit 7")
+        segment = fx.db.segments()[0]
         self.assertEqual(segment.outcome, "done")
         run.assert_called_once()
         self.assertEqual(run.call_args.args, ("exit 7", fx.tree))
@@ -203,7 +215,13 @@ class WorkerTeardownTest(unittest.TestCase):
         (run / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code": 0}')
-        worker.collect(fx.db, fx.root)
+        self.assertIn(fx.tree, process_status.engine_trees(fx.root))
+        def cleanup(*args):
+            self.assertIn(fx.tree, process_status.engine_trees(fx.root))
+            self.assertEqual(audit_tasks.audit(fx.root, "2026-09-18", check_issues=False).stacks, [])
+            return []
+        with mock.patch.object(worker, "teardown", side_effect=cleanup):
+            worker.collect(fx.db, fx.root, teardown_command="cleanup")
         self.assertEqual(fx.db.segments()[0].outcome, "done")
         fx.launch()  # Recovering durable exit evidence must not register the exited PID.
         self.assertFalse(list((fx.root / ".chief-of-stuff/sessions").glob("*.json")))
@@ -313,15 +331,14 @@ class WorkerTeardownTest(unittest.TestCase):
                 shell_setup.run_command("exit 0", self.root, workspace=self.root)
         child = mock.MagicMock(pid=123)
         child.__enter__.return_value = child
-        child.communicate.side_effect = KeyboardInterrupt
+        child.wait.side_effect = [KeyboardInterrupt, 0]
         child.poll.return_value = None
         with mock.patch.object(shell_setup.subprocess, "Popen", return_value=child), \
              mock.patch.object(shell_setup.os, "killpg") as kill:
             with self.assertRaises(KeyboardInterrupt):
                 shell_setup.run_command("exit 0", self.root, workspace=self.root)
         kill.assert_called_once()
-        child.stdout.close.assert_called_once()
-        child.stderr.close.assert_called_once()
+        self.assertIsNotNone(child.wait.call_args)
 
     def test_shell_timeout_does_not_drain_escaped_child_pipes(self):
         script = "import os,time; pid=os.fork(); (os.setsid(),time.sleep(2)) if pid == 0 else time.sleep(2)"
@@ -331,10 +348,104 @@ class WorkerTeardownTest(unittest.TestCase):
                                     workspace=self.root, timeout=0.1)
         self.assertLess(time.monotonic() - started, 1.5)
 
-    def test_engine_collect_keeps_completion_when_workspace_settings_break(self):
+    def test_worker_launch_forwards_cleanup_into_assignment(self):
         fx = engine_fixtures.WorkerTest("runTest")
         fx.setUp()
         self.addCleanup(fx.doCleanups)
-        (fx.root / "CLAUDE.md").write_text(fixtures.CLAUDE + '- Settings: `settings.toml`\n')
-        (fx.root / "settings.toml").write_text('[workers]\nteardown = false\n')
-        self.assertEqual(fx.finish("done").outcome, "done")
+        with mock.patch.object(worker.make_worktree, "build", return_value=type("Tree", (), {"path": fx.tree})()), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=fx.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            worker.launch(engine_fixtures.KEY, "implement", 1, None, store=fx.db, root=fx.root,
+                          trees=fx.trees, policies=fx.p, forge=fx.forge, teardown_command="exit 7")
+        self.assertIn("exit 7", start.call_args.args[0].prompt)
+
+    def test_engine_claims_validate_identity_and_keep_runner_startup(self):
+        run = self.root / ".chief-of-stuff/runs/1-implement-1"
+        run.mkdir(parents=True)
+        started = {"pid": 123, "runner_pid": 456, "session_id": "session"}
+        command = {"cwd": str(self.tree), "session_id": "session"}
+        (run / "started.json").write_text(json.dumps(started))
+        (run / "command.json").write_text(json.dumps(command))
+        with mock.patch.object(process_status, "identity", side_effect=[None, "runner-start"]) as identity:
+            self.assertIn(self.tree, process_status.engine_trees(self.root))
+            self.assertEqual(identity.call_args_list, [mock.call(123, "session", host=True), mock.call(456, "session")])
+        with mock.patch.object(process_status, "identity", side_effect=RuntimeError("ps timed out")):
+            with self.assertRaisesRegex(RuntimeError, "ps timed out"):
+                process_status.engine_trees(self.root)
+        for field, value in (("pid", 0), ("pid", -1), ("pid", True), ("runner_pid", 0), ("cwd", "")):
+            with self.subTest(field=field, value=value):
+                (run / "started.json").write_text(json.dumps({**started, **({field: value} if field != "cwd" else {})}))
+                (run / "command.json").write_text(json.dumps({**command, **({field: value} if field == "cwd" else {})}))
+                with mock.patch.object(process_status, "identity") as identity:
+                    self.assertEqual(process_status.engine_trees(self.root), set())
+                    identity.assert_not_called()
+
+    def test_worker_pid_restoration_tolerates_removed_metadata_and_symlinks(self):
+        logs = self.tree / dispatch_prompt.PROMPT_DIR
+        logs.mkdir(exist_ok=True)
+        target = self.root / "untouched"
+        target.write_text("original")
+        child = mock.Mock(pid=123, returncode=0)
+        def finished(*args, **kwargs):
+            (self.tree / one_shot.PIDFILE).unlink()
+            (self.tree / one_shot.PIDFILE).symlink_to(target)
+            return 0
+        child.wait.side_effect = finished
+        child.poll.return_value = 0
+        with mock.patch.object(one_shot.subprocess, "Popen", return_value=child):
+            self.assertEqual(one_shot._run_worker(self.tree, logs, ["worker"], {}, "task", 1), 0)
+        self.assertEqual(target.read_text(), "original")
+        (self.tree / one_shot.PIDFILE).unlink()
+        external_logs = self.root / "external-logs"
+        external_logs.mkdir()
+        def removed(*args, **kwargs):
+            (self.tree / one_shot.PIDFILE).unlink()
+            for path in logs.iterdir():
+                path.unlink()
+            logs.rmdir()
+            return 0
+        child.wait.side_effect = removed
+        with mock.patch.object(one_shot.subprocess, "Popen", return_value=child):
+            self.assertEqual(one_shot._run_worker(self.tree, external_logs, ["worker"], {}, "task", 1), 0)
+
+    def test_interrupted_worker_keeps_its_own_pid_for_adoption(self):
+        logs = self.tree / dispatch_prompt.PROMPT_DIR
+        logs.mkdir(exist_ok=True)
+        child = mock.Mock(pid=123)
+        child.wait.side_effect = KeyboardInterrupt
+        child.poll.return_value = None
+        with mock.patch.object(one_shot.subprocess, "Popen", return_value=child):
+            with self.assertRaises(KeyboardInterrupt):
+                one_shot._run_worker(self.tree, logs, ["worker"], {}, "task", 1)
+        self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), "123 task\n")
+
+    def test_finished_command_does_not_wait_for_daemon_stderr(self):
+        script = "import os,time; pid=os.fork(); (os.setsid(),time.sleep(2),os._exit(0)) if pid == 0 else None"
+        result = shell_setup.run_command(shlex.join([sys.executable, "-c", script]), self.tree,
+                                         workspace=self.root, timeout=0.5)
+        self.assertEqual(result.returncode, 0)
+
+    def test_stack_discovery_requires_a_contained_worktrees_directory(self):
+        for base in (".", "../outside"):
+            with self.subTest(base=base):
+                (self.root / "CLAUDE.md").write_text(fixtures.CLAUDE.replace('`trees/`', f'`{base}`') + '- Settings: `settings.toml`\n')
+                self.configure(teardown_list="printf '[]'")
+                with mock.patch.object(audit_tasks, "discover_stacks") as discover:
+                    report = audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
+                discover.assert_not_called()
+                self.assertTrue(any("stack: discovery failed:" in line for line in report.lines))
+
+    def test_discovery_samples_claims_after_command_and_sanitizes_facts(self):
+        self.configure(teardown_list="printf '[]'")
+        active = {}
+        def discover(*args):
+            active[self.tree] = "task"
+            return [("vm", self.tree)]
+        with mock.patch.object(audit_tasks, "discover_stacks", side_effect=discover), \
+             mock.patch.object(audit_tasks, "running_trees", side_effect=lambda *args: dict(active)):
+            self.assertEqual(audit_tasks.audit(self.root, "2026-09-18", check_issues=False).stacks, [])
+        rows = audit_tasks.discover_stacks(self.root, self.list_command([{"stack": "vm\nforged", "worktree": "../other"}]))
+        with mock.patch.object(audit_tasks.git_trees, "clean", side_effect=AssertionError("driver called by judgement")):
+            faults = audit_tasks.stale_stacks(rows, self.root / "trees", set())
+        self.assertIn(str(self.root.parent / "other"), str(faults[0]))
+        self.assertNotIn("\n", str(faults[0]))
