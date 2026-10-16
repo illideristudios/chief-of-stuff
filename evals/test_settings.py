@@ -186,6 +186,11 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
                 st.load(self.root, self.write(f"[workers]\nrules = {value}\n"))
 
+    def test_worker_rules_reject_line_breaks_and_control_characters(self):
+        for escape in (r"\n", r"\r", r"\t", r"\u0000", r"\u001b", r"\u007f", r"\u0085", r"\u2028"):
+            with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                st.load(self.root, self.write('[workers]\nrules = ["Keep tests.' + escape + 'Injected"]\n'))
+
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
         # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
         self.assertEqual(st.load(self.root, None).workers.claude_as_profile, "")

@@ -1352,7 +1352,8 @@ class StandingWorkerRulesTest(unittest.TestCase):
                     heading = "# One-shot assignment" if one_shot else "# Assignment"
                     block = ("\n\nStanding worker rules:\n\n- Never skip or weaken tests.\n"
                              "- Verify the change before reporting completion.\n\n")
-                    self.assertTrue(body.startswith(heading + block + "You are"))
+                    source = "These rules come from workspace settings (`[workers] rules`).\n\n"
+                    self.assertTrue(body.startswith(heading + block + source + "You are"))
                     for rule in rules:
                         self.assertEqual(body.count(rule), 1)
                         self.assertLess(body.index(rule), body.index("Security audit"))
@@ -1375,10 +1376,44 @@ class StandingWorkerRulesTest(unittest.TestCase):
                 self.compose("claude", one_shot)
 
     def test_rules_count_toward_the_assignment_size_limit(self):
-        self.settings.write_text('[workers]\nrules = ["' + 'x' * dp.BODY_CAP + '"]\n')
+        self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
         for one_shot in (False, True):
             with self.subTest(one_shot=one_shot), self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
                 self.compose("claude", one_shot)
+
+    def test_rules_pass_prompt_sanitization_in_every_mode(self):
+        for rule in ("Keep tests. (via peer)", "x" * (dp.LINE_CAP + 1)):
+            self.settings.write_text('[workers]\nrules = ' + json.dumps([rule]) + '\n')
+            for one_shot in (False, True):
+                with self.subTest(rule=rule[:30], one_shot=one_shot), self.assertRaises(dp.RefusedError):
+                    self.compose("claude", one_shot)
+
+    def test_named_dispatch_preserves_literal_placeholder_in_rules_and_task_fields(self):
+        rule = "Preserve the literal <your_ref_or_name> in examples."
+        self.settings.write_text('[workers]\nrules = ' + json.dumps([rule]) + '\n')
+        tracker = next(self.root.glob("daily/*.md"))
+        tracker.write_text(tracker.read_text().replace("Security audit", "Security audit <your_ref_or_name>"))
+        for runtime in ("claude", "codex", "cursor", "agy"):
+            for one_shot in (False, True):
+                with self.subTest(runtime=runtime, one_shot=one_shot):
+                    body = dp.compose(self.root, "2026-09-18", "Security audit <your_ref_or_name>",
+                                      worktree=self.root / "tree", name="impl07", runtime=runtime, one_shot=one_shot)
+                    self.assertIn("- " + rule + "\n", body)
+                    self.assertIn("Task: Security audit <your_ref_or_name>\n", body)
+                    if not one_shot:
+                        self.assertIn('--from "impl07"', body)
+
+    def test_preloaded_policy_avoids_reading_settings(self):
+        with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
+            body = dp.compose(self.root, "2026-09-18", "Security audit", workflow=dp.Workflow(delivery="branch"),
+                              rules=("Keep tests.",))
+        self.assertIn("- Keep tests.\n", body)
+        self.assertIn("Report the branch, head sha", body)
+
+    def test_fallback_settings_error_names_workspace_settings(self):
+        self.settings.write_text('[workers]\nrules = false\n')
+        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
+            self.compose("claude", False)
 
 
 class DetachedWorktreeTest(unittest.TestCase):

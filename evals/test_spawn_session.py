@@ -2086,6 +2086,13 @@ class CheckTest(unittest.TestCase):
             self.composed(root, task, **kw)
         return f"refused: {expected.exception}"
 
+    def test_check_uses_already_loaded_workspace_policy(self):
+        root = self.workspace(toml='[workers]\nrules = ["Keep tests."]\n')
+        with unittest.mock.patch.object(ss.dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")):
+            code, out, err = self.check(root)
+        self.assertEqual(code, 0, err)
+        self.assertIn("- Keep tests.\n", out)
+
     def test_a_complete_row_prints_the_assignment_with_no_cwd_and_no_name(self):
         root = self.workspace()
         code, out, err = self.check(root)
