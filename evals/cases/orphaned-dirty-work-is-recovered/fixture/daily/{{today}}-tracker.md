@@ -7,7 +7,6 @@ Coordinator: coordinator. Board: none.
 | item | owner | state | since | due | checklist |
 |---|---|---|---|---|---|
 | Session TTL fix | impl-7 | running 09:10 | 09:00 |  | Checklist: Session TTL fix |
-| Draft release notes | Robin | open | 09:00 |  | Checklist: Draft release notes |
 
 ## Decisions
 

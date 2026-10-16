@@ -171,7 +171,9 @@ For registered workers, check process state with `chief-of-stuff processes --roo
 
 - A listing is not a roster. A Sessions row exists for a session you spawned or handed work to, and for no other: a listing also shows sessions that are nobody's business here, and tooling that mints short-lived sessions of its own. Those rows own no task, answer no poll, and vanish like departed sessions. The orphan check below starts from task owners for this reason, and never from the listing.
 
-- Every time you list, check each task's owner against the list. An owner that is listed nowhere and has a ref is gone: set that task's state to `orphaned`, add a Log line naming the session, and tell the user once, with what is at risk — the worktree and paths from File ownership, and whether they hold uncommitted work. An orphaned task keeps its owner column as a record. Never send to a session that is not listed, and never re-dispatch an orphaned task on your own: its owner is the user's to decide.
+- Every time you list, check task owners. An unlisted owner with a ref is gone: mark its task `orphaned` and log the former owner, tree and work at risk. Never send to a session that is not listed. Recover orphaned work automatically through a one-shot worker, preserving its tree and branch. Log the pickup and tell the user afterwards in one status line, with no ask or decision page. Ask only for a genuine missing decision, such as incompatible changes.
+
+Before recovering orphaned work, Read ${CLAUDE_PLUGIN_ROOT}/skills/dispatch/SKILL.md
 
 ## Relay
 

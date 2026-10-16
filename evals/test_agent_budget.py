@@ -39,7 +39,8 @@ ONE_SHOT_PARAGRAPH = 3_800  # kept: a later slice trims this paragraph
 # rendered_sizes(1) over the simulated agent, copied into a temporary plugin:
 # Claude 39,241 B; Codex 37,248 B; Cursor 37,356 B; AGY 37,412 B (slice 487 plus the PR 540 review sentence simulated).
 # #547 adds the approved-forge-closure sentence: Claude 39,386; Codex 37,393; Cursor 37,501; AGY 37,557.
-PROMPT = {"claude": 39_390, "codex": 37_400, "cursor": 37_510, "agy": 37_560}
+# #133: the non-Claude Sessions adapters also carry the automatic recovery mandate.
+PROMPT = {"claude": 39_390, "codex": 37_500, "cursor": 37_610, "agy": 37_670}
 CEILING = {  # `## ` section -> bytes, heading line included
     "Role": 1600, "Dispatch authority": 1100, "Browser safety": 170, "Writing": 580,
     "Config": 1400, "Clock": 1850, "Calendar": 910, "Open the day": 2000, "Resume": 4670,
@@ -56,8 +57,9 @@ CEILING = {  # `## ` section -> bytes, heading line included
 # stage 4 of the page-theme plan: the decision-page skill gains the theme contract (it names the vendored
 # `${CLAUDE_PLUGIN_ROOT}/assets/page-theme.css` the server reads and forbids styling from the JSON), one paragraph;
 # it measures 2,766 B under a 2,800 B ceiling.
-SKILL_CEILING = {"decision-page": 2_800, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 9_250, "coordinator-sessions": 8_950, "dispatch": 14_400}  # measured size rounded up to 50 B
-SKILLS_TOTAL = 45_500  # all SKILL.md files, bytes; the sum of the ceilings above (measured 45,228 B)
+# #133 adds the on-demand Orphan recovery topic (~1.1 KB); agent and one-shot paragraph caps stay fixed.
+SKILL_CEILING = {"decision-page": 2_800, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 9_250, "coordinator-sessions": 8_950, "dispatch": 15_500}  # measured size rounded up to 50 B
+SKILLS_TOTAL = 46_600  # all SKILL.md files, bytes; #133 measured 46,329 B
 DESCRIPTION_CAP = 300  # frontmatter description characters, not bytes
 SKILL_POINTER = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/skills/([^/\s`]+)/SKILL\.md")
 DECISION_PAGE_POINTER = "Before writing a decision page, Read ${CLAUDE_PLUGIN_ROOT}/skills/decision-page/SKILL.md"
@@ -183,7 +185,7 @@ REVIEW_PIPELINE_RULES = {
         'An audit reports drift but never moves cards.',
         'Note a `workflow` row has no issue and takes no sync.',
         'Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record.',
-        'Never advance into a human-only action, a file another live session owns, an orphaned task, or a stage the yes did not reach; stop and ask instead.',
+        'Never advance into a human-only action, a file another live session owns, or a stage the yes did not reach; stop and ask instead.',
         "At `pr`, only for pull-request delivery: the owning session reports the pull request's URL and head sha.",
         'Write the URL in the item and set `stage` to `review`.',
         'If `[workflow] reviewer_session` names a session, send it `review PR <url>` with a second line, `Report by: chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to coordinator --from <reviewer session> --type review --task "<task>"`, with `<workspace root>` written out as an absolute path, so its fallback report lands in the workspace mailbox and not in the repo it reviews (SendMessage; when it is not listed, use `chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to <reviewer session> --type review --task <task>`).',
@@ -255,11 +257,8 @@ SESSIONS_RETAINED_PARAGRAPHS = ('For registered workers, check process state wit
  "other: a listing also shows sessions that are nobody's business here, and tooling that mints short-lived "
  'sessions of its own. Those rows own no task, answer no poll, and vanish like departed sessions. The orphan '
  'check below starts from task owners for this reason, and never from the listing.',
- "- Every time you list, check each task's owner against the list. An owner that is listed nowhere and has a "
- "ref is gone: set that task's state to `orphaned`, add a Log line naming the session, and tell the user "
- 'once, with what is at risk — the worktree and paths from File ownership, and whether they hold uncommitted '
- 'work. An orphaned task keeps its owner column as a record. Never send to a session that is not listed, and '
- "never re-dispatch an orphaned task on your own: its owner is the user's to decide.")
+ "- Every time you list, check task owners. An unlisted owner with a ref is gone: mark its task `orphaned` and log the former owner, tree and work at risk. Never send to a session that is not listed. Recover orphaned work automatically through a one-shot worker, preserving its tree and branch. Log the pickup and tell the user afterwards in one status line, with no ask or decision page. Ask only for a genuine missing decision, such as incompatible changes.",
+ "Before recovering orphaned work, Read ${CLAUDE_PLUGIN_ROOT}/skills/dispatch/SKILL.md")
 COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch for every task, including reviews and follow-up fixes; '
             'never hand a new task to a continuing session.',
             'The rules below apply only to interactive work.',
@@ -272,9 +271,7 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
             'Tracker).',
             'When you pick, never hand: anything with a decision inside it (a rename is a naming call, not a '
             'cleanup); anything touching a file a live session owns; anything on the human-only list; '
-            "today's log, tracker or board; and any `orphaned` task whose tree holds uncommitted work.",
-            'That last one reads small on the board and is not — picking it up is a rebase and an ownership '
-            "call, and it is the user's.",
+            "today's log, tracker or board.",
             'A task the user hands to a session they name is their call already made.',
             'Poll that session first and stop there.',
             'Say nothing about the item in that message; its answer may be that it is busy or constrained.',
@@ -560,7 +557,7 @@ DISPATCH_ALSO_IN_AUTHORITY = (
     "A task-specific request for an interactive session authorizes that task's launch with `--interactive` in a one-shot workspace.",
 )
 DISPATCH_AUTHORITY_SHA256 = "eb55aa106aa9e645a8e11c76f2ea027f4610d1898711e1b4f414eed5fffb3530"
-DISPATCH_TOPICS = ["Rows", "Worker and model", "Assignment", "Launch", "One-shot", "After launch"]
+DISPATCH_TOPICS = ["Rows", "Worker and model", "Assignment", "Launch", "One-shot", "Orphan recovery", "After launch"]
 
 
 def rendered_sizes(pad: int, source: Path = ROOT) -> dict:
@@ -735,7 +732,7 @@ class AgentBudgetTest(unittest.TestCase):
         for anchor in ("list sessions;", "list sessions,"):
             self.assertNotIn(anchor, pointer, "host replacement anchors must never consume the pointer")
 
-    def test_sessions_keeps_exactly_the_three_retained_paragraphs_in_order(self):
+    def test_sessions_keeps_the_retained_paragraphs_in_order(self):
         expected = "## Sessions\n\n" + "\n\n".join(SESSIONS_RETAINED_PARAGRAPHS)
         self.assertEqual(sections(self.text)["Sessions"].strip(), expected)
 

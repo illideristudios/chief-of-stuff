@@ -13,7 +13,7 @@ When the Settings TOML has `[kanban]`, its stage map projects the tracker's prec
 
 ### Advancing
 
-- Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record. Never advance into a human-only action, a file another live session owns, an orphaned task, or a stage the yes did not reach; stop and ask instead.
+- Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record. Never advance into a human-only action, a file another live session owns, or a stage the yes did not reach; stop and ask instead. Recover orphaned tasks via Sessions; keep configured gates.
 
 ### Review
 

@@ -497,6 +497,14 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             f"Owns: {owns}" + ("" if read_only else ". Edit only these paths and task-local files in this worktree."),
             "Read the workspace rules and the issue if present. Implement the task, verify it, and make the changes this task permits in this one run.",
             READ_ONLY if read_only else delivery,
+            *([] if read_only else [
+                "When resuming unfinished work in this tree: Preserve inherited uncommitted work within Owns, "
+                "finish the task and commit it before you rebase onto the workspace's main branch. "
+                "Run the suite after rebasing, then push the recovered branch under the workspace workflow" +
+                (" and open or update its existing pull or merge request." if workflow.delivery == "pull-request" else ".") +
+                " Never discard inherited work or replace its branch with a fresh main-based change. "
+                "Report human_review for a genuine conflict, missing access or work outside your scope."
+            ]),
             "Do not edit the tracker or issue labels yourself; the launcher reconciles them after you exit.",
             f"Before exiting, write a TOON object to {result} with these fields:",
             'status: done', 'reason: "what was completed, or why human review is required"',

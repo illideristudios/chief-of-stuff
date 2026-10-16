@@ -74,8 +74,8 @@
       "min": 1
     }
   ],
-  "max_turns": 16,
-  "timeout_seconds": 400,
+  "max_turns": 32,
+  "timeout_seconds": 600,
   "repo": {
     "clone": "repo",
     "trees": "trees",

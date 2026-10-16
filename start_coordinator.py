@@ -120,6 +120,11 @@ def prompt(runtime: str, release: Path, root: Path) -> str:
                     "and send replies through the shared mailbox. No registration "
                     "is `starting`; a dead registered process can orphan its task after audit. "
                     "Preserve tracker `## Sessions` states: planning, working, waiting, idle.\n\n")
+        recovery = re.search(r"^Before recovering orphaned work, Read [^\n]+$", rules, flags=re.M)
+        if recovery:
+            sessions += ("Recover orphaned work automatically through a one-shot worker. "
+                         "Log the pickup and report it afterwards, with no ask or decision page.\n\n"
+                         + recovery.group(0) + "\n\n")
         rules = re.sub(r"## Sessions\n.*?(?=## Relay\n)", sessions, rules, flags=re.S)
         rules += ("\n\n## Host adapter\n\nYou run in " + runtime + ". Use your host's tools to read, edit and run the pinned scripts. "
                   "A rule that says \"Read <path>\" means open that file with your host's read tool or `cat`. "

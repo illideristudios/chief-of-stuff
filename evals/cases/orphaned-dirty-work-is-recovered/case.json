@@ -72,12 +72,6 @@
       "pattern": "\\Aunsaved\\n\\Z"
     },
     {
-      "name": "user task untouched",
-      "type": "file_matches",
-      "path": "daily/{{today}}-tracker.md",
-      "pattern": "(?m)^\\| Draft release notes \\| Robin \\| open \\|"
-    },
-    {
       "name": "Log times are this move's clock reads",
       "type": "timestamp_tolerance",
       "path": "daily/{{today}}-tracker.md",

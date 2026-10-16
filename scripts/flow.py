@@ -133,7 +133,8 @@ def reconcile_dead_workers(root: Path, tracker_path: Path, day: str) -> list[str
         return []
     tracker_text = tracker_path.read_text()
     parsed = tracker.parse_tracker(tracker_text)
-    running_tasks = [t for t in parsed.tasks if t.kind == "running"]
+    cfg = read_config(root)
+    running_tasks = [t for t in parsed.tasks if t.kind == "running" and t.owner.casefold() != cfg.user.casefold()]
     if not running_tasks:
         return []
 
@@ -164,7 +165,6 @@ def reconcile_dead_workers(root: Path, tracker_path: Path, day: str) -> list[str
                 matching_reports.sort(key=lambda item: item[0], reverse=True)
                 report_found = matching_reports[0][1]
 
-        cfg = read_config(root)
         at = tracker_write.stamp(cfg.zone)
         status = report_found.get("status") if report_found else None
 
