@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import json
 import re
 import subprocess
 import sys
@@ -31,6 +32,7 @@ import tracker_log  # noqa: E402
 import forge  # noqa: E402
 import kanban as kanban_tool  # noqa: E402
 import ownership  # noqa: E402
+import shell_setup  # noqa: E402
 import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
@@ -416,6 +418,7 @@ class Report:
     lanes: list[LaneFault] = field(default_factory=list)
     kanban: list[KanbanFault] = field(default_factory=list)
     over: list[OverBudget] = field(default_factory=list)
+    stacks: list[str] = field(default_factory=list)
 
 
 def _worktrees(cell: str) -> tuple[list[str], dict[str, str]]:
@@ -832,6 +835,36 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
     return faults, lines, len(open_rows)
 
 
+def stale_stacks(root: Path, trees: str, command: str) -> list[str]:
+    """Discover configured stacks and join them to the existing process-backed ownership sources.
+
+    Tracker rows alone do not establish a live owner. Missing worktrees can still have stacks.
+    Discovery errors remain visible instead of presenting an empty list as successful discovery.
+    """
+    if not command:
+        return []
+    try:
+        result = shell_setup.run_command(command, root, workspace=root)
+        if result.returncode:
+            raise ValueError(f"exit {result.returncode}: {result.stderr or result.stdout}")
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list) or any(
+                not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key].strip()
+                                                for key in ("stack", "worktree")) for row in rows):
+            raise ValueError('expected JSON [{"stack": name, "worktree": path}]')
+        base = (root / trees).resolve()
+        paths = [(root / row["worktree"]).resolve() for row in rows]
+        if any(not path.is_relative_to(base) for path in paths):
+            raise ValueError("stack worktree is outside the configured Worktrees directory")
+        live = {path for path, claims in registry_claims(root, registrations, process_exists).items()
+                if any(claim.live for claim in claims)}
+        live.update(one_shot_claims(base, running_trees))
+        return [git_trees.clean(f"stack {row['stack']}: worktree {path} has no live owner")
+                for row, path in zip(rows, paths) if path not in live]
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return [git_trees.clean(f"stack discovery failed: {exc}")]
+
+
 def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetime | None = None, call=None) -> Report:
     claude_md = (root / "CLAUDE.md").read_text()
     cfg = parse_coordinator(claude_md, today=date.today())
@@ -854,6 +887,8 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
         roster.add(_bare(cfg.user))
 
     report = Report()
+    report.stacks.extend(stale_stacks(root, trees, settings.workers.teardown_list))
+    report.lines.extend(report.stacks)
     handled: set[str] = set()
     seen: set[Path] = set()
     order: list[Path] = []
@@ -988,6 +1023,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     report.over.extend(over_budget(tasks, settings.budgets, day, now or datetime.now(cfg.zone)))
     report.lines.extend(str(o) for o in report.over)
     budgeted = f" over={len(report.over)}" if settings.budgets else ""
+    stacks = f" stacks={len(report.stacks)}" if settings.workers.teardown_list else ""
     report.lines.extend(str(f) for f in report.lanes)
     laned = f" lanes={len(report.lanes)}" if report.lanes or any(t.lane.strip() for t in tasks) else ""
     kanban = f" kanban={len(report.kanban)}" if settings.kanban and check_issues else ""
@@ -995,7 +1031,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     reopen = f"{facts} tree{'' if facts == 1 else 's'}/{len(report.reopen)} task{'' if len(report.reopen) == 1 else 's'}" if report.reopen else "0"
     report.lines.append(
         f"tasks={len(tasks)} trees={len(seen)} reopen={reopen} orphaned={len(report.orphans)} "
-        + (f"unclaimed={len(report.unclaimed)} " if report.unclaimed else "") + f"stopped={len(report.stopped)}" + (f" queued={queued}" if queue_lines or faults or queued else "") + issues + merged + laned + kanban + budgeted)
+        + (f"unclaimed={len(report.unclaimed)} " if report.unclaimed else "") + f"stopped={len(report.stopped)}" + (f" queued={queued}" if queue_lines or faults or queued else "") + issues + merged + laned + kanban + budgeted + stacks)
     return report
 
 
@@ -1070,7 +1106,7 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         return 2
     for line in report.lines:
         print(line)
-    return len(report.reopen) + len(report.stopped) + len(report.queue) + len(report.issues) + len(report.merged) + len(report.lanes) + len(report.kanban)
+    return len(report.reopen) + len(report.stopped) + len(report.queue) + len(report.issues) + len(report.merged) + len(report.lanes) + len(report.kanban) + len(report.stacks)
 
 
 if __name__ == "__main__":

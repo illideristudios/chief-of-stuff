@@ -103,6 +103,8 @@ class Workers:
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
     require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
+    teardown: str = ""
+    teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
 
 
 @dataclass(frozen=True)
@@ -326,8 +328,15 @@ def _workers(table) -> Workers:
     if len(rules) > RULES_MAX or sum(map(len, rules)) > RULES_TOTAL_CAP:
         raise SettingsError(f"[workers] rules must be at most {RULES_MAX} rules and {RULES_TOTAL_CAP} characters in all")
     # Preserve the user's wording, including surrounding spaces.
+    commands = {}
+    for key in ("teardown", "teardown_list"):
+        value = table.get(key, "")
+        if key in table and (not isinstance(value, str) or not value.strip()
+                             or re.search(r"[\x00-\x1f\x7f-\x9f]", value)):
+            raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
+        commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))
+                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules), **commands)
 
 
 def _repos(table) -> dict[str, str]:

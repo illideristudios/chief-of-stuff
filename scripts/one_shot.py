@@ -21,6 +21,7 @@ import git_view
 import kanban
 import ownership
 import runtimes
+import shell_setup
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
 from md import cells as _cells, is_separator as _is_separator
@@ -349,12 +350,30 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
     return len(rows) == 1 and rows[0].kind == "running" and rows[0].owner.strip().lower() == name.lower()
 
 
+def teardown(root: Path, cwd: Path, name: str, command: str) -> list[str]:
+    """Cleanup is independent of the worker outcome; its failure is report evidence, never a hold."""
+    if not command:
+        return []
+    try:
+        result = shell_setup.run_command(command, cwd, workspace=root, worker=name)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return [f"teardown: {_brief(dispatch_prompt.CONTROL.sub('', str(exc)))}"]
+    if result.returncode:
+        detail = _brief(dispatch_prompt.CONTROL.sub("", result.stderr or result.stdout))
+        return [f"teardown: exit {result.returncode}" + (f": {detail}" if detail else "")]
+    return []
+
+
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
               before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
-              *, adopted: bool = False, expected_common: Path | None = None) -> dict:
+              *, adopted: bool = False, expected_common: Path | None = None,
+              teardown_errors: list[str] | None = None) -> dict:
     """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
+    # Adoption also enforces cleanup when the original launcher died. An explicit empty list means
+    # the live launcher already ran it successfully; do not run the command twice.
+    errors = list(teardown_errors) if teardown_errors is not None else teardown(root, cwd, name, settings.workers.teardown)
     if expected_common is None:
         commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
         expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
@@ -373,6 +392,12 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
         path = end
+    for error in errors.copy():
+        try:
+            tracker_write.edit(path, lambda text: tracker_write.append_log(
+                text, f"{tracker_write.stamp(cfg.zone)} one-shot {name} teardown failed: {_brief(error.removeprefix('teardown: '))}"))
+        except (OSError, ValueError) as exc:
+            errors.append(f"{dispatch_prompt.TRACKER_ERROR} could not log teardown failure: {exc}")
     if status == "done" and read_only and (actual or commits != NO_COMMITS):
         # A task that owns nothing changed something: whatever the worker wrote, someone looks (#57).
         left = "\n".join(x for x in (actual, commits) if x and x != NO_COMMITS)
@@ -413,14 +438,13 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                    (f"Working tree: {_brief(actual)[:100]}" if actual else "Working tree clean") + f"; {changes}")
     rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
     row = rows[0] if len(rows) == 1 else None
-    errors = []
     if row is None or row.owner.strip().lower() != name.lower() or (
             # The rollover twin is the same row, open (#576); any other drift from running is a changed row.
             row.kind != "running" and not (carried and row.kind == "open")):
         report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
                   "changes": summary, **counts,
-                  "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
+                  "errors": errors + [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
         return write_report(root, cwd, report)
     if adopted:
         # #99: the launcher died before reconciling this run; the report, the Log line and any
@@ -541,6 +565,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
             effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None) -> int:
     # Same clean login-shell path as interactive sessions; auth and user PATH come from shell setup.
     # Everything that can refuse runs before anything is written; a refused row takes its dispatch back.
+    cleanup = load_settings(root, cfg.settings_path).workers.teardown
     launch_argv, tree = login_argv(argv), _tree_note(root, cwd, expected_common)
     before_head = git_head(cwd, strict=True, expected_common=expected_common)
     written = dispatch_prompt.write_dispatch(cwd, body)
@@ -563,9 +588,11 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
             pass
     env = clean_env()
     env["CHIEF_OF_STUFF_WORKSPACE"] = str(root.resolve())
+    env["CHIEF_OF_STUFF_WORKER"] = name
     for log in ("worker-stdout.log", "worker-stderr.log"):
         (logs / log).write_text("")  # a fresh run's worker logs start empty; a retried run appends
     exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes)
+    teardown_errors = teardown(root, cwd, name, cleanup)
     if exit_code == 124 and not (cwd / RESULT).exists():
         # The first timeout relaunches the run once, into the same tree with its partial commits
         # (#110): the Log line is the once-per-row marker the second timeout finds, a result the
@@ -578,10 +605,13 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
             with suppress(OSError):
                 (cwd / RESULT).unlink(missing_ok=True)
             exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
+            teardown_errors.extend(teardown(root, cwd, name, cleanup))
     report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
-                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common)  # held to what it was told
+                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common,
+                       teardown_errors=teardown_errors)  # held to what it was told
     print(toon_encode(report))
-    return 0 if report["status"] == "done" and not report["errors"] else 1
+    return 0 if report["status"] == "done" and not any(
+        not error.startswith("teardown:") for error in report["errors"]) else 1
 
 
 def timed_out_before(tracker: Path, name: str) -> bool:

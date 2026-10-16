@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import pwd
 import re
+import signal
 import subprocess
 from pathlib import Path
 
@@ -70,3 +71,32 @@ def login_argv(command: list[str], *, path_prefix: str = "") -> list[str]:
         return [shell, "-lic", source, *([path_prefix] if path_prefix else []), *command]
     source = 'export PATH="$1:$PATH"; shift; exec "$@"' if path_prefix else 'exec "$@"'
     return [shell, "-lic", source, "chief-of-stuff", *([path_prefix] if path_prefix else []), *command]
+
+
+def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
+                timeout: int = 120) -> subprocess.CompletedProcess:
+    """Run a trusted workspace command with shell setup, bounded separately from a worker's runtime.
+
+    Teardown and stack discovery share this driver. Command text is workspace-authored shell source;
+    paths and worker identity travel through cwd and the environment, never interpolated into it.
+    """
+    env = {**clean_env(), "CHIEF_OF_STUFF_WORKSPACE": str(workspace.resolve()),
+           "CHIEF_OF_STUFF_WORKER": worker}
+    shell = login_shell()
+    # Interactive job control puts background commands in separate process groups. Disable it
+    # after loading shell setup so the timeout's group kill reaches the command's children too.
+    setup = "status job-control none" if Path(shell).name == "fish" else "set +m"
+    argv = [shell, "-lic", f"{setup}\n{command}"]
+    with subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True) as child:
+        try:
+            stdout, stderr = child.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # A shell may have spawned children; kill its session as well so a timeout leaves no cleanup running.
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
