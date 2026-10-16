@@ -21,8 +21,8 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
-from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, looping, task_changes, went_held, worker_names  # noqa: E402
-from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, issue_number, parse_tracker  # noqa: E402
+from task_forge import current_tasks, drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, looping, task_changes, went_held, worker_names  # noqa: E402
+from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
 import board_sources  # noqa: E402
@@ -182,7 +182,12 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         return page(c.issues[0] if c.issues else "", c.url)
 
     workers = worker_names(sources)
-    ready, shared, _ = _merge_facts(sources)
+    # Approved, passing, unshared changes first, then change number; drafts still share files.
+    open_ = [c for c in sources.changes.values() if c.state == "open"]
+    shared = {c.ref: sorted({o.ref for o in open_ if o is not c and set(o.files) & set(c.files)}) for c in open_}
+    ready = sorted((c for c in open_ if not c.draft),
+                   key=lambda c: (not c.approved, c.pipeline != "passed", bool(shared[c.ref]),
+                                  int(m[1]) if (m := TRAILING_NUMBER.search(c.ref)) else 0))
     queue = {c.ref: i for i, c in enumerate(ready, 1) if c.approved}
 
     def card(task: Task, stage: str | None = None) -> columns.Card:
@@ -190,9 +195,11 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         url = issue_url(issue_key(task.issue, sources.home), task.issue)
         issue = issue_key(task.issue, sources.home) if changes or url else task.issue.strip()
         refs = ((issue, page(issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
+        lane = lanes.get(task.lane.strip())
+        finished = task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1])
         marks = (change_marks(changes, queue, shared)
                  + ((columns.Mark("decision pending", "decision"),) if held.get(task) == "decision" else ())
-                 + ((columns.Mark("looping", "looping"),) if task in loops else ())
+                 + ((columns.Mark("looping", "looping"),) if task in loops and not finished else ())
                  + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ()))
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
@@ -228,9 +235,8 @@ def _plural(n: int, word: str) -> str:
 # The panels' and the new marks' colours are the board's own tokens, so the dark scheme reaches them.
 PANEL_TOKENS = {"ink": "var(--fg)", "muted": "var(--muted)", "card": "var(--surface)", "rule": "var(--line)",
                 "edge": "var(--brass)", "link": "var(--brass)", "hot": "var(--dl)", "hot-ink": "var(--surface)"}
-PANEL_COLOURS = {"all": "var(--fg)", "blocked": "var(--dl)", "decisions": "var(--brass)", "approved": "var(--stage-review)",
-                 "running": "var(--stage-implement)", "drift": "var(--dl)", "orphaned": "var(--muted)",
-                 "merge": "var(--stage-review)", "workers": "var(--stage-implement)"}
+PANEL_COLOURS = {"all": "var(--fg)", "blocked": "var(--dl)", "approved": "var(--stage-review)",
+                 "running": "var(--stage-implement)", "drift": "var(--dl)", "orphaned": "var(--muted)"}
 CARD_COLOURS = {**columns.PALETTE, "merged today": columns.PALETTE["done"],
                 "approved": ("var(--stage-review)", "var(--surface)", "1px solid var(--stage-review)"),
                 "passed": ("var(--surface)", "var(--fg)", "1px solid var(--stage-review)"),
@@ -241,64 +247,6 @@ CARD_COLOURS = {**columns.PALETTE, "merged today": columns.PALETTE["done"],
                 "shared": ("var(--surface)", "var(--brass)", "1px solid var(--brass)"),
                 "decision": ("var(--surface)", "var(--dl)", "1px solid var(--dl)"),
                 "looping": ("var(--surface)", "var(--stage-fix)", "1px solid var(--stage-fix)")}
-
-
-MERGE_SHOWN = 5
-
-
-def _merge_facts(sources: board_sources.Sources) -> tuple[list[board_sources.Change], dict[str, list[str]], dict[str, int]]:
-    """The complete merge order and file overlap, shared by card marks and the legacy panel presenter.
-    Approved first, passed pipelines first, then unshared changes, then change number. Drafts still share files."""
-    # ponytail: overlap by file names; #75's trial merge (`git merge-tree`) when overlap proves too coarse.
-    open_ = [c for c in sources.changes.values() if c.state == "open"]
-    shared = {c.ref: sorted({o.ref for o in open_ if o is not c and set(o.files) & set(c.files)}) for c in open_}
-    overlap = {c.ref: len({f for o in open_ if o is not c for f in set(o.files) & set(c.files)}) for c in open_}
-
-    def number(c: board_sources.Change) -> int:
-        m = TRAILING_NUMBER.search(c.ref)
-        return int(m[1]) if m else 0
-
-    ready = sorted((c for c in open_ if not c.draft),
-                   key=lambda c: (not c.approved, c.pipeline != "passed", bool(shared[c.ref]), number(c)))
-    return ready, shared, overlap
-
-
-def merge_order(sources: board_sources.Sources) -> panels.Panel:
-    """The legacy merge panel model; card marks use its complete order without the display limit."""
-    ready, shared, overlap = _merge_facts(sources)
-    rows = tuple(panels.Row(c.title, " · ".join([
-        "approved" if c.approved else "in review",
-        *([f"pipeline {c.pipeline}"] if c.pipeline else []),
-        *([f"base {c.base}"] if c.base else []),
-        f"shares {_plural(overlap[c.ref], 'file')} with {', '.join(shared[c.ref])}" if shared[c.ref] else "no shared files",
-    ]), num=str(i), ref=c.ref, href=c.url) for i, c in enumerate(ready, 1))
-    approved = sum(c.approved for c in ready)
-    rest = len(rows) - MERGE_SHOWN
-    return panels.Panel("merge", "MERGE ORDER", "merge", len(rows), rows[:MERGE_SHOWN],
-                        f"{approved} approved · {len(rows) - approved} in review", foot=f"+ {rest} more" if rest > 0 else "")
-
-
-def decision_panel(pending: list[tuple[str, dict | None, datetime | None, str]], answered: int, now: datetime) -> panels.Panel:
-    """The pending decisions (decision_page.entries, as decisions.html lists them) and how many were answered today."""
-    when = decision_page.Context(now).when
-    rows = tuple(panels.Row(f"decision-{slug}.json", f"unreadable: {why}") if d is None else panels.Row(
-        d["headline"], " · ".join([*([f"asked {when(asked)}"] if asked else []),
-                                   f"recommended {d['recommended']}", f"default: {d['default']}"]), href=f"/decisions/{slug}")
-        for slug, d, asked, why in pending)
-    return panels.Panel("decisions", "DECISIONS", "decisions", sum(d is not None for _, d, _, _ in pending), rows,
-                        link=("decisions page", "/decisions"), foot=f"{answered} answered today")
-
-
-def worker_panel(sources: board_sources.Sources, now: datetime) -> panels.Panel:
-    def facts(w: board_sources.Worker) -> str:
-        # (#199) kind · runtime model · task · tree, skipping empty parts; no last-reply fallback.
-        return " · ".join(x for x in (w.kind, " ".join(x for x in (w.runtime, w.model) if x), w.task, w.tree) if x)
-
-    rows = tuple(panels.Row(w.name, facts(w), side=panels.hm(w.started, now) if w.started else "", href="/workers")
-                for w in sources.workers)
-    kinds = [w.kind for w in sources.workers]
-    note = " · ".join(f"{kinds.count(k)} {k}" for k in ("one-shot", "session") if k in kinds)  # (#199) one-shots first
-    return panels.Panel("workers", "WORKERS", "workers", len(rows), rows, note, href="/workers")  # (#195)
 
 
 def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: int, drift: int, orphaned: int) -> list[panels.Tile]:
@@ -313,14 +261,15 @@ def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: i
 
 def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = None,
            tracker_day: date | None = None, decisions: list[tuple[str, dict | None, datetime | None, str]] | None = None,
-           kanban: Kanban | None = None, sources: board_sources.Sources = board_sources.EMPTY, answered: int = 0,
+           kanban: Kanban | None = None, sources: board_sources.Sources = board_sources.EMPTY,
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
-           look_log: list[tuple[date, str]] | None = None) -> str:
+           look_log: list[tuple[date, str]] | None = None,
+           loop_log: list[tuple[date, str]] | None = None) -> str:
     """The board page: header, tiles, BUILD (the stage columns), and the Flow charts.
     `stage_log` is (day, tracker text) for the earlier days the Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
-    `look_log` the earlier days that `stage_log` does not reach, for hold starts and repeated fix entries."""
+    `look_log` the earlier days needed for hold starts; `loop_log` the active tasks' older fix history."""
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
     tracker = parse_tracker(tracker_text)
@@ -342,19 +291,24 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
     held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs)
-    flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
-                  for m in tracker_log.moves(text, day, zone)]
-    look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
-    earlier = [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks]
+    # Each snapshot is parsed once even when Flow, holds and loop marks all need it.
+    flow_log = [*(stage_log or []), (tracker_day or today, tracker_text)]
+    all_log = dict([*(loop_log if loop_log is not None else look_log or []), *(look_log or []), *flow_log])
+    rows = {d: tracker.tasks if d == (tracker_day or today) else parse_tracker(text).tasks for d, text in all_log.items()}
+    moves = {d: tracker_log.moves(text, d, zone) for d, text in all_log.items()}
+    flow_moves = [m for day, _ in flow_log for m in moves[day]]
+    earlier = list(rows.items())
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held,
-                               looping(tasks, look_moves + flow_moves, lanes or {}, sources.home, earlier))
+                               looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier))
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols)}</section>\n')
-    began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks, earlier)
     since = looked or datetime.combine(today, time(), zone)
+    hold_days = {d for d, _ in [*(look_log or []), *flow_log] if d >= since.astimezone(zone).date()}
+    began = hold_began(held, [m for d in hold_days for m in moves[d]], pending_refs, sources.home, tasks,
+                       [(d, rows[d]) for d in hold_days])
     shown = since.astimezone(zone)  # a look on another day names its day
     went = went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == today else f"{shown:%a %H:%M}"
-    known = [t for _, text in stage_log or [] for t in parse_tracker(text).tasks] + tasks
+    known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     epics = epic_risk(tasks, sources, ends, zone, now)
@@ -471,16 +425,35 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
     pending = decision_page.write_all(out.parent, ctx, day, root)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
-    trackers = [(d, path) for d, path in daily_trackers(root, cfg) if d < tracker_day]
-    stage_log = [(d, path.read_text()) for d, path in trackers if reach <= d]
-    # Fix-loop marks need the whole task history, including entries before either Flow window.
-    look_log = [(d, path.read_text()) for d, path in trackers if d < reach]
+    sources = board_sources.load(out.parent)
+    since_day = (looked.astimezone(cfg.zone).date() if looked else now.date())
+    bound = min(reach, since_day)
+    # Follow active laned tasks backwards only while they occur in consecutive available snapshots.
+    remaining = {t for t in parse_tracker(tracker_text).tasks if t.kind != "done" and not t.standing
+                 and t.lane.strip() and t.stage.strip()
+                 and (lane := settings.lanes.get(t.lane.strip())) and "fix" in lane.stages
+                 and effective_stage(t, sources, settings.lanes) != lane.stages[-1]}
+    logs = []
+    loop_log = []
+    for d, path in reversed(daily_trackers(root, cfg)):
+        if d >= tracker_day:
+            continue
+        if d < bound and not remaining:
+            break
+        text = path.read_text()
+        if remaining:
+            remaining &= set(current_tasks(list(remaining), parse_tracker(text).tasks, sources.home).values())
+            loop_log.append((d, text))
+        if d >= bound:
+            logs.append((d, text))
+    stage_log = sorted((d, text) for d, text in logs if reach <= d)
+    look_log = sorted((d, text) for d, text in logs if since_day <= d < reach)
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
-                  sources=board_sources.load(out.parent), answered=len(decision_rows(tracker_text)),
+                  sources=sources,
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone), stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
-                  looked=looked, look_log=look_log)
+                  looked=looked, look_log=look_log, loop_log=sorted(loop_log))
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 

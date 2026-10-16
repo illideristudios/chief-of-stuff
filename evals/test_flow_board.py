@@ -171,8 +171,19 @@ class SinceLookedTest(unittest.TestCase):
             with self.subTest(moved):
                 earlier = TRACKER.replace("| Write README | Write eval README |", earlier_row)
                 moves = tracker_log.moves(earlier + f"- 11:00 stage: {moved} → triage\n", day, NOW.tzinfo)
-                began = task_forge.hold_began({task: "triage"}, moves, {}, None, tasks, parse_tracker(earlier).tasks)
+                began = task_forge.hold_began({task: "triage"}, moves, {}, None, tasks, [(day, parse_tracker(earlier).tasks)])
                 self.assertEqual(began[task], datetime.combine(day, time(11, 0), NOW.tzinfo))
+
+    def test_a_historical_launcher_cannot_start_a_reused_names_new_issue_hold(self):
+        day = NOW.date() - timedelta(days=1)
+        old = TRACKER.replace("| #9 |", "| #99 |")
+        old += "- 12:00 one-shot w1 started: claude, task Cut the release branch, extra prompt\n"
+        old += "- 13:00 one-shot w1: completed; awaiting integration\n"
+        html = rb.render(TRACKER.replace("| build | review |", "| build | pr |"),
+                         parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=LANES, kanban=replace(KANBAN, hold_stages=("pr",)), sources=SOURCES,
+                         stage_log=[(day, old)], looked=NOW - timedelta(days=2))
+        self.assertEqual(re.findall(r'title="(\d+) went needs input since', html), [])
 
     def test_a_gate_hold_begins_at_the_tasks_last_move_into_that_gate(self) -> None:
         # #579 review R3, R7: moves read as flow_chart reads them: by name or item, any case; the latest move into the
@@ -608,7 +619,7 @@ class Page(unittest.TestCase):
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         self.html = rb.render(TRACKER, self.cfg, NOW, lanes=LANES, kanban=KANBAN, sources=SOURCES,
                               decisions=[("x", {"headline": "Pick", "recommended": "B", "default": "d"}, NOW.replace(hour=10, minute=0), "")],
-                              answered=1, tracker_at=NOW - timedelta(minutes=5))
+                              tracker_at=NOW - timedelta(minutes=5))
         self.body = self.html.split("</style>", 1)[1]
 
     def test_the_board_is_the_flow_artboard_in_order(self) -> None:
@@ -720,7 +731,7 @@ class Page(unittest.TestCase):
         self.assertTrue(overrides)
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", overrides), [])
         self.assertIn(".panels-head,.panels-tiles,.panels{--panels-ink:var(--fg)", css)
-        self.assertIn('[data-kind="merge"]{--k:var(--stage-review)}', css)
+        self.assertIn('[data-kind="approved"]{--k:var(--stage-review)}', css)
 
     def test_the_clocks_tick_every_second_with_seconds(self) -> None:
         script = self.html.split("<script>", 1)[1]

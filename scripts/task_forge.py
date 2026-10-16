@@ -6,7 +6,7 @@ them, who the workers are and whether a stage holds. The board and the task page
 from __future__ import annotations
 
 from collections.abc import Container, Mapping
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import board_sources
@@ -67,29 +67,42 @@ def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources
                                     pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip())))}
 
 
-def _current_tasks(tasks: list[Task], earlier: list[Task], home) -> dict[str, Task]:
-    """Names and items in current and earlier rows, resolved to today's task (renames keep their issue)."""
+def current_tasks(tasks: list[Task], rows: list[Task], home) -> dict[str, Task | None]:
+    """Resolve a snapshot's names/items to today's tasks. Issue identity wins over a reused name.
+    Unmatched aliases stay explicitly unmatched, so that day's moves cannot fall back to today's names."""
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
-    by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip()}
+    by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip() and not t.workflow}
 
     def today(t: Task) -> Task | None:
-        return by_name.get(t.name.strip().casefold()) or (by_issue.get(issue_key(t.issue, home)) if t.issue.strip() else None)
+        key = issue_key(t.issue, home) if t.issue.strip() and not t.workflow else None
+        if key and key in by_issue:
+            return by_issue[key]
+        named = by_name.get(t.name.strip().casefold())
+        if key and named and named.issue.strip() and not named.workflow and issue_key(named.issue, home) != key:
+            return None
+        return named
 
-    return {**{k: cur for t in earlier for k in (t.item.strip().casefold(), t.name.strip().casefold())
-               if k and (cur := today(t))},
-            **{t.item.strip().casefold(): t for t in tasks if t.item.strip()}, **by_name}
+    return {k: today(t) for t in rows for k in (t.item.strip().casefold(), t.name.strip().casefold()) if k}
 
 
-def looping(tasks: list[Task], moves: list[Move], lanes: dict, home, earlier: list[Task] = ()) -> set[Task]:
+def _current_tasks(tasks: list[Task], earlier: list[tuple[date, list[Task]]], home) -> dict[date | None, dict[str, Task | None]]:
+    """Keep each day's aliases separate: a rename and reuse must not steal each other's moves."""
+    return {None: current_tasks(tasks, tasks, home),
+            **{day: current_tasks(tasks, rows, home) for day, rows in earlier}}
+
+
+def looping(tasks: list[Task], moves: list[Move], lanes: dict, home, earlier: list[tuple[date, list[Task]]] = ()) -> set[Task]:
     """Tasks with at least two entries into their lane's fix stage. Repeated logs at the same stage are one
     entry; launcher lifecycle lines are not lane moves. Earlier row names resolve as they do for hold_began."""
     find = _current_tasks(tasks, earlier, home)
     last, visits = {}, {}
     for move in sorted(moves, key=lambda m: m.at):
-        task = find.get(move.name.strip().casefold())
+        task = find.get(move.at.date(), find[None]).get(move.name.strip().casefold())
         if task is None or move.launch:
             continue
         lane = lanes.get(task.lane.strip())
+        if task.kind == "done" or (lane and lane.stages and task.stage.strip() == lane.stages[-1]):
+            continue
         if lane and "fix" in lane.stages and move.stage == "fix" and last.get(task) != "fix":
             visits[task] = visits.get(task, 0) + 1
         last[task] = move.stage
@@ -97,17 +110,23 @@ def looping(tasks: list[Task], moves: list[Move], lanes: dict, home, earlier: li
 
 
 def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[str, datetime | None], home,
-               tasks: list[Task], earlier: list[Task] = ()) -> dict[Task, datetime | None]:
+               tasks: list[Task], earlier: list[tuple[date, list[Task]]] = ()) -> dict[Task, datetime | None]:
     """When each of the `held` tasks' holds began (#229): a decision when the first decision holding its issue was asked
     (`pending_refs`, decision_page.held_refs); a gate stage at the task's last move into it, the moves read as flow_chart
     reads them (by name or item in any case, a launcher line only until the task's first `stage:` move); a person's
-    wait, which no line records, None. A move may name an `earlier` tracker's row: it is today's task of that row's
-    name, or, renamed, of its issue."""
+    wait, which no line records, None. `earlier` holds dated task snapshots; a move belongs to the issue that
+    owned its name on that day."""
     find = _current_tasks(tasks, earlier, home)
-    row_of = launcher(tasks)
+    launchers = {None: launcher(tasks), **{day: launcher(rows) for day, rows in earlier}}
     staged, into = set(), {}
     for m in sorted(moves, key=lambda m: m.at):
-        t = find.get(m.name.strip().casefold()) or (row_of(m.name)[0] if m.launch else None)
+        aliases = find.get(m.at.date(), find[None])
+        key = m.name.strip().casefold()
+        t = aliases.get(key)
+        if key not in aliases and m.launch:
+            row, _ = launchers.get(m.at.date(), launchers[None])(m.name)
+            if row:
+                t = aliases.get(row.item.strip().casefold())
         if t is None or (m.launch and t in staged):
             continue
         staged |= set() if m.launch else {t}

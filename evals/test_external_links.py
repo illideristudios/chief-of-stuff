@@ -54,7 +54,7 @@ class ExternalLinksTest(tsp.SourcePage):
                          kanban=tfb.KANBAN, sources=sources,
                          decisions=[("x", {"headline": "Pick", "recommended": "B", "default": "d"},
                                      NOW.replace(hour=10, minute=0), "")],
-                         answered=1, tracker_at=NOW - timedelta(minutes=5))
+                         tracker_at=NOW - timedelta(minutes=5))
         check_links(self, html)
 
     def test_the_decisions_list(self):
