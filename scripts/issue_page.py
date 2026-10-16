@@ -212,7 +212,9 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             if issue_number(r.ref) == number]
     log = [m for m in log if m.name.strip().casefold() in keys]
     issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
-    status = rows[0][0] if rows else "needs input" if mine[-1] in holds else mine[-1].kind
+    status = rows[0][0] if rows else mine[-1].kind
+    if status not in ("merged", "closed", "done") and any(t in holds for t in mine):
+        status = "needs input"
     name = rows[0][1].name if rows else mine[0].label
 
     order = {"open": 0, "merged": 1}
@@ -286,7 +288,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             f"<title>{ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
             f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True)}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
-            f'    <span class="chip {escape(status)}">{escape(status.upper())}</span>\n  </header>\n\n'
+            f'    <span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>\n  </header>\n\n'
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'
             + _section("How it got here", f'    <div class="card timeline">\n{steps}\n    </div>' if steps else '    <div class="card"><p>No Log lines yet.</p></div>')

@@ -37,7 +37,7 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html import escape, unescape
 from pathlib import Path
@@ -49,7 +49,7 @@ from fragment import FONTS, TAB_CSS, href, tab_bar, theme
 from md import section as md_section
 from module_graph import section as _graph
 from notify_service import atomic_write
-from settings import Graph, SettingsError, load as load_settings
+from settings import Graph, Kanban, Lane, SettingsError, load as load_settings
 from task_forge import hold_causes
 from tracker import decision_rows, issue_key, parse_tracker
 from workspace import ConfigError, daily_trackers, pages_address, read_config
@@ -445,7 +445,7 @@ def forge(root: Path) -> Backlog | GitHubBacklog | None:
 
 def decision_context(root: Path, day: date, now: datetime | None = None) -> Context:
     """What the decisions pages read from the workspace: every tracker's Decisions rows and Log lines, `day`'s
-    tasks, the cached forge sources and the [kanban] label that holds an issue."""
+    tasks, the cached forge sources, and the lane and [kanban] hold settings."""
     cfg = read_config(root)
     now = now or datetime.now(cfg.zone).replace(second=0, microsecond=0)
     zone = cfg.zone
@@ -465,7 +465,7 @@ def decision_context(root: Path, day: date, now: datetime | None = None) -> Cont
     pages = root / cfg.pages_dir if cfg.pages_dir else tracker.parent
     return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks, board_sources.load(pages),
                    kanban.human_review_label if kanban else "", cfg.user, cfg.backlog,
-                   settings and settings.graph, pages)
+                   settings and settings.graph, pages, settings.lanes if settings else {}, kanban)
 
 
 def context(root: Path, day: str) -> Context | None:
@@ -568,7 +568,7 @@ class Row:
 @dataclass(frozen=True)
 class Context:
     """What the pages read besides a decision's JSON: every tracker's Decisions rows and Log lines (oldest first),
-    the day's Tasks rows, the forge through board_sources, and the [kanban] label that holds an issue."""
+    the day's Tasks rows, the forge through board_sources, and the lane and [kanban] hold settings."""
     now: datetime
     rows: tuple[Row, ...] = ()
     log: tuple[tuple[datetime, str], ...] = ()
@@ -579,6 +579,8 @@ class Context:
     forge: Backlog | GitHubBacklog | None = None
     graph: Graph | None = None    # the settings' [graph], which draws MODULE GRAPH into pages/.graphs
     pages: Path | None = None
+    lanes: dict[str, Lane] = field(default_factory=dict)
+    kanban: Kanban | None = None
 
     def when(self, at: datetime) -> str:
         at = at.astimezone(self.now.tzinfo)
@@ -624,10 +626,12 @@ class Context:
         return c.get(ref) or (c.get("#" + ref[1:]) if ref.startswith("!") else None)
 
     def stage(self, ref: str) -> str:
-        return next((t.stage for t in self.tasks if t.stage and ref in refs_in(t.issue) + refs_in(t.item)), "")
+        keys = ref_keys(ref, self.sources.home)
+        return next((t.stage for t in self.tasks if not t.standing and t.stage
+                     and set(keys).intersection(ref_keys(t.issue, self.sources.home) + ref_keys(t.item, self.sources.home))), "")
 
     def where(self, ref: str) -> str:
-        """Where a ref stands now: `merged 01:15`, `closed`, or its tracker stage with the forge's word on it
+        """Where a ref stands now: `merged 01:15`, `closed`, or its tracker stage with forge status and tracker person-waits
         (`merge · passed`, `triage · needs input`, `open · failed`)."""
         c = self.change(ref) or next((c for c in self.sources.changes.values() if ref in c.issues), None)
         i = self.sources.issues.get(ref)
@@ -635,9 +639,12 @@ class Context:
             return "merged" + (f" {c.merged_at.astimezone(self.now.tzinfo):%H:%M}" if c.merged_at else "")
         if (c or i) and (c or i).state == "closed":
             return "closed"
-        stage = next(filter(None, (self.stage(r) for r in (ref, *((c.ref, *c.issues) if c else ())))), "")
-        waiting = any(ref in refs_in(t.issue) + refs_in(t.item)
-                      for t in hold_causes(list(self.tasks), None, self.sources, {}, frozenset()))
+        refs = (ref, *((c.ref, *c.issues) if c else ()))
+        stage = next(filter(None, (self.stage(r) for r in refs)), "")
+        keys = {key for r in refs for key in ref_keys(r, self.sources.home)}
+        tasks = [t for t in self.tasks if not t.standing]
+        waiting = any(t.issue.strip() and issue_key(t.issue, self.sources.home) in keys
+                      for t in hold_causes(tasks, self.kanban, self.sources, self.lanes, frozenset()))
         held = waiting or (i and self.hold and self.hold in i.labels)
         return " · ".join(x for x in (stage or ("open" if c else ""), c and c.pipeline, "needs input" if held else "") if x)
 

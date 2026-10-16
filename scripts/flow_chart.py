@@ -85,7 +85,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
     `durations` maps a queued task's item to how long it will take, and `slots` is how many run at once;
     `approved` names the tasks whose open change is approved, labelled `approved · merge ~HH:MM` by their end;
     `ended` maps a task's name to (time, word) — its change's forge merge or its closed issue's close time — which
-    ends its row (#220). Status is that word, `held` or the task's state word. Every bar's title names the worker
+    ends its row (#220). Status is that word, `needs input`, `approved`, or the task's state word (`running` when `open`). Every bar's title names the worker
     whose launch was running when it began (now, for a forecast or hold bar), else the task's owner cell, shown as
     the board shows it (#192, #193). `home` resolves issue keys as in the board's source cache."""
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}

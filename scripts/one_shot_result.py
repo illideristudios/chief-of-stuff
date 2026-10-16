@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print a finished one-shot's report, so the coordinator never opens a file under the worker's tree.
 
-With no `--task`, one TOON list of the runs: task, worker, worktree, status, and whether the tracker took the run
+With no `--task`, one TOON list of the runs: task, worker, worktree, status, outcome, and whether the tracker took the run
 (`reconciled`). With `--task <task>`, that task's newest report, exit 1 when there is none. It reads only the launcher's own
 copies, `<root>/.chief-of-stuff/reports/<tree>.toon`, which nothing in a worker's tree can change.
 """

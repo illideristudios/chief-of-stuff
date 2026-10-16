@@ -26,7 +26,8 @@ from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode a
 from md import cells as _cells, is_separator as _is_separator
 from model_port import quota_reset
 from notify_service import atomic_write
-from one_shot_report import FIELD_MAX, OUTCOMES, UNREADABLE, read_report
+from dispatch_prompt import OUTCOMES
+from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
 from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line

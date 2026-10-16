@@ -1,6 +1,7 @@
 """A Gantt chart as an HTML fragment and its CSS: rows of timed segments on a window around now.
 
-Generic by design: it knows segments, rows and a window, never what a row or a category means.
+It knows segments, rows and a window, never what a row or a category means.
+The `hold` kind displays as `needs input` in bar labels and the legend; its CSS class stays `hold`.
 Colours come from the palette passed to `css`; kinds are CSS classes a host can restyle or add to.
 No JavaScript: positions are baked in at render, and everything else is a class.
 """
@@ -124,7 +125,7 @@ def render(rows: list[Row], win: Window, ticks: list[tuple[datetime, str]] | Non
 
 
 def legend(colors: dict[str, str | tuple[str, str]] = PALETTE, kinds: tuple[str, ...] = ("forecast", "hold")) -> str:
-    """One swatch per category, then one per kind other than solid."""
+    """One swatch per category, then one per kind other than solid; `hold` displays as `needs input`."""
     keys = [f'<span class="gantt-bar gantt-done" data-cat="{_esc(c)}"></span>{_esc(c)}' for c in colors]
     keys += [f'<span class="gantt-bar gantt-{_kind(k)}"></span>{_esc("needs input" if k == "hold" else k)}' for k in kinds]
     return '<div class="gantt-legend">' + "".join(f'<span class="gantt-key">{k}</span>' for k in keys) + "</div>"

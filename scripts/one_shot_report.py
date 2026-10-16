@@ -5,9 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode
-from dispatch_prompt import suite_counts
-
-OUTCOMES = {"done": "completed", "human_review": "NEEDS INPUT", "relaunch": "relaunch"}
+from dispatch_prompt import OUTCOMES, suite_counts
 
 LIMIT = 1 << 20  # a report is a few lines; the cap bounds what a runaway writer could leave
 FIELD_MAX = LIMIT // 16  # characters of `reason` or `changes` the launcher keeps: two fields, 6 bytes a character, stay under LIMIT
@@ -20,6 +18,7 @@ def read_report(path: Path, read) -> dict:
     """The report at `path`, or one of UNREADABLE when it is a link, too big, not UTF-8 TOON, or not the launcher's shape.
 
     `read` is the driver's file read (`git_trees.read_regular`): this module stays inside the adapter circle.
+    Suite counts are normalized and `outcome` is synthesized from the machine `status` using OUTCOMES, including for legacy reports.
     """
     raw = read(path, LIMIT + 1, nofollow=True)
     if raw is None or len(raw) > LIMIT:

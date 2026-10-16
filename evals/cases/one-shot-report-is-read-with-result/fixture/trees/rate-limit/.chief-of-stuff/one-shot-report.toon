@@ -1,7 +1,12 @@
 status: human_review
+outcome: NEEDS INPUT
 task: Rate limit headers
 worker: rate-limit
 runtime_exit: 0
 reason: "Added the X-RateLimit-Limit, X-RateLimit-Remaining and X-RateLimit-Reset headers to every successful response in src/a/headers.py, and the unit tests for all three pass, including the case of a client that has never called before and the case of a window that rolls over mid-request. I read the limiter, the middleware that calls it and the two handlers that format its errors before touching anything, and the headers needed no change outside that one module. The task also names the 429 path, and I stopped before it. The existing handler builds its Retry-After value from the limiter's wait, and the limiter reports that wait as a count of milliseconds (1500 for a one and a half second wait) where the header is defined in whole seconds. Changing it alters a value that existing clients already parse, so I left the handler untouched; the owner decides whether to break those clients or to keep the old unit behind a new header."
 changes: "M src/a/headers.py\nCommits from this run:\nNo new commits detected\nWorking tree:\n M src/a/headers.py"
+passed: null
+failed: null
+skipped: null
+xfailed: null
 errors[0]:

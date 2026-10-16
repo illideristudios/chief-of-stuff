@@ -59,7 +59,7 @@ def one_period(reason: str) -> str:
 
 
 def ended_line(at: str, name: str, status: str, reason: str, changes: str) -> str:
-    """The launcher's line when worker `name` stops `done`, or with any other status for review. `reason` and
+    """The launcher's line when worker `name` stops `done`, or with any other status as NEEDS INPUT. `reason` and
     `changes` come already on one line."""
     return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else NEEDS_INPUT}"
             f" — {one_period(reason)} Changes: {changes}.")

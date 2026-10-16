@@ -18,6 +18,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backlog_ref import file_with, issue_ref  # noqa: E402
 from tracker import Task, parse_tracker, short_name  # noqa: E402
+from tracker_log import NEEDS_INPUT  # noqa: E402
 from workspace import Config, ConfigError, architecture_document, read_config  # noqa: E402
 from settings import Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
 import ownership  # noqa: E402
@@ -60,6 +61,8 @@ RESULT_FILE = f"{PROMPT_DIR}/worker-result.toon"
 REPORTS_DIR = f"{PROMPT_DIR}/reports"
 SUITE_KEYS = ("passed", "failed", "skipped", "xfailed")  # Observed final suite counts, or null when unknown.
 REPORT_KEYS = ("status", "outcome", "task", "worker", "runtime_exit", "reason", "changes", *SUITE_KEYS, "errors")
+# Display outcomes shared by the launcher and report readers; status stays a machine key.
+OUTCOMES = {"done": "completed", "human_review": NEEDS_INPUT, "relaunch": "relaunch"}
 # The prefix of a report's error for a tracker the launcher could not update.
 TRACKER_ERROR = "tracker:"
 # Use the installed inbox script, not a workspace path.
