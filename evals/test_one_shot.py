@@ -1138,18 +1138,21 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self._report()["status"], "human_review")
         self.assertIn("board changed", self._report()["reason"])
         hold.assert_not_called()
+        self.assertEqual(self._report()["hold_release_error"], "board changed")
         self.assertEqual(self._report()["hold_release"], "failed")
         self.assertIn("hold release failed: board changed, task Security audit", self.tracker.read_text())
 
     def test_unlaned_quota_stop_never_syncs_a_board_stage(self):
         self._with_an_issue_and_kanban()
         self.tracker.write_text(self.tracker.read_text().replace("| build | implement |", "| | |"))
-        with mock.patch.object(one_shot.forge.Forge, "write_stage") as sync:
+        with mock.patch.object(one_shot.forge, "sync_stage") as sync:
             _, hold, comment = self._stopped()
         sync.assert_not_called()
         hold.assert_not_called()
         comment.assert_not_called()
         self.assertEqual(self._report()["status"], "relaunch")
+
+        self.assertEqual(self._report()["hold_release"], "")
 
     def test_uninitialized_issue_without_hold_does_not_block_quota_relaunch(self):
         self._with_an_issue_and_kanban()
@@ -1195,10 +1198,56 @@ class RunTest(unittest.TestCase):
                         labels.remove("!! - HUMAN REVIEW REQUIRED")
                         return 0, "", ""
                     self.fail(args)
-                with mock.patch.object(one_shot.backlog, "run_gh", side_effect=gh):
+                with mock.patch.object(one_shot.backlog, "run_gh", side_effect=gh) as read:
                     self._run(self._fake(self.ORDINARY, write_partial=False))
+                self.assertTrue(read.called)
+                outcome = "retained" if waiting else "removed"
+                self.assertEqual(self._report()["hold_release"], outcome)
+                self.assertIn(f"hold release {outcome}", self.tracker.read_text())
                 self.assertEqual(self._report()["status"], "relaunch")
                 self.assertEqual("!! - HUMAN REVIEW REQUIRED" in labels, waiting)
+
+    def test_completed_worker_keeps_completion_when_release_fails(self):
+        self._with_an_issue_and_kanban()
+        with mock.patch.object(one_shot.backlog, "run_gh", return_value=(1, "", "offline")), \
+             mock.patch.object(one_shot.backlog, "comment") as comment:
+            self._run(self._fake('status: done\nreason: finished\nchanges: none\n', write_partial=False))
+        self.assertEqual(self._report()["status"], "done")
+        self.assertEqual(self._report()["hold_release_error"], "offline")
+        self.assertIn("completed; awaiting integration", self.tracker.read_text())
+        comment.assert_not_called()
+
+    def test_unlaned_review_does_not_add_a_hold(self):
+        self._with_an_issue_and_kanban()
+        self.tracker.write_text(self.tracker.read_text().replace("| build | implement |", "| | |"))
+        _, hold, _ = self._stopped(stderr="ordinary failure")
+        self.assertEqual(self._report()["status"], "human_review")
+        hold.assert_not_called()
+
+    def test_relaunch_cap_reads_the_locked_log(self):
+        self._with_an_issue_and_kanban()
+        edit = one_shot.tracker_write.edit
+        def raced(path, change):
+            if "| worker01 | running" in path.read_text():
+                with path.open("a") as out:
+                    out.write("\n## Log\n- 10:00 one-shot old: relaunch requested for Security audit — base moved.\n")
+            return edit(path, change)
+        with mock.patch.object(one_shot.tracker_write, "edit", side_effect=raced):
+            self._stopped(result=self.ORDINARY, exit_code=0)
+        self.assertEqual(self._report()["status"], "human_review")
+        self.assertIn("already relaunched once", self._report()["reason"])
+
+    def test_tracker_write_error_cannot_report_a_successful_result(self):
+        self._with_an_issue_and_kanban()
+        edit = one_shot.tracker_write.edit
+        def fail_finish(path, change):
+            if "| worker01 | running" in path.read_text():
+                raise OSError("unreadable tracker")
+            return edit(path, change)
+        with mock.patch.object(one_shot.tracker_write, "edit", side_effect=fail_finish):
+            self._stopped(result=self.ORDINARY, exit_code=0)
+        self.assertEqual(self._report()["status"], "human_review")
+        self.assertTrue(self._report()["errors"])
 
     def test_tracker_lock_revalidates_before_any_forge_mutation(self):
         self._with_an_issue_and_kanban()

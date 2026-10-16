@@ -126,14 +126,26 @@ class RoundTripTest(unittest.TestCase):
             self.assertEqual(tl.moves("## Log\n" + line, DAY, CT), [])
 
     def test_a_later_run_clears_only_its_own_hold_failure(self):
-        start = tl.started_line("11:00", "worker01", "codex", "m", "worktree `tree`", "Security audit")
-        ends = [start, tl.relaunch_line("11:10", "worker01", "Security audit", "base moved"),
-                tl.ended_line("11:10", "worker01", "done", "finished", "none")]
-        for end in ends:
+        start = tl.started_line("11:00", "worker02", "codex", "m", "worktree `tree`", "Security audit")
+        for end in (tl.relaunch_line("11:10", "worker02", "Security audit", "base moved — retry"),
+                    tl.ended_line("11:10", "worker02", "done", "finished", "none"),
+                    tl.ended_line("11:10", "worker01", "done", "finished after midnight", "none")):
             with self.subTest(end=end):
-                text = "## Log\n" + tl.hold_failed_line("10:00", "old", "Other", "offline") + "\n" + start + "\n"
-                text += tl.hold_failed_line("10:20", "worker01", "Security audit", "offline") + "\n" + end
+                text = "## Log\n" + tl.hold_failed_line("10:00", "old", "Other", "offline") + "\n"
+                text += tl.hold_failed_line("10:20", "worker01", "Security audit", "offline") + "\n" + start + "\n" + end
                 self.assertEqual(tl.hold_failures(text), {"Other": "offline"})
+
+    def test_start_preserves_a_failed_hold_until_an_outcome_is_known(self):
+        text = "## Log\n" + tl.hold_failed_line("10:00", "old", "Task", "offline") + "\n"
+        text += tl.started_line("11:00", "new", "codex", "m", TREE, "Task")
+        self.assertEqual(tl.hold_failures(text), {"Task": "offline"})
+
+    def test_release_failures_are_durable_until_a_successful_release(self):
+        text = "## Log\n" + tl.hold_release_line("10:00", "old", "Task", "failed", "offline")
+        self.assertEqual(tl.hold_failures(text), {"Task": "offline"})
+        for outcome in ("removed", "retained", "absent"):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(tl.hold_failures(text + "\n" + tl.hold_release_line("11:00", "new", "Task", outcome)), {})
 
     def test_an_approved_forge_closure_line_reads_back_its_task(self):
         # #547: the coordinator records the user's approval; the audit does not reopen the task it names.

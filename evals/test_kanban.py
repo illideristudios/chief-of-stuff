@@ -362,6 +362,16 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(row["action"], "updated")
                 self.assertEqual(row["remove"], FLOW.human_review_label)
 
+    def test_release_task_uses_all_active_siblings(self):
+        self._two_rows_on_issue_7()
+        result = kanban.Sync(backlog.IssueRef("team/app", 7), "plan review", done=True, hold_release="retained")
+        with mock.patch.object(forge, "sync_stage", return_value=result) as sync, redirect_stdout(io.StringIO()):
+            code = kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7",
+                                    "--task", "12", "--from-stage", "plan review", "--release-hold", "--commit"])
+        self.assertEqual(code, 0)
+        self.assertEqual(sync.call_args.args[3], "plan review")
+        self.assertTrue(sync.call_args.kwargs["keep_hold"])
+
     def test_release_requires_issue_and_prior_stage_even_in_preview(self):
         for flags in ([], ["--issue", "#7"], ["--from-stage", "plan"],
                       ["--issue", "#7", "--initialize"]):
@@ -616,3 +626,11 @@ class AuditTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SharedIssuePolicyTest(unittest.TestCase):
+    def test_tied_stage_prefers_the_required_hold(self):
+        config = Kanban(stages=("stage",), human_review_label="hold",
+                        stage_map={"review": 0, "merge": 0}, hold_stages=("merge",))
+        rows = [SimpleNamespace(standing=False, kind="open", lane="build", stage=stage) for stage in ("review", "merge")]
+        self.assertEqual(kanban.furthest(config, rows).stage, "merge")

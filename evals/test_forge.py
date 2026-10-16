@@ -323,6 +323,67 @@ class GitHubTest(unittest.TestCase):
 
 
 class StageGatewayTest(unittest.TestCase):
+    def test_release_outcomes_use_one_initial_read_on_each_forge(self):
+        for home in (GH, GL):
+            for held in (False, True):
+                for commit in (False, True):
+                    with self.subTest(home=home, held=held, commit=commit):
+                        labels = ["stage: doing"] + ([FLOW.human_review_label] if held else [])
+                        reads = []
+                        def get(url, token, timeout):
+                            reads.append(url)
+                            return {"labels": list(labels)}, {}, ""
+                        def put(method, url, token, timeout, payload):
+                            labels.remove(FLOW.human_review_label)
+                            return {}, {}, ""
+                        gh = FakeGh(issues=[gh_issue(4, "Flag", labels)])
+                        with mock.patch.object(backlog, "_get", side_effect=get), \
+                             mock.patch.object(backlog, "_call", side_effect=put), \
+                             mock.patch.object(backlog, "existing_labels", return_value=(set(FLOW.stages), "")):
+                            got = forge.Forge(home, kanban=FLOW, gh=gh, token="test").write_stage(
+                                4, "doing", expected="doing", release_hold=True, only_if_held=True, commit=commit)
+                        self.assertTrue(got.ok, got.error)
+                        self.assertEqual(got.hold_release, "removed" if held and commit else "retained" if held else "absent")
+                        count = len([c for c in gh.all_calls if c[:2] == ["issue", "view"]]) if home == GH else len(reads)
+                        self.assertEqual(count, 2 if held and commit else 1)
+
+    def test_unheld_issue_still_checks_the_stage_guard(self):
+        for config in (FLOW, BOARD):
+            labels = ["stage: review"] if config.github_project is None else []
+            url = gh_issue(4, "Flag")["url"]
+            gh = FakeGh(issues=[gh_issue(4, "Flag", labels)], status={url: "Review"})
+            got = forge.sync_stage(backlog.IssueRef(REPO, 4), GH, config, "doing", expected="doing",
+                                   release_hold=True, only_if_held=True, commit=True, gh=gh)
+            self.assertIn("changed outside the tracker", got.error)
+            self.assertEqual(got.hold_release, "failed")
+
+    def test_direct_release_errors_and_absent_hold_have_outcomes(self):
+        for stage, expected, outcome in (("unknown", "doing", "failed"), ("doing", None, "failed"),
+                                         ("doing", "doing", "absent")):
+            with self.subTest(stage=stage, expected=expected):
+                gh = FakeGh(issues=[gh_issue(4, "Flag", ["stage: doing"])])
+                got = forge.Forge(GH, kanban=FLOW, gh=gh).write_stage(
+                    4, stage, expected=expected, release_hold=True, commit=True)
+                self.assertEqual(got.hold_release, outcome)
+
+    def test_gitlab_case_variants_are_canonical_for_release_and_add(self):
+        labels = ["STAGE: DOING", "NEEDS HUMAN"]
+        def get(url, token, timeout):
+            return {"labels": list(labels)}, {}, ""
+        def put(method, url, token, timeout, payload):
+            self.assertEqual(payload, {"remove_labels": FLOW.human_review_label})
+            labels.remove("NEEDS HUMAN")
+            return {}, {}, ""
+        with mock.patch.object(backlog, "_get", side_effect=get), \
+             mock.patch.object(backlog, "_call", side_effect=put) as write, \
+             mock.patch.object(backlog, "existing_labels", return_value=(set(FLOW.stages), "")):
+            self.assertEqual(forge.Forge(GL, kanban=FLOW, token="test").add_human_hold(4), "")
+            write.assert_not_called()
+            got = forge.Forge(GL, kanban=FLOW, token="test").write_stage(
+                4, "doing", expected="doing", release_hold=True, commit=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.hold_release, "removed")
+
     def test_github_sibling_release_uses_the_issue_repository(self):
         ref = backlog.IssueRef("other/app", 4)
         calls = []

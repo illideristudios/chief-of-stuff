@@ -1097,3 +1097,12 @@ class ViewMainTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TokenTimeoutTest(unittest.TestCase):
+    def test_token_subprocesses_are_bounded_and_timeout_means_absent(self):
+        for lookup, args in ((bl.keychain_token, ("account", "service")), (bl.glab_token, ("host",))):
+            with self.subTest(lookup=lookup.__name__):
+                with patch.object(bl.subprocess, "run", side_effect=bl.subprocess.TimeoutExpired("lookup", bl.TIMEOUT)) as run:
+                    self.assertEqual(lookup(*args), "")
+                self.assertEqual(run.call_args.kwargs["timeout"], bl.TIMEOUT)
