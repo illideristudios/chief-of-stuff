@@ -93,7 +93,7 @@ agent = "reviewer"
 skills = ["security-review"]
 ```
 
-Each configured stage must appear in a lane's stages or the kanban map (including terminal stages). Both keys are optional. Claude workers launch with the stage's agent profile; `worker --type` or the engine persona's declared `Agent:` type takes precedence. Other runtimes receive only the skills. Every worker brief names the stage's skills and instructs the worker to load and follow them on demand. Invalid profile names, skill lists, unknown keys and unknown stages are refused.
+Each configured stage must appear in a lane's stages or the kanban map (including terminal stages). Both keys are optional. Claude workers launch with the stage's agent profile when the Coordinator block declares it with an `Agent:` line; `worker --type` or the engine persona's declared `Agent:` type takes precedence. Other runtimes receive only the skills. Every worker brief names the stage's skills and instructs the worker to load and follow them on demand. Invalid profile names, skill lists, unknown keys and unknown stages are refused.
 
 Interactive Cursor workers start in [Plan mode](https://cursor.com/docs/cli/overview). Interactive Antigravity workers also start in plan mode. Interactive Codex workers start with a read-only sandbox for planning; after plan approval, use the assignment's `session_exec.py resume-codex` command to resume that session ID with write access and update its process registration. Codex documents `/plan` as a [developer command](https://learn.chatgpt.com/docs/developer-commands), but its CLI has no plan launch flag.
 

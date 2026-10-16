@@ -3,7 +3,7 @@
 
 Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". Notification, lane, budget, and Kanban settings
-live here, and so do the suggested models and their rotations (#111).
+live here, along with suggested models and their rotations (#111) and stage launch defaults (#121).
 
 No `Settings:` line, no file, or no `[notify]` section is notify off, and nothing else changes. A value
 that is there and cannot be read is refused: a guessed day-open time is a notification at the wrong hour.

@@ -99,11 +99,10 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     store.set_resume(key, data)
 
 
-def _declared_agent(root: Path, agent: str) -> str:
+def _declared_agent(text: str, agent: str) -> str:
     """Pass the agent type only when the workspace's Agent: lines declare it (§9)."""
     if not agent:
         return ""
-    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     return agent if agent in make_worktree.agent_types(text) else ""
 
 
@@ -115,10 +114,6 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
     actor = policies.personas[name]
-    agent_type = _declared_agent(root, actor.agent or "")
-    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    defaults = load_settings(root, settings_path(text)).stages.get(stage)
-    agent = agent_type or (defaults.agent or "" if defaults else "")
     run_dir = _run_dir(root, issue_key, stage, attempt)
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
@@ -126,6 +121,9 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         store.set_ownership(issue_key, existing["tree"])
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
+    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
+    defaults = load_settings(root, settings_path(text)).stages.get(stage)
+    agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
@@ -164,7 +162,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
         made = make_worktree.build(root, clone or root, str(trees), tree_name, branch,
-                                   agent_type, from_branch=from_branch)
+                                   agent, from_branch=from_branch)
         tree = made.path
         store.set_ownership(issue_key, str(tree))
         if stage != "review":
