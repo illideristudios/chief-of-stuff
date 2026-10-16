@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import backlog
 import forge_review
@@ -356,6 +356,15 @@ def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, st
 
 
 @dataclass(frozen=True)
+class Pipeline:
+    id: int | None  # None when the branch head has no pipeline
+    ref: str
+    sha: str
+    status: str
+    url: str
+
+
+@dataclass(frozen=True)
 class Forge:
     home: Backlog | GitHubBacklog
     approver: str = ""                 # the user's forge username: whose approval and review threads count
@@ -393,6 +402,71 @@ class Forge:
 
     def issue(self, number: int) -> backlog.Read:
         return backlog.read_one(self.home, number, token=self.token, gh=self.gh)
+
+    def _pipeline_read(self, path: str):
+        if self.github:
+            row, error = _gh_json(self.gh, ["api", f"repos/{self.home.repo}/{path}"])
+        else:
+            token = self._token()
+            if not token:
+                raise ForgeError(self.home.missing_token)
+            row, _, error = backlog._call("GET", f"{self.home.api()}/{path}", token, backlog.TIMEOUT)
+        if error:
+            raise ForgeError(error)
+        return row
+
+    def _pipeline(self, row: dict) -> Pipeline:
+        ref, sha, url = (row[k] for k in (
+            ("head_branch", "head_sha", "html_url") if self.github else ("ref", "sha", "web_url")))
+        status, number = row["status"], row["id"]
+        if (type(number) is not int or number <= 0
+                or any(not isinstance(v, str) or not v.strip() for v in (ref, sha, url, status))):
+            raise ValueError("pipeline has unreadable id, ref, SHA, status or URL")
+        if self.github:
+            status = forge_review.github_pipeline([{
+                "__typename": "CheckRun", "status": status.upper(),
+                "conclusion": (row["conclusion"] or "").upper(),
+            }])
+        else:
+            status = forge_review.gitlab_pipeline_status(status)
+        return Pipeline(number, ref, sha, status, url)
+
+    def pipeline(self, pipeline_id: int) -> Pipeline:
+        """One GitLab pipeline or GitHub Actions run, in the configured repository and host."""
+        try:
+            if type(pipeline_id) is not int or pipeline_id <= 0:
+                raise ValueError("pipeline id must be a positive integer")
+            path = "actions/runs" if self.github else "pipelines"
+            return self._pipeline(self._pipeline_read(f"{path}/{pipeline_id}"))
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"pipeline: {exc}") from exc
+
+    def branch_head(self, ref: str) -> Pipeline:
+        """The branch head and its latest pipeline; an earlier commit's pipeline cannot attest to this head."""
+        try:
+            if not ref.strip():
+                raise ValueError("branch ref must not be blank")
+            path = "branches" if self.github else "repository/branches"
+            branch = self._pipeline_read(f"{path}/{quote(ref, safe='')}")
+            sha = branch["commit"]["sha" if self.github else "id"]
+            if not isinstance(sha, str) or not sha.strip():
+                raise ValueError("branch has no readable head SHA")
+            if self.github:
+                query = urlencode({"branch": ref, "head_sha": sha, "per_page": 1})
+                rows = self._pipeline_read(f"actions/runs?{query}")["workflow_runs"]
+            else:
+                query = urlencode({"ref": ref, "sha": sha, "order_by": "id", "sort": "desc", "per_page": 1})
+                rows = self._pipeline_read(f"pipelines?{query}")
+            if not isinstance(rows, list):
+                raise ValueError("pipeline list is unreadable")
+            if not rows:
+                return Pipeline(None, ref, sha, "none", "")
+            latest = self._pipeline(rows[0])
+            if latest.sha != sha or latest.ref != ref:
+                raise ValueError("latest pipeline does not match the requested branch head")
+            return latest
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"branch head: {exc}") from exc
 
     def requests(self) -> list[merge_ready.Request]:
         """Open pull or merge requests with their merge verdict (#419) and the approver's approval."""
