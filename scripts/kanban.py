@@ -87,7 +87,7 @@ def drift(config: Kanban, labels: tuple[str, ...], stage: str,
 
 
 def extra_hold(config: Kanban, current, expected_stage: str | None) -> bool:
-    """A review hold the recorded stage did not set: the launcher's, which only the user clears."""
+    """A review hold the recorded stage did not set: retained unless explicitly released for relaunch."""
     return config.human_review_label in current and not (expected_stage and config.holds(expected_stage))
 
 

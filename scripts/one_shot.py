@@ -411,6 +411,18 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # review comment say so, and the tree's evidence is the only word there is.
         reason = f"the launcher died before reconciling this run; {reason}"
     ref = backlog.issue_ref(row.issue, cfg.backlog) if row and row.issue.strip() else None
+    home = (backlog.GitHubBacklog(ref.repo) if ref and ref.host == backlog.GITHUB else
+            cfg.backlog.sibling(ref.repo)
+            if ref and isinstance(cfg.backlog, backlog.Backlog) else None)
+    if status == "relaunch" and ref and settings.kanban:
+        # Release only through the stage guard, before making the task dispatchable again (#68).
+        released = (forge.Forge(home, kanban=settings.kanban, gh=backlog.run_gh).write_stage(
+            ref.number, row.stage.strip(), expected=row.stage.strip(), commit=True, release_hold=True)
+            if home is not None else None)
+        if released is None or not released.done:
+            error = released.error if released is not None else "no configured backlog for this issue"
+            errors.append(f"release review hold: {error}")
+            status, reason = "human_review", f"could not release review hold for relaunch: {error}; worker said: {reason}"
     hold_error = ""
     if status == "human_review" and ref:
         if settings.kanban:
@@ -420,9 +432,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 errors.append(f"review hold: {error}")
         else:
             errors.append("review hold: workspace has no [kanban] configuration")
-        home = (backlog.GitHubBacklog(ref.repo) if ref.host == backlog.GITHUB else
-                cfg.backlog.sibling(ref.repo)
-                if isinstance(cfg.backlog, backlog.Backlog) else None)
         if home is not None:
             body = f"One-shot worker {name} needs human review.\n\nWhy: {reason}\n\nChanges made:\n{summary}"
             commented = backlog.comment(home, ref.number, body, commit=True)

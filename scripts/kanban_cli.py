@@ -25,6 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--task", help="with --issue and several rows on it: the tracker row's name or item number (#69)")
     ap.add_argument("--from-stage", help="stage last observed on the issue or project")
     ap.add_argument("--initialize", action="store_true", help="start an unlabeled issue or project item")
+    ap.add_argument("--release-hold", action="store_true", help="release a launcher hold; retain stage-required holds")
     ap.add_argument("--commit", action="store_true", help="apply one verified move; default is preview")
     args = ap.parse_args(argv)
     if args.commit and not args.issue:
@@ -91,12 +92,14 @@ def main(argv: list[str] | None = None) -> int:
             result = kanban.Sync(ref, stage, error="tracker stage is blank")
         elif ref.host == backlog.GITHUB:
             result = forge.Forge(backlog.GitHubBacklog(ref.repo), kanban=settings.kanban).write_stage(
-                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit)
+                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit,
+                release_hold=args.release_hold)
         elif isinstance(cfg.backlog, backlog.Backlog):
             # write_stage rebuilds the IssueRef from Forge.home; keep a sibling project's repo.
             home = cfg.backlog if ref.repo == cfg.backlog.project else cfg.backlog.sibling(ref.repo)
             result = forge.Forge(home, kanban=settings.kanban).write_stage(
-                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit)
+                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit,
+                release_hold=args.release_hold)
         else:
             result = kanban.Sync(ref, stage, error="no configured GitLab host for this issue")
         changed = result.delta.changed or result.project_add or result.current_status != result.project_status

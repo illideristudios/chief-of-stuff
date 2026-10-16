@@ -77,3 +77,5 @@ python3 scripts/kanban_cli.py --root /path/to/workspace --date YYYY-MM-DD --issu
 ```
 
 For an issue that has no stage yet, preview it and replace `--from-stage` with `--initialize`. A commit always names one issue. A completed task is excluded from the bulk preview, but can be selected by `--issue` to replace its numbered board stage with its terminal mark, such as `main`. If a board stage changed after the coordinator last observed it, the updater refuses the write and the coordinator reconciles it with the user. Existing `kind::`, `severity::`, and other unrelated labels survive every move.
+
+A one-shot relaunch releases any launcher hold through this same guarded sync before returning the task to `unassigned` and `open`. If release fails, the task goes to human review with the error. To release a launcher hold through the command, add `--release-hold` to a single-issue sync with `--from-stage` set to the recorded stage; omit `--commit` to preview. Holds required by `hold_stages` remain, and ordinary stage moves preserve launcher holds.
