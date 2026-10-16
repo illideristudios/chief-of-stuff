@@ -37,8 +37,8 @@ import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
 from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
-from process_status import process_exists, registrations, running_trees, engine_trees  # noqa: E402
-from tree_claims import Claims, one_shot_claims, registry_claims  # noqa: E402
+from process_status import process_exists, registrations, running_trees, identity  # noqa: E402
+from tree_claims import Claims, engine_claims, one_shot_claims, registry_claims  # noqa: E402
 
 # Preserve branch names from ownership rows when worktrees disappear.
 WORKTREE = re.compile(r"\bworktrees?\s+(?P<tick>`)?(?P<name>[A-Za-z0-9._\-/]+)`?(?:\s*\((?P<branch>[^)]*)\))?")
@@ -858,7 +858,8 @@ def discover_stacks(root: Path, command: str) -> list[tuple[str, Path]]:
                 not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key].strip()
                                                 for key in ("stack", "worktree")) for row in rows):
             raise ValueError('expected JSON [{"stack": name, "worktree": path}]')
-        return [(row["stack"], (root / row["worktree"]).resolve()) for row in rows]
+        return [(git_trees.clean(row["stack"]), Path(git_trees.clean(str((root / row["worktree"]).resolve()))))
+                for row in rows]
     except (OSError, KeyError, subprocess.SubprocessError) as exc:
         raise ValueError(str(exc)) from exc
 
@@ -868,9 +869,9 @@ def stale_stacks(rows: list[tuple[str, Path]], base: Path, live: set[Path]) -> l
     faults = []
     for name, path in rows:
         if path == base or not path.is_relative_to(base):
-            faults.append(StackFault(git_trees.clean(f"{name}: worktree is outside the configured Worktrees directory")))
+            faults.append(StackFault(f"{name}: worktree {path} is outside the configured Worktrees directory"))
         elif path not in live:
-            faults.append(StackFault(git_trees.clean(f"{name}: worktree {path} has no live owner")))
+            faults.append(StackFault(f"{name}: worktree {path} has no live owner"))
     return faults
 
 
@@ -896,27 +897,29 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
         roster.add(_bare(cfg.user))
 
     report = Report()
-    process_claims: Claims = registry_claims(root, registrations, process_exists)
-    for path, found in one_shot_claims((root / trees).resolve(), running_trees).items():
-        process_claims.setdefault(path, []).extend(found)
-    for path in engine_trees(root):
-        process_claims.setdefault(path, []).append(Claim("engine worker", True))
+    discovered = []
+    workspace = root.resolve()
+    base = (workspace / trees).resolve()
     if settings.workers.teardown_list:
         try:
-            if not trees:
-                raise ValueError("stack discovery requires a nonempty Worktrees directory")
+            if not trees or base == workspace or not base.is_relative_to(workspace):
+                raise ValueError("stack discovery requires a nonempty Worktrees directory inside the workspace")
             discovered = discover_stacks(root, settings.workers.teardown_list)
-            # The gateway normalizes paths relative to the workspace; the judgement remains pure.
-            workspace = root.resolve()
-            base = (workspace / trees).resolve()
-            base = base.relative_to(workspace) if base.is_relative_to(workspace) else base
-            rows = [(name, path.relative_to(workspace) if path.is_relative_to(workspace) else path)
-                    for name, path in discovered]
-            live = {path.relative_to(workspace) if path.is_relative_to(workspace) else path
-                    for path, found in process_claims.items() if any(claim.live for claim in found)}
-            report.stacks.extend(stale_stacks(rows, base, live))
         except (OSError, ValueError) as exc:
             report.stacks.append(StackFault(git_trees.clean(f"discovery failed: {exc}")))
+    # Discovery may take up to 120 seconds. Gather ownership after it, so newly launched
+    # workers are included when judging the returned stacks.
+    process_claims: Claims = registry_claims(root, registrations, process_exists)
+    for claims in (one_shot_claims((root / trees).resolve(), running_trees), engine_claims(root, identity)):
+        for path, found in claims.items():
+            process_claims.setdefault(path, []).extend(found)
+    if discovered:
+        base = base.relative_to(workspace)
+        rows = [(name, path.relative_to(workspace) if path.is_relative_to(workspace) else path)
+                for name, path in discovered]
+        live = {path.relative_to(workspace) if path.is_relative_to(workspace) else path
+                for path, found in process_claims.items() if any(claim.live for claim in found)}
+        report.stacks.extend(stale_stacks(rows, base, live))
     report.lines.extend(str(stack) for stack in report.stacks)
     handled: set[str] = set()
     seen: set[Path] = set()

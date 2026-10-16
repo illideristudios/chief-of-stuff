@@ -98,22 +98,22 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
         else:
             source = f"exec 1>{quoted}; set +m\n{command}"
         argv = [shell, "-lic", source]
-        with subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                              stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True) as child:
+        errors = Path(directory) / "stderr"
+        with errors.open("w") as stderr_file, subprocess.Popen(
+                argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                stderr=stderr_file, start_new_session=True) as child:
             try:
-                _, stderr = child.communicate(timeout=timeout)
+                child.wait(timeout=timeout)
             except BaseException as exc:
-                # Even an escaped descendant may retain stderr. Never drain it after a kill.
+                # Bound command execution even when descendants outlive the shell.
                 if isinstance(exc, subprocess.TimeoutExpired) or child.poll() is None:
                     try:
                         os.killpg(child.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                if child.stdout is not None:
-                    child.stdout.close()
-                child.stderr.close()
                 child.wait()
                 raise
+            stderr = errors.read_text(errors="replace")
             stdout = output.read_text(errors="replace") if output.exists() else ""
             return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
 

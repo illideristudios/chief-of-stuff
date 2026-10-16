@@ -154,22 +154,9 @@ def running_trees(trees: Path) -> dict[Path, str]:
 
 
 def engine_trees(root: Path) -> set[Path]:
-    """Live engine run trees, verified by the adapter's session identity and exit evidence."""
-    live = set()
-    for path in (root / ".chief-of-stuff/runs").glob("*/started.json"):
-        if (path.parent / "exit.json").exists():
-            continue
-        try:
-            started = json.loads(path.read_text())
-            command = json.loads((path.parent / "command.json").read_text())
-            session = started["session_id"]
-            if not isinstance(session, str) or not session or session != command["session_id"]:
-                continue
-            if identity(started["pid"], session, host=True) is not None:
-                live.add(Path(command["cwd"]).resolve())
-        except (OSError, ValueError, KeyError, TypeError, RuntimeError):
-            continue
-    return live
+    """Engine trees claimed through process execution and collection of their segment."""
+    from tree_claims import engine_claims
+    return set(engine_claims(root, identity))
 
 
 def check(root: Path, pids: list[int]) -> list[dict[str, str | int]]:

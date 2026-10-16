@@ -624,7 +624,8 @@ def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: 
             try:
                 (cwd / PIDFILE).write_text(f"{worker.pid} {task}\n")
             except OSError:
-                os.killpg(worker.pid, signal.SIGKILL)  # no untracked worker may survive
+                with suppress(ProcessLookupError):
+                    os.killpg(worker.pid, signal.SIGKILL)  # no untracked worker may survive
                 worker.wait()
                 raise
             return worker.wait(timeout=timeout_minutes * 60)
@@ -637,11 +638,16 @@ def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: 
             stderr.write(f"One-shot run timed out after {timeout_minutes} minutes\n")
         return 124
     except OSError as exc:
-        (logs / "worker-stderr.log").open("a").write(f"Could not start worker: {exc}\n")
+        with suppress(OSError), (logs / "worker-stderr.log").open("a") as stderr:
+            stderr.write(f"Could not start worker: {exc}\n")
         return 127
     finally:
         # The launcher owns the tree throughout cleanup, retry setup and reconciliation.
-        (cwd / PIDFILE).write_text(f"{os.getpid()} {task}\n")
+        if worker is None or worker.poll() is not None:
+            with suppress(OSError):
+                pidfile = cwd / PIDFILE
+                if not pidfile.parent.is_symlink() and not pidfile.is_symlink():
+                    pidfile.write_text(f"{os.getpid()} {task}\n")
 
 
 ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's running row
@@ -689,12 +695,31 @@ def adopt(root: Path, day: str | None = None, *,
         found = _running_row(root, cfg, task, cwd, days)
         if found is None:
             continue
-        row_day, name = found
-        stale = cwd / dispatch_prompt.DISPATCH_FILE
-        body = stale.read_text() if stale.is_file() else ""
-        # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
-        adopted.append(reconcile(root, row_day, task, name, cwd, 0,
-                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
-                                 expected_common=commons.get(cwd.resolve()),
-                                 teardown_errors=teardown(root, cwd, name, settings.workers.teardown)))
+        # Recheck under the launch/cleanup lock before taking the dead worker's slot.
+        with trees_lock(trees):
+            current = next(((held_pid, held_task) for tree, held_pid, held_task in pidfile_runs(trees) if tree == cwd), None)
+            if current != (pid, task) or process_exists(pid) or launcher_copy(root, cwd).exists():
+                continue
+            pidfile = cwd / PIDFILE
+            if pidfile.parent.is_symlink() or pidfile.is_symlink():
+                continue
+            pidfile.write_text(f"{os.getpid()} {task}\n")
+        try:
+            row_day, name = found
+            stale = cwd / dispatch_prompt.DISPATCH_FILE
+            body = stale.read_text() if stale.is_file() else ""
+            # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
+            adopted.append(reconcile(root, row_day, task, name, cwd, 0,
+                                     read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
+                                     expected_common=commons.get(cwd.resolve()),
+                                     teardown_errors=teardown(root, cwd, name, settings.workers.teardown)))
+        except BaseException:
+            # Preserve the dead worker evidence so a later sweep can retry interrupted adoption.
+            with suppress(OSError):
+                if not pidfile.parent.is_symlink() and not pidfile.is_symlink():
+                    pidfile.write_text(f"{pid} {task}\n")
+            raise
+        else:
+            with suppress(OSError):
+                pidfile.unlink(missing_ok=True)
     return adopted
