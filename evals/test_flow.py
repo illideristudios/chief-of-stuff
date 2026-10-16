@@ -285,6 +285,44 @@ class FlowEngineTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["name"], "flow-task-a")
         self.assertIsNone(run.call_args.kwargs["agent_type"])
 
+    def test_dispatch_stage_agent_matches_cut_and_actual_launch(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| task-a | Review module A | unassigned | open | 2026-10-08 | | S | code | review | | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| task-a | `src/a.py` |
+"""
+        import spawn_session
+        import one_shot
+        for declarations, expected in (("- Agent: implementer task\n- Agent: reviewer task\n", "reviewer"),
+                                       ("- Agent: reviewer task\n", "reviewer"),
+                                       ("- Agent: implementer task\n", ""), ("", "")):
+            with self.subTest(declarations=declarations):
+                make_workspace(self.root, tracker_text, SAMPLE_TOML +
+                               '[lanes.code]\nstages = ["review"]\n[stages.review]\nagent = "reviewer"\n')
+                claude = self.root / "CLAUDE.md"
+                claude.write_text(claude.read_text() + declarations)
+                settings = load_settings(self.root, "chief-of-stuff.toml")
+
+                def cut(*args, **kwargs):
+                    flow.make_worktree.check_type(claude.read_text(), kwargs["agent_type"])
+
+                with mock.patch("make_worktree.build", side_effect=cut) as build, \
+                     mock.patch("subprocess.Popen") as popen:
+                    flow.dispatch_ready_tasks(self.root, "2026-10-08",
+                                              self.root / "daily/2026-10-08-tracker.md", settings)
+                self.assertEqual(build.call_args.kwargs["agent_type"], expected)
+                cmd = popen.call_args.args[0]
+                with mock.patch.object(one_shot, "run", return_value=0) as run:
+                    self.assertEqual(spawn_session.main(cmd[cmd.index("worker") + 1:]), 0)
+                self.assertEqual(run.call_args.kwargs["agent_type"] or "", expected)
+
     def test_dispatch_passes_type_only_when_agent_lines_declare_it(self):
         tracker_text = """## Tasks
 

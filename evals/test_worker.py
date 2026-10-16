@@ -732,20 +732,54 @@ class WorkerTest(unittest.TestCase):
             with self.subTest(declared=declared):
                 (self.root / "CLAUDE.md").write_text(
                     "## Coordinator\n- Settings: `chief-of-stuff.toml`\n"
-                    + ("- Agent: specialist task\n" if declared else ""))
+                    + ("- Agent: reviewer task\n" if declared else ""))
                 (self.root / "chief-of-stuff.toml").write_text(
                     '[lanes.code]\nstages = ["review"]\n'
                     '[stages.review]\nagent = "reviewer"\nskills = ["security-review"]\n')
                 self.p.personas["critic"] = SimpleNamespace(
-                    name="critic", role="reviews", rules=(), agent="specialist", model="example", effort="")
-                with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+                    name="critic", role="reviews", rules=(), agent="", model="example", effort="")
+
+                def cut(*args, **kwargs):
+                    worker.make_worktree.check_type((self.root / "CLAUDE.md").read_text(), args[5])
+                    return SimpleNamespace(path=self.tree)
+
+                with mock.patch.object(worker.make_worktree, "build", side_effect=cut) as build, \
                      mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
                      mock.patch.object(worker.process_status, "identity", return_value="start"):
                     self.launch("review", attempt=1 + int(declared))
                 request = start.call_args.args[0]
-                self.assertEqual(request.agent, "specialist" if declared else "reviewer")
+                self.assertEqual(request.agent, "reviewer" if declared else "")
                 self.assertIn("Skills: load and follow security-review", request.prompt)
-                self.assertEqual(build.call_args.args[5], "specialist" if declared else "")
+                self.assertEqual(build.call_args.args[5], request.agent)
+
+    def test_restart_adopts_run_despite_broken_launch_configuration(self):
+        for completed in (False, True):
+            for broken in ("settings", "claude"):
+                with self.subTest(completed=completed, broken=broken):
+                    if self.db.resume(KEY):
+                        self.db.engine.dispose()
+                        self.setUp()
+                    with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+                         mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+                         mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+                        self.launch()
+                    record = self.db.resume(KEY)["runs"]["implement-1"]
+                    if completed:
+                        (Path(record["run_dir"]) / "exit.json").write_text('{"exit_code": 0}')
+                    if broken == "settings":
+                        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: chief-of-stuff.toml\n")
+                        (self.root / "chief-of-stuff.toml").write_text("invalid toml [")
+                    else:
+                        (self.root / "CLAUDE.md").write_bytes(b"\xff")
+                    with mock.patch.object(worker.claude_adapter, "start") as start, \
+                         mock.patch.object(worker.make_worktree, "build") as build, \
+                         mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+                        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                                    max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+                    self.assertEqual(slots.running(self.db), 1)
+                    self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"], record)
+                    start.assert_not_called()
+                    build.assert_not_called()
 
     def test_undeclared_agent_is_omitted_so_default_agent_runs(self):
         (self.root / "CLAUDE.md").write_text(
