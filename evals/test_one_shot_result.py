@@ -212,11 +212,12 @@ class ResultTests(unittest.TestCase):
     def test_missing_or_invalid_counts_are_unknown_and_hold_opted_in_completion(self):
         self.suite_policy()
         green = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
+        missing = object()
         for key in green:
-            for bad in (None, True, -1, "0", 1.5, {}, []):
+            for bad in (missing, None, True, False, -1, "0", 1.5, {}, []):
                 with self.subTest(key=key, value=bad):
                     counts = {**green, key: bad}
-                    if bad is None:
+                    if bad is missing:
                         del counts[key]
                     report = self.reconcile("rate-limit", result={
                         "status": "done", "reason": "finished", "changes": "tested", **counts})
@@ -316,7 +317,7 @@ class ResultTests(unittest.TestCase):
                                   "Commits from this run:", "abc123", "Working tree:", "pending.py", "worker details"):
                         self.assertIn(token, summary)
                 if not changed:
-                    log = self.tracker_path().read_text().split("## Log", 1)[1]
+                    log = self.tracker_path().read_text().split("## Log", 1)[1].split("Changes: ", 1)[1]
                     for token in ("Suite:", "passed=23", "failed=0", "skipped=0", "xfailed=0",
                                   "Commits from this run:", "abc123", "Working tree:", "pending.py"):
                         self.assertIn(token, log)
