@@ -253,7 +253,7 @@ def skills_line(skills: tuple[str, ...]) -> str:
 
 def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
                   skills: tuple[str, ...] = (), rules: tuple[str, ...] = ()) -> str:
-    """Assignment from a store row, forge issue and workspace, never a peer session's instructions (E3)."""
+    """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or a header over BODY_CAP raises RefusedError (E3)."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
     delivery = (f"{COMMITS}\nPut `Closes #{key.rpartition('#')[2]}` in the pull/merge request body "
@@ -273,11 +273,10 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
             + delivery
             + review
             + (skills_line(skills) + "\n" if skills else "")
-            + architecture
-            + f"\n## Forge issue\n\n{title}\n\n{body}\n")
+            + architecture)
     if len(assignment) > BODY_CAP:
         raise RefusedError(f"the assignment is {len(assignment)} characters, over the {BODY_CAP} cap")
-    return assignment
+    return assignment + f"\n## Forge issue\n\n{title}\n\n{body}\n"
 
 
 def commit_rule(workflow: Workflow, root: Path) -> str:
@@ -320,13 +319,9 @@ def _clean(label: str, value: str) -> str:
 
 
 def standing_rules(rules: tuple[str, ...]) -> str:
-    """Render workspace rules as bounded single-line bullets with their source."""
+    """Render workspace rules already validated at the settings boundary, with their source."""
     if not rules:
         return ""
-    for rule in rules:
-        _clean("[workers] rules", rule)
-        if not rule.strip() or re.search(r"[\n\r\t\u2028\u2029]", rule):
-            raise RefusedError("[workers] rules must be non-blank single lines without control characters")
     return ("\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in rules)
             + "\n\nThese rules come from workspace settings (`[workers] rules`).\n")
 
@@ -438,7 +433,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
             one_shot: bool = False, *, workflow: Workflow | None = None,
             rules: tuple[str, ...] | None = None) -> str:
-    """Compose task for worktree/coordinator/name/runtime/one_shot, prefixing preloaded rules; invalid data, settings or launch conditions raise RefusedError."""
+    """Compose root/day/task for worktree/coordinator/name/runtime/one_shot, loading missing workflow/rules from settings; invalid data, settings or launch conditions raise RefusedError."""
     cfg = config(root)
     day = day or datetime.now(cfg.zone).date().isoformat()
     relative, text, row = _task_context(root, cfg, day, task)
