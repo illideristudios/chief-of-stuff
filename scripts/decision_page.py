@@ -532,8 +532,9 @@ KEYED = re.compile(r"https?://[^\s`<>()]+?/(?:issues|pull|merge_requests)/\d+\b|
 
 
 def ref_keys(text: str, home: Backlog | GitHubBacklog | None) -> list[str]:
-    """refs_in's refs keyed as the board files them: an issue by tracker.issue_key, a change as refs_in names it."""
-    keys = [r if (r := refs_in(m[0])[0]).startswith("!") else issue_key(m[0], home) for m in KEYED.finditer(text or "")]
+    """refs_in's refs keyed as the board files them: issues and GitHub PRs by repository, MRs as refs_in names them."""
+    keys = [r if (r := refs_in(m[0])[0]).startswith("!") else issue_key(re.sub(r'/pull/(\d+)\b', r'/issues/\1', m[0]), home)
+            for m in KEYED.finditer(text or "")]
     return list(dict.fromkeys(keys))
 
 
@@ -628,7 +629,8 @@ class Context:
     def stage(self, ref: str) -> str:
         keys = ref_keys(ref, self.sources.home)
         return next((t.stage for t in self.tasks if not t.standing and t.stage
-                     and set(keys).intersection(ref_keys(t.issue, self.sources.home) + ref_keys(t.item, self.sources.home))), "")
+                     and set(keys).intersection(ref_keys(t.issue if t.issue.strip() and not t.workflow else t.item,
+                                                          self.sources.home))), "")
 
     def where(self, ref: str) -> str:
         """Where a ref stands now: `merged 01:15`, `closed`, or its tracker stage with forge status and tracker person-waits
@@ -643,7 +645,8 @@ class Context:
         stage = next(filter(None, (self.stage(r) for r in refs)), "")
         keys = {key for r in refs for key in ref_keys(r, self.sources.home)}
         tasks = [t for t in self.tasks if not t.standing]
-        waiting = any(t.issue.strip() and issue_key(t.issue, self.sources.home) in keys
+        waiting = any(keys.intersection(ref_keys(t.issue if t.issue.strip() and not t.workflow else t.item,
+                                                self.sources.home))
                       for t in hold_causes(tasks, self.kanban, self.sources, self.lanes, frozenset()))
         held = waiting or (i and self.hold and self.hold in i.labels)
         return " · ".join(x for x in (stage or ("open" if c else ""), c and c.pipeline, "needs input" if held else "") if x)

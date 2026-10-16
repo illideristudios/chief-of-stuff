@@ -105,8 +105,8 @@ def went_held(held: dict[Task, str], began: dict[Task, datetime | None], since: 
 
 
 def held_names(held: dict[Task, str]) -> dict[str, str]:
-    """`hold_causes` by task name, as flow_chart.build reads it. A nameless task has no name to hold it by (as forge_ends)."""
-    return {t.name.strip(): cause for t, cause in held.items() if t.name.strip()}
+    """`hold_causes` by task name, falling back to its item, as flow_chart.build matches Log moves."""
+    return {t.name.strip() or t.item.strip(): cause for t, cause in held.items() if t.name.strip() or t.item.strip()}
 
 
 def forge_ends(tasks: list[Task], sources: board_sources.Sources, zone: ZoneInfo) -> dict[str, tuple[datetime, str]]:

@@ -212,13 +212,17 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             if issue_number(r.ref) == number]
     log = [m for m in log if m.name.strip().casefold() in keys]
     issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
-    status = rows[0][0] if rows else mine[-1].kind
-    if status not in ("merged", "closed", "done") and any(t in holds for t in mine):
-        status = "needs input"
-    name = rows[0][1].name if rows else mine[0].label
-
     order = {"open": 0, "merged": 1}
     changes = sorted((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2))
+    status = rows[0][0] if rows else mine[-1].kind
+    if any(c.state == "merged" for c in changes):
+        status = "merged"
+    elif issue and issue.state == "closed":
+        status = "closed"
+    elif status not in ("merged", "closed", "done") and any(t in holds for t in mine):
+        status = "needs input"
+    name = (rows[0][1].name or mine[0].label) if rows else mine[0].label
+
     every = list(sources.changes.values())
     cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {ref} yet.</p></div>')
     change = changes[0] if changes else None

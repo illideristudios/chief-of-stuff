@@ -81,7 +81,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
           approved: frozenset[str] = frozenset(), ended: dict[str, tuple[datetime, str]] | None = None,
           home=None) -> list[tuple[str, gantt.Row]]:
     """(status, row) per task with a move, first moved first, then the queued tasks in tracker order. `tasks` are
-    tracker rows, later ones winning; `held` maps each held task's name to what holds it (task_forge.hold_causes); `ends` maps a task's item to its estimated end;
+    tracker rows, later ones winning; `held` maps each held task's name (or item when nameless) to what holds it (task_forge.hold_causes); `ends` maps a task's item to its estimated end;
     `durations` maps a queued task's item to how long it will take, and `slots` is how many run at once;
     `approved` names the tasks whose open change is approved, labelled `approved · merge ~HH:MM` by their end;
     `ended` maps a task's name to (time, word) — its change's forge merge or its closed issue's close time — which
@@ -96,7 +96,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
 
     def key_of(m: Move) -> str:
         t = find.get(m.name.strip().casefold()) or (row_of(m.name)[0] if m.launch else None)
-        return t.name.strip().casefold() if t and t.name.strip() else m.name.casefold()
+        return (t.name.strip() or t.item.strip()).casefold() if t else m.name.casefold()
 
     terminal = {lane.stages[-1] for lane in lanes.values()}
     horizon = now + WINDOWS[-1][2]
@@ -139,7 +139,8 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             else:
                 stop = last.at
         finish = task and (ended or {}).get(task.name.strip())
-        is_held = bool(task and task.name.strip() in held)
+        hold_key = (task.name.strip() or task.item.strip()) if task else ""
+        is_held = bool(task and hold_key in held)
         boundary = last.at
         # A launcher stop ends its run but leaves the row at its prior working stage.
         mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
@@ -173,7 +174,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             status, note = "merged", f"merged {last.at:%H:%M}"
         elif is_held:
             segs.append(gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner(key, now, task)))
-            status, note = "needs input", f"needs input · {held[task.name.strip()]}"
+            status, note = "needs input", f"needs input · {held[hold_key]}"
         elif task and lane and last.stage in lane.stages and (end := ends.get(task.item)) and end > now:
             ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
             segs += _ahead(ahead, now, end, owner(key, now, task))
@@ -186,7 +187,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             kind = task.kind if task else ""
             status = "approved" if is_approved else ("running" if kind == "open" else kind)
             note = "approved" if is_approved else last.stage
-        out.append((status, gantt.Row(ref_of(task, last.name), task.name.strip() if task else launch_row(last.name, ())[1],
+        out.append((status, gantt.Row(ref_of(task, last.name), task.label if task else launch_row(last.name, ())[1],
                                       note, tuple(segs))))
     # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.
     slots = max(1, slots)
