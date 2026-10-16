@@ -187,7 +187,7 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
 def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
-           pending_refs: Container[str] = frozenset()) -> str | None:
+           pending_refs: Container[str] = frozenset(), review_stages: Container[str] = frozenset({"plan"})) -> str | None:
     """The page, or None when no task in `trackers` names issue `number`. `cfg` resolves a task's due (the board's
     deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
     ref = f"#{number}"
@@ -205,7 +205,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
-    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
+    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs, review_stages))
     rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
                                                 ended=forge_ends(known, sources, now.tzinfo))
             if issue_number(r.ref) == number]
@@ -325,5 +325,5 @@ def write(root: Path, pages_dir: Path, number: int) -> Path | None:
     ctx = context(root, now.date().isoformat())
     pending = entries(pages_dir, ctx) if ctx else []
     page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
-                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx))
+                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx), settings.review_stages())
     return put(pages_dir / f"issue-{number}.html", page)

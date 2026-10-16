@@ -427,6 +427,9 @@ class EngineTest(unittest.TestCase):
         })
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "plan", "builder", 1)])
         self.finish("plan")
+        self.assertEqual(self.run_pass(), [reconcile.Ask(KEY, "review_after:plan:1", "plan needs your review")])
+        self.assertEqual(self.db.items()[0].stage, "plan")
+        gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.db.items()[0].stage, "implement")
         self.assertEqual(self.forge.snapshots()[0]["stage"], "plan")

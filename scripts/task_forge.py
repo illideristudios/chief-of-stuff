@@ -17,13 +17,17 @@ from tracker_log import Move
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
-               home, lane) -> str:
-    """What holds the task, or "" when nothing does, at `stage` (its own cell when None): `decision` when a pending
-    decision holds its issue (`pending_refs`, keyed as issue_key keys it under `home`), else the stage when [kanban] holds it there, else the person a waiting task waits on.
-    The one place a hold is decided, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree (#228). Nothing
-    holds a finished task: done, or at its `lane`'s last stage, where a merged change puts it (#240)."""
+               home, lane, review_stages: Container[str] = frozenset({"plan"})) -> str:
+    """What holds the task at `stage` (its own cell when None): a completed stage's review, a pending decision on
+    its issue (`pending_refs`, keyed under `home`), a [kanban] hold stage, or the person a waiting task waits on.
+    The BUILD flag, NEEDS INPUT tile and Flow note share this judgement (#228). Done tasks are never held; the
+    lane's last stage also ends a task unless its completed result still needs review (#240, #130)."""
     stage = task.stage.strip() if stage is None else stage
-    if task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1]):
+    if task.kind == "done":
+        return ""
+    if task.kind == "waiting" and stage in review_stages and task.shown_owner and task.shown_owner not in workers:
+        return "needs your review"
+    if lane and lane.stages and stage == lane.stages[-1]:
         return ""
     if task.issue.strip() and issue_key(task.issue, home) in pending_refs:
         return "decision"
@@ -58,13 +62,14 @@ def effective_stage(task: Task, sources: board_sources.Sources, lanes: dict) -> 
 
 
 def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources.Sources, lanes: dict,
-                pending_refs: Container[str]) -> dict[Task, str]:
+                pending_refs: Container[str], review_stages: Container[str] = frozenset({"plan"})) -> dict[Task, str]:
     """Each held task to its `hold_cause` at its effective stage, decided once: the BUILD flag, the NEEDS INPUT tile and
     the Flow note all read it (#228)."""
     workers = worker_names(sources)
     return {t: cause for t in tasks
             if (cause := hold_cause(t, kanban, effective_stage(t, sources, lanes), workers=workers,
-                                    pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip())))}
+                                    pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip()),
+                                    review_stages=review_stages))}
 
 
 def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[str, datetime | None], home,

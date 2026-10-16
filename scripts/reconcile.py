@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, Sequence
+from typing import Container, Mapping, Protocol, Sequence
 
 from model_port import RETRYABLE
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
@@ -194,7 +194,7 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
 
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
-          decisions: Sequence[Decision]) -> Action | None:
+          decisions: Sequence[Decision], review_stages: Container[str], reviewed: Container[str]) -> Action | None:
     key = item.issue_key
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
@@ -211,6 +211,10 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
     if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
         return Wait(key, "segments tie at the latest start")
+    if latest and latest.stage == stage and latest.outcome == "done" and stage in review_stages:
+        gate = f"review_after:{stage}:{latest.attempt}"
+        if gate not in reviewed:
+            return Ask(key, gate, f"{stage} needs your review")
     return_edge = None
     if latest and latest.stage == "review":
         work = tuple(s for s in completed if s.stage not in ("review", "merge"))
@@ -251,11 +255,14 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
-         quota_resets: Mapping[str, datetime] | None = None) -> list[Action]:
+         quota_resets: Mapping[str, datetime] | None = None,
+         review_stages: Container[str] = (),
+         reviewed_stages: Mapping[str, Container[str]] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
     Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
+    review_stages ask only after successful completion; reviewed_stages names the exact attempts the user released.
     Merge requires answered decisions and, where policy requires it, a done architect segment for the current work.
     Without creation times, issue numbers order work within each forge namespace.
     """
@@ -270,7 +277,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             continue
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
-                       (decisions or {}).get(item.issue_key, ()))
+                       (decisions or {}).get(item.issue_key, ()), review_stages,
+                       (reviewed_stages or {}).get(item.issue_key, ()))
         if isinstance(action, (Dispatch, Review)):
             if free_slots:
                 free_slots -= 1

@@ -66,9 +66,10 @@ class Lane:
 
 @dataclass(frozen=True)
 class Stage:
-    """Launch defaults for a tracker stage; an explicit worker choice takes precedence."""
+    """Launch defaults and the independent review after a stage completes."""
     agent: str | None = None
     skills: tuple[str, ...] = ()
+    review_after: bool | None = None  # None keeps the stage default: plan requires review
 
 
 @dataclass(frozen=True)
@@ -193,6 +194,15 @@ class Settings:
     repos: dict[str, str] = field(default_factory=dict)
     stages: dict[str, Stage] = field(default_factory=dict)
 
+    def reviews(self, stage: str) -> bool:
+        """Whether completion needs the user's review, separately from lane gates."""
+        entry = self.stages.get(stage)
+        return entry.review_after if entry and entry.review_after is not None else stage == "plan"
+
+    def review_stages(self) -> frozenset[str]:
+        """The configured marks, including the plan default unless explicitly disabled."""
+        return frozenset(s for s in {"plan", *self.stages} if self.reviews(s))
+
 
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
     if not isinstance(table, dict):
@@ -206,8 +216,10 @@ def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, S
         where = f"[stages.{name}]"
         if name not in known:
             raise SettingsError(f"{where}: no lane or kanban map names this stage")
-        if not isinstance(entry, dict) or set(entry) - {"agent", "skills"}:
-            raise SettingsError(f"{where}: a table with only agent and/or skills")
+        if not isinstance(entry, dict) or set(entry) - {"agent", "skills", "review_after"}:
+            raise SettingsError(f"{where}: a table with only agent, skills and/or review_after")
+        if "review_after" in entry and type(entry["review_after"]) is not bool:
+            raise SettingsError(f"{where}: review_after must be true or false")
         agent = entry.get("agent")
         if "agent" in entry and not (isinstance(agent, str) and WORKER_NAME.fullmatch(agent)):
             raise SettingsError(f"{where}: agent must be an agent profile name")
@@ -218,7 +230,7 @@ def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, S
             raise SettingsError(f"{where}: skills must be a list of skill names")
         if len(set(skills)) != len(skills):
             raise SettingsError(f"{where}: a skill appears twice")
-        stages[name] = Stage(agent, tuple(skills))
+        stages[name] = Stage(agent, tuple(skills), entry.get("review_after"))
     return stages
 
 

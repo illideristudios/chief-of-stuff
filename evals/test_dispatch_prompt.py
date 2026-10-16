@@ -809,8 +809,10 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
     def test_the_coordinator_hands_off_and_asks_only_for_the_users_reasons(self):
         # The user, 2026-09-24 01:35: "You shouldn't be asking me to give things to things - your role is exactly to do that."
         asks = self._section("Asks")
-        for reason in ("A plan needs review", "An architectural decision needs review", "wedged, blocked, or stuck", "time-critical"):
+        for reason in ("A completed `review_after = true` stage needs review", "An architectural decision needs review", "wedged, blocked, or stuck", "time-critical"):
             self.assertIn(reason, asks)
+        self.assertIn("`plan` by default", asks)
+        self.assertIn("Unmarked completions need no ask", asks)
         self.assertIn("Never ask who should take a task", asks)
         self.assertIn("launching a new session", asks)
         self.assertNotIn("an owner, a scope", self.content)

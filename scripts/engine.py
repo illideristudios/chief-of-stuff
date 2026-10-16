@@ -26,7 +26,7 @@ import store_access
 import supervisor
 import worker
 from forge_port import ForgeError
-from workspace import worktrees_dir
+from workspace import settings_path, worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 
@@ -36,7 +36,7 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _planning_inputs(store: Any, items: list) -> dict:
+def _planning_inputs(store: Any, items: list, review_stages: frozenset[str] = frozenset()) -> dict:
     """Read the same issue context for the engine pass and merge recheck."""
     segments = {item.issue_key: store.segments(item.issue_key) for item in items}
     states = {item.issue_key: _resume(store, item.issue_key) for item in items}
@@ -50,6 +50,8 @@ def _planning_inputs(store: Any, items: list) -> dict:
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
                          if (quota := state.get("quota"))},
+        "review_stages": review_stages,
+        "reviewed_stages": {key: state.get("reviewed_stages", []) for key, state in states.items()},
     }
 
 
@@ -90,6 +92,17 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     and board.stage_map[observed] == board.stage_map[stored]):
                 row["stage"] = stored
     store.sync_from_forge(snapshots)
+    # Only an observed removal of a successfully applied hold releases this completed attempt.
+    # Missing hold data is not approval, and an approval never covers the next attempt.
+    for row in snapshots:
+        key = row["issue_key"]
+        data = _resume(store, key)
+        pending = data.get("pending_review")
+        if pending and row.get("human_review") is False:
+            data["reviewed_stages"] = [*data.get("reviewed_stages", []), pending]
+            data.pop("pending_review")
+            data.pop("interrupt", None)
+            store.set_resume(key, data)
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
@@ -115,9 +128,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     store.add_log(item.issue_key, message, at)
 
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
+    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
+    review_stages = settings.load(root, settings_path(text)).review_stages()
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             **_planning_inputs(store, items))
+                             **_planning_inputs(store, items, review_stages))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
@@ -138,17 +153,23 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
                 elif engine_merge.execute(action, forge, store, at, policies=policies,
-                                         inputs=_planning_inputs(store, [by_key[key]])):
+                                         inputs=_planning_inputs(store, [by_key[key]], review_stages)):
                     stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
+                if isinstance(action, reconcile.Ask) and action.gate.startswith("review_after:"):
+                    error = forge.add_human_hold(int(key.rpartition("#")[2]))
+                    if error:
+                        raise ForgeError(error)
+                    store.set_human_review(key, True)
+                    data["pending_review"] = action.gate
                 record = {"kind": type(action).__name__, "reason": action.reason}
                 if isinstance(action, reconcile.Ask):
                     record["gate"] = action.gate
                 if data.get("interrupt") != record:
                     store.add_log(key, f"{record['kind'].lower()}: {action.reason}", at)
                     data["interrupt"] = record  # M5/M6 delivers and resolves the interrupt.
-                    store.set_resume(key, data)
+                store.set_resume(key, data)
             elif isinstance(action, reconcile.Wait):
                 message = f"wait: {action.reason}"
                 last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)

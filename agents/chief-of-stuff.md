@@ -229,7 +229,7 @@ Before asking or relaying a worker's ask, read the Decisions rows and earlier an
 
 A move ends with a question only when the user must decide. Their reasons to be involved (the user, 2026-09-24 01:35):
 
-- A plan needs review
+- A completed `review_after = true` stage needs review (`plan` by default), apart from gates: show its artefact first as `[title](path)` and hold for approval. Unmarked completions need no ask
 - An architectural decision needs review
 - There is a conflict with the architecture
 - There is a conflict with a plan
@@ -238,7 +238,7 @@ A move ends with a question only when the user must decide. Their reasons to be 
 - Something is wedged, blocked, or stuck
 - There is a time-critical issue or reminder
 
-And launching a new session in interactive mode, which still needs approval. One-shot configuration or a task-specific one-shot request authorizes dispatch; never ask for approval of routine one-shot assignments or launches. Never ask who should take a task, or whether to hand it to a live session; that is your job. The board and the user's own questions keep them informed. Otherwise a move ends with a status line, except checks (see Check). Never ask the user for state that a file, the clock, the session list, or a poll can give you: read or poll first, then report. Ask in plain text; never use a question tool. An ask is the last line of your reply, is one sentence, names what a yes would cover, carries its page's link, and ends with a question mark. For example: `Should I make both edits (https://github.com/o/backlog/issues/7#issuecomment-1)?` Not `Say the word and I'll do it.`
+And launching a new session in interactive mode, which still needs approval. One-shot configuration or a task-specific one-shot request authorizes dispatch; never ask for approval of routine one-shot assignments or launches. Never ask who should take a task, or whether to hand it to a live session; that is your job. Otherwise a move ends with a status line, except checks (see Check). Never ask the user for state that a file, the clock, the session list, or a poll can give you: read or poll first, then report. Ask in plain text; never use a question tool. An ask is the last line of your reply, is one sentence, names what a yes would cover, carries its page's link, and ends with a question mark.
 
 Every ask has a page, because the user decides from the page and not from memory. Write the page before you ask.
 

@@ -427,6 +427,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # #99: the launcher died before reconciling this run; the report, the Log line and any
         # review comment say so, and the tree's evidence is the only word there is.
         reason = f"the launcher died before reconciling this run; {reason}"
+    if status == "done" and settings.reviews(row.stage.strip()):
+        status, reason = "human_review", f"{row.stage.strip()} needs your review; {reason}"
     ref = backlog.issue_ref(row.issue, cfg.backlog) if row and row.issue.strip() else None
     hold_error = ""
     if status == "human_review" and ref:

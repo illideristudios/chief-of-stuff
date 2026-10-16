@@ -157,11 +157,11 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
 
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
-                  held: dict[Task, str] | None = None) -> list[columns.Column]:
+                  held: dict[Task, str] | None = None, review_stages: frozenset[str] = frozenset({"plan"})) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
-    held = hold_causes(tasks, kanban, sources, lanes, frozenset()) if held is None else held
+    held = hold_causes(tasks, kanban, sources, lanes, frozenset(), review_stages) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
 
     def issue_url(ref: str, cell: str = "") -> str:
@@ -188,7 +188,7 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
-                            flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
+                            flag=columns.Mark("needs your review" if held[task] == "needs your review" else "NEEDS INPUT", "hold") if task in held else None,
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
@@ -200,6 +200,14 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
     order = [s for s in order if s not in into]
     cols = [columns.Column(stage, tuple(card(t, at[t]) for t in laned if into.get(at[t], at[t]) == stage),
                            *(("gate", "gate") if stage in gates else ())) for stage in order]
+    # Keep completed reviews visible ahead of active work, including beyond the overflow fold.
+    def needs_review(card: columns.Card) -> bool:
+        return card.flag is not None and card.flag.text == "needs your review"
+
+    cols = [replace(col, cards=tuple(sorted(col.cards, key=lambda c: not needs_review(c))),
+                    note="needs your review", kind="gate")
+            if any(needs_review(c) for c in col.cards) else col for col in cols]
+    cols.sort(key=lambda col: col.note != "needs your review")
     merged = merged_today(sources, now) if now else []
     if merged:
         cards = tuple(columns.Card(c.title, "merged today", tuple((i, page(i, issue_url(i))) for i in c.issues[:1]) + ((c.ref, change_href(c)),),
@@ -298,7 +306,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            kanban: Kanban | None = None, sources: board_sources.Sources = board_sources.EMPTY, answered: int = 0,
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
-           look_log: list[tuple[date, str]] | None = None) -> str:
+           look_log: list[tuple[date, str]] | None = None,
+           review_stages: frozenset[str] = frozenset({"plan"})) -> str:
     """The board page, the Flow artboard's sections: header, tiles, BUILD (the stage columns), the MERGE ORDER,
     DECISIONS and WORKERS panels, and the Flow charts. `stage_log` is (day, tracker text) for the earlier days the
     Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
@@ -324,8 +333,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     stages = {t: effective_stage(t, sources, lanes or {}) for t in tasks}
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
-    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs)
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
+    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, review_stages)
+    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, review_stages)
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols)}</section>\n')
     flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
@@ -463,7 +472,7 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
                   sources=board_sources.load(out.parent), answered=len(decision_rows(tracker_text)),
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone), stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
-                  looked=looked, look_log=look_log)
+                  looked=looked, look_log=look_log, review_stages=settings.review_stages())
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 
