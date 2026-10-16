@@ -267,12 +267,176 @@ class FlowEngineTests(unittest.TestCase):
         self.assertEqual(len(dispatched), 1)
         self.assertIn("dispatched one-shot worker for 'task-a'", dispatched[0])
         mock_build.assert_called_once()
+        self.assertEqual(mock_build.call_args.kwargs["agent_type"], "")
         mock_popen.assert_called_once()
         args, kwargs = mock_popen.call_args
         cmd = args[0]
         self.assertIn("worker", cmd)
         self.assertIn("--one-shot", cmd)
         self.assertIn("task-a", cmd)
+        self.assertEqual(cmd[cmd.index("--name") + 1], "flow-task-a")
+        self.assertNotIn("--type", cmd)
+        import spawn_session
+        import one_shot
+        argv = cmd[cmd.index("worker") + 1:]
+        with mock.patch.object(one_shot, "run", return_value=0) as run:
+            self.assertEqual(spawn_session.main(argv), 0)
+        run.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["name"], "flow-task-a")
+        self.assertIsNone(run.call_args.kwargs["agent_type"])
+
+    def test_dispatch_passes_type_only_when_agent_lines_declare_it(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| task-a | Fix bug in module A | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| task-a | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        claude = self.root / "CLAUDE.md"
+        claude.write_text(claude.read_text() + "- Agent: implementer task\n")
+        tracker_path = self.root / "daily" / "2026-10-08-tracker.md"
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        with mock.patch("make_worktree.build") as mock_build, mock.patch("subprocess.Popen") as mock_popen:
+            flow.dispatch_ready_tasks(self.root, "2026-10-08", tracker_path, settings)
+        self.assertEqual(mock_build.call_args.kwargs["agent_type"], "implementer")
+        cmd = mock_popen.call_args.args[0]
+        self.assertEqual(cmd[cmd.index("--type") + 1], "implementer")
+
+    def test_dispatch_omits_type_when_implementer_is_not_declared(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| task-a | Fix bug in module A | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| task-a | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        claude = self.root / "CLAUDE.md"
+        claude.write_text(claude.read_text() + "- Agent: fixer standing\n")
+        tracker_path = self.root / "daily" / "2026-10-08-tracker.md"
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        with mock.patch("make_worktree.build") as mock_build, mock.patch("subprocess.Popen") as mock_popen:
+            flow.dispatch_ready_tasks(self.root, "2026-10-08", tracker_path, settings)
+        self.assertEqual(mock_build.call_args.kwargs["agent_type"], "")
+        self.assertNotIn("--type", mock_popen.call_args.args[0])
+
+    def test_a_standing_implementer_is_not_the_one_shot_type(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| task-a | Fix bug in module A | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| task-a | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        claude = self.root / "CLAUDE.md"
+        claude.write_text(claude.read_text() + "- Agent: implementer standing\n")
+        tracker_path = self.root / "daily" / "2026-10-08-tracker.md"
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        with mock.patch("make_worktree.build") as mock_build, mock.patch("subprocess.Popen") as mock_popen:
+            flow.dispatch_ready_tasks(self.root, "2026-10-08", tracker_path, settings)
+        self.assertEqual(mock_build.call_args.kwargs["agent_type"], "")
+        self.assertNotIn("--type", mock_popen.call_args.args[0])
+
+    def test_a_bad_agent_lifetime_refuses_that_task_and_does_not_abort_the_tick(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| task-a | Fix bug in module A | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| task-a | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        claude = self.root / "CLAUDE.md"
+        claude.write_text(claude.read_text() + "- Agent: ghost immortal\n")
+        tracker_path = self.root / "daily" / "2026-10-08-tracker.md"
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        with mock.patch("subprocess.Popen") as mock_popen:
+            dispatched = flow.dispatch_ready_tasks(self.root, "2026-10-08", tracker_path, settings)
+        self.assertTrue(any("refused worktree" in line for line in dispatched))
+        mock_popen.assert_not_called()
+
+    def test_an_unassigned_standing_placeholder_is_not_dispatched(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| impl02 — standing implementer | impl02: standing implementer. Wait idle. | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| impl02: standing implementer. Wait idle. | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        ready = flow.ready_one_shot_tasks(self.root, tracker_text, settings)
+        self.assertEqual(ready, [])
+
+    def test_a_bold_unassigned_standing_item_is_not_dispatched(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| impl03 | **impl03**: standing implementer. Wait idle. | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| **impl03**: standing implementer. Wait idle. | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        ready = flow.ready_one_shot_tasks(self.root, tracker_text, settings)
+        self.assertEqual(ready, [])
 
     def test_tick_runs_full_cycle(self):
         tracker_text = """## Tasks
