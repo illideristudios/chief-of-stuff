@@ -512,6 +512,17 @@ class AuditTest(unittest.TestCase):
         with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
             self.assertEqual(audit_tasks.kanban_faults(tasks, cfg, FLOW), [])
 
+    def test_completed_waiting_sibling_does_not_explain_a_hold(self):
+        tasks = [SimpleNamespace(standing=False, lane="build", stage=stage, issue="#7",
+                                 label=stage, kind=kind, item=stage)
+                 for stage, kind in (("plan", "waiting"), ("implement", "open"))]
+        home = backlog.GitHubBacklog("team/app")
+        issue = backlog.Issue(7, "Build it", "open", ("03 - BUILD", FLOW.human_review_label))
+        with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+            faults = audit_tasks.kanban_faults(tasks, home, FLOW, completed={"plan"})
+        self.assertEqual(len(faults), 1)
+        self.assertIn("expected 03 - BUILD, found", str(faults[0]))
+
     def test_gitlab_audit_uses_labels_even_with_github_project_configured(self):
         task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
                                label="Build it", kind="open", item="Build it")

@@ -147,6 +147,14 @@ class RoundTripTest(unittest.TestCase):
             with self.subTest(outcome=outcome):
                 self.assertEqual(tl.hold_failures(text + "\n" + tl.hold_release_line("11:00", "new", "Task", outcome)), {})
 
+    def test_completion_hold_policy_recognizes_cross_midnight_and_later_review(self):
+        text = "## Log\n" + tl.ended_line("01:00", "old", "done", "finished", "none") + "\n"
+        text += tl.hold_release_line("01:00", "old", "Task", "removed")
+        self.assertEqual(tl.completed_tasks(text), {"Task"})
+        text += "\n" + tl.started_line("02:00", "new", "codex", "m", TREE, "Task")
+        text += "\n" + tl.ended_line("02:30", "new", "human_review", "blocked", "none")
+        self.assertEqual(tl.completed_tasks(text), set())
+
     def test_an_approved_forge_closure_line_reads_back_its_task(self):
         # #547: the coordinator records the user's approval; the audit does not reopen the task it names.
         line = tl.approved_close_line("10:05", "Open branch work",

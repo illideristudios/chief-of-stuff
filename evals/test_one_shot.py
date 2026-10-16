@@ -1207,6 +1207,44 @@ class RunTest(unittest.TestCase):
                 self.assertEqual(self._report()["status"], "relaunch")
                 self.assertEqual("!! - HUMAN REVIEW REQUIRED" in labels, waiting)
 
+    def test_shared_waiting_sibling_still_checks_drift_and_absence(self):
+        for board in ("drifted", "absent"):
+            with self.subTest(board=board):
+                self._with_an_issue_and_kanban()
+                body = self.tracker.read_text().replace("\n## File ownership",
+                    "| Other | Other | Robin | waiting | 09:00 | | M | build | implement | #7 | |\n\n## File ownership")
+                self.tracker.write_text(body)
+                labels = ["00 - PLAN", "!! - HUMAN REVIEW REQUIRED"] if board == "drifted" else ["03 - BUILD"]
+                with mock.patch.object(one_shot.backlog, "run_gh", return_value=(0, json.dumps({"labels": [{"name": x} for x in labels]}), "")) as gh, \
+                     mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")):
+                    self._run(self._fake(self.ORDINARY, write_partial=False))
+                self.assertTrue(gh.called)
+                self.assertEqual(self._report()["hold_release"], "failed" if board == "drifted" else "absent")
+                self.assertEqual(self._report()["status"], "human_review" if board == "drifted" else "relaunch")
+                self.assertIn("hold release " + self._report()["hold_release"], self.tracker.read_text())
+
+    def test_completed_or_unlaned_sibling_does_not_keep_a_review_hold(self):
+        for sibling in ("completed", "unlaned"):
+            with self.subTest(sibling=sibling):
+                self._with_an_issue_and_kanban()
+                lane = "build | implement" if sibling == "completed" else " | "
+                body = self.tracker.read_text().replace("\n## File ownership",
+                    f"| Other | Other | Robin | waiting | 09:00 | | M | {lane} | #7 | |\n\n## File ownership")
+                if sibling == "completed":
+                    body += "\n## Log\n- 08:00 one-shot old started: codex m, worktree `other`, task Other\n"
+                    body += "- 08:30 one-shot old: completed; awaiting integration — finished. Changes: none.\n"
+                self.tracker.write_text(body)
+                labels = ["03 - BUILD", "!! - HUMAN REVIEW REQUIRED"]
+                def gh(args):
+                    if args[:2] == ["issue", "edit"]:
+                        labels.remove("!! - HUMAN REVIEW REQUIRED")
+                    return 0, json.dumps({"labels": [{"name": x} for x in labels]}), ""
+                with mock.patch.object(one_shot.backlog, "run_gh", side_effect=gh):
+                    self._run(self._fake(self.ORDINARY, write_partial=False))
+                self.assertEqual(self._report()["status"], "relaunch")
+                self.assertEqual(self._report()["hold_release"], "removed")
+                self.assertEqual(labels, ["03 - BUILD"])
+
     def test_completed_worker_keeps_completion_when_release_fails(self):
         self._with_an_issue_and_kanban()
         with mock.patch.object(one_shot.backlog, "run_gh", return_value=(1, "", "offline")), \
