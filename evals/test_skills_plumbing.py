@@ -226,7 +226,7 @@ class SkillsPlumbingTest(unittest.TestCase):
         from evals.test_agent_budget import DESCRIPTION_CAP, description
         root = Path(__file__).resolve().parent.parent
         text = (root / "skills" / "review-pipeline" / "SKILL.md").read_text()
-        expected = ("Use on an unexpected board or task-write refusal, before moving a task's stage, sending its pull request to the reviewer, "
+        expected = ("Use on any board or task-write refusal or kanban error, before moving a task's stage, sending its pull request to the reviewer, "
                     "handling a Reviewer pass report or an over budget line, running the kanban command, "
                     "checking review state, or merging.")
         self.assertEqual(description(text), expected)

@@ -2,6 +2,7 @@
 """Probe the `Health:` targets in a workspace `## Coordinator` block and print one line each, after
 one line for the file its `Settings:` line names, loaded through the settings loader, and one for the
 runtimes its `[models]` rotations name: each `ok` or `missing`, as the login shell finds its binary.
+An optional `Harness defects:` destination is validated; an invalid one prints a failure line.
 
 The coordinator runs this on open and on resume instead of remembering what was up an hour ago.
 One invocation covers every target, so a restart costs one call rather than one per service.
@@ -9,7 +10,8 @@ One invocation covers every target, so a restart costs one call rather than one 
     python3 probe_health.py --config /path/to/CLAUDE.md
 
 Exit code is the number of failed checks: the targets that did not answer as expected, plus one when
-the settings file cannot be loaded, plus one for each missing runtime, or one when the login shell
+the settings file cannot be loaded, plus one for an invalid `Harness defects:` destination,
+plus one for each missing runtime, or one when the login shell
 could not be asked. A caller can branch on it without parsing. Every target gets a
 line even when it fails: a missing line would read as a healthy service. No `Settings:` line is no
 settings line, and a settings file that is not there is `absent, defaults`: not a fault, and not ok.
@@ -150,7 +152,7 @@ def report(targets: list[Target], timeout: float = TIMEOUT) -> tuple[list[str], 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check the Settings: file and its runtimes, and probe the Health: targets in a ## Coordinator block.")
+    parser = argparse.ArgumentParser(description="Check the Settings: file and its runtimes, validate Harness defects:, and probe the Health: targets in a ## Coordinator block.")
     parser.add_argument("--config", default="CLAUDE.md", help="workspace CLAUDE.md holding the block")
     parser.add_argument("--timeout", type=float, default=TIMEOUT, help="seconds per target")
     args = parser.parse_args(argv)

@@ -178,7 +178,7 @@ REVIEW_PIPELINE_RULES = {
         'If logging is denied, do not retry or edit the tracker: carry that exact logging refusal in the outgoing report.',
         "Then send the full defect report to `Harness defects: session <name>` using Sessions' direct/dual-transport messaging (Read ../coordinator-sessions/SKILL.md first).",
         "This is an incident report, not an assignment: send it directly even in one-shot mode, without Assign's poll-first barrier, and never ask the recipient to perform the blocked write.",
-        'When direct delivery is unavailable or when the configured session is not listed, use `chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to <name> --from coordinator --type report --body "<full defect report>"`, with the absolute workspace root; this fallback is authorized even for an unlisted configured session.',
+        'Use the workspace mailbox with `--type report` when direct delivery fails or when the configured session is not listed; this fallback is authorized.',
         'Without a configured target, give the full report to the user.',
         'If direct messaging and mailbox delivery fail, give the user the full report plus both delivery failures.',
         'Do not rewrite or append another Log line to change the original target.',

@@ -100,12 +100,12 @@ def settings_path(text: str) -> str | None:
 
 
 def harness_defects(text: str) -> str | None:
-    """Validate the optional incident destination independently, so health checks need no full config."""
+    """Return the bare session name or None; raise ConfigError for invalid/unsupported targets, independently of full config."""
     top = _bullets(_section(text, "## Coordinator"))[0]
     if "Harness defects" not in top:
         return None
-    match = re.fullmatch(r"session\s+(?:`([^`\r\n]+)`|([^`\s]+))", top["Harness defects"].strip())
-    if not match or not (name := (match[1] or match[2]).strip()):
+    match = re.fullmatch(r"session\s+(?:`([A-Za-z0-9][A-Za-z0-9._-]*)`|([A-Za-z0-9][A-Za-z0-9._-]*))", top["Harness defects"].strip())
+    if not match or (name := match[1] or match[2]).lower() in {"user", "coordinator"}:
         raise ConfigError("`Harness defects:` must be `session <name>`; repository targets are unsupported")
     return name
 

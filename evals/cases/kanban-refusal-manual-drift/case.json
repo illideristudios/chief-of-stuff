@@ -1,14 +1,14 @@
 {
   "tz": "America/Chicago",
   "description": "#92: expected workflow/forge failures preserve reconciliation and recovery, rather than reporting a harness defect.",
-  "prompt": "Continue after `chief-of-stuff kanban --root . --date {{today}} --issue 17 --from-stage implement --commit` exited 1 with `Kanban state changed outside the tracker; reconcile before writing`. Upload fix is recorded at review in the tracker. The fresh board read confirms Robin deliberately moved #17 to planning; it is a genuine manual change, not a launcher hold or a harness bug. Handle the result and finish this move.",
+  "prompt": "Continue after `chief-of-stuff kanban --root . --date {{today}} --issue 17 --from-stage implement --commit` exited 1 with `Kanban state changed outside the tracker; reconcile before writing`. Upload fix is recorded at review in the tracker. The fresh board read confirms Robin deliberately moved #17 to planning. Handle the result and finish this move.",
   "graders": [
     {
       "name": "no severe harness incident for an expected failure",
       "type": "regex",
-      "pattern": "(?im)^(?:[-*] )?(?:\\*\\*)?Severe process violation:",
+      "pattern": "(?i)severe\\s+process\\s+violation:",
       "match": "absent",
-      "rule": "Normal domain gates (including main-branch, suite and audit gates) are not harness defects."
+      "rule": "Reconcile a genuine manual board move with the user before syncing; report missing configuration for correction."
     },
     {
       "name": "explains the recovery path",
@@ -27,6 +27,20 @@
     {
       "name": "no shell edits",
       "type": "no_shell_edits",
+      "rule": "Keep the recorded task stage."
+    },
+    {
+      "name": "tracker remains unchanged",
+      "type": "file_unchanged",
+      "path": "daily/{{today}}-tracker.md",
+      "rule": "Keep the recorded task stage."
+    },
+    {
+      "name": "no state or log CLI writes",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "\"command\"\\s*:\\s*\"(?:(?:\\\\.|[^\"\\\\])*(?:[;&|]|\\\\n)\\s*)?(?:[A-Za-z_]\\w*=(?:\\\\.|[^\\s\"\\\\])+\\s+)*(?:python(?:3(?:\\.\\d+)?)?\\s+)?(?:[^\\s\";]+/)?(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+(?:log|kanban)|(?:tracker_write|kanban_cli)\\.py)\\b",
+      "max": 0,
       "rule": "Keep the recorded task stage."
     }
   ],

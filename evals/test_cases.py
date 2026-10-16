@@ -798,8 +798,7 @@ class CaseLintTest(unittest.TestCase):
         "merge-what-the-user-approved", "over-budget-polls-the-session",
         "kanban-refusal-is-severe", "kanban-refusal-no-defect-target",
     )
-    # The first three require an ask as the reply, with no authorized fix; a
-    # mandatory Read would conflict. The last checks readiness and never merges.
+    # Ask-only, readiness-only, and recovery cases with no state write need no mandatory Read.
     REVIEW_PIPELINE_SKIPPED_CASES = (
         "triage-waits-for-the-user", "triage-spec-item-is-asked",
         "triage-user-specified-behaviour-is-asked", "merge-ready-not-forge-status",
@@ -933,7 +932,8 @@ class CaseLintTest(unittest.TestCase):
                     self.assertFalse(passes([dict(read, input={"file_path": path})]))
                 self.assertTrue(passes([read]))
                 self.assertTrue(passes(harmless + [read]))
-                for action in (writes if before == write_before else sends):
+                for action in (writes if before == write_before else
+                               [a for a in sends if before == poll_before or a["name"] != "session_poll"]):
                     action = dict(action, id="action")
                     self.assertTrue(passes(harmless + [read, action]), action)
                     self.assertFalse(passes([action]), action)
@@ -2435,6 +2435,27 @@ class RefusalGradersTest(unittest.TestCase):
 
     def severe_cases(self):
         return (gs for gs in self.cases() if 'violation logged through the command once' in gs)
+
+    def test_log_and_sessions_read_precede_every_report_transport(self):
+        from datetime import timezone
+        gs = next(self.severe_cases())
+        log_g = gs['violation logged through the command once']
+        read_g = gs['loads sessions procedure before reporting']
+        self.assertEqual(log_g['before'], read_g['before'])
+        log = dict(id='log', name='Bash', input={'command': 'cd "/ws" && chief-of-stuff log "Severe process violation: sync #17"'})
+        read = dict(id='read', name='Read', input={'file_path': '/plugin/skills/coordinator-sessions/SKILL.md'})
+        at = datetime.now(timezone.utc)
+        for send in (
+            dict(name='mcp__peers__send', input={'to': '7720-harness', 'text': 'report'}),
+            dict(name='SendMessage', input={'recipient': '7720-harness', 'content': 'report'}),
+            dict(name='Bash', input={'command': 'chief-of-stuff inbox --root . send --to 7720-harness --type report'}),
+            dict(name='Bash', input={'command': 'python3 /p/scripts/inbox.py --mailbox-dir /ws/mail send --to 7720-harness --type report'}),
+        ):
+            send['id'] = 'send'
+            for grader, action in ((log_g, log), (read_g, read)):
+                for calls, expected in (([action, send], True), ([send, action], False)):
+                    rec = run.RunRecord(run.Stream(tool_uses=calls), at, at, 'UTC', EVALS)
+                    self.assertEqual(run.grade(grader, rec)[0], expected, (grader['name'], calls))
 
     def test_compound_commands_quotes_and_metadata_cannot_bypass_limits(self):
         for gs in self.severe_cases():

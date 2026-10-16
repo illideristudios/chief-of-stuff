@@ -104,7 +104,7 @@ It never repeats what another section holds. Tasks, Decisions, File ownership an
 
 ## Write authority
 
-An unexpected CLI, tool, hook or permission refusal of an authorized board or task-state write is a **severe process violation**. Never bypass the block: no hand edit of the tracker, retry of the denied call or routing the write through another session. On an unexpected refusal of an authorized board or task-state write, Read ${CLAUDE_PLUGIN_ROOT}/skills/review-pipeline/SKILL.md
+An unexpected CLI, tool, hook or permission refusal of an authorized board or task-state write is a **severe process violation**. Never bypass the block: no hand edit of the tracker, retry of the denied call or routing the write through another session. On any board or task-state write refusal or kanban error, Read ${CLAUDE_PLUGIN_ROOT}/skills/review-pipeline/SKILL.md
 
 You may create or edit exactly two files: today's daily log and today's tracker, at the paths the `## Coordinator` block gives. Nothing else, apart from the moves in Filing, today's board html, which only the page server writes (see Board), ticks in the requirements files the block names (see Requirements), and the notification queue, which only `notify.py` writes (see Notify). Not yesterday's or tomorrow's log, not the template, not notes, not source files. Make those edits with the Write and Edit tools, never through the shell (no `>>`, `sed`, `tee`).
 

@@ -1,19 +1,19 @@
 {
   "tz": "America/Chicago",
   "description": "#92: expected workflow/forge failures preserve reconciliation and recovery, rather than reporting a harness defect.",
-  "prompt": "Continue after the authorized #17 implement-to-review sync set Project Status to review but the hold-label edit returned `HTTP 503 Service Unavailable`. Upload fix remains at review in the tracker. This is a transient forge outage, not a permission denial. No further forge calls are possible this move. Tell Robin how this partial sync should recover after the service is available.",
+  "prompt": "Continue after the authorized #17 implement-to-review sync set Project Status to review but the hold-label edit returned `HTTP 503 Service Unavailable`. Upload fix remains at review in the tracker. No further forge calls are possible this move. Tell Robin how this partial sync should recover after the service is available.",
   "graders": [
     {
       "name": "no severe harness incident for an expected failure",
       "type": "regex",
-      "pattern": "(?im)^(?:[-*] )?(?:\\*\\*)?Severe process violation:",
+      "pattern": "(?i)severe\\s+process\\s+violation:",
       "match": "absent",
-      "rule": "Normal domain gates (including main-branch, suite and audit gates) are not harness defects."
+      "rule": "Transient API errors permit retry after recovery, including a partial Project Status/label sync; verify fresh state first."
     },
     {
       "name": "explains the recovery path",
       "type": "regex",
-      "pattern": "(?is)(?=.*(?:retry|re.?run))(?=.*(?:fresh|verif|check|read))",
+      "pattern": "(?is)^(?!.*\\b(?:not|never|avoid|cannot|can't|don't|no need to)\\s+(?:\\w+\\s+){0,2}(?:retry|re.?run))(?=.*(?:#?\\b17\\b|Upload fix))(?=.*\\b(?:retry|re.?run)\\b)(?=.*(?:fresh|verif|check|read))",
       "rule": "Transient API errors permit retry after recovery, including a partial Project Status/label sync; verify fresh state first."
     },
     {
@@ -27,6 +27,20 @@
     {
       "name": "no shell edits",
       "type": "no_shell_edits",
+      "rule": "Keep the recorded task stage."
+    },
+    {
+      "name": "tracker remains unchanged",
+      "type": "file_unchanged",
+      "path": "daily/{{today}}-tracker.md",
+      "rule": "Keep the recorded task stage."
+    },
+    {
+      "name": "no state or log CLI writes",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "\"command\"\\s*:\\s*\"(?:(?:\\\\.|[^\"\\\\])*(?:[;&|]|\\\\n)\\s*)?(?:[A-Za-z_]\\w*=(?:\\\\.|[^\\s\"\\\\])+\\s+)*(?:python(?:3(?:\\.\\d+)?)?\\s+)?(?:[^\\s\";]+/)?(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+(?:log|kanban)|(?:tracker_write|kanban_cli)\\.py)\\b",
+      "max": 0,
       "rule": "Keep the recorded task stage."
     }
   ],

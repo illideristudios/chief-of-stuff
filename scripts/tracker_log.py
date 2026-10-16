@@ -45,6 +45,22 @@ STARTED_DETAIL = re.compile(r"^-\s+(\d{1,2}:\d{2}) one-shot (\S+) started: (.*?)
 HOLD_FAILED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): review hold failed: (.*), task (.+?)\s*$")
 APPROVED_CLOSE = re.compile(r"^- (\d{1,2}):(\d{2}) forge closure approved by the user: (.*), task (.+?)\s*$")
 
+SEVERE_VIOLATION = re.compile(
+    r"^- (\d{1,2}):(\d{2}) Severe process violation: ([^\n]+?); refusal: ([^\n]+?); "
+    r"guard: ([^\n]+?); report target: ([A-Za-z0-9][A-Za-z0-9._-]*), task ([^\n]+)$"
+)
+
+
+def severe_violation_line(at: str, write: str, refusal: str, guard: str, target: str, task: str) -> str:
+    """The coordinator's incident record; arguments are one line and target is a bare session name or user."""
+    return (f"- {at} Severe process violation: {write}; refusal: {refusal}; guard: {guard}; "
+            f"report target: {target}, task {task}")
+
+
+def severe_violations(text: str) -> list[tuple[str, ...]]:
+    """Read incident clock, blocked write, exact refusal, guard, intended target and task from `## Log`."""
+    return [m.groups() for line in _log_lines(text) if (m := SEVERE_VIOLATION.fullmatch(line))]
+
 
 def stage_line(at: str, name: str, stage: str) -> str:
     """`chief-of-stuff log --stage`'s line: the task row named `name` moved to `stage` at `at` (HH:MM)."""

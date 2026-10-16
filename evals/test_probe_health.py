@@ -209,8 +209,8 @@ FORMS = {
 class SettingsCheckTest(unittest.TestCase):
     """#47: `health` loads the file the `Settings:` line names through the settings loader.
 
-    The blocks stay as small as the ones above: health reads `Settings:` and `Health:` and asks the
-    block for nothing else.
+    The blocks stay as small as the ones above: health reads `Settings:`, `Harness defects:` and
+    `Health:`. An invalid optional Harness defects destination prints a failure and adds one to the exit code.
     """
 
     def run_health(self, block: str, toml: str | bytes | None = None, *, text: str | None = None, setup=None) -> tuple[int, list[str], str]:
