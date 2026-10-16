@@ -432,10 +432,12 @@ def _task_directives(root: Path, row: Task, skills: str, issue: Any) -> list[str
 def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
             coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
             one_shot: bool = False, *, workflow: Workflow | None = None,
-            rules: tuple[str, ...] | None = None, stages: dict[str, Stage] | None = None) -> str:
+            rules: tuple[str, ...] | None = None, stages: dict[str, Stage] | None = None,
+            require_green_tests: bool | None = None) -> str:
     """Compose a tracker assignment using preloaded policy, or load missing workflow/rules and stage defaults.
 
-    Pass stages with preloaded workflow/rules to include stage skills without rereading settings.
+    Pass stages and require_green_tests with preloaded workflow/rules to preserve the same
+    settings snapshot without rereading it; omitted green-test policy defaults to disabled.
     Invalid data, settings or launch conditions raise RefusedError.
     """
     cfg = config(root)
@@ -449,6 +451,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         workflow = settings.workflow if workflow is None else workflow
         rules = settings.workers.rules if rules is None else rules
         stages = settings.stages if stages is None else stages
+        if require_green_tests is None:
+            require_green_tests = settings.workers.require_green_tests
     rules_header = standing_rules(rules)
     stage = (stages or {}).get(row.stage.strip())
     skills = skills_line(stage.skills) if stage else ""
@@ -528,7 +532,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             *(["Workspace [workers] require_green_tests is enabled: the launcher holds done as human_review "
                "unless all four counts are reported with passed > 0 and failed, skipped and xfailed all zero. "
                "Completed runs still report status: done with observed counts; the launcher applies this gate."]
-              if settings.workers.require_green_tests else []),
+              if require_green_tests else []),
             "Use status: human_review if unfinished, including when you made partial changes. State the blocker and the partial changes plainly.",
             ("Use status: relaunch only when the task's premise moved under you before you changed anything, such as its "
              "base or target PR merged or was replaced, and a fresh run from current main would do the task as written. "
