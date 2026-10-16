@@ -1,0 +1,22 @@
+{
+  "tz": "America/Chicago",
+  "peers": "sessions.json",
+  "description": "Resume in a workspace with a Settings line and no Health targets. The file has invalid [workers] mode = \"oneshot\". Health must run and the final reply must name workers.mode; a generic invalid-settings warning or the bad value alone does not pass (#285).",
+  "prompt": "resume",
+  "graders": [
+    {
+      "name": "health was run",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "\"command\": \"(?:[^\"\\\\]|\\\\.)*?(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+health\\b|probe_health\\.py)",
+      "min": 1
+    },
+    {
+      "name": "reply names the bad setting",
+      "type": "regex",
+      "pattern": "(?i)workers[^\\n]{0,20}mode|mode[^\\n]{0,30}workers"
+    }
+  ],
+  "max_turns": 20,
+  "timeout_seconds": 300
+}

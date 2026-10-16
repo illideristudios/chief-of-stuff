@@ -414,6 +414,16 @@ class CaseLintTest(unittest.TestCase):
                       "The settings file `chief-of-stuff.toml` did not load: `oneshot` is not a value it takes."):
             self.assertNotRegex(reply, named["pattern"])
 
+    def test_resume_bad_setting_uses_the_pinned_open_day_graders(self) -> None:
+        resume = spec(EVALS / "cases" / "resume-names-a-bad-setting")
+        opened = spec(EVALS / "cases" / "open-day-names-a-bad-setting")
+        self.assertEqual(resume["prompt"], "resume")
+        self.assertEqual(resume["graders"], opened["graders"])
+        fixture = EVALS / "cases" / "resume-names-a-bad-setting" / "fixture"
+        self.assertEqual(settings_path((fixture / "CLAUDE.md").read_text()), "chief-of-stuff.toml")
+        with self.assertRaisesRegex(ValueError, r"\[workers\] mode"):
+            load_settings(fixture, "chief-of-stuff.toml")
+
     def assert_names_codex_as_missing(self, named: dict) -> None:
         """#48: "`health` names it as missing". `codex` and a word for missing share a clause of one line, in either
         order, with no other runtime's name between them; a reply about codex, or about claude being missing, is not one,

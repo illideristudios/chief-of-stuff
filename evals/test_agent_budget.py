@@ -762,6 +762,13 @@ class AgentBudgetTest(unittest.TestCase):
     def test_browser_safety_keeps_asking_to_open_once(self):
         self.assertEqual(sections(self.text)["Browser safety"].count("or ask to open it"), 1)
 
+    def test_resume_reply_names_invalid_settings_as_open_day_does(self):
+        for name in ("Open the day", "Resume"):
+            reply = next(line for line in sections(self.text)[name].splitlines()
+                         if "Reply:" in line or line.startswith("10. Reply"))
+            with self.subTest(section=name):
+                self.assertIn("any invalid setting in the words `health` printed", reply)
+
     def test_resume_states_the_300_character_cap_and_not_a_160_fold(self):
         resume = sections(self.text)["Resume"]
         self.assertIn("at most 300 characters", resume)
