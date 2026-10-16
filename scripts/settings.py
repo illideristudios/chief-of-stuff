@@ -3,7 +3,7 @@
 
 Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". Notification, lane, budget, and Kanban settings
-live here, and so do the suggested models and their rotations (#111).
+live here, along with suggested models and their rotations (#111) and stage launch defaults (#121).
 
 No `Settings:` line, no file, or no `[notify]` section is notify off, and nothing else changes. A value
 that is there and cannot be read is refused: a guessed day-open time is a notification at the wrong hour.
@@ -65,6 +65,13 @@ class Lane:
 
 
 @dataclass(frozen=True)
+class Stage:
+    """Launch defaults for a tracker stage; an explicit worker choice takes precedence."""
+    agent: str | None = None
+    skills: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class GitHubProject:
     owner: str
     number: int
@@ -89,6 +96,7 @@ class Workers:
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
+    require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
 
 
 @dataclass(frozen=True)
@@ -183,6 +191,35 @@ class Settings:
     graph: Graph | None = None
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
     repos: dict[str, str] = field(default_factory=dict)
+    stages: dict[str, Stage] = field(default_factory=dict)
+
+
+def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
+    if not isinstance(table, dict):
+        raise SettingsError("[stages] must be a table of stage launch defaults")
+    known = {stage for lane in lanes.values() for stage in lane.stages}
+    if kanban is not None:
+        known.update(kanban.stage_map)
+        known.update(kanban.terminal_stages)
+    stages = {}
+    for name, entry in table.items():
+        where = f"[stages.{name}]"
+        if name not in known:
+            raise SettingsError(f"{where}: no lane or kanban map names this stage")
+        if not isinstance(entry, dict) or set(entry) - {"agent", "skills"}:
+            raise SettingsError(f"{where}: a table with only agent and/or skills")
+        agent = entry.get("agent")
+        if "agent" in entry and not (isinstance(agent, str) and WORKER_NAME.fullmatch(agent)):
+            raise SettingsError(f"{where}: agent must be an agent profile name")
+        skills = entry.get("skills", [])
+        if (not isinstance(skills, list)
+                or any(not isinstance(s, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]*", s)
+                       for s in skills)):
+            raise SettingsError(f"{where}: skills must be a list of skill names")
+        if len(set(skills)) != len(skills):
+            raise SettingsError(f"{where}: a skill appears twice")
+        stages[name] = Stage(agent, tuple(skills))
+    return stages
 
 
 def _entry(where: str, text) -> ModelEntry:
@@ -247,6 +284,9 @@ def _workers(table) -> Workers:
     cap = table.get("max_concurrency")
     if cap is not None and (type(cap) is not int or cap < 1):
         raise SettingsError("[workers] max_concurrency must be a positive whole number")
+    green = table.get("require_green_tests", False)
+    if type(green) is not bool:
+        raise SettingsError("[workers] require_green_tests must be a boolean")
     if "claude_profile" in table:
         raise SettingsError("[workers] claude_profile is renamed claude_as_profile")
     profile = table.get("claude_as_profile", "")
@@ -254,7 +294,7 @@ def _workers(table) -> Workers:
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile)
+                   claude_as_profile=profile, require_green_tests=green)
 
 
 def _repos(table) -> dict[str, str]:
@@ -456,6 +496,7 @@ def load(root: Path, settings_path: str | None) -> Settings:
         raise SettingsError(f"{settings_path}: [lanes] is not a table")
     lanes = {name: _lane(name, t) for name, t in lanes.items()}
     kanban = _kanban(data["kanban"]) if "kanban" in data else None
+    stages = _stages(data["stages"], lanes, kanban) if "stages" in data else {}
     workflow = _workflow(data["workflow"]) if "workflow" in data else Workflow()
     workers = _workers(data["workers"]) if "workers" in data else Workers()
     models = _models(data["models"]) if "models" in data else {}
@@ -468,11 +509,11 @@ def load(root: Path, settings_path: str | None) -> Settings:
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:

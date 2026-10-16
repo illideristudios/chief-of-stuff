@@ -406,16 +406,17 @@ class CommandTest(unittest.TestCase):
 
     def test_exit_zero_without_structured_result_requires_review(self):
         with tempfile.TemporaryDirectory() as tmp:
-            status, reason, changes = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
+            status, reason, changes, counts = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
         self.assertEqual(status, "human_review")
         self.assertIn("did not write", reason)
         self.assertEqual(changes, "")
+        self.assertEqual(counts, dict.fromkeys(("passed", "failed", "skipped", "xfailed")))
 
     def test_an_undecodable_result_requires_review_with_its_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('status: done\nreason: "costs \\$5"\nchanges: "a.py"\n')
-            status, reason, _ = one_shot.worker_result(path, 0)
+            status, reason, _, _ = one_shot.worker_result(path, 0)
         self.assertEqual(status, "human_review")
         self.assertIn("costs", reason)
 
@@ -424,7 +425,15 @@ class CommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('{"status": "done", "reason": "fixed: the \\"cap\\"", "changes": "a.py, b.py"}\n')
-            self.assertEqual(one_shot.worker_result(path, 0), ("done", 'fixed: the "cap"', "a.py, b.py"))
+            self.assertEqual(one_shot.worker_result(path, 0), (
+                "done", 'fixed: the "cap"', "a.py, b.py", dict.fromkeys(("passed", "failed", "skipped", "xfailed"))))
+
+    def test_toon_result_carries_observed_suite_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "worker-result.toon"
+            counts = {"passed": 23, "failed": 0, "skipped": 2, "xfailed": 11}
+            path.write_text(toon_encode({"status": "done", "reason": "finished", "changes": "tested", **counts}))
+            self.assertEqual(one_shot.worker_result(path, 0), ("done", "finished", "tested", counts))
 
 
 class CodexAddDirArgsTest(unittest.TestCase):
