@@ -727,6 +727,26 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(start.call_args.args[0].agent, "specialist")
         self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
 
+    def test_review_stage_configuration_reaches_engine_worker(self):
+        for declared in (False, True):
+            with self.subTest(declared=declared):
+                (self.root / "CLAUDE.md").write_text(
+                    "## Coordinator\n- Settings: `chief-of-stuff.toml`\n"
+                    + ("- Agent: specialist task\n" if declared else ""))
+                (self.root / "chief-of-stuff.toml").write_text(
+                    '[lanes.code]\nstages = ["review"]\n'
+                    '[stages.review]\nagent = "reviewer"\nskills = ["security-review"]\n')
+                self.p.personas["critic"] = SimpleNamespace(
+                    name="critic", role="reviews", rules=(), agent="specialist", model="example", effort="")
+                with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+                     mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+                     mock.patch.object(worker.process_status, "identity", return_value="start"):
+                    self.launch("review", attempt=1 + int(declared))
+                request = start.call_args.args[0]
+                self.assertEqual(request.agent, "specialist" if declared else "reviewer")
+                self.assertIn("Skills: load and follow security-review", request.prompt)
+                self.assertEqual(build.call_args.args[5], "specialist" if declared else "")
+
     def test_undeclared_agent_is_omitted_so_default_agent_runs(self):
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Agent: implementer task\n")
