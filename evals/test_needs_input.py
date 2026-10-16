@@ -14,6 +14,7 @@ import flow_chart as fc
 import issue_page as ip
 import render_board as rb
 import settings
+import task_forge
 import tracker_log as tl
 import workers_page as wp
 from tracker import parse_tracker
@@ -73,19 +74,54 @@ class NeedsInputTest(unittest.TestCase):
                 self.assertIn('>NEEDS INPUT</span>', html)
 
     def test_a_nameless_task_with_log_moves_still_names_its_person_wait(self):
-        tracker = TODAY_TRACKER.replace("| Cache warmup |", "| |")
+        tracker = TODAY_TRACKER.replace("| Cache warmup |", "| |").replace("stage: Cache warmup", "stage: Warm the pool")
+        tasks = parse_tracker(tracker).tasks
+        held = task_forge.held_names(task_forge.hold_causes(tasks, None, bs.EMPTY, LANES, frozenset()))
+        rows = fc.build(tl.moves(tracker, TODAY, CT), tasks, LANES, held, {}, NOW)
+        status, row = next((s, r) for s, r in rows if r.ref == '#111')
+        self.assertEqual((status, row.name, row.note), ('needs input', 'Warm the pool', 'needs input · Robin'))
+        self.assertTrue(any(s.kind == 'hold' for s in row.segments))
         html = ip.render(111, [(TODAY, tracker)], bs.EMPTY, NOW, LANES)
         self.assertIn('<span class="chip needs-input">NEEDS INPUT</span>', html)
+        self.assertIn('<h1>Warm the pool</h1>', html)
+        self.assertIn('<title>#111 Warm the pool</title>', html)
+        self.assertIn('needs input · Robin', html)
 
     def test_a_person_wait_in_any_current_task_sets_the_issue_status(self):
-        tracker = TODAY_TRACKER.replace('#111', '#109').replace('#107', '#109')
+        tracker = TODAY_TRACKER.replace('#111', '#109').replace('#107', '#109').replace('- 01:40 stage: Cache warmup → triage\n', '')
+        tasks = parse_tracker(tracker).tasks
+        held = task_forge.held_names(task_forge.hold_causes(tasks, None, bs.EMPTY, LANES, frozenset()))
+        rows = fc.build(tl.moves(tracker, TODAY, CT), tasks, LANES, held, {}, NOW)
+        self.assertEqual(next(s for s, r in rows if r.ref == '#109'), 'running')
         html = ip.render(109, [(TODAY, tracker)], bs.EMPTY, NOW, LANES)
         self.assertIn('>NEEDS INPUT</span>', html)
 
     def test_a_person_wait_does_not_override_a_closed_issue(self):
-        sources = replace(bs.EMPTY, issues={'#111': bs.Issue('#111', '', 'Cache', 'closed', (), closed_at=NOW)})
-        html = ip.render(111, [(TODAY, TODAY_TRACKER)], sources, NOW, LANES)
-        self.assertIn('>CLOSED</span>', html)
+        for named in (True, False):
+            for logged in (True, False):
+                for closed_at in (NOW, None):
+                    with self.subTest(named=named, logged=logged, closed_at=closed_at):
+                        tracker = TODAY_TRACKER if logged else TODAY_TRACKER.split('## Log')[0]
+                        if not named:
+                            tracker = tracker.replace('| Cache warmup |', '| |').replace('stage: Cache warmup', 'stage: Warm the pool')
+                        sources = replace(bs.EMPTY, issues={'#111': bs.Issue('#111', '', 'Cache', 'closed', (), closed_at=closed_at)})
+                        html = ip.render(111, [(TODAY, tracker)], sources, NOW, LANES)
+                        self.assertIn('>CLOSED</span>', html)
+                        self.assertIn('Nothing happens next: the issue is closed.', html)
+
+    def test_a_person_wait_does_not_override_a_merged_change(self):
+        for named in (True, False):
+            for logged in (True, False):
+                for merged_at in (NOW, None):
+                    with self.subTest(named=named, logged=logged, merged_at=merged_at):
+                        tracker = TODAY_TRACKER if logged else TODAY_TRACKER.split('## Log')[0]
+                        if not named:
+                            tracker = tracker.replace('| Cache warmup |', '| |').replace('stage: Cache warmup', 'stage: Warm the pool')
+                        change = bs.Change('!58', '', 'Cache', 'merged', False, None, False, 0, merged_at, 'main', (), ('#111',))
+                        sources = replace(bs.EMPTY, changes={'!58': change})
+                        html = ip.render(111, [(TODAY, tracker)], sources, NOW, LANES)
+                        self.assertIn('>MERGED</span>', html)
+                        self.assertIn('Nothing happens next: the task is done.', html)
 
     def test_decision_context_names_a_person_wait_even_without_a_hold_label(self):
         ctx = dp.Context(NOW, tasks=tuple(parse_tracker(TODAY_TRACKER).tasks))
@@ -107,7 +143,23 @@ class NeedsInputTest(unittest.TestCase):
             with self.subTest(issue=issue):
                 ctx = dp.Context(NOW, tasks=(replace(wait, issue=issue, item='Related to #111'),),
                                  sources=replace(bs.EMPTY, home=GitHubBacklog('o/app')))
-                self.assertNotIn('needs input', ctx.where('#111'))
+                self.assertEqual(ctx.where('#111'), '')
+
+    def test_decision_waits_keep_change_and_issue_refs_distinct(self):
+        wait = next(t for t in parse_tracker(TODAY_TRACKER).tasks if t.issue == '#111')
+        for issue, item in (('!58', 'Review cache'), ('', 'Review !58'), ('workflow', 'Review !58')):
+            with self.subTest(issue=issue, item=item):
+                ctx = dp.Context(NOW, tasks=(replace(wait, issue=issue, item=item),))
+                self.assertEqual(ctx.where('!58'), 'triage · needs input')
+                self.assertEqual(ctx.where('#58'), '')
+
+    def test_decision_waits_keep_foreign_pull_requests_distinct(self):
+        from backlog_ref import GitHubBacklog
+        wait = next(t for t in parse_tracker(TODAY_TRACKER).tasks if t.issue == '#111')
+        ctx = dp.Context(NOW, tasks=(replace(wait, issue='https://github.com/other/repo/pull/58'),),
+                         sources=replace(bs.EMPTY, home=GitHubBacklog('o/app')))
+        self.assertEqual(ctx.where('#58'), '')
+        self.assertEqual(ctx.where('other/repo#58'), 'triage · needs input')
 
     def test_decision_waits_ignore_standing_placeholders(self):
         wait = next(t for t in parse_tracker(TODAY_TRACKER).tasks if t.issue == '#111')
