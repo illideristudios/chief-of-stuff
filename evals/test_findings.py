@@ -47,6 +47,7 @@ FINDINGS = {
     al.LaneFault: (findings.LANE, al.LaneFault("Build it", "lane review but no stage")),
     al.KanbanFault: (findings.KANBAN, al.KanbanFault("Build it", "expected 03, found 00")),
     al.OverBudget: (findings.OVER, al.OverBudget("Build it", timedelta(hours=3), "S", timedelta(hours=1))),
+    al.StackFault: (findings.STACK, al.StackFault("worker-vm: worktree trees/worker01 has no live owner")),
 }
 
 
@@ -83,7 +84,7 @@ class VocabularyTest(unittest.TestCase):
         # `over budget:` and `unclaimed work:` are printed and not forwarded; `overdue:` and `waiting:` are
         # forwarded and never printed. Closing either gap is a behaviour change, and changes this test with it.
         words = {word for word, _ in printed()}
-        self.assertEqual(findings.UNWATCHED, (findings.OVER, findings.UNCLAIMED))
+        self.assertEqual(findings.UNWATCHED, (findings.OVER, findings.UNCLAIMED, findings.STACK))
         self.assertEqual(set(findings.WATCHED) - words, {"overdue:", "waiting:"})
 
 

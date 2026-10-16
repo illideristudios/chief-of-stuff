@@ -196,4 +196,4 @@ class WorkerTeardownTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.configure(teardown=self.cleanup_command(), teardown_list=command)
                 lines = audit_tasks.audit(self.root, "2026-09-18", check_issues=False).lines
-                self.assertTrue(any("stack discovery failed:" in line for line in lines), lines)
+                self.assertTrue(any("stack: discovery failed:" in line for line in lines), lines)
