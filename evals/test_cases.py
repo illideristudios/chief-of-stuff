@@ -100,6 +100,20 @@ def fixture_files(case: Path, suffix: str) -> list[Path]:
 
 
 class CaseLintTest(unittest.TestCase):
+    def test_completed_stage_review_fixture_requires_review_after_and_blocks_all_launch_forms(self):
+        case = EVALS / "cases/completed-stage-needs-human-review"
+        report = (case / "fixture/.chief-of-stuff/reports/cache-design.toon").read_text()
+        tracker = (case / "fixture/daily/{{today}}-tracker.md").read_text()
+        self.assertIn("status: done", report)
+        self.assertNotIn("human_review", report)
+        self.assertNotIn("HUMAN REVIEW NEEDED", tracker)
+        grader = next(g for g in spec(case)["graders"] if g["type"] == "tool_used")
+        for command in ("chief-of-stuff worker --dry-run", "chief-of-stuff worker", "chief_of_stuff.py --dry-run worker",
+                        "python3 scripts/spawn_session.py --dry-run", "chief-of-stuff tick", "python3 scripts/flow.py --root ."):
+            with self.subTest(command=command):
+                self.assertTrue(grader_hits(grader, "Bash", command=command))
+        self.assertFalse(grader_hits(grader, "Bash", command="chief-of-stuff result --task Cache"))
+
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)
 

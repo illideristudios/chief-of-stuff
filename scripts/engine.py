@@ -26,7 +26,7 @@ import store_access
 import supervisor
 import worker
 from forge_port import ForgeError
-from workspace import settings_path, worktrees_dir
+from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 
@@ -73,7 +73,7 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, review_stages: frozenset[str] = frozenset()) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -92,24 +92,39 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     and board.stage_map[observed] == board.stage_map[stored]):
                 row["stage"] = stored
     store.sync_from_forge(snapshots)
+    now = clock()
+    at = now.isoformat()
     # Only an observed removal of a successfully applied hold releases this completed attempt.
     # Missing hold data is not approval, and an approval never covers the next attempt.
     for row in snapshots:
         key = row["issue_key"]
         data = _resume(store, key)
         pending = data.get("pending_review")
-        if pending and row.get("human_review") is False:
-            data["reviewed_stages"] = [*data.get("reviewed_stages", []), pending]
-            data.pop("pending_review")
+        if not pending:
+            continue
+        history = store.segments(key)
+        latest = max(history, key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
+        current = (latest is not None and latest.ended_at and latest.outcome == "done"
+                   and latest.stage == row.get("stage")
+                   and pending == reconcile.review_gate(latest.stage, latest.attempt))
+        approved = (row.get("forge_state") == "open" and current and data.get("pending_review_applied")
+                    and row.get("human_review") is False)
+        if row.get("forge_state") == "closed" or not current or approved:
+            if approved:
+                data["reviewed_stages"] = [*data.get("reviewed_stages", []), pending]
+                store.add_log(key, f"approved: {pending}", at)
+            data.pop("pending_review", None)
+            data.pop("pending_review_applied", None)
             data.pop("interrupt", None)
+            store.set_resume(key, data)
+        elif row.get("human_review") is True:
+            data["pending_review_applied"] = True
             store.set_resume(key, data)
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
 
-    now = clock()
-    at = now.isoformat()
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         pending = _resume(store, item.issue_key).get("pending_stage")
@@ -128,8 +143,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     store.add_log(item.issue_key, message, at)
 
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
-    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    review_stages = settings.load(root, settings_path(text)).review_stages()
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              **_planning_inputs(store, items, review_stages))
@@ -157,12 +170,18 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
-                if isinstance(action, reconcile.Ask) and action.gate.startswith("review_after:"):
-                    error = forge.add_human_hold(int(key.rpartition("#")[2]))
-                    if error:
-                        raise ForgeError(error)
-                    store.set_human_review(key, True)
+                if isinstance(action, reconcile.Ask) and action.review_stage is not None:
+                    # Persist intent before a remote write that may apply then fail its verification read.
+                    if data.get("pending_review") != action.gate:
+                        data.pop("pending_review_applied", None)
                     data["pending_review"] = action.gate
+                    store.set_resume(key, data)
+                    if not by_key[key].human_review:
+                        error = forge.add_human_hold(int(key.rpartition("#")[2]))
+                        if error:
+                            raise ForgeError(error)
+                    store.set_human_review(key, True)
+                    data["pending_review_applied"] = True
                 record = {"kind": type(action).__name__, "reason": action.reason}
                 if isinstance(action, reconcile.Ask):
                     record["gate"] = action.gate
@@ -227,7 +246,8 @@ def main(argv: list[str] | None = None) -> int:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, max_concurrency=config.workers.max_concurrency,
+                                 review_stages=config.review_stages())
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

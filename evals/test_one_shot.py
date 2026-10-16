@@ -15,7 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from types import SimpleNamespace
@@ -2042,6 +2042,24 @@ class RunTest(unittest.TestCase):
         self.assertIn("changed parser", body)
         self.assertIn("partial.txt", body)
         self.assertIn("| Security audit | Security audit | Robin | waiting |", self.tracker.read_text())
+
+    def test_completed_review_stage_exits_successfully_and_logs_completion(self):
+        import tracker_log
+        (self.root / "CLAUDE.md").write_text(CLAUDE + '- Settings: `chief-of-stuff.toml`\n')
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[lanes.build]\nstages = ["implement", "review"]\n[stages.implement]\nreview_after = true\n')
+        self.tracker.write_text(TRACKER.replace(
+            "| item | owner | state | since | due | checklist |", "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |"
+        ).replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|---|---|").replace(
+            "| Security audit | unassigned | open | 09:00 | | Inspect upload handler |",
+            "| Audit | Security audit | unassigned | open | 09:00 | | M | build | implement | | Inspect upload handler |"))
+        fake = self._fake('status: done\nreason: completed\nchanges: artifact\n', write_partial=False)
+        self.assertEqual(self._run(fake), 0)
+        report = toon_decode((self.root / dispatch_prompt.REPORTS_DIR / "worker.toon").read_text())
+        self.assertEqual((report["status"], report["review_stage"]), ("done", "implement"))
+        moves = tracker_log.moves(self.tracker.read_text(), date(2026, 9, 18), ZoneInfo("America/Chicago"))
+        self.assertEqual(moves[-1].stage, "pr")
+        self.assertEqual(tracker_log.ENDED.match(moves[-1].line)[4], tracker_log.COMPLETED)
 
     def test_completed_marked_stage_holds_without_advancing_and_keeps_the_artifact(self):
         for stage, entry, held in (("plan", "", True), ("plan", "review_after = false", False),

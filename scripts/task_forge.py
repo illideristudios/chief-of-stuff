@@ -13,24 +13,30 @@ import board_sources
 import kanban as kanban_tool
 from settings import Kanban
 from tracker import Task, issue_key, launcher
-from tracker_log import Move
+from tracker_log import Move, review_completions
+
+
+STAGE_REVIEW = "stage_review"
+REVIEW_LABEL = "needs your review"
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
-               home, lane, review_stages: Container[str] = frozenset({"plan"})) -> str:
-    """What holds the task at `stage` (its own cell when None): a completed stage's review, a pending decision on
-    its issue (`pending_refs`, keyed under `home`), a [kanban] hold stage, or the person a waiting task waits on.
-    The BUILD flag, NEEDS INPUT tile and Flow note share this judgement (#228). Done tasks are never held; the
-    lane's last stage also ends a task unless its completed result still needs review (#240, #130)."""
+               home, lane, review_stages: Container[str] = frozenset(), completed_review: bool = False) -> str:
+    """Return "" for done or forge-advanced tasks; "decision" for pending_refs; STAGE_REVIEW for a completed
+    waiting stage in review_stages; stage for a kanban gate; task.shown_owner for a human wait, else "".
+    completed_review is launcher-confirmed completion evidence, never inferred from a waiting row.
+    A terminal stage ends the task unless its own completed result still requires review (#130, #240).
+    """
     stage = task.stage.strip() if stage is None else stage
-    if task.kind == "done":
-        return ""
-    if task.kind == "waiting" and stage in review_stages and task.shown_owner and task.shown_owner not in workers:
-        return "needs your review"
-    if lane and lane.stages and stage == lane.stages[-1]:
+    if task.kind == "done" or stage != task.stage.strip():
         return ""
     if task.issue.strip() and issue_key(task.issue, home) in pending_refs:
         return "decision"
+    if (completed_review and task.kind == "waiting" and stage in review_stages
+            and task.shown_owner and task.shown_owner not in workers):
+        return STAGE_REVIEW
+    if lane and lane.stages and stage == lane.stages[-1]:
+        return ""
     if kanban is not None and kanban.holds(stage):
         return stage
     if task.kind == "waiting" and task.shown_owner and task.shown_owner not in workers:
@@ -62,14 +68,17 @@ def effective_stage(task: Task, sources: board_sources.Sources, lanes: dict) -> 
 
 
 def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources.Sources, lanes: dict,
-                pending_refs: Container[str], review_stages: Container[str] = frozenset({"plan"})) -> dict[Task, str]:
+                pending_refs: Container[str], review_stages: Container[str] = frozenset(), *, moves: list[Move] = ()) -> dict[Task, str]:
     """Each held task to its `hold_cause` at its effective stage, decided once: the BUILD flag, the NEEDS INPUT tile and
-    the Flow note all read it (#228)."""
+    the Flow note all read it; review_stages require completed launcher moves (#228, #130)."""
     workers = worker_names(sources)
+    completed = review_completions(moves)
     return {t: cause for t in tasks
             if (cause := hold_cause(t, kanban, effective_stage(t, sources, lanes), workers=workers,
                                     pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip()),
-                                    review_stages=review_stages))}
+                                    review_stages=review_stages,
+                                    completed_review=any(completed.get(n.strip().casefold(), (None,))[0] == t.stage.strip()
+                                                         for n in (t.name, t.item))))}
 
 
 def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[str, datetime | None], home,
@@ -77,8 +86,8 @@ def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[s
     """When each of the `held` tasks' holds began (#229): a decision when the first decision holding its issue was asked
     (`pending_refs`, decision_page.held_refs); a gate stage at the task's last move into it, the moves read as flow_chart
     reads them (by name or item in any case, a launcher line only until the task's first `stage:` move); a person's
-    wait, which no line records, None. A move may name an `earlier` tracker's row: it is today's task of that row's
-    name, or, renamed, of its issue."""
+    wait, which no line records, None. STAGE_REVIEW begins at the launcher-confirmed completion. A move may name an
+    `earlier` tracker's row: it is today's task of that row's name, or, renamed, of its issue."""
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
     by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip()}
 
@@ -96,7 +105,10 @@ def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[s
             continue
         staged |= set() if m.launch else {t}
         into[t, m.stage] = m.at
-    return {t: pending_refs.get(issue_key(t.issue, home)) if cause == "decision" else into.get((t, cause))
+    completed = {find[name]: at for name, (stage, at) in review_completions(moves).items()
+                 if name in find and find[name].stage.strip() == stage}
+    return {t: pending_refs.get(issue_key(t.issue, home)) if cause == "decision" else
+            completed.get(t) if cause == STAGE_REVIEW else into.get((t, cause))
             for t, cause in held.items()}
 
 
@@ -111,7 +123,8 @@ def went_held(held: dict[Task, str], began: dict[Task, datetime | None], since: 
 
 def held_names(held: dict[Task, str]) -> dict[str, str]:
     """`hold_causes` by task name, as flow_chart.build reads it. A nameless task has no name to hold it by (as forge_ends)."""
-    return {t.name.strip(): cause for t, cause in held.items() if t.name.strip()}
+    return {t.name.strip(): REVIEW_LABEL if cause == STAGE_REVIEW else cause
+            for t, cause in held.items() if t.name.strip()}
 
 
 def forge_ends(tasks: list[Task], sources: board_sources.Sources, zone: ZoneInfo) -> dict[str, tuple[datetime, str]]:

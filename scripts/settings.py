@@ -66,7 +66,7 @@ class Lane:
 
 @dataclass(frozen=True)
 class Stage:
-    """Launch defaults and the independent review after a stage completes."""
+    """Launch defaults and independent completion review; an explicit worker choice takes precedence."""
     agent: str | None = None
     skills: tuple[str, ...] = ()
     review_after: bool | None = None  # None keeps the stage default: plan requires review
@@ -207,7 +207,7 @@ class Settings:
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
     if not isinstance(table, dict):
         raise SettingsError("[stages] must be a table of stage launch defaults")
-    known = {stage for lane in lanes.values() for stage in lane.stages}
+    known = {"plan"} | {stage for lane in lanes.values() for stage in lane.stages}
     if kanban is not None:
         known.update(kanban.stage_map)
         known.update(kanban.terminal_stages)

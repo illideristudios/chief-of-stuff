@@ -286,7 +286,7 @@ def record_launch(path: Path, task: str, name: str, tree: str, runtime: str, mod
 
 
 def update_tracker(path: Path, task: str, name: str, owner: str, status: str, reason: str, changes: str,
-                   at: str, hold_error: str = "", carried: bool = False) -> None:
+                   at: str, hold_error: str = "", carried: bool = False, review_stage: str = "") -> None:
     """Set the dispatched row to waiting, or back to ready on a relaunch, and append a durable local result note.
 
     A row the midnight rollover carried over starts open under the worker (#576), not running. A failed
@@ -307,7 +307,7 @@ def update_tracker(path: Path, task: str, name: str, owner: str, status: str, re
             note = relaunch_line(at, name, task, _brief(reason))
         else:
             lines[i] = _set_owner_state(lines[i], running, f"| {owner} | waiting |", why)
-            note = ended_line(at, name, status, _brief(reason), _brief(changes))
+            note = ended_line(at, name, status, _brief(reason), _brief(changes), review_stage=review_stage)
         text = tracker_write.append_log("".join(lines), note, create=True)
         if hold_error:
             text = tracker_write.append_log(text, hold_failed_line(at, name, task, hold_error))
@@ -351,7 +351,7 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
               before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
               *, adopted: bool = False, expected_common: Path | None = None) -> dict:
-    """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
+    """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating, then review_after holds clean completions; return counts and evidence."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
     if expected_common is None:
@@ -420,18 +420,19 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             row.kind != "running" and not (carried and row.kind == "open")):
         report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
-                  "changes": summary, **counts,
+                  "changes": summary, "review_stage": "", **counts,
                   "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
         return write_report(root, cwd, report)
     if adopted:
         # #99: the launcher died before reconciling this run; the report, the Log line and any
         # review comment say so, and the tree's evidence is the only word there is.
         reason = f"the launcher died before reconciling this run; {reason}"
-    if status == "done" and settings.reviews(row.stage.strip()):
-        status, reason = "human_review", f"{row.stage.strip()} needs your review; {reason}"
+    review_stage = row.stage.strip() if status == "done" and settings.reviews(row.stage.strip()) else ""
+    if review_stage:
+        reason = f"{review_stage} needs your review; {reason}"
     ref = backlog.issue_ref(row.issue, cfg.backlog) if row and row.issue.strip() else None
     hold_error = ""
-    if status == "human_review" and ref:
+    if (status == "human_review" or review_stage) and ref:
         if settings.kanban:
             error = forge.add_human_hold(ref, cfg.backlog, settings.kanban)
             if error:
@@ -449,11 +450,11 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 errors.append(f"issue comment: {commented.error}")
     try:
         update_tracker(path, task, name, cfg.user, status, reason, log_summary,
-                       tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
+                       tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open", review_stage=review_stage)
     except (OSError, ValueError) as exc:
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
-              "reason": reason, "changes": summary, **counts, "errors": errors}
+              "reason": reason, "changes": summary, "review_stage": review_stage, **counts, "errors": errors}
     return write_report(root, cwd, report)
 
 

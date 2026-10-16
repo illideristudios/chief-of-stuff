@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 # and does not use that daily relaunch. That marker is a launcher-written Log line; a worker's reason can never carry it.
 COMPLETED = "completed; awaiting integration"
 HUMAN_REVIEW = "HUMAN REVIEW NEEDED"
+REVIEW_COMPLETED = re.compile(r"^- \d{1,2}:\d{2} one-shot \S+: completed; awaiting integration \[review_after=(\S+)\] — ")
 RELAUNCHED = ": relaunch requested for {task} — "
 RELAUNCH_STAGE = "relaunch"
 
@@ -57,10 +58,11 @@ def one_period(reason: str) -> str:
     return reason if reason.endswith(".") else reason + "."
 
 
-def ended_line(at: str, name: str, status: str, reason: str, changes: str) -> str:
+def ended_line(at: str, name: str, status: str, reason: str, changes: str, *, review_stage: str = "") -> str:
     """The launcher's line when worker `name` stops `done`, or with any other status for review. `reason` and
     `changes` come already on one line."""
     return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else HUMAN_REVIEW}"
+            f"{f' [review_after={review_stage}]' if status == 'done' and review_stage else ''}"
             f" — {one_period(reason)} Changes: {changes}.")
 
 
@@ -142,3 +144,14 @@ def moves(text: str, day: date, zone: ZoneInfo) -> list[Move]:
             stage = RELAUNCH_STAGE if m.re is RELAUNCH else "pr" if m[4].startswith("completed") else "review"
             out.append(Move(at, task_of.pop(m[3]), stage, True, line, m[3]))
     return out
+
+
+def review_completions(moves: list[Move]) -> dict[str, tuple[str, datetime]]:
+    """Latest launcher-confirmed review completion by task name; a later move or attempt invalidates it."""
+    completed = {}
+    for move in sorted(moves, key=lambda m: m.at):
+        name = move.name.strip().casefold()
+        completed.pop(name, None)
+        if move.launch and (match := REVIEW_COMPLETED.match(move.line)):
+            completed[name] = (match[1], move.at)
+    return completed

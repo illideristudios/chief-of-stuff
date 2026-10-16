@@ -73,6 +73,7 @@ class Ask:
     issue_key: str
     gate: str
     reason: str
+    review_stage: str | None = None
 
 
 @dataclass(frozen=True)
@@ -192,16 +193,21 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
     return edges[0] if len(edges) == 1 else None
 
 
+def review_gate(stage: str, attempt: int) -> str:
+    """Identity of the exact completed stage attempt requiring approval."""
+    return f"review_after:{stage}:{attempt}"
+
+
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
           decisions: Sequence[Decision], review_stages: Container[str], reviewed: Container[str]) -> Action | None:
     key = item.issue_key
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
-    if item.human_review:
-        return Wait(key, "human review")
     workflow = policies.workflow_for(issue_type)
     stage = item.stage or workflow.start
+    if item.human_review and stage not in review_stages:
+        return Wait(key, "human review")
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
         return Wait(key, "stage is outside the workflow")
@@ -212,9 +218,11 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
         return Wait(key, "segments tie at the latest start")
     if latest and latest.stage == stage and latest.outcome == "done" and stage in review_stages:
-        gate = f"review_after:{stage}:{latest.attempt}"
+        gate = review_gate(stage, latest.attempt)
         if gate not in reviewed:
-            return Ask(key, gate, f"{stage} needs your review")
+            return Ask(key, gate, f"{stage} needs your review", review_stage=stage)
+    if item.human_review:
+        return Wait(key, "human review")
     return_edge = None
     if latest and latest.stage == "review":
         work = tuple(s for s in completed if s.stage not in ("review", "merge"))

@@ -12,6 +12,7 @@ import hashlib
 import html
 import re
 import sys
+from collections.abc import Container
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from pathlib import Path
@@ -21,7 +22,7 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
-from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, task_changes, went_held, worker_names  # noqa: E402
+from task_forge import REVIEW_LABEL, STAGE_REVIEW, drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, task_changes, went_held, worker_names  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
@@ -157,9 +158,12 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
 
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
-                  held: dict[Task, str] | None = None, review_stages: frozenset[str] = frozenset({"plan"})) -> list[columns.Column]:
-    """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
-    a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
+                  held: dict[Task, str] | None = None, review_stages: Container[str] = frozenset()) -> list[columns.Column]:
+    """Build columns in lane order, with completed review cards and their gate columns first.
+
+    Sources add change marks and today's merges. `held` from hold_causes uses REVIEW_LABEL for completed
+    review_stages and NEEDS INPUT for other holds. Review columns carry REVIEW_LABEL and kind="gate".
+    """
     lanes = lanes or {}
     held = hold_causes(tasks, kanban, sources, lanes, frozenset(), review_stages) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
@@ -188,26 +192,24 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
-                            flag=columns.Mark("needs your review" if held[task] == "needs your review" else "NEEDS INPUT", "hold") if task in held else None,
+                            flag=columns.Mark(REVIEW_LABEL if held[task] == STAGE_REVIEW else "NEEDS INPUT", "hold") if task in held else None,
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
     laned = [t for t in tasks if t.lane.strip() and t.stage.strip()]
     at = {t: effective_stage(t, sources, lanes) for t in laned}
     order = list(dict.fromkeys(stage_order(lanes) + list(at.values())))
-    # No PR column: a card at `pr` draws in the stage after it, normally review.
-    into = {"pr": order[order.index("pr") + 1]} if "pr" in order[:-1] else {}
+    # Unheld PR cards draw in the next stage; a review or other hold keeps its own column.
+    into = ({"pr": order[order.index("pr") + 1]} if "pr" in order[:-1] and "pr" not in review_stages
+            and not any(t in held and at[t] == "pr" for t in laned) else {})
     order = [s for s in order if s not in into]
-    cols = [columns.Column(stage, tuple(card(t, at[t]) for t in laned if into.get(at[t], at[t]) == stage),
-                           *(("gate", "gate") if stage in gates else ())) for stage in order]
-    # Keep completed reviews visible ahead of active work, including beyond the overflow fold.
-    def needs_review(card: columns.Card) -> bool:
-        return card.flag is not None and card.flag.text == "needs your review"
-
-    cols = [replace(col, cards=tuple(sorted(col.cards, key=lambda c: not needs_review(c))),
-                    note="needs your review", kind="gate")
-            if any(needs_review(c) for c in col.cards) else col for col in cols]
-    cols.sort(key=lambda col: col.note != "needs your review")
+    groups = {stage: [t for t in laned if into.get(at[t], at[t]) == stage] for stage in order}
+    review_columns = {stage for stage, members in groups.items() if any(held.get(t) == STAGE_REVIEW for t in members)}
+    cols = [columns.Column(stage,
+                           tuple(card(t, at[t]) for t in sorted(groups[stage], key=lambda t: held.get(t) != STAGE_REVIEW)),
+                           *((REVIEW_LABEL, "gate") if stage in review_columns else
+                             ("gate", "gate") if stage in gates else ())) for stage in order]
+    cols.sort(key=lambda col: col.name not in review_columns)
     merged = merged_today(sources, now) if now else []
     if merged:
         cards = tuple(columns.Card(c.title, "merged today", tuple((i, page(i, issue_url(i))) for i in c.issues[:1]) + ((c.ref, change_href(c)),),
@@ -307,12 +309,12 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
            look_log: list[tuple[date, str]] | None = None,
-           review_stages: frozenset[str] = frozenset({"plan"})) -> str:
+           review_stages: Container[str] = frozenset()) -> str:
     """The board page, the Flow artboard's sections: header, tiles, BUILD (the stage columns), the MERGE ORDER,
     DECISIONS and WORKERS panels, and the Flow charts. `stage_log` is (day, tracker text) for the earlier days the
     Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
-    `look_log` the earlier days back to it that `stage_log` does not reach, read only for when a hold began."""
+    `look_log` the earlier days back to it that `stage_log` does not reach; review_stages marks completed review holds."""
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
     tracker = parse_tracker(tracker_text)
@@ -333,12 +335,12 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     stages = {t: effective_stage(t, sources, lanes or {}) for t in tasks}
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
-    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, review_stages)
+    flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
+                  for m in tracker_log.moves(text, day, zone)]
+    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, review_stages, moves=flow_moves)
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, review_stages)
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols)}</section>\n')
-    flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
-                  for m in tracker_log.moves(text, day, zone)]
     look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
     began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks,
                        [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks])
