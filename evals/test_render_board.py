@@ -1452,13 +1452,12 @@ Coordinator: coordinator. Board: board-7.
 class SectionOrderTest(unittest.TestCase):
     """The page's sections appear in the Flow artboard's order (#259).
 
-    Tabs, header, tiles, BUILD, the MERGE ORDER / DECISIONS / WORKERS panels, then the Flow charts (this tracker
-    has no stage history, so none; test_board_flow_design.py pins their place after the panels).
+    Tabs, header, tiles, BUILD, then the Flow charts (this tracker
+    has no stage history, so none; test_board_flow_design.py pins their place after BUILD).
     Due next, Blocked, the 24-hour day strip, Lanes and Sessions are not in the design, so none is drawn.
     """
 
-    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>",
-             '<div class="panels">']
+    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>"]
 
     def setUp(self) -> None:
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
@@ -1473,8 +1472,8 @@ class SectionOrderTest(unittest.TestCase):
         # This tracker has no stage history, so the two Flow charts are not drawn (test_board_flow_design.py pins them).
         h2, ids, sections = outline(self.html)
         self.assertEqual(h2, ["Build"])
-        self.assertEqual(ids, ["flow", "merge", "decisions", "workers"])
-        self.assertEqual(sections, 4)
+        self.assertEqual(ids, ["flow"])
+        self.assertEqual(sections, 1)
 
 
 class InlineMarksTest(unittest.TestCase):

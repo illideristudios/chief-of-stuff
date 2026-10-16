@@ -296,7 +296,9 @@ class Build(unittest.TestCase):
         # Both refs open the task page (#209): !48 names #9, so it lands there too.
         card = next(c for col in self.cols() for c in col.cards if c.name == "Cut the release")
         self.assertEqual(card.refs, (("#9", "/issues/9"), ("!48", "/issues/9")))
-        self.assertEqual(card.marks, (columns.Mark("passed", "passed"),))
+        self.assertEqual(card.marks, (columns.Mark("passed", "passed"),
+                                      columns.Mark("shares file with !42", "shared"),
+                                      columns.Mark("shares file with !50", "shared")))
 
     def test_approval_and_a_failed_pipeline_are_marks(self) -> None:
         self.assertEqual(rb.change_marks((SOURCES.changes["!52"],)),
@@ -360,6 +362,94 @@ class Build(unittest.TestCase):
 
 def card_named(cols: list[columns.Column], name: str) -> columns.Card:
     return next(c for col in cols for c in col.cards if c.name == name)
+
+
+class CardFactsTest(unittest.TestCase):
+    """#208: facts formerly in side panels are visible on the task's own card."""
+
+    def cols(self, changes, log="", *, earlier=(), refs=None, tracker=TRACKER, lanes=None):
+        sources = replace(SOURCES, changes={c.ref: c for c in changes})
+        lanes = lanes or {"build": st.Lane(("implement", "review", "fix", "merge"))}
+        html = rb.render(tracker + log, parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=lanes, sources=sources, pending_refs=refs, stage_log=list(earlier))
+        # Capture the actual cards produced by render, including stage history and decision holds.
+        return html.split("</style>", 1)[1]
+
+    def marks(self, html, name="Cut the release"):
+        card = html.split(f'>{name}</a>', 1)[1].split('<div class="columns-card', 1)[0]
+        return re.findall(r'class="columns-tag columns-mark" data-cat="[^"]+">([^<]+)<', card)
+
+    def test_approved_cards_keep_the_complete_merge_order_past_the_old_five_row_limit(self):
+        changes = [change(f"!{i}", approved=True, issues=("#9",) if i == 8 else ()) for i in range(1, 9)]
+        self.assertIn("queue 8", self.marks(self.cols(changes)))
+
+    def test_the_queue_uses_approval_pipeline_overlap_and_change_number(self):
+        changes = [change("!3", approved=True, issues=("#9",), files=("a",)),
+                   change("!1", approved=True, files=("a",)),
+                   change("!7", approved=True), change("!2", approved=True, pipeline="failed"),
+                   change("!4", approved=False)]
+        self.assertIn("queue 3", self.marks(self.cols(changes)))
+
+    def test_only_open_approved_non_draft_changes_receive_a_queue_mark(self):
+        for attrs in ({"approved": False}, {"approved": True, "draft": True},
+                      {"approved": True, "state": "merged"}, {"approved": True, "state": "closed"}):
+            with self.subTest(attrs=attrs):
+                self.assertFalse(any(m.startswith("queue ") for m in self.marks(
+                    self.cols([change("!1", issues=("#9",), **attrs)]))))
+
+    def test_shared_file_marks_include_drafts_but_exclude_closed_and_merged_changes(self):
+        changes = [change("!1", issues=("#9",), files=("a", "b")),
+                   change("!2", draft=True, files=("a", "b")),
+                   change("!3", state="closed", files=("a",)),
+                   change("!4", state="merged", files=("b",)), change("!5", files=("c",))]
+        self.assertEqual([m for m in self.marks(self.cols(changes)) if m.startswith("shares")],
+                         ["shares file with !2"])
+        self.assertNotIn("shares file with", self.cols([replace(c, state="merged") for c in changes]))
+
+    def test_a_pending_decision_marks_only_the_task_it_holds(self):
+        html = self.cols([], refs={"#9": None})
+        self.assertIn("decision pending", self.marks(html))
+        self.assertNotIn("decision pending", self.marks(html, "Write README"))
+        self.assertNotIn("decision pending", self.cols([], refs={}))
+
+    def test_looping_counts_entries_into_the_lanes_fix_stage_across_days(self):
+        earlier = TRACKER + "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+        log = "- 11:00 stage: Cut the release → fix\n"
+        self.assertIn("looping", self.marks(self.cols([], log, earlier=[(NOW.date() - timedelta(days=1), earlier)])))
+        for history in ("", "- 09:00 stage: Cut the release → fix\n",
+                        "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → fix\n"):
+            with self.subTest(history=history):
+                self.assertNotIn("looping", self.marks(self.cols([], history)))
+        self.assertNotIn("looping", self.cols([], earlier + log, lanes=LANES))  # no fix stage in this lane
+
+    def test_looping_resolves_a_renamed_task_by_its_issue_and_does_not_mark_other_cards(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft release | Draft the release |")
+        earlier += "- 09:00 stage: Draft release → fix\n- 10:00 stage: Draft the release → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertIn("looping", self.marks(html))
+        self.assertNotIn("looping", self.marks(html, "Write README"))
+
+    def test_write_reads_fix_entries_older_than_the_flow_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            (root / f"daily/{today}-tracker.md").write_text(TRACKER + "- 11:00 stage: Cut the release → fix\n")
+            earlier = TRACKER + "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+            (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(earlier)
+            html = rb.write(root)[0].read_text().split("</style>", 1)[1]
+            self.assertIn("looping", self.marks(html))
+
+    def test_tiles_and_tabs_still_reach_their_destinations_without_the_panels(self):
+        html = self.cols([])
+        for target in re.findall(r'class="panels-tile"[^>]+href="#([^"]+)"', html):
+            self.assertIn(f'id="{target}"', html)
+        self.assertIn('href="/workers"', html)
+        self.assertIn('href="/decisions"', html)
+        self.assertFalse('class="panels-panel"' in html)
 
 
 class HomeProjectUrlTest(unittest.TestCase):

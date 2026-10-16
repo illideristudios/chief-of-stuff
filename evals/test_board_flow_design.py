@@ -1,7 +1,7 @@
 """#259: the board draws only the Flow artboard's sections, and draws each task once in BUILD.
 
 The reference is the canvas's Flow artboard (Flow.dc.html), top to bottom: the tab bar; the header; six tiles;
-BUILD, the stage columns (no NO LANE strip: #350); the panels; `FLOW · 24 HOURS` and `FLOW · 7 DAYS` with one legend.
+BUILD, the stage columns (no NO LANE strip: #350); `FLOW · 24 HOURS` and `FLOW · 7 DAYS` with one legend.
 Due next, Blocked, Sessions, the 24-hour day strip and the Lanes table are not in it, so none is drawn.
 
 Artboard markers the stage columns map onto columns.py's classes: a column (`columns-col`, head `columns-name`, gate
@@ -80,9 +80,9 @@ def at(body: str, mark: str | re.Pattern) -> int:
 
 
 def build_region() -> str:
-    """BUILD's drawing: from its heading to the panels."""
+    """BUILD's drawing: from its heading to the Flow charts."""
     body = page()
-    return body[at(body, r"<h2>\s*Build\s*</h2>"):at(body, '<div class="panels">')]
+    return body[at(body, r"<h2>\s*Build\s*</h2>"):at(body, '<h2>Flow · 24 hours</h2>')]
 
 
 class Board(unittest.TestCase):
@@ -102,23 +102,22 @@ class Board(unittest.TestCase):
 class FlowDesign(Board):
     def test_the_sections_are_the_artboards_in_its_order(self) -> None:
         marks = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', r"<h2>\s*Build\s*</h2>",
-                 '<figure class="columns"', '<div class="panels">',
-                 '<section class="panels-panel" id="merge"', '<section class="panels-panel" id="decisions"',
-                 '<section class="panels-panel" id="workers"', "<h2>Flow · 24 hours</h2>", "<h2>Flow · 7 days</h2>", 'class="gantt-legend"']
+                 '<figure class="columns"', "<h2>Flow · 24 hours</h2>", "<h2>Flow · 7 days</h2>", 'class="gantt-legend"']
         found = [(at(self.body, m), m) for m in marks]
         self.assertEqual([m for _, m in found], [m for _, m in sorted(found)])
 
-    def test_the_panels_are_merge_order_decisions_and_workers(self) -> None:
+    def test_the_merge_decisions_and_workers_panels_are_gone(self) -> None:
         titles = re.findall(r'<h3 class="panels-title">(?:<a [^>]*>)?([^<]+)', self.body)
-        self.assertEqual(titles, ["MERGE ORDER", "DECISIONS", "WORKERS"])
+        self.assertEqual(titles, [])
+        self.assertNotIn('<div class="panels">', self.body)
 
     def test_the_headings_and_section_ids_are_exactly_the_artboards(self) -> None:
         # An allow-list: a renamed or extra section ("Due soon", `id="due_next"`, "Sessions · 1") fails, not just the old names.
-        # The tab bar has no <h2>; BUILD is `#flow`; the three panels are `h3`s with their own ids.
+        # The tab bar has no <h2>; BUILD is the only section with an id.
         h2, ids, sections = outline(self.body)
         self.assertEqual(h2, ["Build", "Flow · 24 hours", "Flow · 7 days"])
-        self.assertEqual(ids, ["flow", "merge", "decisions", "workers"])
-        self.assertEqual(sections, 4)
+        self.assertEqual(ids, ["flow"])
+        self.assertEqual(sections, 1)
 
     def test_no_section_the_artboard_lacks_is_drawn(self) -> None:
         for mark in REMOVED:
@@ -132,7 +131,7 @@ class FlowDesign(Board):
 
     def test_id_flow_is_the_build_columns_the_tiles_link_to_not_a_table(self) -> None:
         self.assertEqual(self.body.count('id="flow"'), 1)
-        flow = self.body.split('id="flow"', 1)[1].split('<div class="panels">', 1)[0]
+        flow = self.body.split('id="flow"', 1)[1].split('</section>', 1)[0]
         self.seen(r"<h2>\s*Build\s*</h2>", flow, "BUILD inside #flow")
         self.seen('<figure class="columns"', flow, "the stage columns inside #flow")
         self.absent("<table", flow)
@@ -150,7 +149,7 @@ class OneBuildDrawing(Board):
     def drawn(self, name: str, within: str) -> int:
         return len(re.findall(rf">\s*{re.escape(name)}\s*<", within))
 
-    def test_each_laned_task_is_drawn_once_between_the_tiles_and_the_panels(self) -> None:
+    def test_each_laned_task_is_drawn_once_between_the_tiles_and_the_charts(self) -> None:
         for name in LANED:
             with self.subTest(task=name):
                 self.assertEqual(self.drawn(name, self.build), 1)

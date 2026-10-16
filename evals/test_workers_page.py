@@ -308,12 +308,11 @@ class TabsTest(unittest.TestCase):
         tab = {name(t): t for t in parse(page()).navs[0].children}["Workers"]
         self.assertEqual([n.attrs["href"] for n in tab.walk() if "href" in n.attrs], ["/workers"])
 
-    def test_the_board_workers_panel_title_links_to_the_page(self):
-        panel = next((n for n in doc(page(path="/")).walk() if n.tag == "section" and n.attrs.get("id") == "workers"), None)
-        self.assertIsNotNone(panel, "the board has no WORKERS panel")
-        titled = [n for n in panel.walk() if n.tag == "a" and n.attrs.get("href") == "/workers"
-                  and words(n).casefold() == "workers"]
-        self.assertTrue(titled, "the board's WORKERS panel title is not a link to /workers")
+    def test_the_board_keeps_the_workers_tab_without_a_workers_panel(self):
+        board = doc(page(path="/"))
+        self.assertTrue(any(n.tag == "a" and n.attrs.get("href") == "/workers"
+                            and words(n).casefold() == "workers" for n in board.walk()))
+        self.assertFalse(any(n.tag == "section" and n.attrs.get("id") == "workers" for n in board.walk()))
 
 
 class RunningTest(unittest.TestCase):
