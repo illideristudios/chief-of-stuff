@@ -26,10 +26,11 @@ from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode a
 from md import cells as _cells, is_separator as _is_separator
 from model_port import quota_reset
 from notify_service import atomic_write
-from one_shot_report import FIELD_MAX, UNREADABLE, read_report
+from one_shot_report import FIELD_MAX, LIMIT, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
-from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
+from tracker_log import (LAUNCHER_CHECK, NO_RESULT, RUNTIME_EXIT, TIMEOUT, WORKERS_CALL,
+                         RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line)
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -72,10 +73,13 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
 def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, int | None], str]:
     """Return (status, reason, changes, counts, review_class); never infer success from the CLI exit code or free-form final response."""
     counts = dict.fromkeys(dispatch_prompt.SUITE_KEYS)
-    cause = "timeout" if exit_code == 124 else "runtime exit" if exit_code else "no result file"
+    cause = TIMEOUT if exit_code == 124 else RUNTIME_EXIT if exit_code else NO_RESULT
     try:
-        raw = path.read_text()
-    except OSError as exc:
+        data = git_view.read_regular(path, LIMIT + 1, nofollow=True)
+        if data is None or len(data) > LIMIT:
+            raise ValueError("result is not a bounded regular file")
+        raw = data.decode("utf-8")
+    except (OSError, ValueError) as exc:
         return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", "", counts, cause
     try:
         data = toon_decode(raw)
@@ -95,7 +99,7 @@ def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, 
                                 f"exit {exit_code}"), "", counts, cause
     if exit_code:
         return "human_review", f"worker exited {exit_code}; result complete; worker said: {data['reason']}", data["changes"], counts, cause
-    return data["status"], data["reason"], data["changes"], counts, "worker's call" if data["status"] == "human_review" else ""
+    return data["status"], data["reason"], data["changes"], counts, WORKERS_CALL if data["status"] == "human_review" else ""
 
 
 QUOTA_STOP = "quota stop: "
@@ -376,19 +380,19 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
         path = end
-    if status == "done" and read_only and (actual or commits != NO_COMMITS):
+    if (status == "done" or exit_code) and read_only and (actual or commits != NO_COMMITS):
         # A task that owns nothing changed something: whatever the worker wrote, someone looks (#57).
         left = "\n".join(x for x in (actual, commits) if x and x != NO_COMMITS)
-        review_class = "launcher check"
+        review_class = LAUNCHER_CHECK
         status, reason = "human_review", f"read-only task left changes: {left}; worker said: {reason}"
-    if status == "done" and actual:
-        status, review_class = "human_review", "launcher check"
-        reason = f"worker reported completion but the worktree is not clean: {actual}"
+    if (status == "done" or exit_code) and actual and review_class != LAUNCHER_CHECK:
+        status, review_class = "human_review", LAUNCHER_CHECK
+        reason = f"worker stopped but the worktree is not clean: {actual}"
     # Git/worktree violations take precedence over the suite gate.
     if status == "done" and settings.workers.require_green_tests and (
             any(value is None for value in counts.values()) or counts["passed"] == 0
             or any(counts[key] for key in ("failed", "skipped", "xfailed"))):
-        review_class = "launcher check"
+        review_class = LAUNCHER_CHECK
         status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     quota = ""
     if status == "human_review" and not changes and not actual and commits == NO_COMMITS:
@@ -404,14 +408,15 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         if not quota and _brief(reason).startswith(QUOTA_STOP):  # as the Log folds it, so padding cannot dodge it
             reason = f"worker: {reason}"  # the launcher's marker is the launcher's alone
         if actual or commits != NO_COMMITS:
-            review_class = "launcher check"
+            review_class = LAUNCHER_CHECK
             status, reason = "human_review", f"worker asked to be relaunched but left changes: {reason}"
         elif quota:
             mine = re.escape(quota_marker(runtime, model))  # then the line goes on with `;` and a snippet, or ends with `.`
             if any(marker in line and re.match(mine + r"(?:;|\.?$)", line.split(marker, 1)[1]) for line in log):
+                review_class = LAUNCHER_CHECK
                 status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
         elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
-            review_class = "launcher check"
+            review_class = LAUNCHER_CHECK
             status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
     if status != "human_review":
         review_class = ""
@@ -429,7 +434,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             # The rollover twin is the same row, open (#576); any other drift from running is a changed row.
             row.kind != "running" and not (carried and row.kind == "open")):
         report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
-                  "review_class": "launcher check",
+                  "review_class": LAUNCHER_CHECK,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
                   "changes": summary, **counts,
                   "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
@@ -440,7 +445,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         reason = f"the launcher died before reconciling this run; {reason}"
     # Keep exit and result availability visible even when a retry cap replaces the original reason.
     detail = (f"exit {exit_code}; {'result complete' if changes else 'no valid result'}; "
-              if review_class == "launcher check" or (quota and status == "human_review") else "")
+              if not adopted and review_class == LAUNCHER_CHECK else "")
+    reason = detail + reason
     ref = backlog.issue_ref(row.issue, cfg.backlog) if row and row.issue.strip() else None
     hold_error = ""
     if status == "human_review" and ref:
@@ -455,12 +461,12 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 cfg.backlog.sibling(ref.repo)
                 if isinstance(cfg.backlog, backlog.Backlog) else None)
         if home is not None:
-            body = f"One-shot worker {name} needs human review [{review_class}].\n\nWhy: {detail}{reason}\n\nChanges made:\n{summary}"
+            body = f"One-shot worker {name} needs human review [{review_class}].\n\nWhy: {reason}\n\nChanges made:\n{summary}"
             commented = backlog.comment(home, ref.number, body, commit=True)
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")
     try:
-        update_tracker(path, task, name, cfg.user, status, detail + reason if status == "human_review" else reason, log_summary,
+        update_tracker(path, task, name, cfg.user, status, reason, log_summary,
                        tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open", review_class=review_class)
     except (OSError, ValueError) as exc:
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")

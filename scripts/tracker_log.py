@@ -20,7 +20,12 @@ from zoneinfo import ZoneInfo
 # and does not use that daily relaunch. That marker is a launcher-written Log line; a worker's reason can never carry it.
 COMPLETED = "completed; awaiting integration"
 HUMAN_REVIEW = "HUMAN REVIEW NEEDED"
-REVIEW_CLASSES = ("worker's call", "no result file", "timeout", "runtime exit", "launcher check")
+WORKERS_CALL = "worker's call"
+NO_RESULT = "no result file"
+TIMEOUT = "timeout"
+RUNTIME_EXIT = "runtime exit"
+LAUNCHER_CHECK = "launcher check"
+REVIEW_CLASSES = (WORKERS_CALL, NO_RESULT, TIMEOUT, RUNTIME_EXIT, LAUNCHER_CHECK)
 RELAUNCHED = ": relaunch requested for {task} — "
 RELAUNCH_STAGE = "relaunch"
 
@@ -61,6 +66,8 @@ def one_period(reason: str) -> str:
 def ended_line(at: str, name: str, status: str, reason: str, changes: str, *, review_class: str = "") -> str:
     """The launcher's line when worker `name` stops `done`, or with any other status for review. `reason` and
     `changes` come already on one line."""
+    if review_class and review_class not in REVIEW_CLASSES:
+        raise ValueError(f"invalid review class: {review_class}")
     label = f" [{review_class}]" if status != "done" and review_class in REVIEW_CLASSES else ""
     return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else HUMAN_REVIEW}{label}"
             f" — {one_period(reason)} Changes: {changes}.")
@@ -129,10 +136,13 @@ def approved_closes(text: str) -> set[str]:
     return {m[4] for line in _log_lines(text) if (m := APPROVED_CLOSE.match(line))}
 
 
-def moves(text: str, day: date, zone: ZoneInfo) -> list[Move]:
+def moves(text: str, day: date, zone: ZoneInfo, task_of: dict[str, str] | None = None) -> list[Move]:
     """The `stage:` and one-shot launcher lines of the tracker's `## Log`, stamped on `day`. A launcher move names
-    the task key of its worker's active started line; a relaunch is a stop boundary, not a working stage."""
-    out, task_of = [], {}
+    the task key of its worker's active started line; a relaunch is a stop boundary, not a working stage.
+    Pass the same `task_of` through trackers in day order to pair launches and stops across midnight."""
+    out = []
+    if task_of is None:
+        task_of = {}
     for line in _log_lines(text):
         m = STAGE.match(line) or STARTED.match(line) or ENDED.match(line) or RELAUNCH.match(line)
         if not m or int(m[1]) >= 24 or int(m[2]) >= 60:

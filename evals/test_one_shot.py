@@ -747,7 +747,11 @@ class RunTest(unittest.TestCase):
         self.assertNotIn("exit 0", self.tracker.read_text())
 
     def test_nonzero_exit_does_not_hide_read_only_or_dirty_tree_violations(self):
-        for read_only, dirty, commits, expected in ((True, "partial.txt", one_shot.NO_COMMITS, "read-only task left changes"), (True, "", "abc commit", "read-only task left changes"), (False, "partial.txt", one_shot.NO_COMMITS, "worktree is not clean")):
+        for read_only, dirty, commits, expected in (
+            (True, "partial.txt", one_shot.NO_COMMITS, "read-only task left changes"),
+            (True, "", "abc commit", "read-only task left changes"),
+            (False, "partial.txt", one_shot.NO_COMMITS, "worktree is not clean"),
+        ):
             with self.subTest(read_only=read_only, dirty=dirty):
                 self.tracker.write_text(TRACKER.replace("| unassigned | open |", "| worker01 | running 09:00 |"))
                 path = self.tree / one_shot.RESULT
@@ -1077,7 +1081,7 @@ class RunTest(unittest.TestCase):
         self._read_only()
         report = self._read_only_report(self._fake('status: done\nreason: reviewed\nchanges: none\n', commit_partial=True))
         self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; read-only task left changes:"), report["reason"])
         self.assertIn("partial.txt", report["reason"])
         tracker = self.tracker.read_text()
         self.assertIn("| Security audit | Robin | waiting |", tracker)
@@ -1087,7 +1091,7 @@ class RunTest(unittest.TestCase):
         self._read_only()
         report = self._read_only_report(self._fake('status: done\nreason: reviewed\nchanges: none\n'))
         self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; read-only task left changes:"), report["reason"])
         self.assertIn("partial.txt", report["reason"])
         self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
 
@@ -1102,7 +1106,7 @@ class RunTest(unittest.TestCase):
                           during=self._rewrites_the_tracker("t.read_text().replace('none; read-only review of the importer', 'src/')"))
         report = self._read_only_report(fake)
         self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; read-only task left changes:"), report["reason"])
 
     def test_a_read_only_task_stays_read_only_when_the_worker_deletes_its_ownership_row(self):
         self._read_only()
@@ -1110,7 +1114,7 @@ class RunTest(unittest.TestCase):
                           during=self._rewrites_the_tracker("'\\n'.join(l for l in t.read_text().split('\\n') if 'none; read-only' not in l)"))
         report = self._read_only_report(fake)
         self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; read-only task left changes:"), report["reason"])
 
     def test_a_read_only_task_stays_read_only_when_the_end_days_tracker_has_no_read_only_cell(self):
         # The run ends on another day; the launch day's cell decided, not the end day's (#93).
@@ -1120,7 +1124,7 @@ class RunTest(unittest.TestCase):
         self._run_past_midnight(fake)
         report = toon_decode((self.tree / one_shot.REPORT).read_text())
         self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; read-only task left changes:"), report["reason"])
 
     def test_a_read_only_task_whose_worker_asked_for_review_keeps_its_own_reason(self):
         self._read_only()
@@ -1133,7 +1137,7 @@ class RunTest(unittest.TestCase):
         self._read_only()
         report = self._read_only_report(self._fake('status: done\nreason: found two races in the importer\nchanges: none\n',
                                                    commit_partial=True))
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; read-only task left changes:"), report["reason"])
         self.assertIn("partial.txt", report["reason"])
         self.assertTrue(report["reason"].endswith("; worker said: found two races in the importer"), report["reason"])
 
@@ -1146,7 +1150,7 @@ class RunTest(unittest.TestCase):
         self._read_only()
         report = self._read_only_report(self._fake('status: relaunch\nreason: base moved\nchanges: none\n'))
         self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("worker asked to be relaunched but left changes: base moved"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; worker asked to be relaunched but left changes: base moved"), report["reason"])
 
     def _reconcile_a_commit(self, **kwargs) -> dict:
         """A running row, one commit since the launch, and a worker that reported done."""
@@ -1165,7 +1169,7 @@ class RunTest(unittest.TestCase):
         # The tracker's cell says `src/a/`; what reconcile is told wins.
         report = self._reconcile_a_commit(read_only=True)
         self.assertEqual(report["status"], "human_review")
-        self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
+        self.assertTrue(report["reason"].startswith("exit 0; result complete; read-only task left changes:"), report["reason"])
 
     def test_reconcile_does_not_read_the_tracker_for_the_rule(self):
         self.tracker.write_text(TRACKER.replace("`src/a/`", "none; read-only review of the importer"))
@@ -1358,7 +1362,7 @@ class RunTest(unittest.TestCase):
         self._stopped(stderr=self.AGY, runtime="agy", tree=again)
         report = self._report(again)
         self.assertEqual((report["status"], report["reason"]),
-                         ("human_review", "quota stop repeated: agy m-test; Resets in 3h46m46s."))
+                         ("human_review", "exit 3; no valid result; quota stop repeated: agy m-test; Resets in 3h46m46s."))
         tracker = self.tracker.read_text()
         self.assertIn("3h46m46s. Changes:", tracker)  # the HUMAN REVIEW line: one period before `Changes:`
         self.assertNotIn("3h46m46s..", tracker)
@@ -1378,7 +1382,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self._stopped(tree=again)[0], 1)
         report = self._report(again)
         self.assertEqual((report["status"], report["reason"]),
-                         ("human_review", "quota stop repeated: codex m-test; resets in about four hours"))
+                         ("human_review", "exit 3; no valid result; quota stop repeated: codex m-test; resets in about four hours"))
         self.assertEqual(report["review_class"], "launcher check")
         self.assertIn("HUMAN REVIEW NEEDED [launcher check]", self.tracker.read_text())
 
@@ -1388,7 +1392,7 @@ class RunTest(unittest.TestCase):
         again = self._another_tree("worker-2")
         self._stopped(stderr=stderr, tree=again)
         report = self._report(again)
-        self.assertEqual((report["status"], report["reason"]), ("human_review", "quota stop repeated: codex m-test"))
+        self.assertEqual((report["status"], report["reason"]), ("human_review", "exit 3; no valid result; quota stop repeated: codex m-test"))
 
     def test_a_second_quota_stop_on_another_model_the_same_day_is_a_relaunch(self):
         self._quota_relaunched()
@@ -1421,7 +1425,7 @@ class RunTest(unittest.TestCase):
         again = self._another_tree("worker-2")
         self._stopped(stderr="", during=fake_a_stop, tree=again)
         self.assertEqual(self._report(again)["status"], "human_review")
-        self.assertTrue(self._report(again)["reason"].startswith("quota stop repeated: codex m-test"),
+        self.assertTrue(self._report(again)["reason"].startswith("exit 3; no valid result; quota stop repeated: codex m-test"),
                         self._report(again)["reason"])
 
     def test_a_worker_relaunch_reason_cannot_forge_the_launchers_quota_marker(self):
@@ -1499,8 +1503,9 @@ class RunTest(unittest.TestCase):
         self._stopped(write_partial=True)
         report = self._report()
         self.assertEqual(report["status"], "human_review")
-        # The worker's own failure to write a result, not a relaunch refused for its changes (#422 review R1).
-        self.assertTrue(report["reason"].startswith("worker did not write a valid TOON result"), report["reason"])
+        # A dirty worktree takes precedence over the missing result and cannot be relaunched.
+        self.assertEqual(report["review_class"], "launcher check")
+        self.assertTrue(report["reason"].startswith("exit 3; no valid result; worker stopped but the worktree is not clean"), report["reason"])
         self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
 
     def _twice(self, first: dict, second: dict | None = None) -> tuple[dict, dict]:
@@ -1535,7 +1540,7 @@ class RunTest(unittest.TestCase):
                 first, second = self._twice({"stderr": "429 RESOURCE_EXHAUSTED\n", "model": model})
                 self.assertEqual(first["status"], "relaunch")
                 self.assertEqual(second["status"], "human_review")
-                self.assertTrue(second["reason"].startswith("quota stop repeated: codex"), second["reason"])
+                self.assertTrue(second["reason"].startswith("exit 3; no valid result; quota stop repeated: codex"), second["reason"])
 
     def test_the_cap_holds_a_second_quota_stop_whatever_the_models_spelling_with_reset_text(self):
         for model in ("", " m-test", "m-test ", "m  test", "m" * 600):
@@ -1559,7 +1564,7 @@ class RunTest(unittest.TestCase):
         # #436 review R1: the Log line is `...m-test.` (the writer adds no period of its own), so the cap's tail is `;`, or `.` or nothing.
         first, second = self._twice({"model": "m-test.", "stderr": "429 RESOURCE_EXHAUSTED quota\n"})
         self.assertEqual(first["status"], "relaunch")
-        self.assertEqual((second["status"], second["reason"]), ("human_review", "quota stop repeated: codex m-test."))
+        self.assertEqual((second["status"], second["reason"]), ("human_review", "exit 3; no valid result; quota stop repeated: codex m-test."))
 
     def test_a_marker_the_500_character_log_cut_ends_on_a_period_is_held_when_repeated(self):
         model = "x" * (500 - len("quota stop: codex ") - 1) + "." + "y" * 20  # the cut keeps the period as the marker's last character

@@ -328,9 +328,10 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols)}</section>\n')
-    flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
-                  for m in tracker_log.moves(text, day, zone)]
-    look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
+    task_of = {}
+    look_moves = [m for day, text in sorted(look_log or []) for m in tracker_log.moves(text, day, zone, task_of)]
+    flow_moves = [m for day, text in sorted([*(stage_log or []), (tracker_day or today, tracker_text)])
+                  for m in tracker_log.moves(text, day, zone, task_of)]
     began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks,
                        [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks])
     since = looked or datetime.combine(today, time(), zone)

@@ -197,7 +197,8 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     if not mine:
         return None
     keys = set().union(*map(names, mine))
-    log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
+    task_workers = {}
+    log = sorted((m for day, text in sorted(trackers) for m in tracker_log.moves(text, day, now.tzinfo, task_workers)), key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
     ends = {t.item: end for t in parse_tracker(trackers[-1][1]).tasks
@@ -236,8 +237,6 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             workers.setdefault(started[2], []).append([replace(m, stage=stage), started, None])
             what[m] = f"{escape(stage)} started · {escape(started[2])} · {escape(started[4])}"
         elif (w := tracker_log.ENDED.match(m.line)) and (runs := workers.get(w[3])):
-            # ponytail: an end pairs with a start on the same day's tracker (tracker_log.moves); a run over midnight
-            # loses its end and counts nothing, pair across days if that shows up.
             runs[-1][2] = m
             what[m] = f"ended {escape(ENDED.get(m.stage, 'ended'))} · {escape(w[3])} · {escape(runs[-1][1][4])}"
     steps = "\n".join(f'      <div class="step"><span class="when">{_clock(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'

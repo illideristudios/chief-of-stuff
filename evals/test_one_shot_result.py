@@ -476,15 +476,22 @@ class ResultTests(unittest.TestCase):
 
     # What a worker writes is the launcher's to bound and to encode: its copy stays readable by `result`.
 
-    def test_a_worker_result_over_the_cap_is_cut_so_the_report_stays_readable(self):
-        big = "x" * LIMIT
+    def test_large_worker_fields_are_cut_so_the_report_stays_readable(self):
+        big = "x" * (LIMIT // 4)  # large fields inside a result below the file-read cap
         self.reconcile("rate-limit", result={"status": "human_review", "reason": big, "changes": big})
         self.assertLessEqual((self.reports / "rate-limit.toon").stat().st_size, LIMIT, "the copy is past what `result` reads")
         done = self.one("--task", "Rate limit headers")
         self.only_skipped_none()
         self.assertEqual((done["task"], done["status"]), ("Rate limit headers", "human_review"))
-        self.assertTrue(done["reason"].startswith("xxx"), "the start of the worker's reason is kept")
+        self.assertEqual(done["reason"], big[:one_shot.FIELD_MAX])
         self.assertLess(len(done["reason"]) + len(done["changes"]), LIMIT)
+
+    def test_an_oversized_worker_result_leaves_a_readable_review_report(self):
+        self.reconcile("rate-limit", result={"status": "human_review", "reason": "x" * LIMIT, "changes": "x" * LIMIT})
+        done = self.one("--task", "Rate limit headers")
+        self.only_skipped_none()
+        self.assertEqual((done["status"], done["review_class"]), ("human_review", "no result file"))
+        self.assertIn("not a bounded regular file", done["reason"])
 
     def only_skipped_none(self) -> None:
         self.assertEqual(self.stderr, "", "a report was skipped as unreadable")

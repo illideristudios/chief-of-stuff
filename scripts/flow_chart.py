@@ -176,6 +176,8 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
         elif is_held:
             segs.append(gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner(key, now, task)))
             status, note = "needs input", f"needs input · {held[task.name.strip()]}"
+            if cause := review_stops.get(key):
+                note += f" · human review · {cause}"
         elif task and lane and last.stage in lane.stages and (end := ends.get(task.item)) and end > now:
             ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
             segs += _ahead(ahead, now, end, owner(key, now, task))
@@ -188,8 +190,6 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             kind = task.kind if task else ""
             status = "approved" if is_approved else ("running" if kind == "open" else kind)
             note = "approved" if is_approved else last.stage
-        if not finish and last.stage not in terminal and (cause := review_stops.get(key)):
-            note += f" · human review · {cause}"
         out.append((status, gantt.Row(ref_of(task, last.name), task.name.strip() if task else launch_row(last.name, ())[1],
                                       note, tuple(segs))))
     # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.
