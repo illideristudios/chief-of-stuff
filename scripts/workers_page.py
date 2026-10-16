@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
-"""The Workers page, `/workers` (#195): header boxes (need you, running, slots free); RUNNING, a row per worker the
-sources cache lists, with last activity and tokens from its Claude session log; and ENDED TODAY, a row per one-shot
-launcher end line in today's tracker. pages.py renders it into `workers.html` on every request.
+"""The Workers page, `/workers` (#195, #235): header tiles (`NEEDS INPUT`, `RUNNING`, `SLOTS FREE`); RUNNING, a row per
+worker with a task (sessions with no task are omitted), leading with a state chip (`RUNNING`, `LOOPING`) and the worker
+name over `runtime model · kind`, the stage as a chip after the task name, and last activity and tokens from its Claude
+session log; and ENDED TODAY, a row per one-shot launcher end line in today's tracker with a state chip (`DONE`,
+`CRASHED`), a one-line summary, and a link or `re-dispatch`. pages.py renders it into `workers.html` on every request.
 """
 
 from __future__ import annotations
@@ -18,12 +20,10 @@ from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
-from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STARTED
+from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STAGE, STARTED
 from workspace import parse_coordinator, worktrees_dir
 from settings import load as load_settings
 
-# The Ended today table's word for an ENDED or RELAUNCH line's outcome.
-HOW = {COMPLETED: "completed", HUMAN_REVIEW: "human review", "relaunch": "relaunch"}
 USAGE = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 CSS = """<style>
 .boxes{display:flex;flex-wrap:wrap;gap:8px}
@@ -33,6 +33,13 @@ CSS = """<style>
 table{width:100%;border-collapse:collapse;font-size:13px}
 th{text-align:left;font-weight:400;padding:4px 8px}
 td{padding:6px 8px;border-top:1px dotted var(--line);vertical-align:baseline}
+.lead{display:inline-flex;align-items:baseline;gap:8px}
+.meta{color:var(--muted);font-size:12px}
+.chip{border:1px solid var(--line);color:var(--fg)}
+.chip.running{color:var(--surface);background:var(--stage-implement);border-color:var(--stage-implement)}
+.chip.looping,.chip.crashed{color:var(--dl);border-color:var(--dl)}
+.chip.done{color:var(--surface);background:var(--stage-review);border-color:var(--stage-review)}
+.chip.stage{font-weight:500;color:var(--muted)}
 </style>
 """
 
@@ -62,6 +69,21 @@ def _task(t, fallback: str) -> str:
     return f'<a class="ref" data-k="issue" href="/issues/{m[1]}">#{m[1]}</a> {name}' if m else name
 
 
+def _task_stage(t, fallback: str) -> str:
+    """The task's ref and name, followed by its stage as a chip when set."""
+    base = _task(t, fallback)
+    stage = escape(t.stage.strip()) if t and t.stage.strip() else ""
+    return f'{base} <span class="chip stage">{stage}</span>' if stage else base
+
+
+def _worker_lead(w: board_sources.Worker, looping: bool) -> str:
+    """State chip (`RUNNING`, `LOOPING`) and the worker name stacked over `runtime model · kind`."""
+    state = "LOOPING" if looping else "RUNNING"
+    sub = " · ".join(x for x in (" ".join(x for x in (w.runtime, w.model) if x), w.kind) if x)
+    return (f'<span class="lead"><span class="chip {state.lower()}">{state}</span>'
+            f'<span class="stack"><b>{escape(w.name)}</b><span class="meta">{escape(sub)}</span></span></span>')
+
+
 def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
     head = "".join(f'<th class="cap">{h}</th>' for h in heads)
     body = "".join("<tr>" + "".join(f"<td>{c}</td>" for c in r) + "</tr>\n" for r in rows)
@@ -73,26 +95,45 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
     """The page. `trees` is where one-shot trees sit; `cap` is `[workers] max_concurrency`."""
     tasks = parse_tracker(tracker_text).tasks
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
-    running = []
-    for w in sources.workers:
-        t = by_name.get(w.task.strip().casefold())
-        last, tokens = activity(trees / w.tree) if w.tree else (None, 0)
-        running.append([escape(w.name), escape(" ".join(x for x in (w.runtime, w.model) if x)), escape(w.kind),
-                        _task(t, w.task), escape(t.stage.strip() if t else ""), panels.hm(w.started, now) if w.started else "",
-                        f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""])
-    row_of, task_of, ended = launcher(tasks), {}, []
+    row_of, task_of, fix_counts, last_stage, ended, need = launcher(tasks), {}, {}, {}, [], 0
     for line in map(str.strip, _section(tracker_text, "## Log")):
-        if m := STARTED.match(line):
+        if m := STAGE.match(line):
+            t, name = row_of(m[3].strip())
+            key = (t.name.strip() if t and t.name.strip() else name).casefold()
+            stage = m[4].strip().casefold()
+            if stage == "fix" and last_stage.get(key) != "fix":
+                fix_counts[key] = fix_counts.get(key, 0) + 1
+            last_stage[key] = stage
+        elif m := STARTED.match(line):
             task_of[m[3]] = m[4]
         elif m := ENDED.match(line) or RELAUNCH.match(line):
             t, name = row_of(task_of.get(m[3], ""))
-            ended.append([f"{int(m[1]):02d}:{m[2]}", HOW[m[4]], escape(m[3]), _task(t, name)])
+            done = m[4] == COMPLETED
+            need += m[4] == HUMAN_REVIEW
+            state = "DONE" if done else "CRASHED"
+            summary = (line[m.end():].removeprefix(" — ").strip() if m.re is ENDED
+                       else line[m.end():].partition(" — ")[2].strip())
+            ref = TRAILING_NUMBER.search(t.issue) if t else None
+            action = ((f'<a class="ref" data-k="issue" href="/issues/{ref[1]}">#{ref[1]}</a>' if ref else escape(name))
+                      if done else '<span class="chip redispatch">re-dispatch</span>')
+            ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(m[3])}</b>',
+                          f"{int(m[1]):02d}:{m[2]}", _task(t, name), escape(summary), action])
     ended.reverse()  # newest first
-    need = sum(e[1] == "human review" for e in ended)
+    running = []
+    for w in sources.workers:
+        if w.kind == "session" and not w.task.strip():
+            continue
+        t = by_name.get(w.task.strip().casefold()) or row_of(w.task)[0]
+        key = (t.name.strip() if t and t.name.strip() else w.task.strip()).casefold()
+        is_looping = fix_counts.get(key, 0) >= 2 or bool(t and t.stage.strip().casefold() == "looping")
+        last, tokens = activity(trees / w.tree) if w.tree else (None, 0)
+        running.append([_worker_lead(w, is_looping), _task_stage(t, w.task),
+                        panels.hm(w.started, now) if w.started else "",
+                        f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""])
     shots = sum(w.kind == "one-shot" for w in sources.workers)
-    boxes = [("need you", str(need), " hot" if need else ""), ("running", str(len(running)), "")]
+    boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
     if cap:
-        boxes.append(("slots free", f"{max(cap - shots, 0)} of {cap}", ""))
+        boxes.append(("SLOTS FREE", f"{max(cap - shots, 0)} of {cap}", ""))
     boxes_html = "".join(f'<span class="box{hot}"><b>{v}</b><span class="cap">{k}</span></span>' for k, v, hot in boxes)
     eyebrow = " · ".join([*(f"{escape(k)}: {escape(why)}" for k, why in sources.errors.items()),  # (#215) no render clock
                           '<a href="/">board</a>'])
@@ -102,9 +143,9 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             f'  <header class="top">\n    <div>\n      <h1>Workers</h1>\n      <span class="eyebrow">{eyebrow}</span>\n    </div>\n'
             f'    <div class="boxes">{boxes_html}</div>\n  </header>\n'
             f'  <section>\n    <h2>Running · {len(running)}</h2>\n'
-            + _table(("worker", "runtime", "kind", "task", "stage", "running", "last activity", "tokens"), running)
+            + _table(("worker", "task", "running", "last activity", "tokens"), running)
             + f'\n  </section>\n  <section>\n    <h2>Ended today · {len(ended)}</h2>\n'
-            + _table(("at", "how", "worker", "task"), ended)
+            + _table(("worker", "at", "task", "summary", "action"), ended)
             + "\n  </section>\n</main>\n</body>\n</html>\n")
 
 
