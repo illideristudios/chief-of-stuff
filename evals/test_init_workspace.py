@@ -76,6 +76,17 @@ class InitWorkspaceTest(unittest.TestCase):
         self.assertIsNotNone(settings.kanban)
         self.assertEqual(set(settings.kanban.stage_map), {"plan", "implement", "review", "fix", "merge"})
 
+    def test_file_inventory_is_the_data_init_uses_to_create_its_files(self):
+        with mock.patch.dict(init.WORKSPACE_FILES, {
+            "config": init.WorkspaceFile("workspace.md", "chief-of-stuff init --help"),
+            "settings": init.WorkspaceFile("engine.toml", "chief-of-stuff init --help"),
+        }):
+            self.assertEqual(self.run_init()[0], 0)
+            self.assertEqual({p.name for p in self.root.iterdir()},
+                             {item.name for item in init.WORKSPACE_FILES.values()})
+            config = parse_coordinator((self.root / "workspace.md").read_text(), date.today())
+            self.assertEqual(config.settings_path, "engine.toml")
+
     def test_fresh_repo_can_write_its_first_stage_after_init(self):
         labels, issue_labels = [], []
 

@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import re
+import shlex
 import socket
 import sys
 import tempfile
@@ -22,6 +23,8 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import probe_health as ph  # noqa: E402
+import init_workspace as init  # noqa: E402
+import install_model_guidance as guidance  # noqa: E402
 import runtimes  # noqa: E402
 import test_shell_setup  # noqa: E402
 from shell_setup import ShellError  # noqa: E402
@@ -174,6 +177,66 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class WorkspaceFilesTest(unittest.TestCase):
+    """#284: missing init files are advice, with their installer named."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="workspace with spaces ")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.config = self.root / "CLAUDE.md"
+        self.config.write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text("")
+
+    def health(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ph.main(["--config", str(self.config)])
+        self.assertEqual(err.getvalue(), "")
+        return code, out.getvalue().splitlines()
+
+    def test_missing_model_guidance_names_an_executable_install_command_once(self):
+        code, lines = self.health()
+        found = [line for line in lines if guidance.NAME in line]
+        self.assertEqual(len(found), 1, lines)
+        self.assertIn("missing", found[0])
+        self.assertIn("advice", found[0])
+        command = f"chief-of-stuff models --root {shlex.quote(str(self.root))}"
+        self.assertIn(command, found[0])
+        self.assertEqual(code, 0, "missing init files do not add failed checks")
+        self.assertFalse((self.root / guidance.NAME).exists(), "health only advises")
+        self.assertEqual(guidance.main(shlex.split(command)[2:]), 0)
+        _, after = self.health()
+        self.assertFalse(any(guidance.NAME in line for line in after), after)
+
+    def test_missing_settings_and_guidance_are_each_advised_without_failing(self):
+        (self.root / "chief-of-stuff.toml").unlink()
+        code, lines = self.health()
+        advice = [line for line in lines if line.startswith("workspace file ")]
+        self.assertEqual(len(advice), 2, lines)
+        self.assertTrue(any("chief-of-stuff.toml" in line and "init --help" in line for line in advice))
+        self.assertTrue(any(guidance.NAME in line and "models --root" in line for line in advice))
+        self.assertEqual(code, 0)
+
+    def test_health_reads_new_init_file_data_without_its_own_list(self):
+        guidance.install(self.root)
+        extra = init.WorkspaceFile("new-release.md", "chief-of-stuff models --root {root}")
+        with mock.patch.dict(init.WORKSPACE_FILES, {"future": extra}):
+            code, lines = self.health()
+        self.assertEqual(code, 0)
+        self.assertEqual(len([line for line in lines if "new-release.md" in line]), 1, lines)
+
+    def test_custom_config_and_settings_paths_do_not_advise_default_names(self):
+        guidance.install(self.root)
+        self.config.rename(self.root / "workspace.md")
+        self.config = self.root / "workspace.md"
+        self.config.write_text("## Coordinator\n- Settings: `custom.toml`\n")
+        (self.root / "chief-of-stuff.toml").rename(self.root / "custom.toml")
+        code, lines = self.health()
+        self.assertEqual(code, 0)
+        self.assertFalse(any(line.startswith("workspace file ") for line in lines), lines)
+
+
 TOML = "chief-of-stuff.toml"
 BAD_MODE = '[workers]\nmode = "sometimes"\n'
 GOOD = '[workers]\nmode = "one-shot"\n'
@@ -232,7 +295,9 @@ class SettingsCheckTest(unittest.TestCase):
             finally:
                 if undo:
                     undo()
-        return code, out.getvalue().splitlines(), err.getvalue()
+        # These tests compare settings, runtime and target output independently of init-file advice.
+        lines = [line for line in out.getvalue().splitlines() if not line.startswith("workspace file ")]
+        return code, lines, err.getvalue()
 
     def targets(self) -> str:
         """Two `Health:` lines, one target up and one answering 500."""
