@@ -259,7 +259,7 @@ def dispatch_ready_tasks(root: Path, day: str, tracker_path: Path, settings: Set
         try:
             declared = make_worktree.agent_types((root / "CLAUDE.md").read_text())
             # §9: cut and launch the declared implementer, else the default agent (empty type).
-            cut_type = "implementer" if "implementer" in declared else ""
+            cut_type = "implementer" if declared.get("implementer") == "task" else ""
             make_worktree.build(root, clone_repo, trees_base, tree_name, branch_name, agent_type=cut_type)
         except make_worktree.RefusedError as exc:
             dispatched.append(f"refused worktree for {t.label}: {exc}")
