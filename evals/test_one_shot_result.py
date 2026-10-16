@@ -49,7 +49,7 @@ def report(task: str = "Rate limit headers", **over) -> dict:
     """What `one_shot.reconcile` writes for a worker that finished and left the tracker updated."""
     return {"status": "human_review", "task": task, "worker": "rate-limit", "runtime_exit": 0,
             "reason": "the 429 path sends Retry-After in milliseconds", "changes": "M src/a/headers.py\nWorking tree clean",
-            "errors": [], **over}
+            "errors": [], **dict.fromkeys(dispatch_prompt.SUITE_KEYS), **over}
 
 
 def padded(data: dict, size: int) -> str:

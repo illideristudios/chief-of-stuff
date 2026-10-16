@@ -58,7 +58,7 @@ DISPATCH_FILE = f"{PROMPT_DIR}/dispatch.md"
 RESULT_FILE = f"{PROMPT_DIR}/worker-result.toon"
 # The launcher's own copy of each report, under the workspace root as `<tree directory name>.toon`: nothing in a tree can change it.
 REPORTS_DIR = f"{PROMPT_DIR}/reports"
-SUITE_KEYS = ("passed", "failed", "skipped", "xfailed")
+SUITE_KEYS = ("passed", "failed", "skipped", "xfailed")  # Observed final suite counts, or null when unknown.
 REPORT_KEYS = ("status", "task", "worker", "runtime_exit", "reason", "changes", *SUITE_KEYS, "errors")
 # The prefix of a report's error for a tracker the launcher could not update.
 TRACKER_ERROR = "tracker:"
@@ -500,8 +500,9 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             "Keep status, reason and changes as strings. Report the final suite run's observed counts as non-negative integers; "
             "use null when unknown, including when no suite ran. Never infer a missing count as zero. "
             "Name the suite command in changes; do not add earlier failing TDD runs to the final counts.",
-            *(["Workspace [workers] require_green_tests is enabled: done requires all four counts, "
-               "with failed, skipped and xfailed all zero; otherwise use human_review."]
+            *(["Workspace [workers] require_green_tests is enabled: the launcher holds done as human_review "
+               "unless all four counts are reported with passed > 0 and failed, skipped and xfailed all zero. "
+               "Completed runs still report status: done with observed counts; the launcher applies this gate."]
               if settings.workers.require_green_tests else []),
             "Use status: human_review if unfinished, including when you made partial changes. State the blocker and the partial changes plainly.",
             ("Use status: relaunch only when the task's premise moved under you before you changed anything, such as its "

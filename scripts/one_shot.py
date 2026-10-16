@@ -70,7 +70,7 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
 
 
 def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, int | None]]:
-    """Do not infer success from the CLI exit code or a free-form final response."""
+    """Return (status, reason, changes, counts) for the report; exact int counts reject bool."""
     counts = dict.fromkeys(dispatch_prompt.SUITE_KEYS)
     try:
         raw = path.read_text()
@@ -360,9 +360,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     status, reason, changes, counts = worker_result(cwd / RESULT, exit_code)
     suite = "Suite: " + ", ".join(f"{key}={value if value is not None else 'missing or invalid'}"
                                   for key, value in counts.items())
-    if status == "done" and settings.workers.require_green_tests and (
-            any(value is None for value in counts.values()) or any(counts[key] for key in ("failed", "skipped", "xfailed"))):
-        status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     actual = changed_files(cwd, expected_common=expected_common)
     commits = committed_changes(cwd, before_head, expected_common=expected_common)
     # The result lands on the day the run ends, falling back to the launch day's (#93).
@@ -382,6 +379,10 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     if status == "done" and actual:
         status = "human_review"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
+    if status == "done" and settings.workers.require_green_tests and (
+            any(value is None for value in counts.values()) or counts["passed"] == 0
+            or any(counts[key] for key in ("failed", "skipped", "xfailed"))):
+        status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     quota = ""
     if status == "human_review" and not changes and not actual and commits == NO_COMMITS:
         # No valid result from an unchanged tree: a quota stop returns it to ready rather than holding it (#422).
@@ -403,8 +404,13 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
         elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
             status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
-    summary = (changes + f"\n{suite}\nCommits from this run:\n{commits}" +
-               (f"\nWorking tree:\n{actual}" if actual else "\nWorking tree clean"))
+    # Keep launcher evidence ahead of worker prose and reserve room for each part.
+    evidence = (f"{suite}\nCommits from this run:\n{commits[:FIELD_MAX // 4]}" +
+                (f"\nWorking tree:\n{actual[:FIELD_MAX // 4]}" if actual else "\nWorking tree clean") + "\n")
+    summary = evidence + changes[:FIELD_MAX - len(evidence)]
+    # The tracker keeps only 500 characters: its git excerpts must leave room for both facts.
+    log_summary = (f"{suite}; Commits from this run: {_brief(commits)[:100]}; " +
+                   (f"Working tree: {_brief(actual)[:100]}" if actual else "Working tree clean") + f"; {changes}")
     rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
     row = rows[0] if len(rows) == 1 else None
     errors = []
@@ -439,7 +445,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")
     try:
-        update_tracker(path, task, name, cfg.user, status, reason, summary,
+        update_tracker(path, task, name, cfg.user, status, reason, log_summary,
                        tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
     except (OSError, ValueError) as exc:
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
