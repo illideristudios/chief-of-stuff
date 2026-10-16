@@ -386,7 +386,8 @@ def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None 
     return dispatch_prompt.compose(Path(args.root), args.date, args.task, worktree=worktree, coordinator=args.coordinator,
                                    name=args.title if name is None else name, runtime=args.runtime, one_shot=one_shot,
                                    workflow=settings.workflow if settings is not None else None,
-                                   rules=settings.workers.rules if settings is not None else None)
+                                   rules=settings.workers.rules if settings is not None else None,
+                                   stages=settings.stages if settings is not None else None)
 
 
 def main(argv_in: list[str] | None = None) -> int:

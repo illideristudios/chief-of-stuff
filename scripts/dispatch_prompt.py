@@ -432,8 +432,12 @@ def _task_directives(root: Path, row: Task, skills: str, issue: Any) -> list[str
 def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
             coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
             one_shot: bool = False, *, workflow: Workflow | None = None,
-            rules: tuple[str, ...] | None = None) -> str:
-    """Compose root/day/task for worktree/coordinator/name/runtime/one_shot, loading missing workflow/rules from settings; invalid data, settings or launch conditions raise RefusedError."""
+            rules: tuple[str, ...] | None = None, stages: dict[str, Stage] | None = None) -> str:
+    """Compose a tracker assignment using preloaded policy, or load missing workflow/rules and stage defaults.
+
+    Pass stages with preloaded workflow/rules to include stage skills without rereading settings.
+    Invalid data, settings or launch conditions raise RefusedError.
+    """
     cfg = config(root)
     day = day or datetime.now(cfg.zone).date().isoformat()
     relative, text, row = _task_context(root, cfg, day, task)
@@ -444,8 +448,9 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             raise RefusedError(f"cannot read workspace settings: {exc}") from None
         workflow = settings.workflow if workflow is None else workflow
         rules = settings.workers.rules if rules is None else rules
+        stages = settings.stages if stages is None else stages
     rules_header = standing_rules(rules)
-    stage = stage_defaults(root, day, task)
+    stage = (stages or {}).get(row.stage.strip())
     skills = skills_line(stage.skills) if stage else ""
     owner = row.owner.strip()
     # Prevent two workers from claiming one task.
