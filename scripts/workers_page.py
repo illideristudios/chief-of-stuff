@@ -18,7 +18,7 @@ from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
-from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STARTED
+from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STARTED, review_class
 from workspace import parse_coordinator, worktrees_dir
 from settings import load as load_settings
 
@@ -86,9 +86,12 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             task_of[m[3]] = m[4]
         elif m := ENDED.match(line) or RELAUNCH.match(line):
             t, name = row_of(task_of.get(m[3], ""))
-            ended.append([f"{int(m[1]):02d}:{m[2]}", HOW[m[4]], escape(m[3]), _task(t, name)])
+            how = HOW[m[4]]
+            if cause := review_class(line):
+                how += f" · {cause}"
+            ended.append([f"{int(m[1]):02d}:{m[2]}", escape(how), escape(m[3]), _task(t, name)])
     ended.reverse()  # newest first
-    need = sum(e[1] == "human review" for e in ended)
+    need = sum(e[1].startswith("human review") for e in ended)
     shots = sum(w.kind == "one-shot" for w in sources.workers)
     boxes = [("need you", str(need), " hot" if need else ""), ("running", str(len(running)), "")]
     if cap:

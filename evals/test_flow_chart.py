@@ -99,7 +99,10 @@ class BuildTest(unittest.TestCase):
             html = rb.render(tracker, cfg, NOW, lanes=LANES, kanban=KANBAN)
             from html import unescape
             self.assertIn(f"human review · {cause}", unescape(html))
-            # Explicit stage moves must not hide a launcher's cause. A fresh run must clear it.
+            # Earlier stage moves must not hide the cause; subsequent progress clears it.
+            progressed = tracker + "\n" + tl.stage_line("02:04", "Cache warmup", "pr")
+            self.assertNotIn(f"human review · {cause}", unescape(rb.render(progressed, cfg, NOW, lanes=LANES, kanban=KANBAN)))
+            # A fresh run must clear it as well.
             tracker += "\n" + tl.started_line("02:05", "w2", "codex", "", "worktree `tree`", "Warm the pool")
             self.assertNotIn(f"human review · {cause}", unescape(rb.render(tracker, cfg, NOW, lanes=LANES, kanban=KANBAN)))
 

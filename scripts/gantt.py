@@ -142,12 +142,12 @@ BASE_CSS = """\
 .gantt-past{left:0;background:var(--gantt-past);opacity:.55}
 .gantt-grid{width:1px;background:var(--gantt-grid)}
 .gantt-nowline{width:2px;margin-left:-1px;background:var(--gantt-now)}
-.gantt-row{display:flex;align-items:center;height:22px;border-top:1px solid var(--gantt-rule)}
+.gantt-row{display:flex;align-items:center;min-height:22px;border-top:1px solid var(--gantt-rule)}
 .gantt-label{width:var(--gantt-label);flex:none;padding-right:10px;box-sizing:border-box;display:flex;gap:6px;align-items:baseline;overflow:hidden;white-space:nowrap}
 .gantt-ref{font:11px ui-monospace,monospace;color:var(--gantt-muted)}
 .gantt-name{font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis}
 .gantt-track{position:relative;flex-grow:1;height:14px;border-left:1px solid var(--gantt-edge)}
-.gantt-note{width:var(--gantt-note);flex:none;padding-left:10px;box-sizing:border-box;font-size:11px;color:var(--gantt-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gantt-note{width:var(--gantt-note);flex:none;padding:3px 0 3px 10px;box-sizing:border-box;font-size:11px;color:var(--gantt-muted);white-space:normal;overflow-wrap:anywhere}
 .gantt-bar{--c:var(--gantt-muted);--e:var(--c);position:absolute;top:0;height:14px;border-radius:2px;box-sizing:border-box}
 .gantt-bar:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
 .gantt-bar.gantt-done{background:var(--c);box-shadow:inset 0 0 0 1px var(--e)}

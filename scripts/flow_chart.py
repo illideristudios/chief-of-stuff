@@ -22,7 +22,7 @@ from fragment import esc
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
 # here as well, so `flow_chart.moves` still names it.
-from tracker_log import RELAUNCH_STAGE, Move, moves  # noqa: F401
+from tracker_log import RELAUNCH_STAGE, Move, moves, review_class  # noqa: F401
 
 H = timedelta(hours=1)
 # (title, behind now, ahead of now), after the Flow artboard.
@@ -102,9 +102,11 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
     horizon = now + WINDOWS[-1][2]
     busy: list[datetime] = []
     log = sorted(log, key=lambda m: m.at)
+    review_stops = {}
     first, runs = {}, {}  # runs: key → [worker, start, end or None] per launch
     for m in log:
         key = key_of(m)
+        review_stops[key] = review_class(m.line)
         if not m.launch:
             first.setdefault(key, m.at)
         elif m.stage == "implement":
@@ -186,6 +188,8 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             kind = task.kind if task else ""
             status = "approved" if is_approved else ("running" if kind == "open" else kind)
             note = "approved" if is_approved else last.stage
+        if not finish and last.stage not in terminal and (cause := review_stops.get(key)):
+            note += f" · human review · {cause}"
         out.append((status, gantt.Row(ref_of(task, last.name), task.name.strip() if task else launch_row(last.name, ())[1],
                                       note, tuple(segs))))
     # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.

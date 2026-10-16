@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 # and does not use that daily relaunch. That marker is a launcher-written Log line; a worker's reason can never carry it.
 COMPLETED = "completed; awaiting integration"
 HUMAN_REVIEW = "HUMAN REVIEW NEEDED"
+REVIEW_CLASSES = ("worker's call", "no result file", "timeout", "runtime exit", "launcher check")
 RELAUNCHED = ": relaunch requested for {task} — "
 RELAUNCH_STAGE = "relaunch"
 
@@ -57,11 +58,21 @@ def one_period(reason: str) -> str:
     return reason if reason.endswith(".") else reason + "."
 
 
-def ended_line(at: str, name: str, status: str, reason: str, changes: str) -> str:
+def ended_line(at: str, name: str, status: str, reason: str, changes: str, *, review_class: str = "") -> str:
     """The launcher's line when worker `name` stops `done`, or with any other status for review. `reason` and
     `changes` come already on one line."""
-    return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else HUMAN_REVIEW}"
+    label = f" [{review_class}]" if status != "done" and review_class in REVIEW_CLASSES else ""
+    return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else HUMAN_REVIEW}{label}"
             f" — {one_period(reason)} Changes: {changes}.")
+
+
+def review_class(line: str) -> str:
+    """A launcher's explicit review class; legacy lines and worker prose imply no class."""
+    ended = ENDED.match(line)
+    if ended and ended[4] == HUMAN_REVIEW:
+        tail = line[ended.end():]
+        return next((cause for cause in REVIEW_CLASSES if tail.startswith(f" [{cause}] — ")), "")
+    return ""
 
 
 def relaunch_line(at: str, name: str, task: str, reason: str) -> str:

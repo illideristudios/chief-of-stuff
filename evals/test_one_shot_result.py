@@ -248,7 +248,7 @@ class ResultTests(unittest.TestCase):
                 self.assertEqual(report["status"], expected)
                 self.assertEqual(report["skipped"], 2)
                 self.assertNotIn("suite is not green", report["reason"])
-                self.assertEqual(report["reason"], "worker exited 1: premise moved" if exit_code else "premise moved")
+                self.assertEqual(report["reason"], "worker exited 1; result complete; worker said: premise moved" if exit_code else "premise moved")
 
     def test_one_shot_assignment_requests_observed_counts_and_explains_the_opt_in_gate(self):
         self.suite_policy()
@@ -641,7 +641,7 @@ class ResultTests(unittest.TestCase):
         done = self.result("--task", "Rate limit headers")
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertEqual(toon_decode(done.stdout), {
-            **mine, **dict.fromkeys(("passed", "failed", "skipped", "xfailed")), "worktree": "rate-limit"})
+            **mine, "review_class": None, **dict.fromkeys(("passed", "failed", "skipped", "xfailed")), "worktree": "rate-limit"})
         self.assertNotIn("not this one", done.stdout)
 
     def test_a_task_is_matched_exactly_not_by_prefix_or_case(self):
