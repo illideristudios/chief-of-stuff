@@ -59,7 +59,7 @@ RESULT_FILE = f"{PROMPT_DIR}/worker-result.toon"
 # The launcher's own copy of each report, under the workspace root as `<tree directory name>.toon`: nothing in a tree can change it.
 REPORTS_DIR = f"{PROMPT_DIR}/reports"
 SUITE_KEYS = ("passed", "failed", "skipped", "xfailed")  # Observed final suite counts, or null when unknown.
-REPORT_KEYS = ("status", "task", "worker", "runtime_exit", "reason", "changes", *SUITE_KEYS, "errors")
+REPORT_KEYS = ("status", "outcome", "task", "worker", "runtime_exit", "reason", "changes", *SUITE_KEYS, "errors")
 # The prefix of a report's error for a tracker the launcher could not update.
 TRACKER_ERROR = "tracker:"
 # Use the installed inbox script, not a workspace path.
@@ -499,7 +499,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             READ_ONLY if read_only else delivery,
             "Do not edit the tracker or issue labels yourself; the launcher reconciles them after you exit.",
             f"Before exiting, write a TOON object to {result} with these fields:",
-            'status: done', 'reason: "what was completed, or why human review is required"',
+            'status: done', 'reason: "what was completed, or why input is needed"',
             'changes: "files changed, tests run, commit or PR if any"',
             *(f"{key}: null" for key in SUITE_KEYS),
             "Keep status, reason and changes as strings. Report the final suite run's observed counts as non-negative integers; "
@@ -509,7 +509,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
                "unless all four counts are reported with passed > 0 and failed, skipped and xfailed all zero. "
                "Completed runs still report status: done with observed counts; the launcher applies this gate."]
               if settings.workers.require_green_tests else []),
-            "Use status: human_review if unfinished, including when you made partial changes. State the blocker and the partial changes plainly.",
+            "Use status: human_review (NEEDS INPUT) if unfinished, including when you made partial changes. State the blocker and the partial changes plainly.",
             ("Use status: relaunch only when the task's premise moved under you before you changed anything, such as its "
              "base or target PR merged or was replaced, and a fresh run from current main would do the task as written. "
              "Say what moved; the coordinator relaunches it."),

@@ -19,13 +19,14 @@ from zoneinfo import ZoneInfo
 # a task relaunches at most once a day. A quota stop on a model is relaunched once per task and model a day instead,
 # and does not use that daily relaunch. That marker is a launcher-written Log line; a worker's reason can never carry it.
 COMPLETED = "completed; awaiting integration"
-HUMAN_REVIEW = "HUMAN REVIEW NEEDED"
+HUMAN_REVIEW = "HUMAN REVIEW NEEDED"  # historical trackers
+NEEDS_INPUT = "NEEDS INPUT"
 RELAUNCHED = ": relaunch requested for {task} — "
 RELAUNCH_STAGE = "relaunch"
 
 STAGE = re.compile(r"^- (\d{1,2}):(\d{2}) stage: (.+) → (\S+)\s*$")
 STARTED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+) started: .*, task (.+?)\s*$")
-ENDED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (completed; awaiting integration|HUMAN REVIEW NEEDED)\b")
+ENDED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (completed; awaiting integration|NEEDS INPUT|HUMAN REVIEW NEEDED)\b")
 # RELAUNCHED's Log line, grouped as ENDED is.
 RELAUNCH = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (relaunch) requested for ")
 # A run whose wait ran out relaunches once into its tree (#110); this line is the once-per-row marker the
@@ -60,7 +61,7 @@ def one_period(reason: str) -> str:
 def ended_line(at: str, name: str, status: str, reason: str, changes: str) -> str:
     """The launcher's line when worker `name` stops `done`, or with any other status for review. `reason` and
     `changes` come already on one line."""
-    return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else HUMAN_REVIEW}"
+    return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else NEEDS_INPUT}"
             f" — {one_period(reason)} Changes: {changes}.")
 
 

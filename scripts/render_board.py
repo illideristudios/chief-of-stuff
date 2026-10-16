@@ -187,7 +187,7 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         refs = ((issue, page(issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
         owner = task.shown_owner
-        return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
+        return columns.Card(task.label, task.kind, refs, owner, "needs input" if task.kind == "waiting" and task in held else task.state, marks,
                             flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")

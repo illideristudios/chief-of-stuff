@@ -27,8 +27,8 @@ from tracker import TRAILING_NUMBER, issue_number, parse_tracker, resolve_due as
 from workspace import Config, ConfigError, daily_trackers, read_config
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
-# A worker's outcome by its last launcher move's stage (tracker_log.moves: completed → pr, HUMAN REVIEW → review).
-ENDED = {"pr": "completed", "review": "human review"}
+# A worker's outcome by its last launcher move's stage (tracker_log.moves: completed → pr, NEEDS INPUT (and historical HUMAN REVIEW) → review).
+ENDED = {"pr": "completed", "review": "needs input"}
 # The Flow chart's colours on HEAD's tokens in the dark scheme, as the board sets them (render_board.render).
 CSS = """<style>
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}}
@@ -205,13 +205,14 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
-    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
+    holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
+    held = held_names(holds)
     rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
                                                 ended=forge_ends(known, sources, now.tzinfo))
             if issue_number(r.ref) == number]
     log = [m for m in log if m.name.strip().casefold() in keys]
     issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
-    status = rows[0][0] if rows else mine[-1].kind
+    status = rows[0][0] if rows else "needs input" if mine[-1] in holds else mine[-1].kind
     name = rows[0][1].name if rows else mine[0].label
 
     order = {"open": 0, "merged": 1}

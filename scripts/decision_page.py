@@ -50,6 +50,7 @@ from md import section as md_section
 from module_graph import section as _graph
 from notify_service import atomic_write
 from settings import Graph, SettingsError, load as load_settings
+from task_forge import hold_causes
 from tracker import decision_rows, issue_key, parse_tracker
 from workspace import ConfigError, daily_trackers, pages_address, read_config
 
@@ -57,7 +58,7 @@ NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 REQUIRED = ("headline", "ask", "options", "recommended", "why", "default")
 NODE = {"deployed": "n", "inflight": "n-inflight", "designed": "n-designed", "external": "ext"}
 EDGE = {"deployed": "e", "inflight": "e-inflight", "designed": "e-designed"}
-CHIPS = (("deployed", "DEPLOYED"), ("inflight", "IN FLIGHT"), ("designed", "DESIGNED"), ("hot", "WAITING ON THIS"),
+CHIPS = (("deployed", "DEPLOYED"), ("inflight", "IN FLIGHT"), ("designed", "DESIGNED"), ("hot", "NEEDS INPUT"),
          ("external", "EXTERNAL"))
 
 
@@ -627,7 +628,7 @@ class Context:
 
     def where(self, ref: str) -> str:
         """Where a ref stands now: `merged 01:15`, `closed`, or its tracker stage with the forge's word on it
-        (`merge · passed`, `triage · hold`, `open · failed`)."""
+        (`merge · passed`, `triage · needs input`, `open · failed`)."""
         c = self.change(ref) or next((c for c in self.sources.changes.values() if ref in c.issues), None)
         i = self.sources.issues.get(ref)
         if c and c.state == "merged":
@@ -635,8 +636,10 @@ class Context:
         if (c or i) and (c or i).state == "closed":
             return "closed"
         stage = next(filter(None, (self.stage(r) for r in (ref, *((c.ref, *c.issues) if c else ())))), "")
-        held = i and self.hold and self.hold in i.labels
-        return " · ".join(x for x in (stage or ("open" if c else ""), c and c.pipeline, "hold" if held else "") if x)
+        waiting = any(ref in refs_in(t.issue) + refs_in(t.item)
+                      for t in hold_causes(list(self.tasks), None, self.sources, {}, frozenset()))
+        held = waiting or (i and self.hold and self.hold in i.labels)
+        return " · ".join(x for x in (stage or ("open" if c else ""), c and c.pipeline, "needs input" if held else "") if x)
 
     def ref(self, ref: str) -> str:
         found = self.change(ref) or self.sources.issues.get(ref)
@@ -758,7 +761,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
     if any(ready):
         meta.append(f"oldest {span(ctx.now - min(a for a in ready if a))}")
     if held:
-        meta.append(f"holding {_plural(len(held) - mrs, 'issue')}, {_plural(mrs, 'merge request')}")
+        meta.append(f"needs input: {_plural(len(held) - mrs, 'issue')}, {_plural(mrs, 'merge request')}")
     if unread:
         meta.append(f"{unread} unreadable")
     meta.append(f"{len(done)} completed today")
@@ -767,7 +770,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
     words = f"{escape(ctx.user)}'s words" if ctx.user else "words"
     none = '      <div class="row"><span class="none">none</span></div>'
     body = (f'  <section>\n    <h2 class="pend">PENDING · {len(ready)}</h2>\n    <div class="list">\n'
-            '      <div class="row pend head cap"><span>asked</span><span>decision</span><span>options</span><span>holding</span><span>if unanswered</span></div>\n'
+            '      <div class="row pend head cap"><span>asked</span><span>decision</span><span>options</span><span>needs input</span><span>if unanswered</span></div>\n'
             + ("\n".join(rows) or none) + "\n    </div>\n  </section>\n"
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'
             f'      <div class="row done head cap"><span>answered</span><span>decision</span><span>answer</span><span>{words}</span><span>since</span></div>\n'

@@ -7,6 +7,8 @@ from pathlib import Path
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode
 from dispatch_prompt import suite_counts
 
+OUTCOMES = {"done": "completed", "human_review": "NEEDS INPUT", "relaunch": "relaunch"}
+
 LIMIT = 1 << 20  # a report is a few lines; the cap bounds what a runaway writer could leave
 FIELD_MAX = LIMIT // 16  # characters of `reason` or `changes` the launcher keeps: two fields, 6 bytes a character, stay under LIMIT
 # What reading a file that is not a report can raise: a link, a directory or an unreadable file (OSError), invalid UTF-8,
@@ -26,4 +28,5 @@ def read_report(path: Path, read) -> dict:
     if not (isinstance(data, dict) and all(isinstance(data.get(k), str) for k in ("task", "worker", "status"))):
         raise ValueError("not a report")
     data.update(suite_counts(data))
+    data["outcome"] = OUTCOMES.get(data["status"], data["status"])
     return data

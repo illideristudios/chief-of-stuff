@@ -7,20 +7,20 @@
       "name": "uses needs input for the person wait",
       "type": "regex",
       "pattern": "(?i)\\bneeds input\\b",
-      "rule": "Call person waits NEEDS INPUT; continue other ready work."
+      "rule": "In replies, call a `waiting` task owned by a person NEEDS INPUT; keep `waiting` in the tracker."
     },
     {
       "name": "does not use competing state names",
       "type": "regex",
       "pattern": "(?i)\\bon hold\\b|\\bhuman review\\b|\\bblocked\\b|\\bneeds you\\b|\\bheld\\b",
       "match": "absent",
-      "rule": "Call person waits NEEDS INPUT; continue other ready work."
+      "rule": "In replies, call a `waiting` task owned by a person NEEDS INPUT; keep `waiting` in the tracker."
     },
     {
       "name": "tracker remains unchanged",
       "type": "file_unchanged",
       "path": "daily/{{today}}-tracker.md",
-      "rule": "Call person waits NEEDS INPUT; continue other ready work."
+      "rule": "In replies, call a `waiting` task owned by a person NEEDS INPUT; keep `waiting` in the tracker."
     }
   ],
   "max_turns": 8,

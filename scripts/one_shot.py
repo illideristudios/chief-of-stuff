@@ -26,7 +26,7 @@ from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode a
 from md import cells as _cells, is_separator as _is_separator
 from model_port import quota_reset
 from notify_service import atomic_write
-from one_shot_report import FIELD_MAX, UNREADABLE, read_report
+from one_shot_report import FIELD_MAX, OUTCOMES, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
 from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
@@ -324,7 +324,8 @@ def write_report(root: Path, cwd: Path, report: dict) -> dict:
     """The launcher's own copy, which `result` reads, then the worker's in the tree; returns what was written. The text is cut
     to what `result` reads and written as UTF-8. A copy that cannot be written is an error in the report, and the old one goes
     so it is not served as this run's; the tree is the worker's, so a failure there costs nothing."""
-    report = {**report, **{key: report[key][:FIELD_MAX] for key in ("reason", "changes")}}
+    report = {**report, "outcome": OUTCOMES.get(report["status"], report["status"]),
+              **{key: report[key][:FIELD_MAX] for key in ("reason", "changes")}}
     mine = launcher_copy(root, cwd)
     try:
         atomic_write(mine, (toon_encode(report) + "\n").encode("utf-8", errors="replace"))
@@ -441,7 +442,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 cfg.backlog.sibling(ref.repo)
                 if isinstance(cfg.backlog, backlog.Backlog) else None)
         if home is not None:
-            body = f"One-shot worker {name} needs human review.\n\nWhy: {reason}\n\nChanges made:\n{summary}"
+            body = f"One-shot worker {name} needs input.\n\nWhy: {reason}\n\nChanges made:\n{summary}"
             commented = backlog.comment(home, ref.number, body, commit=True)
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")

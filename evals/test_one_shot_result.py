@@ -35,7 +35,7 @@ CLAUDE = ("# Workspace\n\n## Coordinator\n\n- User: Robin\n- Timezone: UTC\n- Da
 # (name, item): the tracker's Tasks table. A task is held by its item or, when it has one, its name.
 TASKS = (("Rate limit", "Rate limit headers"), ("", "Search pagination"))
 WAIT = 30  # seconds the command may take before a regression (a FIFO opened blocking) counts as a hang
-FIELDS = ["task", "worker", "worktree", "status", "reconciled"]  # a row of the list, in this order
+FIELDS = ["task", "worker", "worktree", "status", "outcome", "reconciled"]  # a row of the list, in this order
 SKIPPED = "one-shot reports skipped: {n} could not be read"
 LIMIT = 1 << 20  # the most a report may be: spelled out here, so a change of the cap is a change of this test
 SITES = (("the normal one", False), ("the task row changed one", True))  # the launcher's two writes of a report
@@ -567,6 +567,11 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(self.one("--task", "Rate limit headers")["worktree"], "rate-limit")
         self.assertEqual(self.stderr, "")
 
+    def test_a_legacy_report_gets_a_visible_outcome_without_changing_status(self):
+        self.plant("rate-limit", report(status="human_review"))
+        got = self.one("--task", "Rate limit headers")
+        self.assertEqual((got["status"], got["outcome"]), ("human_review", "NEEDS INPUT"))
+
     def test_with_no_reports_directory_it_prints_an_empty_list(self):
         self.assertFalse(self.reports.exists())
         self.assertEqual(self.rows(), [])
@@ -580,9 +585,9 @@ class ResultTests(unittest.TestCase):
         self.plant("Rate_limit.v2-3", report("Rate limit headers", worker="a-worker"))  # a dot: only `.toon` is the suffix
         rows = self.rows()
         self.assertEqual(rows, [{"task": "Rate limit headers", "worker": "a-worker", "worktree": "Rate_limit.v2-3",
-                                 "status": "human_review", "reconciled": True},
+                                 "status": "human_review", "outcome": "NEEDS INPUT", "reconciled": True},
                                 {"task": "Search pagination", "worker": "b-worker", "worktree": "b-tree",
-                                 "status": "done", "reconciled": True}])
+                                 "status": "done", "outcome": "completed", "reconciled": True}])
         self.assertEqual(list(rows[0]), FIELDS)  # in this order
         self.assertEqual(self.stderr, "")  # good reports say nothing
 
@@ -641,7 +646,8 @@ class ResultTests(unittest.TestCase):
         done = self.result("--task", "Rate limit headers")
         self.assertEqual((done.returncode, done.stderr), (0, ""))
         self.assertEqual(toon_decode(done.stdout), {
-            **mine, **dict.fromkeys(("passed", "failed", "skipped", "xfailed")), "worktree": "rate-limit"})
+            **mine, **dict.fromkeys(("passed", "failed", "skipped", "xfailed")),
+            "outcome": "NEEDS INPUT", "worktree": "rate-limit"})
         self.assertNotIn("not this one", done.stdout)
 
     def test_a_task_is_matched_exactly_not_by_prefix_or_case(self):

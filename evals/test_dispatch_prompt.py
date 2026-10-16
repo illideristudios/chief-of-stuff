@@ -694,7 +694,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
     def test_one_shot_dispatch_is_authorized_by_configuration(self):
         authority = self._section("Dispatch authority")
         self.assertIn("Do not ask the user to choose a worker or approve each assignment or launch", authority)
-        self.assertIn("unresolved human-review hold or lane gate", authority)
+        self.assertIn("no NEEDS INPUT flag or lane gate", authority)
         self.assertIn("never invent an approval quote in Decisions", authority)
         dispatch = self._section("Dispatch")
         self.assertNotIn("The same explicit user approval for launching a new worker applies", dispatch)
@@ -962,7 +962,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
     # The lines the rule makes stale: each still claimed the user disposes of every finding, or that a gate or a verify mark is only the user's.
     STALE_LINES_MADE_CONSISTENT = (
         ("Ready paragraph (:22)", "Configuration authorizes routine dispatch, not architectural decisions, review dispositions (an automatic fix under Triage excepted) or human-only actions."),
-        ("Pipeline (:217)", "Review findings still go to the user for disposition, except an automatic fix under Triage; configured lane gates and human-review holds still apply."),
+        ("Pipeline (:217)", "Review findings still go to the user for disposition, except an automatic fix under Triage; configured lane gates and NEEDS INPUT flags still apply."),
         ("gate rule (:221)", "A gate passes only on the user's word in chat, quoted in a Decisions row; the one exception is the `triage` gate, which a Triage pass that leaves nothing for the user passes by the automatic-fix rule, recorded in the Log."),
         ("advancing (:222)", "Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record."),
         ("one-shot tasks (:217)", "Include the PR, findings and recorded dispositions in each task; an automatic fix's task names its Log line instead of a disposition."),

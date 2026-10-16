@@ -32,7 +32,7 @@ class NeedsInputTest(unittest.TestCase):
         start = tl.started_line("01:00", "impl-1", "codex", "test", "worktree `a` (a)", "Cap uploads")
         for outcome in ("NEEDS INPUT", "HUMAN REVIEW NEEDED"):
             with self.subTest(outcome=outcome):
-                tracker = TODAY_TRACKER + start + f"\n- 01:30 one-shot impl-1: {outcome} — choose a limit. Changes: none.\n"
+                tracker = TODAY_TRACKER.replace("- 01:00 stage: Upload size limit → pr\n", "") + start + f"\n- 01:30 one-shot impl-1: {outcome} — choose a limit. Changes: none.\n"
                 moves = tl.moves(tracker, TODAY, CT)
                 ends = [m for m in moves if m.launch and m.stage == "review"]
                 self.assertEqual([(m.worker, m.at.hour, m.at.minute) for m in ends], [("impl-1", 1, 30)])
@@ -59,6 +59,14 @@ class NeedsInputTest(unittest.TestCase):
                 html = page(today=tracker)
                 self.assertIn('needs input', text(section(html, 'Workers')))
                 self.assertIn('ended needs input', text(section(html, 'How it got here')))
+
+    def test_a_task_without_log_moves_still_names_its_person_wait(self):
+        tracker = TODAY_TRACKER.split("## Log")[0]
+        for named in (True, False):
+            with self.subTest(named=named):
+                text = tracker if named else tracker.replace("| Cache warmup |", "| |")
+                html = ip.render(111, [(TODAY, text)], bs.EMPTY, NOW, LANES)
+                self.assertIn('>NEEDS INPUT</span>', html)
 
     def test_decision_context_names_a_person_wait_even_without_a_hold_label(self):
         ctx = dp.Context(NOW, tasks=tuple(parse_tracker(TODAY_TRACKER).tasks))

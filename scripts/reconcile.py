@@ -199,7 +199,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
     if item.human_review:
-        return Wait(key, "human review")
+        return Wait(key, "needs input")
     workflow = policies.workflow_for(issue_type)
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}

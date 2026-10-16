@@ -54,7 +54,7 @@ def main(argv: list[str] | None = None) -> int:
         print(toon_encode({**{key: clean(data.get(key)) for key in REPORT_KEYS}, "worktree": shown_tree(tree)}))
         return 0
     rows = [{"task": clean(data["task"]), "worker": clean(data["worker"]), "worktree": shown_tree(tree),
-             "status": clean(data["status"]),
+             "status": clean(data["status"]), "outcome": clean(data["outcome"]),
              "reconciled": isinstance(data.get("errors"), list)
              and not any(str(e).startswith(TRACKER_ERROR) for e in data["errors"])} for _, tree, data in runs]
     print(toon_encode(rows) if rows else "[]")

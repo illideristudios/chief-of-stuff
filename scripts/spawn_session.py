@@ -420,7 +420,7 @@ def main(argv_in: list[str] | None = None) -> int:
     mode.add_argument("--interactive", action="store_true",
                       help="start a standing session for this task even in a one-shot workspace")
     ap.add_argument("--timeout-minutes", type=int, default=60,
-                    help="one-shot run limit before human review (default: 60)")
+                    help="one-shot run limit before input is needed (default: 60)")
     args = ap.parse_args(argv_in)
     missing = [flag for flag, value in (("--cwd", args.cwd), ("--name", args.title)) if not value]
     if missing and not args.check:

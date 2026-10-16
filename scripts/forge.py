@@ -609,7 +609,7 @@ class Forge:
             if not got.issue.is_open:
                 raise ForgeError(f"{issue_key} is no longer open on the forge")
             if self.kanban and self.kanban.human_review_label in got.issue.labels:
-                raise ForgeError(f"{issue_key} is held for human review on the forge")
+                raise ForgeError(f"{issue_key} needs input on the forge")
             if stage_mark is not None and self.kanban:
                 try:  # same decode as snapshot: Project Status when configured, else labels
                     statuses = None

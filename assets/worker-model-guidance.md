@@ -20,7 +20,7 @@ This is the workspace's editable routing policy for dispatched workers. Replace 
 | Multimodal work or work that needs Antigravity-specific tools | Antigravity CLI with a capable Gemini model | Medium to high |
 | Independent review of a completed change | A different provider or model family from the implementer, when available | High for risky changes |
 
-These are examples, not assumed installed model IDs. The table is not an authorization to switch providers or lower a user-requested model: a request for GPT-6 does not mean GPT-6 Sol. For one-shot tasks, choose a runtime that can complete the task with its noninteractive permissions; a blocked operation goes to human review with its reason and partial changes.
+These are examples, not assumed installed model IDs. The table is not an authorization to switch providers or lower a user-requested model: a request for GPT-6 does not mean GPT-6 Sol. For one-shot tasks, choose a runtime that can complete the task with its noninteractive permissions; an operation needing input stops as NEEDS INPUT with its reason and partial changes.
 
 ## Workspace choices
 

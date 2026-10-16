@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The Workers page, `/workers` (#195): header boxes (need you, running, slots free); RUNNING, a row per worker the
+"""The Workers page, `/workers` (#195): header boxes (needs input, running, slots free); RUNNING, a row per worker the
 sources cache lists, with last activity and tokens from its Claude session log; and ENDED TODAY, a row per one-shot
 launcher end line in today's tracker. pages.py renders it into `workers.html` on every request.
 """
@@ -18,12 +18,12 @@ from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
-from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STARTED
+from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, NEEDS_INPUT, RELAUNCH, STARTED
 from workspace import parse_coordinator, worktrees_dir
 from settings import load as load_settings
 
 # The Ended today table's word for an ENDED or RELAUNCH line's outcome.
-HOW = {COMPLETED: "completed", HUMAN_REVIEW: "human review", "relaunch": "relaunch"}
+HOW = {COMPLETED: "completed", HUMAN_REVIEW: "needs input", NEEDS_INPUT: "needs input", "relaunch": "relaunch"}
 USAGE = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 CSS = """<style>
 .boxes{display:flex;flex-wrap:wrap;gap:8px}
@@ -88,9 +88,9 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             t, name = row_of(task_of.get(m[3], ""))
             ended.append([f"{int(m[1]):02d}:{m[2]}", HOW[m[4]], escape(m[3]), _task(t, name)])
     ended.reverse()  # newest first
-    need = sum(e[1] == "human review" for e in ended)
+    need = sum(e[1] == "needs input" for e in ended)
     shots = sum(w.kind == "one-shot" for w in sources.workers)
-    boxes = [("need you", str(need), " hot" if need else ""), ("running", str(len(running)), "")]
+    boxes = [("needs input", str(need), " hot" if need else ""), ("running", str(len(running)), "")]
     if cap:
         boxes.append(("slots free", f"{max(cap - shots, 0)} of {cap}", ""))
     boxes_html = "".join(f'<span class="box{hot}"><b>{v}</b><span class="cap">{k}</span></span>' for k, v, hot in boxes)

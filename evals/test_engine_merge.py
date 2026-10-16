@@ -246,14 +246,14 @@ class ExecutorTest(unittest.TestCase):
     def test_a_forge_human_review_hold_added_after_planning_refuses(self):
         self.at_merge_stage()
         self.gh.issues[3]["labels"] = self.HOLD
-        self.refused("human review")
+        self.refused("needs input")
 
     def test_a_forge_human_review_hold_added_during_the_policy_check_refuses(self):
         self.at_merge_stage()
         with self.during_policy_check(lambda: self.gh.issues[3].update(labels=self.HOLD)):
             self.assertFalse(self.execute())
         self.assertEqual(self.gh.merges, [])
-        self.assertIn("held for human review", self.message())
+        self.assertIn("needs input on the forge", self.message())
 
     def test_a_stale_cached_approval_is_replaced_by_the_fresh_request(self):
         no_review = policy.parse({"default_workflow": "direct", "personas": {}, "stages": {"merge": {}},
@@ -296,7 +296,7 @@ class ExecutorTest(unittest.TestCase):
     def test_a_human_review_hold_added_after_planning_refuses(self):
         self.planned()
         self.db.set_human_review(self.key, True)
-        self.refused("human review")
+        self.refused("needs input")
 
     def test_fresh_forge_changes_requested_refuses_after_planning(self):
         self.planned()

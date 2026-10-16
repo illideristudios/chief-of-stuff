@@ -167,7 +167,7 @@ REVIEW_PIPELINE_RULES = {
         "A task with a `lane` moves through that lane's stages (see Tracker).",
         'In one-shot mode, represent review and follow-up fix work as scoped Tasks rows and launch fresh one-shot workers; do not send assignments to persistent reviewer or implementer sessions.',
         "Include the PR, findings and recorded dispositions in each task; an automatic fix's task names its Log line instead of a disposition.",
-        'Review findings still go to the user for disposition, except an automatic fix under Triage; configured lane gates and human-review holds still apply.',
+        'Review findings still go to the user for disposition, except an automatic fix under Triage; configured lane gates and NEEDS INPUT flags still apply.',
         '`[workflow] delivery` selects `pull-request` (the backward-compatible default) or `branch`; `[workflow] merge_owner` selects `user` (default), `worker` or `approval` for pull requests.',
         'When `[workflow] reviewer_session` names a session, send pull requests to it for review and bring its findings to the user for triage.',
         'With no configured reviewer, ask the user how to review a pull request before advancing its review stage.',
@@ -508,10 +508,10 @@ DISPATCH_RULES = {
         'Do not dispatch a standing placeholder this way; a launcher call starts exactly one task.',
         'The launcher writes a TOON report at `<worktree>/.chief-of-stuff/one-shot-report.toon` and prints it.',
         'On completion it sets the tracker row to `waiting` under the configured user for normal integration or review.',
-        'On an unfinished run, including a failed process, timeout, or missing worker result, it also adds the configured human-review hold to the issue without changing its numbered stage and comments with the reason and partial changes.',
+        'On an unfinished run, including a failed process, timeout, or missing worker result, it also adds the configured NEEDS INPUT flag to the issue without changing its numbered stage and comments with the reason and partial changes.',
         'A report with `status: relaunch` means the worker stopped before changing anything because its premise moved, such as its base or target pull request merging; the launcher set the row back to `unassigned` and `open` with no hold.',
         "That is not a held or failed task and not the user's to decide: relaunch it now in a fresh worktree from current main, without asking, and log why.",
-        'A second stop on the same task comes back as human review.',
+        'A second stop on the same task comes back as needs input.',
         'Read and reconcile any errors in the report; a failed issue update is not a successful hold.',
         'No coordinator or worker mailbox messages are part of this mode.',
         'The default time limit is 60 minutes; `--timeout-minutes N` changes it.',
@@ -559,7 +559,8 @@ NO_COMMIT_PROHIBITION = "Write only: do not commit " + "or push"
 DISPATCH_ALSO_IN_AUTHORITY = (
     "A task-specific request for an interactive session authorizes that task's launch with `--interactive` in a one-shot workspace.",
 )
-DISPATCH_AUTHORITY_SHA256 = "eb55aa106aa9e645a8e11c76f2ea027f4610d1898711e1b4f414eed5fffb3530"
+# #210 changes only the person-wait vocabulary in Dispatch authority.
+DISPATCH_AUTHORITY_SHA256 = "e1279f9396d730723eee1d1af1aee6a46cdbe8ddf254df6b93049eded06c579c"
 DISPATCH_TOPICS = ["Rows", "Worker and model", "Assignment", "Launch", "One-shot", "After launch"]
 
 

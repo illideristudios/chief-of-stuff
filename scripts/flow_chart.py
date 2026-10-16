@@ -6,7 +6,7 @@ window, and an open task with an estimated end draws its remaining stages ahead 
 its lane's first stage with no move yet is queued: forecast only, after the running forecasts, in worker slots.
 Rows that share a tracker issue (a review loop's build/Review/Fix/Verify passes) merge into one row.
 Until a task's first `stage:` move, it moves on the one-shot launcher's lines: started → implement, completed → pr,
-HUMAN REVIEW NEEDED → review. A relaunch request ends its worker's bar without starting another stage.
+NEEDS INPUT (and historical HUMAN REVIEW NEEDED) → review. A relaunch request ends its worker's bar without starting another stage.
 A done task's last segment ends at its done time, not now.
 """
 

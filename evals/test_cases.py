@@ -1938,7 +1938,7 @@ class CaseLintTest(unittest.TestCase):
         pinned by test_process_status.py, and a reply that says the run stopped is not graded."""
         agent_text = rules_text()
         launch, asks, listing = spec(EVALS / "cases" / "one-shot-in-flight-is-checked-with-processes")["graders"]
-        self.assertIn("Ready means an open, unassigned task", launch["rule"])
+        self.assertIn("Ready: open, unassigned", launch["rule"])
         helper = "Use this helper instead of ad hoc `ps` or `pgrep` calls, and do not mark an `unverified` worker gone."
         self.assertEqual((asks["rule"], listing["rule"]), (helper, helper))
         for g in (launch, asks, listing):
@@ -2163,7 +2163,7 @@ class CaseLintTest(unittest.TestCase):
             self.assertNotRegex(tracker, r"running \d\d:\d\d")
             ended = next(line for line in tracker.splitlines() if tracker_log.ENDED.match(line))
             self.assertEqual(tracker_log.ENDED.match(ended)[4], "HUMAN REVIEW NEEDED")
-            self.assertTrue(ended.startswith(tracker_log.ended_line(ended[2:7], "rate-limit", "human_review", "", "")[:-len(" — . Changes: .")]), ended)
+            self.assertTrue(ended.replace("HUMAN REVIEW NEEDED", "NEEDS INPUT").startswith(tracker_log.ended_line(ended[2:7], "rate-limit", "human_review", "", "")[:-len(" — . Changes: .")]), ended)
             self.assertIn(one_shot._brief(report["reason"]), ended)  # the reason as the launcher writes it: whitespace joined, cut at 500
             self.assertLess(len(one_shot._brief(report["reason"])), len(" ".join(report["reason"].split())))  # and it is cut
             # The fact is in the report, the launcher's copy of it and the worker's log, and nowhere the coordinator reads without `result`.

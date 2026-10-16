@@ -301,7 +301,7 @@ class DesignTest(unittest.TestCase):
         for word in ("get / set", "holds 20 open", "Warm pool", "Not drawn: auth, the job queue."):
             self.assertIn(word, page)
         self.assertIn('<a href="https://github.com/o/app/blob/HEAD/src/cache/pool.py" target="_blank" rel="noopener">', page)
-        for chip in ("DEPLOYED", "IN FLIGHT", "DESIGNED", "EXTERNAL", "WAITING ON THIS"):
+        for chip in ("DEPLOYED", "IN FLIGHT", "DESIGNED", "EXTERNAL", "NEEDS INPUT"):
             self.assertIn(chip, page)
 
     def test_every_edge_of_an_acyclic_figure_points_right(self):
@@ -529,7 +529,7 @@ class IndexTest(unittest.TestCase):
 
     def test_two_decisions_holding_one_issue_hold_it_once(self):
         page = self.render(dp.Context(NOW), a=decision(holds=["#111"], references=[]), b=decision(holds=["#111"], references=[]))
-        self.assertRegex(page, r"holding 1 issue\b")
+        self.assertRegex(page, r"needs input: 1 issue\b")
 
     def test_a_saved_page_answer_is_an_answered_row_with_the_words(self):
         saved = {"key": "B", "words": "B, and log each retry", "at": at("02:08").isoformat()}
