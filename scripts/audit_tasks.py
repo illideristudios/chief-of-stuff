@@ -35,6 +35,7 @@ import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
 from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
+from process_status import process_exists, registrations, running_trees  # noqa: E402
 from tree_claims import Claims, one_shot_claims, registry_claims  # noqa: E402
 
 # Preserve branch names from ownership rows when worktrees disappear.
@@ -939,7 +940,8 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 path = _resolve(root, trees, name)[0]
                 if path is not None:
                     claims.setdefault(path, []).append(row_claim(row, tasks, roster, refs, cfg.user, tracker.sessions))
-        for source in (registry_claims(root), one_shot_claims((root / trees).resolve())):
+        for source in (registry_claims(root, registrations, process_exists),
+                       one_shot_claims((root / trees).resolve(), running_trees)):
             for path, found in source.items():
                 claims.setdefault(path, []).extend(found)
         for path in order:

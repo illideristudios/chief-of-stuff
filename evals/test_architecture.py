@@ -272,7 +272,6 @@ OUTWARD_IMPORTS = frozenset({
     "task_forge→settings",
     "tracker→backlog_ref",
     "tracker→workspace",
-    "tree_claims→process_status",
 })
 
 
