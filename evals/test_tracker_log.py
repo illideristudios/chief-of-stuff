@@ -126,14 +126,21 @@ class RoundTripTest(unittest.TestCase):
             self.assertEqual(tl.moves("## Log\n" + line, DAY, CT), [])
 
     def test_a_later_run_clears_only_its_own_hold_failure(self):
-        start = tl.started_line("11:00", "worker02", "codex", "m", "worktree `tree`", "Security audit")
-        for end in (tl.relaunch_line("11:10", "worker02", "Security audit", "base moved — retry"),
-                    tl.ended_line("11:10", "worker02", "done", "finished", "none"),
-                    tl.ended_line("11:10", "worker01", "done", "finished after midnight", "none")):
-            with self.subTest(end=end):
-                text = "## Log\n" + tl.hold_failed_line("10:00", "old", "Other", "offline") + "\n"
-                text += tl.hold_failed_line("10:20", "worker01", "Security audit", "offline") + "\n" + start + "\n" + end
-                self.assertEqual(tl.hold_failures(text), {"Other": "offline"})
+        # worker03 has no earlier line. The relaunch reason contains " — ", so the task is the
+        # text before the first separator; a worker map must not overwrite that parse.
+        other = tl.hold_failed_line("10:00", "old", "Other", "offline")
+        failed = tl.hold_failed_line("10:20", "worker01", "Security audit", "offline")
+        relaunch = tl.relaunch_line("11:10", "worker03", "Security audit", "base moved — retry")
+        self.assertEqual(tl.hold_failures("## Log\n" + other + "\n" + failed + "\n" + relaunch),
+                         {"Other": "offline"})
+        done = tl.ended_line("01:00", "old", "done", "finished", "none")
+        released = tl.hold_release_line("01:01", "old", "Security audit", "removed")
+        self.assertNotIn("Security audit", tl.completed_tasks(
+            "## Log\n" + done + "\n" + released + "\n" + relaunch))
+        end = tl.ended_line("11:10", "worker03", "done", "finished after midnight", "none")
+        clear = tl.hold_release_line("11:11", "worker03", "Security audit", "removed")
+        self.assertEqual(tl.hold_failures("## Log\n" + other + "\n" + failed + "\n" + end + "\n" + clear),
+                         {"Other": "offline"})
 
     def test_start_preserves_a_failed_hold_until_an_outcome_is_known(self):
         text = "## Log\n" + tl.hold_failed_line("10:00", "old", "Task", "offline") + "\n"
@@ -151,9 +158,13 @@ class RoundTripTest(unittest.TestCase):
         text = "## Log\n" + tl.ended_line("01:00", "old", "done", "finished", "none") + "\n"
         text += tl.hold_release_line("01:00", "old", "Task", "removed")
         self.assertEqual(tl.completed_tasks(text), {"Task"})
-        text += "\n" + tl.started_line("02:00", "new", "codex", "m", TREE, "Task")
-        text += "\n" + tl.ended_line("02:30", "new", "human_review", "blocked", "none")
-        self.assertEqual(tl.completed_tasks(text), set())
+        # The review end has no same-day start. The worker is known from the release line above.
+        reviewed = text + "\n" + tl.ended_line("02:30", "old", "human_review", "blocked", "none")
+        self.assertEqual(tl.completed_tasks(reviewed), set())
+        # A different worker, still with no same-day start, names the task on the release that follows.
+        later = text + "\n" + tl.ended_line("02:30", "worker03", "human_review", "blocked", "none")
+        later += "\n" + tl.hold_release_line("02:31", "worker03", "Task", "failed", "offline")
+        self.assertEqual(tl.completed_tasks(later), set())
 
     def test_an_approved_forge_closure_line_reads_back_its_task(self):
         # #547: the coordinator records the user's approval; the audit does not reopen the task it names.

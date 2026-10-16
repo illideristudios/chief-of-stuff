@@ -1798,6 +1798,15 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.tracker.read_text(), (self.root / "during.md").read_text(),
                          "the launch day's tracker is untouched by the result")
 
+    def test_an_unreadable_end_day_tracker_does_not_take_yesterdays_row(self):
+        end = self.root / self.END_TRACKER
+        end.mkdir()
+        fake = self._fake('status: done\nreason: completed audit\nchanges: none\n', write_partial=False)
+        self.assertEqual(self._run_past_midnight(fake), 1)
+        self.assertEqual(self.tracker.read_text(), (self.root / "during.md").read_text())
+        self.assertTrue(self._report()["errors"])
+        self.assertTrue(end.is_dir())
+
     def test_a_run_ending_after_midnight_with_no_end_day_tracker_lands_on_the_launch_days_row(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler\n',
                           write_partial=False)
@@ -2136,6 +2145,22 @@ class RunTest(unittest.TestCase):
         self.assertEqual(reports[0]["status"], "done")
         self.assertIn("the launcher died before reconciling this run", reports[0]["reason"])
         self.assertIn("| Security audit | Robin | waiting |", self.tracker.read_text())
+
+    def test_an_adopted_quota_stop_logs_the_quota_marker_and_keeps_the_prefix(self):
+        real = one_shot.reconcile
+
+        def adopted(*args, **kwargs):
+            return real(*args, adopted=True, **kwargs)
+
+        fake = self._fake(None, exit_code=3, write_partial=False, stderr=self.QUOTA)
+        with mock.patch.object(one_shot, "reconcile", side_effect=adopted):
+            self.assertEqual(self._run(fake, model="m-test"), 1)
+        report = self._report()
+        self.assertEqual(report["status"], "relaunch")
+        self.assertIn("the launcher died before reconciling this run", report["reason"])
+        marker = "relaunch requested for Security audit — "
+        line = next(row for row in self.tracker.read_text().splitlines() if marker in row)
+        self.assertTrue(line.split(marker, 1)[1].startswith("quota stop:"), line)
 
     def test_a_tree_with_a_result_but_no_report_copy_is_adopted(self):
         # #99: a run whose worker finished but whose launcher died before reconciling is adopted

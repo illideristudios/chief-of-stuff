@@ -498,6 +498,45 @@ class StageWriteBackTest(unittest.TestCase):
                     self.assertEqual(gh.all_calls, [])
                     get.assert_not_called()
 
+    def test_keep_hold_retains_a_hold_only_when_it_is_already_there(self):
+        for home in (GH, GL):
+            with self.subTest(home=home):
+                gh = FakeGh(issues=[gh_issue(4, "Flag", ["stage: doing"])])
+                with mock.patch.object(backlog, "_get", return_value=({"labels": ["stage: doing"]}, {}, "")), \
+                     mock.patch.object(backlog, "_call") as write, \
+                     mock.patch.object(backlog, "existing_labels", return_value=(set(FLOW.stages), "")), \
+                     mock.patch.object(backlog, "token", return_value="test"):
+                    got = forge.Forge(home, kanban=FLOW, gh=gh, token="test").write_stage(
+                        4, "doing", expected="doing", release_hold=True, keep_hold=True, commit=True)
+                self.assertTrue(got.done, got.error)
+                self.assertEqual(got.hold_release, "absent")
+                self.assertNotIn(FLOW.human_review_label, [x["name"] for x in gh.issues[4]["labels"]])
+                write.assert_not_called()
+        cfg = replace(FLOW, hold_stages=("review",))
+        gh = FakeGh(issues=[gh_issue(4, "Flag", ["stage: review", FLOW.human_review_label])])
+        got = forge.Forge(GH, kanban=cfg, gh=gh).write_stage(
+            4, "doing", expected="review", release_hold=True, keep_hold=True, commit=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.hold_release, "retained")
+        self.assertIn(FLOW.human_review_label, [x["name"] for x in gh.issues[4]["labels"]])
+
+    def test_an_unheld_hold_stage_reports_an_absent_release(self):
+        cfg = replace(FLOW, hold_stages=("doing",))
+        gh = FakeGh(issues=[gh_issue(4, "Flag", ["bug"])])
+        got = forge.Forge(GH, kanban=cfg, gh=gh).write_stage(
+            4, "doing", expected="doing", release_hold=True, only_if_held=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.hold_release, "absent")
+
+    def test_an_empty_project_status_is_an_unheld_card(self):
+        issue = gh_issue(4, "Flag")
+        gh = FakeGh(issues=[issue], status={issue["url"]: None})
+        got = forge.Forge(GH, kanban=BOARD, gh=gh).write_stage(
+            4, "doing", expected="doing", release_hold=True, only_if_held=True, commit=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.hold_release, "absent")
+        self.assertFalse(any(c[:2] == ["project", "item-edit"] for c in gh.all_calls))
+
     def test_release_hold_reports_failed_or_unverified_writes(self):
         for fail in (True, False):
             with self.subTest(failed_write=fail):

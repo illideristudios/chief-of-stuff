@@ -20,6 +20,7 @@ import audit_tasks  # noqa: E402
 import forge  # noqa: E402
 import kanban  # noqa: E402
 import kanban_cli  # noqa: E402
+import tracker_log  # noqa: E402
 from _vendor.toon_format import decode as toon_decode
 from evals.project_cli import validate as validate_project_cli  # noqa: E402
 from settings import GitHubProject, Kanban  # noqa: E402
@@ -363,14 +364,57 @@ class CliTest(unittest.TestCase):
                 self.assertEqual(row["remove"], FLOW.human_review_label)
 
     def test_release_task_uses_all_active_siblings(self):
-        self._two_rows_on_issue_7()
         result = kanban.Sync(backlog.IssueRef("team/app", 7), "plan review", done=True, hold_release="retained")
-        with mock.patch.object(forge, "sync_stage", return_value=result) as sync, redirect_stdout(io.StringIO()):
+
+        def release(task: str, extra: str = ""):
+            self._two_rows_on_issue_7()
+            if extra:
+                path = self.root / "daily" / "2026-09-25-tracker.md"
+                path.write_text(path.read_text() + extra)
+            with mock.patch.object(forge.Forge, "write_stage", return_value=result) as sync, \
+                    redirect_stdout(io.StringIO()):
+                code = kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7",
+                                        "--task", task, "--from-stage", "plan review", "--release-hold", "--commit"])
+            self.assertEqual(code, 0)
+            self.assertEqual(sync.call_args.args[1], "plan review")
+            return sync.call_args.kwargs["keep_hold"]
+
+        self.assertTrue(release("12"))
+        self.assertFalse(release("13"))
+        done = "\n## Log\n" + tracker_log.started_line("08:00", "w", "codex", "m", "worktree `t`", "13")
+        done += "\n" + tracker_log.ended_line("08:10", "w", "done", "finished", "none") + "\n"
+        self.assertFalse(release("12", done))
+
+    def test_a_blank_selected_stage_is_not_replaced_by_a_sibling(self):
+        self._two_rows_on_issue_7()
+        path = self.root / "daily" / "2026-09-25-tracker.md"
+        path.write_text(path.read_text().replace(
+            "| Feature | 12 | worker | running 09:00 | 09:00 | | M | build | plan | #7 |",
+            "| Feature | 12 | worker | running 09:00 | 09:00 | | M | build |  | #7 |"))
+        output = io.StringIO()
+        with mock.patch.object(forge.Forge, "write_stage") as sync, redirect_stdout(output):
             code = kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7",
-                                    "--task", "12", "--from-stage", "plan review", "--release-hold", "--commit"])
-        self.assertEqual(code, 0)
-        self.assertEqual(sync.call_args.args[3], "plan review")
-        self.assertTrue(sync.call_args.kwargs["keep_hold"])
+                                    "--task", "12", "--from-stage", "plan", "--release-hold", "--commit"])
+        self.assertEqual(code, 1)
+        self.assertIn("tracker stage is blank", output.getvalue())
+        sync.assert_not_called()
+
+    def test_release_hold_ignores_a_done_sibling(self):
+        folder = self.root / "daily"
+        (folder / "2026-09-25-tracker.md").write_text(
+            "## Tasks\n| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Feature | 12 | worker | open | 09:00 | | M | build | plan | #7 | |\n"
+            "| Old | 11 | worker | done 08:00 | 08:00 | | M | build | plan | #7 | |\n")
+        result = kanban.Sync(backlog.IssueRef("team/app", 7), "plan", done=True, hold_release="absent")
+        err = io.StringIO()
+        with mock.patch.object(forge.Forge, "write_stage", return_value=result) as sync, \
+                redirect_stdout(io.StringIO()), redirect_stderr(err):
+            code = kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7",
+                                    "--from-stage", "plan", "--release-hold", "--commit"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertNotIn("multiple tracker tasks", err.getvalue())
+        sync.assert_called_once()
 
     def test_release_requires_issue_and_prior_stage_even_in_preview(self):
         for flags in ([], ["--issue", "#7"], ["--from-stage", "plan"],
@@ -554,6 +598,37 @@ class AuditTest(unittest.TestCase):
         with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
             self.assertEqual(audit_tasks.kanban_faults([task], cfg, FLOW,
                 hold_failures={"Security audit": "lab was down"}), [])
+
+    def test_a_completed_task_with_no_hold_is_not_a_failed_hold(self):
+        task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
+                               label="Build it", kind="waiting", item="Security audit")
+        cfg = backlog.Backlog("https://labs.example.test", "team/app")
+        issue = backlog.Issue(7, "Build it", "opened", ("03 - BUILD",))
+        with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+            faults = audit_tasks.kanban_faults([task], cfg, FLOW,
+                                               hold_failures={"Security audit": "offline"},
+                                               completed={"Security audit"})
+        self.assertEqual(faults, [])
+
+    def test_a_hold_label_matches_in_any_case(self):
+        task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
+                               label="Build it", kind="waiting", item="Security audit")
+        cfg = backlog.Backlog("https://labs.example.test", "team/app")
+        issue = backlog.Issue(7, "Build it", "opened", ("03 - BUILD", "!! - human review required"))
+        with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+            self.assertEqual(audit_tasks.kanban_faults([task], cfg, FLOW,
+                                                       hold_failures={"Security audit": "lab was down"}), [])
+
+    def test_a_failed_release_that_left_the_hold_is_reported(self):
+        task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
+                               label="Build it", kind="waiting", item="Security audit")
+        cfg = backlog.Backlog("https://labs.example.test", "team/app")
+        issue = backlog.Issue(7, "Build it", "opened", ("03 - BUILD", FLOW.human_review_label))
+        with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+            faults = audit_tasks.kanban_faults([task], cfg, FLOW,
+                                               release_failures={"Security audit": "board changed"})
+        self.assertEqual([f.why for f in faults],
+                         ["review hold release failed: board changed; the issue still has the hold label"])
 
     def test_a_failed_hold_whose_hold_landed_is_not_reported(self):
         task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
