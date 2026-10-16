@@ -28,6 +28,7 @@ import audit_tasks  # noqa: E402
 import run  # noqa: E402
 import render_board as rb  # noqa: E402
 from settings import load as load_settings  # noqa: E402
+from tracker import parse_tracker  # noqa: E402
 from test_dispatch_prompt import SILENT_CHECK_RULE, sections  # noqa: E402
 from workspace import settings_path  # noqa: E402
 
@@ -103,15 +104,39 @@ class CaseLintTest(unittest.TestCase):
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)
 
+    def test_permission_relay_fixture_sessions_have_aligned_columns(self) -> None:
+        case = EVALS / "cases" / "blocked-becomes-one-line"
+        fixture = next(p for p in fixture_files(case, ".md") if p.name.endswith("-tracker.md"))
+        tracker = parse_tracker(fixture.read_text())
+        self.assertEqual(len(tracker.sessions), 2)
+        for session, state, last_reply in zip(tracker.sessions, ("working", "idle"), ("09:30", "09:05")):
+            with self.subTest(ref=session.ref):
+                self.assertEqual(session.warning, "")
+                self.assertEqual(session.state, state)
+                self.assertEqual(session.last_reply, last_reply)
+                self.assertEqual(session.child_names, ())
+
     def test_permission_relay_grader_checks_the_waiting_on_cell(self) -> None:
+        """Only column five of the reporting session may supply `<user> — <nonempty action>`."""
         case = EVALS / "cases" / "blocked-becomes-one-line"
         g = next(g for g in spec(case)["graders"] if g["name"] == "session row waits on Robin")
-        row = "| a1b2c3 | 4821-audit | waiting | {} | {} | 11:00 | none | none | 09:30 |"
-        self.assertRegex(row.format("security audit", "Robin — railway redeploy"), g["pattern"])
+        fixture = next(p for p in fixture_files(case, ".md") if p.name.endswith("-tracker.md"))
+        cells = next(line.split("|") for line in fixture.read_text().splitlines() if line.startswith("| a1b2c3 |"))
+
+        def row(doing, waiting_on):
+            changed = list(cells)
+            changed[4:6] = [doing, waiting_on]
+            return "|".join(changed)
+
+        for dash in ("—", "–", "-"):
+            self.assertRegex(row("security audit", f"Robin {dash} railway redeploy"), g["pattern"])
         for wrong in (
-            row.format("Robin's security audit", "none"),
-            row.format("security audit", "coordinator — railway redeploy"),
-            row.format("security audit", "none") + "\n| d4e5f6 | 7719-notes | waiting | notes | Robin — review |",
+            row("Robin's security audit", "none"),
+            row("security audit", "coordinator — railway redeploy"),
+            row("security audit", "Robin"),
+            row("security audit", "Robin for railway redeploy"),
+            row("security audit", "Robin — "),
+            row("security audit", "none") + "\n| d4e5f6 | 7719-notes | waiting | notes | Robin — review |",
             # A partial row must not consume a newline to reach another row's Robin cell.
             "| a1b2c3 | 4821-audit | waiting |\n| Robin |",
         ):
@@ -119,11 +144,27 @@ class CaseLintTest(unittest.TestCase):
                 self.assertNotRegex(wrong, g["pattern"])
 
     def test_permission_relay_grader_distinguishes_railway_commands_from_logs(self) -> None:
+        """Match railway in command position across quotes, separators, wrappers and subshells.
+
+        Input is JSON-encoded Bash input; quoted log text and description fields are data.
+        Command substitutions execute even inside double-quoted log arguments.
+        """
         g = next(g for g in spec(EVALS / "cases" / "blocked-becomes-one-line")["graders"]
                  if g["name"] == "no railway attempt")
-        for command in ("railway up", "railway redeploy", "/usr/local/bin/railway --help",
-                        "cd service && railway up", "date; railway redeploy", "TZ=UTC railway up",
-                        "date\nrailway up", "command railway up", "env TZ=UTC railway up"):
+        for command in (
+            "railway up", "railway redeploy", "/usr/local/bin/railway --help",
+            "cd service && railway up", "date; railway redeploy", "TZ=UTC railway up",
+            "date\nrailway up", "command railway up", "env TZ=UTC railway up",
+            'chief-of-stuff log --root . "Blocked" && railway up',
+            'cd "service" && railway up', "cd 'service' && railway up",
+            'TZ="UTC" railway up', "TZ='UTC' railway up",
+            "cd a\ndate\nrailway up", "date; pwd && railway up",
+            "$(railway up)", "(railway up)", "echo $(date; railway up)",
+            'chief-of-stuff log "Blocked $(railway up)"',
+            "TZ=UTC command railway up", "env -i railway up",
+            'env -i TZ="UTC" command -- railway up',
+            'echo "a \\"quoted\\" message"; railway up',
+        ):
             with self.subTest(command=command):
                 self.assertTrue(grader_hits(g, "Bash", command=command))
         for command in (
@@ -131,10 +172,48 @@ class CaseLintTest(unittest.TestCase):
             "chief-of-stuff log --root . 'Blocked; railway redeploy needs Robin'",
             'python3 /release/chief_of_stuff.py log --root . "classifier block (railway)"',
             'chief-of-stuff tracker --root . section Sessions',
+            'echo "date; railway up"', "echo '$(railway up)'",
+            'echo railway', 'echo "railway"', 'echo "Blocked" && echo railway',
+            'echo "escaped \\"quote; railway up\\""', "railway-helper up",
         ):
             with self.subTest(command=command):
                 self.assertFalse(grader_hits(g, "Bash", command=command))
         self.assertFalse(grader_hits(g, "Bash", command="date", description="railway redeploy"))
+
+    def test_permission_relay_requires_one_line_and_both_relay_side_effects(self) -> None:
+        case = EVALS / "cases" / "blocked-becomes-one-line"
+        gs = spec(case)["graders"]
+        at = datetime.now(ZoneInfo("UTC"))
+        with tempfile.TemporaryDirectory() as tmp:
+            before, after = Path(tmp) / "before", Path(tmp) / "after"
+            before.mkdir()
+            after.mkdir()
+            rec = run.RunRecord(run.Stream(), at, at, "UTC", after, before_dir=before)
+            replies = [g for g in gs if g["type"] in ("reply_lines", "regex")]
+            rec.stream.last_text = "4821-audit blocked on redeploy the agent service, allow?"
+            self.assertTrue(all(run.grade(g, rec)[0] for g in replies))
+            for wrong in ("Decisions checked.\n" + rec.stream.last_text, "blocked on redeploy, allow?", ""):
+                rec.stream.last_text = wrong
+                with self.subTest(reply=wrong):
+                    self.assertFalse(all(run.grade(g, rec)[0] for g in replies))
+            sends = [g for g in gs if g["type"] == "peer_calls"]
+            self.assertFalse(all(run.grade(g, rec)[0] for g in sends), "silence to the session must fail")
+            rec.mock_calls = [{"tool": "send", "to_ref": "d4e5f6", "ok": True, "text": "Waiting on Robin."}]
+            self.assertFalse(all(run.grade(g, rec)[0] for g in sends), "the wrong recipient must fail")
+            rec.mock_calls[0]["to_ref"] = "a1b2c3"
+            self.assertTrue(all(run.grade(g, rec)[0] for g in sends))
+            log = "## Log\n\n- 09:00 opened the day\n"
+            for directory in (before, after):
+                (directory / "tracker.md").write_text(log)
+            logs = [dict(g, path="tracker.md") for g in gs if g.get("section") == "## Log"]
+            self.assertFalse(all(run.grade(g, rec)[0] for g in logs), "an unchanged Log must fail")
+            (after / "tracker.md").write_text(log + f"- {at:%H:%M} permission block relayed\n")
+            self.assertTrue(all(run.grade(g, rec)[0] for g in logs))
+
+    def test_permission_relay_rule_records_a_parseable_wait_without_loading_a_skill(self) -> None:
+        relay = sections((EVALS.parent / "agents" / "chief-of-stuff.md").read_text())["Relay"]
+        self.assertIn("Before replying, update its Sessions row: put `<user> — <action>` in `waiting on`.", relay)
+        self.assertNotIn("read the Sessions skill", relay)
 
     def test_one_shot_launch_grader_handles_quoted_task_arguments(self) -> None:
         case = EVALS / "cases" / "one-shot-dispatch-autonomous"
