@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from clock import HHMM, RAN, dur as _dur, hhmm as _hhmm  # noqa: E402
-from findings import ISSUE, KANBAN, LANE, MERGED, NEXT, OVER, QUEUE, REOPEN, STOPPED  # noqa: E402
+from findings import ISSUE, KANBAN, LANE, MERGED, NEXT, OVER, QUEUE, REOPEN, STACK, STOPPED  # noqa: E402
 from md import cells as _cells, is_separator as _is_separator, section as _section, unmark as _unmark  # noqa: E402
 from tracker import Session, clip_name, parse_tracker  # noqa: E402
 from workspace import ConfigError, parse_coordinator, read_config, settings_path, worktrees_dir  # noqa: E402
@@ -108,6 +108,16 @@ class QueueFault:
 
     def __str__(self) -> str:
         return f"{QUEUE} {self.row} — {self.why}"
+
+
+@dataclass(frozen=True)
+class StackFault:
+    """A stack without a live owner, or an unsuccessful stack discovery."""
+
+    why: str
+
+    def __str__(self) -> str:
+        return f"{STACK} {self.why}"
 
 
 @dataclass(frozen=True)
@@ -418,7 +428,7 @@ class Report:
     lanes: list[LaneFault] = field(default_factory=list)
     kanban: list[KanbanFault] = field(default_factory=list)
     over: list[OverBudget] = field(default_factory=list)
-    stacks: list[str] = field(default_factory=list)
+    stacks: list[StackFault] = field(default_factory=list)
 
 
 def _worktrees(cell: str) -> tuple[list[str], dict[str, str]]:
@@ -835,7 +845,7 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
     return faults, lines, len(open_rows)
 
 
-def stale_stacks(root: Path, trees: str, command: str) -> list[str]:
+def stale_stacks(root: Path, trees: str, command: str) -> list[StackFault]:
     """Discover configured stacks and join them to the existing process-backed ownership sources.
 
     Tracker rows alone do not establish a live owner. Missing worktrees can still have stacks.
@@ -859,10 +869,10 @@ def stale_stacks(root: Path, trees: str, command: str) -> list[str]:
         live = {path for path, claims in registry_claims(root, registrations, process_exists).items()
                 if any(claim.live for claim in claims)}
         live.update(one_shot_claims(base, running_trees))
-        return [git_trees.clean(f"stack {row['stack']}: worktree {path} has no live owner")
+        return [StackFault(git_trees.clean(f"{row['stack']}: worktree {path} has no live owner"))
                 for row, path in zip(rows, paths) if path not in live]
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        return [git_trees.clean(f"stack discovery failed: {exc}")]
+        return [StackFault(git_trees.clean(f"discovery failed: {exc}"))]
 
 
 def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetime | None = None, call=None) -> Report:
@@ -888,7 +898,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
 
     report = Report()
     report.stacks.extend(stale_stacks(root, trees, settings.workers.teardown_list))
-    report.lines.extend(report.stacks)
+    report.lines.extend(str(stack) for stack in report.stacks)
     handled: set[str] = set()
     seen: set[Path] = set()
     order: list[Path] = []
