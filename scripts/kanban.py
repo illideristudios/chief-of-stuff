@@ -3,10 +3,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 
 import backlog
 from settings import Kanban
+from tracker import Task
 
 
 @dataclass(frozen=True)
@@ -114,8 +116,23 @@ def github_label_delta(config: Kanban, current: tuple[str, ...], stage: str, kee
     return Delta(add, remove)
 
 
-def furthest(config: Kanban, tasks):
+def furthest(config: Kanban, tasks: Iterable[Task]) -> Task | None:
     """The active card row at the furthest mapped stage; one issue has one board stage."""
     rows = [task for task in tasks if not task.standing and task.kind != "done"
             and task.lane.strip() and task.stage.strip()]
-    return max(rows, key=lambda task: config.stage_map.get(task.stage.strip(), -1), default=None)
+    return max(rows, key=lambda task: (config.stage_map.get(task.stage.strip(), -1),
+                                       config.holds(task.stage.strip())), default=None)
+
+
+def shared_issue(config: Kanban, tasks: Iterable[Task], home: backlog.Backlog | backlog.GitHubBacklog,
+                 ref: backlog.IssueRef, *, completed: Collection[str] = (),
+                 releasing: Task | None = None) -> tuple[Task | None, bool]:
+    """Choose one active laned stage and retain only unfinished siblings' review holds.
+
+    Completion leaves a row waiting for integration; it is not a human-review hold. The row
+    being released is excluded from retention, while tied stages prefer a required hold.
+    """
+    rows = [task for task in tasks if not task.standing and task.kind != "done"
+            and task.lane.strip() and task.stage.strip() and backlog.issue_ref(task.issue, home) == ref]
+    return furthest(config, rows), any(task is not releasing and task.kind == "waiting"
+                                      and task.item.strip() not in completed for task in rows)

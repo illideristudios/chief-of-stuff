@@ -152,28 +152,47 @@ def _github_labels_exist(gh, ref: backlog.IssueRef, names: tuple[str, ...]) -> s
             f"create the label(s) {', '.join(sorted(missing))} before syncing") if missing else ""
 
 
+def _release_result(result: kanban.Sync, config: Kanban, current: tuple[str, ...],
+                    commit: bool, release_hold: bool, keep_hold: bool) -> kanban.Sync:
+    """Report a release from the adapter's observed labels and verified write outcome."""
+    if not release_hold:
+        return result
+    present = config.human_review_label in current
+    outcome = ("failed" if result.error else
+               "removed" if present and config.human_review_label in result.delta.remove and commit and result.done else
+               "retained" if present or config.holds(result.stage) or
+               (keep_hold and result.done and config.human_review_label in result.delta.add) else "absent")
+    return replace(result, hold_release=outcome)
+
+
 def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
                 commit: bool = False, expected_stage: str | None = None,
-                initialize: bool = False, release_hold: bool = False) -> kanban.Sync:
+                initialize: bool = False, release_hold: bool = False,
+                only_if_held: bool = False, keep_hold: bool = False) -> kanban.Sync:
     """Update issue labels, or a GitHub Project Status plus the issue's hold label."""
+    current: tuple[str, ...] = ()
+
+    def result(value: kanban.Sync) -> kanban.Sync:
+        return _release_result(value, config, current, commit, release_hold, keep_hold)
+
     if ref.host != backlog.GITHUB:
-        return kanban.Sync(ref, stage, error="issue is not on GitHub")
+        return result(kanban.Sync(ref, stage, error="issue is not on GitHub"))
     try:
         config.label_for(stage)
     except KeyError:
-        return kanban.Sync(ref, stage, error=f"unmapped tracker stage: {stage}")
+        return result(kanban.Sync(ref, stage, error=f"unmapped tracker stage: {stage}"))
     if expected_stage is not None:
         try:
             config.label_for(expected_stage)
         except KeyError:
-            return kanban.Sync(ref, stage, error=f"unmapped prior stage: {expected_stage}")
+            return result(kanban.Sync(ref, stage, error=f"unmapped prior stage: {expected_stage}"))
     gh = gh or backlog.run_gh
     current, error = _github_issue(gh, ref)
     if error:
-        return kanban.Sync(ref, stage, error=error)
+        return result(kanban.Sync(ref, stage, error=error))
     current = kanban.canonical_labels(config, current)
     delta = kanban.github_label_delta(config, current, stage,
-                                      keep_hold=kanban.extra_hold(config, current, expected_stage, release_hold=release_hold))
+                                      keep_hold=keep_hold or kanban.extra_hold(config, current, expected_stage, release_hold=release_hold))
     managed = kanban.managed_labels(config)
     current_labels = frozenset(current) & managed
     desired_labels = set(kanban.after(current, delta)) & managed
@@ -186,7 +205,7 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if project:
         item, old_status, error = _project_item(gh, project, ref)
         if error:
-            return kanban.Sync(ref, stage, delta, error=error)
+            return result(kanban.Sync(ref, stage, delta, error=error))
         present = item is not None
         item_id = _node_id(item)
         # Forge used stage labels before it honored github_project. Migrate only a single stage mark.
@@ -196,15 +215,13 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         if wanted:
             field_id, option_id, error = project_option_ids(gh, project, wanted)
             if error:
-                return kanban.Sync(ref, stage, delta, error=error)
+                return result(kanban.Sync(ref, stage, delta, error=error))
     project_add = bool(project and not present and wanted is not None)
     changed = delta.changed or (project is not None and (project_add or (present and old_status != wanted)))
-    result = kanban.Sync(ref, stage, delta, current_status=old_status, project_status=wanted,
+    preview = kanban.Sync(ref, stage, delta, current_status=old_status, project_status=wanted,
                   project_add=project_add)
-    if not changed:
-        return kanban.Sync(ref, stage, delta, done=True, current_status=old_status, project_status=wanted)
     if not commit and expected_stage is None and not initialize:
-        return result
+        return result(replace(preview, done=not changed))
     if project:
         prior_status = config.status_for(expected_stage) if expected_stage else None
         current_state = (old_status if present else None, frozenset(current_labels))
@@ -213,6 +230,8 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         # Status is written before labels when leaving a hold or migrating; a retry after a failed label edit
         # finds that half-written state.
         priors = (prior_state, (prior_status, prior_labels | hold), (wanted, prior_labels), (wanted, prior_labels | hold))
+        if only_if_held and not present and not current_labels:
+            priors += ((None, frozenset()),)
         blanks = ((None, frozenset()), (None, hold))
         if legacy or (single_mark and present and old_status == wanted):
             legacy_prior = frozenset(kanban.label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
@@ -222,29 +241,34 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         error = kanban.guard(current_state, desired_state, priors,
                        expected_stage=expected_stage, initialize=initialize, blanks=blanks)
     else:
-        error = kanban.guard(current_labels, desired_labels, (prior_labels, prior_labels | hold),
+        error = kanban.guard(current_labels, desired_labels, (prior_labels, prior_labels | hold) +
+                       ((frozenset(),) if only_if_held and not current_labels else ()),
                        expected_stage=expected_stage, initialize=initialize, blanks=(frozenset(), hold))
     if error:
-        return kanban.Sync(ref, stage, delta, error=error, current_status=old_status, project_status=wanted)
+        return result(kanban.Sync(ref, stage, delta, error=error, current_status=old_status, project_status=wanted))
+    if only_if_held and config.human_review_label not in current:
+        return result(kanban.Sync(ref, stage, done=True, current_status=old_status, project_status=old_status))
+    if not changed:
+        return result(kanban.Sync(ref, stage, delta, done=True, current_status=old_status, project_status=wanted))
     if not commit:
-        return result
+        return result(preview)
     error = _github_labels_exist(gh, ref, delta.add)
     if error:
-        return kanban.Sync(ref, stage, delta, error=error, current_status=old_status, project_status=wanted)
+        return result(kanban.Sync(ref, stage, delta, error=error, current_status=old_status, project_status=wanted))
 
     project_changed = project is not None and (project_add or (present and old_status != wanted))
     if project_changed:
         if present and item_id is None:
-            return kanban.Sync(ref, stage, delta, error="GitHub Project item has no readable node ID")
+            return result(kanban.Sync(ref, stage, delta, error="GitHub Project item has no readable node ID"))
         if field_id is None:
             field_id, option_id, error = project_option_ids(gh, project, wanted)
             if error:
-                return kanban.Sync(ref, stage, delta, error=error)
+                return result(kanban.Sync(ref, stage, delta, error=error))
         row, error = _gh_json(gh, ["project", "view", str(project.number), "--owner", project.owner,
                                   "--format", "json"])
         project_id = _node_id(row)
         if error or project_id is None:
-            return kanban.Sync(ref, stage, delta, error=error or "GitHub Project has no readable node ID")
+            return result(kanban.Sync(ref, stage, delta, error=error or "GitHub Project has no readable node ID"))
 
     def edit_labels():
         if not delta.changed:
@@ -279,18 +303,18 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     for step in steps:
         error = step()
         if error:
-            return kanban.Sync(ref, stage, delta, error=error, current_status=old_status,
-                        project_status=wanted, project_add=project_add)
+            return result(kanban.Sync(ref, stage, delta, error=error, current_status=old_status,
+                        project_status=wanted, project_add=project_add))
     verified_labels, error = _github_issue(gh, ref)
     if error or set(kanban.canonical_labels(config, verified_labels)) != set(kanban.after(current, delta)):
-        return kanban.Sync(ref, stage, delta, error=error or "GitHub labels differ after update")
+        return result(kanban.Sync(ref, stage, delta, error=error or "GitHub labels differ after update"))
     if project:
         item, status, error = _project_item(gh, project, ref)
         present = item is not None
         if error or (wanted is not None and not present) or (present and status != wanted):
-            return kanban.Sync(ref, stage, delta, error=error or "GitHub Project status differs after update")
-    return kanban.Sync(ref, stage, delta, done=True, current_status=old_status,
-                project_status=wanted, project_add=project_add)
+            return result(kanban.Sync(ref, stage, delta, error=error or "GitHub Project status differs after update"))
+    return result(kanban.Sync(ref, stage, delta, done=True, current_status=old_status,
+                project_status=wanted, project_add=project_add))
 
 
 def _gitlab_issue_labels(project: Backlog, number: int, secret: str, timeout: float):
@@ -305,49 +329,59 @@ def _gitlab_issue_labels(project: Backlog, number: int, secret: str, timeout: fl
 def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, stage: str,
                  *, token: str | None = None, commit: bool = False,
                  expected_stage: str | None = None, initialize: bool = False,
-                 timeout: float = backlog.TIMEOUT, release_hold: bool = False) -> kanban.Sync:
+                 timeout: float = backlog.TIMEOUT, release_hold: bool = False,
+                 only_if_held: bool = False, keep_hold: bool = False) -> kanban.Sync:
     """GitLab's add/remove update leaves unrelated issue labels untouched."""
+    current: tuple[str, ...] = ()
+
+    def result(value: kanban.Sync) -> kanban.Sync:
+        return _release_result(value, config, current, commit, release_hold, keep_hold)
+
     if ref.host != backlog.home_of(cfg)[0]:
-        return kanban.Sync(ref, stage, error="issue host does not match the configured GitLab host")
+        return result(kanban.Sync(ref, stage, error="issue host does not match the configured GitLab host"))
     try:
         config.label_for(stage)
     except KeyError:
-        return kanban.Sync(ref, stage, error=f"unmapped tracker stage: {stage}")
+        return result(kanban.Sync(ref, stage, error=f"unmapped tracker stage: {stage}"))
     if expected_stage is not None:
         try:
             config.label_for(expected_stage)
         except KeyError:
-            return kanban.Sync(ref, stage, error=f"unmapped prior stage: {expected_stage}")
+            return result(kanban.Sync(ref, stage, error=f"unmapped prior stage: {expected_stage}"))
     project = cfg if cfg.project == ref.repo else cfg.sibling(ref.repo)
     secret = token if token is not None else backlog.token(project)
     if not secret:
-        return kanban.Sync(ref, stage, error=cfg.missing_token)
+        return result(kanban.Sync(ref, stage, error=cfg.missing_token))
     url = f"{project.issues_url}/{ref.number}"
     current, error = _gitlab_issue_labels(project, ref.number, secret, timeout)
     if error:
-        return kanban.Sync(ref, stage, error=error)
-    held = kanban.extra_hold(config, current, expected_stage, release_hold=release_hold)
+        return result(kanban.Sync(ref, stage, error=error))
+    current = kanban.canonical_labels(config, current)
+    held = keep_hold or kanban.extra_hold(config, current, expected_stage, release_hold=release_hold)
     delta = kanban.label_delta(config, current, stage, keep_hold=held)
     managed = kanban.managed_labels(config)
     prior = frozenset(kanban.label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
     hold = frozenset({config.human_review_label})
     desired = set(kanban.after(current, delta)) & managed
     if commit or expected_stage is not None or initialize:
-        error = kanban.guard(frozenset(current) & managed, desired, (prior, prior | hold),
+        error = kanban.guard(frozenset(current) & managed, desired, (prior, prior | hold) +
+                              ((frozenset(),) if only_if_held and not (set(current) & managed) else ()),
                               expected_stage=expected_stage, initialize=initialize, blanks=(frozenset(), hold))
         if error:
-            return kanban.Sync(ref, stage, delta, error=error)
+            return result(kanban.Sync(ref, stage, delta, error=error))
+    if only_if_held and config.human_review_label not in current:
+        return result(kanban.Sync(ref, stage, done=True))
     if not delta.changed:
-        return kanban.Sync(ref, stage, delta, done=True)
+        return result(kanban.Sync(ref, stage, delta, done=True))
     if not commit:
-        return kanban.Sync(ref, stage, delta)
+        return result(kanban.Sync(ref, stage, delta))
     have, error = backlog.existing_labels(project, token=secret, timeout=timeout)
     if error:
-        return kanban.Sync(ref, stage, delta, error=error)
+        return result(kanban.Sync(ref, stage, delta, error=error))
     missing = set(delta.add) - have
     if missing:
-        return kanban.Sync(ref, stage, delta, error=f"missing label in GitLab: {', '.join(sorted(missing))}; "
-                    f"create the label(s) {', '.join(sorted(missing))} before syncing")
+        return result(kanban.Sync(ref, stage, delta, error=f"missing label in GitLab: {', '.join(sorted(missing))}; "
+                    f"create the label(s) {', '.join(sorted(missing))} before syncing"))
     payload = {}
     if delta.add:
         payload["add_labels"] = ",".join(delta.add)
@@ -355,13 +389,13 @@ def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, st
         payload["remove_labels"] = ",".join(delta.remove)
     _, _, error = backlog._call("PUT", url, secret, timeout, payload)
     if error:
-        return kanban.Sync(ref, stage, delta, error=error)
+        return result(kanban.Sync(ref, stage, delta, error=error))
     verified, _, error = backlog._get(url, secret, timeout)
     if error or not isinstance(verified, dict) or not isinstance(verified.get("labels"), list):
-        return kanban.Sync(ref, stage, delta, error=error or "could not verify GitLab labels after update")
-    if set(verified["labels"]) != set(kanban.after(current, delta)):
-        return kanban.Sync(ref, stage, delta, error="GitLab labels differ after update; reconcile before continuing")
-    return kanban.Sync(ref, stage, delta, done=True)
+        return result(kanban.Sync(ref, stage, delta, error=error or "could not verify GitLab labels after update"))
+    if set(kanban.canonical_labels(config, tuple(verified["labels"]))) != set(kanban.after(current, delta)):
+        return result(kanban.Sync(ref, stage, delta, error="GitLab labels differ after update; reconcile before continuing"))
+    return result(kanban.Sync(ref, stage, delta, done=True))
 
 
 @dataclass(frozen=True)
@@ -653,22 +687,30 @@ class Forge:
                               parent=parent, blocked_by=blocked_by)
 
     def write_stage(self, number: int, stage: str, expected: str | None = None, commit: bool = False,
-                    initialize: bool = False, release_hold: bool = False) -> kanban.Sync:
+                    initialize: bool = False, release_hold: bool = False,
+                    only_if_held: bool = False, keep_hold: bool = False) -> kanban.Sync:
         """Move the issue's stage (label, or GitHub Project Status when configured), leaving its other labels.
         `expected` is the stage the store last wrote; `initialize` starts a blank issue or migrates its legacy label into
         Project Status, and is never inferred from a missing `expected`. A card moved by hand is reported, never overwritten.
-        `release_hold` explicitly releases a launcher's extra hold through the same guard; stage-required holds remain."""
+        `release_hold` explicitly releases a launcher's extra hold through the same guard; stage-required holds remain.
+        `only_if_held` skips writes on an unheld card after validation; `keep_hold` retains a shared sibling's hold."""
         host, repo = home_of(self.home)
         ref = IssueRef(repo, number, host)
         if release_hold and (not expected or initialize):
-            return kanban.Sync(ref, stage, error="release hold requires a prior stage and forbids initialize")
+            return kanban.Sync(ref, stage, error="release hold requires a prior stage and forbids initialize",
+                               hold_release="failed" if release_hold else "")
+        if only_if_held and not release_hold:
+            return kanban.Sync(ref, stage, error="only_if_held needs release_hold")
         if self.kanban is None:
-            return kanban.Sync(ref, stage, error="no [kanban] stage labels configured")
+            return kanban.Sync(ref, stage, error="no [kanban] stage labels configured",
+                               hold_release="failed" if release_hold else "")
         if self.github:
             return _sync_github(ref, self.kanban, stage, gh=self.gh, commit=commit, expected_stage=expected,
-                                initialize=initialize, release_hold=release_hold)
+                                initialize=initialize, release_hold=release_hold,
+                                only_if_held=only_if_held, keep_hold=keep_hold)
         return _sync_gitlab(self.home, ref, self.kanban, stage, token=self.token, commit=commit, expected_stage=expected,
-                            initialize=initialize, release_hold=release_hold)
+                            initialize=initialize, release_hold=release_hold,
+                            only_if_held=only_if_held, keep_hold=keep_hold)
 
     def add_human_hold(self, number: int) -> str:
         """Add only the review hold; leave the numbered stage and Project Status untouched."""
@@ -712,7 +754,7 @@ def add_human_hold(ref: backlog.IssueRef, home: backlog.Backlog | backlog.GitHub
         return error
     if not isinstance(row, dict) or not isinstance(row.get("labels"), list):
         return "GitLab issue has no readable labels"
-    if label in row["labels"]:
+    if label in kanban.canonical_labels(config, tuple(row["labels"])):
         return ""
     # #566: the hold is the point — a label the project has never seen is created, not refused.
     for made in backlog.ensure_labels(project, (label,), token=secret, commit=True):
@@ -723,7 +765,7 @@ def add_human_hold(ref: backlog.IssueRef, home: backlog.Backlog | backlog.GitHub
         return error
     updated, _, error = backlog._get(url, secret, backlog.TIMEOUT)
     return error or ("GitLab review hold was not applied" if not isinstance(updated, dict) or
-                     label not in updated.get("labels", []) else "")
+                     label not in kanban.canonical_labels(config, tuple(updated.get("labels", []))) else "")
 
 
 def for_workspace(root: Path | str, **options: Any) -> Forge | None:
@@ -745,37 +787,22 @@ def _for_issue(ref: IssueRef, home: Backlog | GitHubBacklog, config: Kanban | No
 
 def sync_stage(ref: IssueRef, home: Backlog | GitHubBacklog, config: Kanban, stage: str, *,
                expected: str | None = None, initialize: bool = False, commit: bool = False,
-               release_hold: bool = False, only_if_held: bool = False, gh=None, token=None) -> kanban.Sync:
+               release_hold: bool = False, only_if_held: bool = False, keep_hold: bool = False, gh=None, token=None) -> kanban.Sync:
     """Resolve a tracked issue's gateway once for the CLI and the one-shot launcher.
 
-    The launcher only releases an existing hold: a first run on an uninitialized card has nothing to release.
-    A present hold still goes through write_stage's stage guard, including during preview.
+    The adapter reads labels once before its guard, including for unheld cards and previews.
+    only_if_held permits a blank uninitialized card as a no-op; stage drift is still rejected.
     """
     if release_hold and (not expected or initialize):
-        return kanban.Sync(ref, stage, error="release hold requires a prior stage and forbids initialize")
+        return kanban.Sync(ref, stage, error="release hold requires a prior stage and forbids initialize",
+                               hold_release="failed" if release_hold else "")
     adapter = _for_issue(ref, home, config, gh=gh, token=token)
     if adapter is None:
-        return kanban.Sync(ref, stage, error="no configured backlog for this issue")
-    if only_if_held:
-        if not release_hold:
-            return kanban.Sync(ref, stage, error="only_if_held needs release_hold")
-        if adapter.github:
-            labels, error = _github_issue(adapter.gh, ref)
-        else:
-            secret = adapter._token()
-            labels, error = (_gitlab_issue_labels(adapter.home, ref.number, secret, backlog.TIMEOUT)
-                             if secret else ((), adapter.home.missing_token))
-        if error:
-            return kanban.Sync(ref, stage, error=error, hold_release="failed")
-        if config.human_review_label not in kanban.canonical_labels(config, labels):
-            return kanban.Sync(ref, stage, done=True, hold_release="absent")
-    result = adapter.write_stage(ref.number, stage, expected=expected, initialize=initialize,
-                                 commit=commit, release_hold=release_hold)
-    if release_hold:
-        outcome = ("failed" if result.error else "removed" if config.human_review_label in result.delta.remove
-                   else "retained")
-        return replace(result, hold_release=outcome)
-    return result
+        return kanban.Sync(ref, stage, error="no configured backlog for this issue",
+                           hold_release="failed" if release_hold else "")
+    return adapter.write_stage(ref.number, stage, expected=expected, initialize=initialize,
+                               commit=commit, release_hold=release_hold,
+                               only_if_held=only_if_held, keep_hold=keep_hold)
 
 
 def comment_issue(ref: IssueRef, home: Backlog | GitHubBacklog, config: Kanban | None, body: str):

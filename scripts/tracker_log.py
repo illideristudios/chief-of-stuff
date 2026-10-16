@@ -1,5 +1,5 @@
 """The tracker's `## Log` lines that scripts write and the pages read back: a task's stage move, a one-shot's
-start, end and relaunch, a run relaunching after its wait ran out, a hold the launcher could not apply, and a
+start, end and relaunch, a run relaunching after its wait ran out, a hold the launcher could not apply or release, and a
 closure the user approved.
 
 `chief-of-stuff log --stage` and the one-shot launcher write them with the formatters here; the Flow charts, the
@@ -110,24 +110,64 @@ def _log_lines(text: str) -> list[str]:
 
 
 def hold_failures(text: str) -> dict[str, str]:
-    """Task -> the reason of the last hold failure the Log records for it (#566)."""
+    """Task -> unresolved hold application or release error; a new start alone clears neither."""
     out: dict[str, str] = {}
     workers: dict[str, str] = {}
     for line in _log_lines(text):
         if m := HOLD_FAILED.match(line):
             out[m[5]] = m[4]
             workers[m[3]] = m[5]
+        elif m := HOLD_RELEASE.match(line):
+            workers[m[3]] = m[6]
+            if m[4] == "failed":
+                out[m[6]] = m[5]
+            else:
+                out.pop(m[6], None)
         elif m := STARTED.match(line):
             workers[m[3]] = m[4]
-            out.pop(m[4], None)
         elif m := RELAUNCH.match(line):
             # Use the explicit task name even for a Log whose started line is on the previous day.
-            task, sep, _ = line[m.end():].rpartition(" — ")
+            task, sep, _ = line[m.end():].partition(" — ")
+            task = workers.get(m[3], task)
             if sep:
                 out.pop(task, None)
         elif (m := ENDED.match(line)) and m[4] == COMPLETED:
             out.pop(workers.get(m[3], ""), None)
     return out
+
+
+def completed_tasks(text: str) -> set[str]:
+    """Tasks whose latest recorded one-shot outcome is completion, rather than a review hold.
+
+    A release line also identifies the stopped worker's task when its start was on the prior day.
+    """
+    workers: dict[str, str] = {}
+    outcomes: dict[str, str] = {}
+    completed: set[str] = set()
+    for line in _log_lines(text):
+        if m := STARTED.match(line):
+            workers[m[3]] = m[4]
+            outcomes.pop(m[3], None)
+            completed.discard(m[4])
+        elif m := HOLD_FAILED.match(line):
+            workers[m[3]] = m[5]
+            completed.discard(m[5])
+        elif m := ENDED.match(line):
+            outcomes[m[3]] = m[4]
+            task = workers.get(m[3])
+            if task:
+                if m[4] == COMPLETED:
+                    completed.add(task)
+                else:
+                    completed.discard(task)
+        elif m := HOLD_RELEASE.match(line):
+            workers[m[3]] = m[6]
+            if outcomes.get(m[3]) == COMPLETED:
+                completed.add(m[6])
+        elif m := RELAUNCH.match(line):
+            task = workers.get(m[3]) or line[m.end():].partition(" — ")[0]
+            completed.discard(task)
+    return completed
 
 
 def approved_closes(text: str) -> set[str]:

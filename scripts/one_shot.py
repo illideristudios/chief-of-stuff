@@ -19,6 +19,7 @@ import forge
 import git_trees
 import git_view
 import kanban
+import tracker_log
 import ownership
 import runtimes
 import tracker_write
@@ -361,7 +362,11 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     launch = path
     end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
     carried = False
-    if end.exists() and any(row.item.strip() == task for row in parse_tracker(end.read_text()).tasks):
+    try:
+        end_tasks = parse_tracker(end.read_text()).tasks if end.exists() else []
+    except OSError:
+        end_tasks = []  # The locked edit below records an unreadable tracker as a report error.
+    if any(row.item.strip() == task for row in end_tasks):
         # The midnight rollover carries a still-running launch-day row over as the end day's open twin (#576):
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
@@ -379,21 +384,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         quota = quota_stop(cwd / dispatch_prompt.PROMPT_DIR / "worker-stderr.log", runtime, model)
         if quota:
             status, reason = "relaunch", quota
-    if status == "relaunch":
-        # A relaunch is for a run that changed nothing, once: anything else is someone's to look at.
-        # A quota relaunch does not spend that limit; it has its own, once per task and runtime+model a day (#422).
-        marker = RELAUNCHED.format(task=task)
-        log = path.read_text().splitlines()
-        if not quota and _brief(reason).startswith(QUOTA_STOP):  # as the Log folds it, so padding cannot dodge it
-            reason = f"worker: {reason}"  # the launcher's marker is the launcher's alone
-        if actual or commits != NO_COMMITS:
-            status, reason = "human_review", f"worker asked to be relaunched but left changes: {reason}"
-        elif quota:
-            mine = re.escape(quota_marker(runtime, model))  # then the line goes on with `;` and a snippet, or ends with `.`
-            if any(marker in line and re.match(mine + r"(?:;|\.?$)", line.split(marker, 1)[1]) for line in log):
-                status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
-        elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
-            status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
     summary = (changes + f"\nCommits from this run:\n{commits}" +
                (f"\nWorking tree:\n{actual}" if actual else "\nWorking tree clean"))
     errors = []
@@ -410,31 +400,44 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 row.kind != "running" and not (carried and row.kind == "open")):
             status, reason = "human_review", "task row changed during the one-shot run; reconcile it manually"
             raise ValueError("task row changed; no issue or tracker update was made")
+        if status == "relaunch":
+            # A relaunch is for a run that changed nothing, once: anything else is someone's to look at.
+            # A quota relaunch does not spend that limit; it has its own, once per task and runtime+model a day (#422).
+            marker = RELAUNCHED.format(task=task)
+            log = text.splitlines()
+            if not quota and _brief(reason).startswith(QUOTA_STOP):  # as the Log folds it, so padding cannot dodge it
+                reason = f"worker: {reason}"  # the launcher's marker is the launcher's alone
+            if actual or commits != NO_COMMITS:
+                status, reason = "human_review", f"worker asked to be relaunched but left changes: {reason}"
+            elif quota:
+                mine = re.escape(quota_marker(runtime, model))  # then the line goes on with `;` and a snippet, or ends with `.`
+                if any(marker in line and re.match(mine + r"(?:;|\.?$)", line.split(marker, 1)[1]) for line in log):
+                    status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
+            elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
+                status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
         at = tracker_write.stamp(cfg.zone)
         # Validate the exact writable row before any forge mutation. Keep the lock through the
         # bounded forge calls and the final tracker edit so a coordinator cannot change it between them.
         _tracker_result(text, task, name, cfg.user, status, reason, summary, at, carried=row.kind == "open")
         ref = backlog.issue_ref(row.issue, cfg.backlog) if row.issue.strip() else None
-        if status in ("relaunch", "done") and ref and settings.kanban and row.lane.strip() and row.stage.strip():
-            siblings = [other for other in tasks if other is not row and not other.standing
-                        and other.kind != "done" and backlog.issue_ref(other.issue, cfg.backlog) == ref]
-            if any(other.kind == "waiting" for other in siblings):
-                hold_release = "retained"
-            else:
-                furthest = kanban.furthest(settings.kanban, [row, *siblings])
-                stage = furthest.stage.strip()
-                released = forge.sync_stage(ref, cfg.backlog, settings.kanban, stage, expected=stage,
-                                            commit=True, release_hold=True, only_if_held=True)
-                hold_release = released.hold_release
-                if not released.done:
-                    release_error = released.error
-                    hold_release = "failed"
-                    errors.append(f"release review hold: {release_error}")
+        if (status in ("relaunch", "done") and ref and settings.kanban and not row.standing
+                and row.lane.strip() and row.stage.strip()):
+            furthest, keep_hold = kanban.shared_issue(settings.kanban, tasks, cfg.backlog, ref,
+                completed=tracker_log.completed_tasks(text), releasing=row)
+            stage = (furthest or row).stage.strip()
+            released = forge.sync_stage(ref, cfg.backlog, settings.kanban, stage, expected=stage,
+                                        commit=True, release_hold=True, only_if_held=True, keep_hold=keep_hold)
+            hold_release = released.hold_release
+            if not released.done:
+                release_error = released.error
+                hold_release = "failed"
+                errors.append(f"release review hold: {release_error}")
+                if status == "relaunch":
                     status, reason = "human_review", f"could not release review hold: {release_error}; worker said: {reason}"
         hold_error = ""
         if status == "human_review" and ref:
             # A refused stage guard is evidence to reconcile; do not overwrite its board state with a hold.
-            if hold_release != "failed":
+            if hold_release != "failed" and not row.standing and row.lane.strip() and row.stage.strip():
                 if settings.kanban:
                     hold_error = forge.add_human_hold(ref, cfg.backlog, settings.kanban)
                     if hold_error:
@@ -452,6 +455,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     try:
         tracker_write.edit(path, finish)
     except (OSError, ValueError) as exc:
+        status = "human_review"
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
               "reason": reason, "changes": summary, "errors": errors,

@@ -128,10 +128,13 @@ class Counts:
 
 def keychain_token(account: str, service: str) -> str:
     """The macOS Keychain entry, or "". Not found is the common case, not an incident."""
-    found = subprocess.run(
-        ["security", "find-generic-password", "-a", account, "-s", service, "-w"],
-        capture_output=True, text=True, check=False,
-    )
+    try:
+        found = subprocess.run(
+            ["security", "find-generic-password", "-a", account, "-s", service, "-w"],
+            capture_output=True, text=True, check=False, timeout=TIMEOUT,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return ""
     return found.stdout.strip() if found.returncode == 0 else ""
 
 
@@ -139,8 +142,8 @@ def glab_token(host: str) -> str:
     """The token `glab auth login` already keeps for the host, or "". No second copy of it is made."""
     try:
         found = subprocess.run(["glab", "config", "get", "token", "--host", host],
-                               capture_output=True, text=True, check=False)
-    except FileNotFoundError:
+                               capture_output=True, text=True, check=False, timeout=TIMEOUT)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return ""
     return found.stdout.strip() if found.returncode == 0 else ""
 

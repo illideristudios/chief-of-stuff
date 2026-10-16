@@ -324,10 +324,10 @@ class GitHubTest(unittest.TestCase):
 
 class StageGatewayTest(unittest.TestCase):
     def test_release_outcomes_use_one_initial_read_on_each_forge(self):
-        for home in (GH, GL):
+        for home, gateway in ((GH, "direct"), (GH, "helper"), (GL, "direct"), (GL, "helper")):
             for held in (False, True):
                 for commit in (False, True):
-                    with self.subTest(home=home, held=held, commit=commit):
+                    with self.subTest(home=home, gateway=gateway, held=held, commit=commit):
                         labels = ["stage: doing"] + ([FLOW.human_review_label] if held else [])
                         reads = []
                         def get(url, token, timeout):
@@ -339,9 +339,16 @@ class StageGatewayTest(unittest.TestCase):
                         gh = FakeGh(issues=[gh_issue(4, "Flag", labels)])
                         with mock.patch.object(backlog, "_get", side_effect=get), \
                              mock.patch.object(backlog, "_call", side_effect=put), \
-                             mock.patch.object(backlog, "existing_labels", return_value=(set(FLOW.stages), "")):
-                            got = forge.Forge(home, kanban=FLOW, gh=gh, token="test").write_stage(
-                                4, "doing", expected="doing", release_hold=True, only_if_held=True, commit=commit)
+                             mock.patch.object(backlog, "existing_labels", return_value=(set(FLOW.stages), "")), \
+                             mock.patch.object(backlog, "token", return_value="test") as lookup:
+                            if gateway == "direct":
+                                got = forge.Forge(home, kanban=FLOW, gh=gh).write_stage(
+                                    4, "doing", expected="doing", release_hold=True, only_if_held=True, commit=commit)
+                            else:
+                                host, repo = backlog.home_of(home)
+                                got = forge.sync_stage(backlog.IssueRef(repo, 4, host), home, FLOW, "doing",
+                                    expected="doing", release_hold=True, only_if_held=True, commit=commit, gh=gh)
+                        self.assertEqual(lookup.call_count, int(home == GL))
                         self.assertTrue(got.ok, got.error)
                         self.assertEqual(got.hold_release, "removed" if held and commit else "retained" if held else "absent")
                         count = len([c for c in gh.all_calls if c[:2] == ["issue", "view"]]) if home == GH else len(reads)

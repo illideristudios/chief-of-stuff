@@ -11,6 +11,7 @@ import sys
 import backlog
 import forge
 import kanban
+import tracker_log
 from _vendor.toon_format import encode as toon_encode
 from tracker import parse_tracker
 from workspace import ConfigError, read_config
@@ -50,7 +51,8 @@ def main(argv: list[str] | None = None) -> int:
             print("kanban: no [kanban] section in the workspace settings", file=sys.stderr)
             return 2
         day = args.date or datetime.now(cfg.zone).date().isoformat()
-        tracker = parse_tracker((args.root / cfg.tracker_path(day)).read_text())
+        text = (args.root / cfg.tracker_path(day)).read_text()
+        tracker = parse_tracker(text)
     except (OSError, ConfigError, SettingsError) as exc:
         print(f"kanban: {exc}", file=sys.stderr)
         return 2
@@ -90,13 +92,18 @@ def main(argv: list[str] | None = None) -> int:
             seen.add(ref)
     rows = []
     for task, ref in selected:
+        keep_hold = False
+        if args.release_hold:
+            shared, keep_hold = kanban.shared_issue(settings.kanban, tracker.tasks, cfg.backlog, ref,
+                completed=tracker_log.completed_tasks(text), releasing=task)
+            task = shared or task
         stage = task.stage.strip()
         if not stage:
             result = kanban.Sync(ref, stage, error="tracker stage is blank")
         else:
             result = forge.sync_stage(ref, cfg.backlog, settings.kanban, stage,
                                       expected=args.from_stage, initialize=args.initialize, commit=args.commit,
-                                      release_hold=args.release_hold)
+                                      release_hold=args.release_hold, keep_hold=keep_hold)
         changed = result.delta.changed or result.project_add or result.current_status != result.project_status
         rows.append({"issue": ref.label(cfg.backlog), "stage": stage,
                      "add": ", ".join(result.delta.add), "remove": ", ".join(result.delta.remove),

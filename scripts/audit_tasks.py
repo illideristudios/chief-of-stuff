@@ -306,13 +306,15 @@ class KanbanFault:
 
 
 def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
-                  hold_failures: dict[str, str] | None = None) -> list[KanbanFault]:
+                  hold_failures: dict[str, str] | None = None,
+                  completed: set[str] | None = None) -> list[KanbanFault]:
     """Report label or Project Status drift; never move a card during an audit.
 
     Rows sharing one issue are audited once against the furthest row by the board's stage order (#87):
     an issue carries one stage label, and a closed issue is expected to carry none. `hold_failures`
-    maps task item -> the Log's last hold-failure reason (#566): a hold the launcher could not apply
+    maps task item -> the Log's unresolved hold application or release error (#566): a failed hold operation
     stays visible here while the issue still has no hold label, and stops once the hold lands.
+    `completed` identifies waiting rows that await integration rather than human review.
     """
     selected = []
     for task in tasks:
@@ -353,7 +355,9 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
                                           f"expected no managed labels, found {', '.join(present)}"))
             continue
         # #87: one expected stage per issue — the furthest row by the board's stage order decides the label.
-        furthest = kanban_tool.furthest(config, [task for task, _ in rows]) or rows[0][0]
+        furthest, keep_hold = kanban_tool.shared_issue(config, [task for task, _ in rows], home, ref,
+                                                       completed=completed or ())
+        furthest = furthest or rows[0][0]
         status = None
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
@@ -369,7 +373,7 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
             status = project_items[ref.url.casefold()]
         issue_config = config if ref.host == GITHUB else replace(config, github_project=None)
         why = kanban_tool.drift(issue_config, found.labels, furthest.stage.strip(), project_status=status,
-                                allow_extra_hold=any(task.kind == "waiting" for task, _ in rows))
+                                allow_extra_hold=keep_hold)
         if why:
             faults.append(KanbanFault(clip_name(furthest.label), why))
     return faults
@@ -981,7 +985,8 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     report.lanes.extend(lane_faults(tasks, settings.lanes, cfg.settings_path))
     if settings.kanban and cfg.backlog and check_issues:
         report.kanban.extend(kanban_faults(tasks, cfg.backlog, settings.kanban, gh=gh,
-                                           hold_failures=tracker_log.hold_failures(tracker_text)))
+                                           hold_failures=tracker_log.hold_failures(tracker_text),
+                                           completed=tracker_log.completed_tasks(tracker_text)))
         report.lines.extend(str(f) for f in report.kanban)
     report.over.extend(over_budget(tasks, settings.budgets, day, now or datetime.now(cfg.zone)))
     report.lines.extend(str(o) for o in report.over)
