@@ -11,6 +11,8 @@ reloads itself when the file changes.
 
     python3 pages.py --ensure [--root R]              # start it unless it is already serving; print status only
     python3 pages.py serve --dir D --port P --root R  # what --ensure starts, detached
+    python3 pages.py ensure --root R                # install the independent workspace supervisor (macOS)
+    python3 pages.py supervise --root R             # foreground supervisor, also usable on other hosts
 
 A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
 The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
@@ -48,12 +50,15 @@ from html import escape
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import page_reload
+from supervisor import ServiceError, label, load_agent, lock, state_dir, unload_agent
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
 CACHE = ".sources.json"
 REFRESH = 60  # seconds between forge reads
+POLL = 5  # healthy board probes, independent of agent sessions
+RETRY_MIN, RETRY_MAX = 1, 60
 RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-\d+(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 ISSUE = re.compile(r"/issues/(\d+)(/source)?")
@@ -498,6 +503,14 @@ def _stop(pages_dir: Path, port: int) -> None:
 
 
 def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> str:
+    """Start or reuse the pages server, serializing concurrent callers through pid publication."""
+    # A caller must own startup through the health check and pid publication. Otherwise
+    # concurrent ensures can publish a losing child's pid for the winning server.
+    with lock(pages_dir / ".start.lock", wait=True):
+        return _ensure(pages_dir, port, log, root)
+
+
+def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
     moves to another port: the URL is the board's address, and a board that wanders is a board nobody has open."""
     who = _who(port)
@@ -541,11 +554,74 @@ def from_config(root: Path) -> tuple[Path, int]:
         raise PagesError(str(e)) from None
 
 
+def supervise(root: Path, stop: threading.Event | None = None):
+    """Recover the configured server without an agent; back off failed or flapping starts."""
+    root = root.resolve()
+    stop = stop if stop is not None else threading.Event()
+    with lock(state_dir(root) / "pages-supervisor.lock"):
+        previous = {}
+        if threading.current_thread() is threading.main_thread():
+            previous = {sig: signal.signal(sig, lambda *_: stop.set())
+                        for sig in (signal.SIGTERM, signal.SIGINT)}
+        delay = RETRY_MIN
+        try:
+            while not stop.is_set():
+                wait = POLL
+                try:
+                    cfg = read_config(root)
+                    if cfg.board_tool:
+                        directory, port = from_config(root)
+                        result = ensure(directory, port, state_dir(root) / "pages.log", root)
+                        if result == "pages: serving":
+                            delay = RETRY_MIN
+                        else:
+                            print(result, flush=True)
+                            wait, delay = delay, min(delay * 2, RETRY_MAX)
+                except (OSError, ValueError, RuntimeError, ConfigError, subprocess.TimeoutExpired) as exc:
+                    print(f"pages supervisor: {exc}", file=sys.stderr, flush=True)
+                    wait, delay = delay, min(delay * 2, RETRY_MAX)
+                stop.wait(wait)
+        finally:
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
+
+
+def ensure_service(root: Path, jobs_dir: Path | None = None) -> str:
+    """Provision a workspace's board watchdog from this pinned release, without a browser."""
+    root = root.resolve()
+    if not read_config(root).board_tool:
+        return "pages: off"
+    from_config(root)  # reject incomplete configuration before installing a job
+    if sys.platform != "darwin":
+        raise PagesError("managed pages require macOS; run pages supervise under your host supervisor")
+    with lock(state_dir(root) / "pages-management.lock", wait=True):
+        directory = state_dir(root)
+        desired = {"Label": label("pages", root),
+                   # Preserve a venv interpreter and pin the script to this release.
+                   "ProgramArguments": [sys.executable, str(Path(__file__).resolve()),
+                                        "supervise", "--root", str(root)],
+                   "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True,
+                   "ThrottleInterval": 10,
+                   "EnvironmentVariables": {"CHIEF_OF_STUFF_VERSION": VERSION},
+                   "StandardOutPath": str(directory / "pages-supervisor.log"),
+                   "StandardErrorPath": str(directory / "pages-supervisor.log")}
+        return "pages: " + load_agent(desired, jobs_dir)
+
+
+def stop_service(root: Path, jobs_dir: Path | None = None) -> str:
+    if sys.platform != "darwin":
+        raise PagesError("managed pages require macOS")
+    root = root.resolve()
+    with lock(state_dir(root) / "pages-management.lock", wait=True):
+        unload_agent(label("pages", root), root, jobs_dir)
+    return "pages: supervisor stopped"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
     ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
-    ap.add_argument("command", nargs="?", choices=("serve",))
+    ap.add_argument("command", nargs="?", choices=("serve", "supervise", "ensure", "stop"))
     ap.add_argument("--dir")
     ap.add_argument("--port", type=int)
     args = ap.parse_args(argv)
@@ -554,9 +630,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     root = Path(args.root or ".")
     try:
+        if args.command == "supervise":
+            supervise(root)
+            return 0
+        if args.command in ("ensure", "stop"):
+            print(ensure_service(root) if args.command == "ensure" else stop_service(root))
+            return 0
         pages_dir, port = from_config(root)
         print(ensure(pages_dir, port, root / ".chief-of-stuff" / "pages.log", root))
-    except PagesError as e:
+    except (PagesError, ServiceError, OSError, ValueError, ConfigError, subprocess.TimeoutExpired) as e:
         print(f"pages: not served — {e}", file=sys.stderr)
         return 1
     return 0

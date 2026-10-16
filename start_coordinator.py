@@ -231,6 +231,14 @@ def main(argv: list[str] | None = None) -> int:
     # Provision before every runtime launch, independently of prompts or session
     # lifetime. Failure remains visible without blocking unrelated coordination.
     try:
+        board = subprocess.run(
+            [sys.executable, str(release / "scripts" / "pages.py"), "--root", str(root), "ensure"],
+            capture_output=True, text=True, timeout=60)
+        if board.returncode:
+            print(board.stderr.strip() or "pages: service setup failed", file=sys.stderr)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"pages: service setup failed: {exc}", file=sys.stderr)
+    try:
         notifications = subprocess.run(
             [sys.executable, str(release / "scripts" / "notify_service.py"), "--root", str(root), "ensure"],
             capture_output=True, text=True, timeout=60)

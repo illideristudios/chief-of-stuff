@@ -762,12 +762,15 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertIn("chief-of-stuff inbox list --recipient coordinator --unread", self.content)
 
     def test_the_board_is_served_from_this_mac(self):
-        # Zach, 2026-09-24 14:07: "we should host our own webserver and ensure they are set up as part of the agent's boot loop."
-        ensure = "chief-of-stuff pages --ensure"
-        for move in ("## Open the day", "## Resume", "## Check"):
-            # By heading, not by substring: "## Resume" alone first matches the "`## Resume` block" in Open the day.
-            self.assertIn(ensure, self._section(move[3:]), move)
+        # #260: the launcher provisions independent supervision; agent checks no longer own recovery.
+        for move in ("Open the day", "Resume"):
+            self.assertIn("launcher’s board supervisor", self._section(move), move)
+        self.assertIn("scheduled checks do not run routine pages commands", self._section("Check"))
+        for move in ("Open the day", "Resume", "Check"):
+            self.assertNotIn("chief-of-stuff pages --ensure", self._section(move), move)
         board = self.content.split("## Board", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("chief-of-stuff pages ensure", board)
+        self.assertIn("only for a reported server failure", board)
         self.assertIn("<url>/all", board)
         for gone in ("publish tool", "`url` argument", "`open` action", "Board: <url>"):
             self.assertNotIn(gone, board)

@@ -381,7 +381,8 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               'Check its registered PID with `process_status.py` for the orphan check.',
               "A poll to it is a mailbox message, and its row's `waiting on` reads `<its name> — its mailbox "
               'reply` until the reply arrives.')}
-CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bfcd742acbf3dd1ef9',
+# #260 delegates recurring board recovery to the workspace supervisor.
+CHECK_RELAY_SHA256 = {'Check': '77789c976b5f176b77c2957c448938f2dcf467315076d12e5c86adbdee1bfdd2',
  'Relay': '3a31080acd47efa080232fac9d181f81dd0c1b30c1721fe7177c78dfbd6469e7'}
 
 # Slice 8 (#491): captured once from git show origin/main:agents/chief-of-stuff.md
@@ -746,7 +747,7 @@ class AgentBudgetTest(unittest.TestCase):
                          "start_coordinator.py replaces Check/Sessions using these adjacent headings")
         for name, digest in CHECK_RELAY_SHA256.items():
             self.assertEqual(hashlib.sha256(sections(self.text)[name].encode()).hexdigest(), digest,
-                             f"slice 7 must leave {name} verbatim (Relay: slice 487 merged Notices in)")
+                             f"retained {name} contract changed (Check: #260 board supervision; Relay: #487 Notices)")
 
     def test_slice_487_removed_fragments_are_absent(self):
         low = self.text.lower()

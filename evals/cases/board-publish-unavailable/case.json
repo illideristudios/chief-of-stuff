@@ -1,10 +1,10 @@
 {
   "tz": "America/Chicago",
-  "description": "Another server holds the Board URL's port, so the scheduled check's pages --ensure fails. The check says the board is not being served and why. No render step, never hand-edit the html, never start the server on another port.",
-  "prompt": "[Scheduled check] anything moved?",
+  "description": "A reported board failure warrants a one-time pages --ensure diagnostic. Another server owns the configured port: report the failure without rendering HTML or changing ports.",
+  "prompt": "[Scheduled check] The board is unavailable; diagnose the reported server failure as part of the check.",
   "graders": [
     {
-      "name": "the check ensures the page server",
+      "name": "diagnoses the reported server failure",
       "type": "tool_used",
       "tool": "Bash",
       "input_match": "\\bpages(?:\\.py)?\\s[^\"]*--ensure",

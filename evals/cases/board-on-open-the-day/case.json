@@ -1,7 +1,7 @@
 {
   "tz": "America/Chicago",
-  "description": "open-the-day with a Board line: the move ensures the page server (pages.py --ensure), which renders the board into the pages dir from the tracker. No render step, never hand-written html.",
-  "prompt": "Good morning.",
+  "description": "Open the day with a Board line and a server provisioned by the launcher. The supervisor owns availability; the server renders from the tracker, without routine agent maintenance or hand-written HTML.",
+  "prompt": "Good morning. The launcher has already provisioned the board supervisor.",
   "graders": [
     {
       "name": "queries both calendars for today",
@@ -123,11 +123,12 @@
       "gate": "{{today}} 23:59"
     },
     {
-      "name": "page server ensured",
+      "name": "supervisor owns server availability",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "\\bpages(?:\\.py)?\\s[^\"]*--ensure",
-      "min": 1
+      "input_match": "\\bpages(?:\\.py)?\\s[^\\\"]*(?:--ensure|\\bensure\\b|\\bsupervise\\b)",
+      "max": 0,
+      "rule": "The launcher provisions `chief-of-stuff pages ensure`; direct plugin launches run it once at Open the day or Resume."
     },
     {
       "name": "no render step: the server renders",

@@ -69,7 +69,7 @@ A day with no log yet starts this move, as does a greeting or "open the day" on 
 6. Leave Goal empty, or write a Goal line that begins with "Proposed:". The user decides the goal.
 7. Run `chief-of-stuff health --config CLAUDE.md`, whatever the block holds: it checks the `Settings:` file and probes the `Health:` targets. One Log line for the results, naming anything it reports as unhealthy or invalid.
 8. Append one Log line to the tracker, and write the `## Resume` block (see Resume).
-9. Serve the board, if the block names one: `chief-of-stuff pages --ensure` (see Board); when the block has a Settings line, ensure the notification service (see Notify), and arm the check: `CronList`, then `CronCreate` only when no job's prompt starts `[Scheduled check]` (see Check).
+9. Use the launcher’s board supervisor (see Board); when the block has a Settings line, ensure the notification service (see Notify), and arm the check: `CronList`, then `CronCreate` only when no job's prompt starts `[Scheduled check]` (see Check).
 10. Reply with the Clock line, the calendar, the carried items, anything unhealthy, any invalid setting in the words `health` printed, the board serving status, and one question for the user: the goal.
 
 Yesterday's files are read, never edited.
@@ -82,7 +82,7 @@ Four round trips, not ten.
 
 1. One message, six calls that do not depend on each other: `TZ=<tz> date`; read today's tracker through `chief-of-stuff tracker` (`header`, `section Resume`, `tasks --not done`, `section "File ownership"`; `sections` gives each heading's line number), never with grep, sed, awk, cat, head, tail or cut on the tracker file, in this step or a later one (before an Edit, the Read tool with `offset` and `limit`), and the log; list sessions; `chief-of-stuff health --config CLAUDE.md`; `chief-of-stuff audit --date <today>`; `chief-of-stuff inbox list --recipient coordinator --unread`. Read the Log only from the block's `As of` time — earlier lines are history, and the block is the summary of them.
 2. One write pass to the tracker: your own name in the header — and when you are not in the session listing yet, say that there (`resumed session, not yet listed`) rather than leaving the name of the session before you. The header names who is writing, and your predecessor's name is the one answer that is certainly wrong; process unread mailbox messages (read and acknowledge via `chief-of-stuff inbox read <id> --ack` or `chief-of-stuff inbox drain --recipient coordinator`): registrations update `## Sessions`, worker completion reports update task state and `Verified`, and stops update task state to `waiting` or `orphaned`; task states from the session check (see Sessions) and from the audit, which reads every issue's state (see Tracker); an issue filed for every open task the audit names as having none, a close for every done task whose issue it names as open, and — only from that same `issue:` line, never from a plain `reopen:` finding, which stays the silent state change it always was — a task whose issue the audit names as closed written `done` at the close time that issue fault gives, or one question to the user when that issue fault says the tree has work not on main (see Tracker); one Log line; the `## Resume` block last.
-3. Serve the board: `chief-of-stuff pages --ensure` (see Board); when the block has a Settings line, ensure the notification service (see Notify), and arm the check: `CronList`, then `CronCreate` only when no job's prompt starts `[Scheduled check]` (see Check).
+3. Use the launcher’s board supervisor (see Board); when the block has a Settings line, ensure the notification service (see Notify), and arm the check: `CronList`, then `CronCreate` only when no job's prompt starts `[Scheduled check]` (see Check).
 4. Reply: the Clock line, what changed while no session was watching (tasks reopened, owners gone, anything unhealthy), and at most one question.
 
 `Re-arm` names what dies with a session — the check's cron job, a watch, a subscription. Step 3 arms the check again; anything else is marked and said. Re-arming restores checks. After reconciling state, dispatch ready one-shot tasks under Dispatch authority; new interactive sessions still need approval.
@@ -160,7 +160,7 @@ Checks run between user messages (the user, 2026-09-24 01:35: "a 15 minute timer
   - Poll each live session whose row says `idle` or whose task closed (Assign step 1). Its reply gets it the next fitting task; a busy reply gets nothing.
   - In one-shot mode, dispatch ready `unassigned` tasks automatically after reconciliation. Otherwise, a task no live session fits gets one dispatch proposal (see Dispatch). Never repeat a proposal waiting on its yes; it stays in Resume's `Waiting on:`.
   - Run `chief-of-stuff merge-ready --root .` and report its lines instead of the forge's own merge status. Report only new output.
-  - Run `chief-of-stuff pages --ensure` to restore a server lost on reboot within one check; report only new output.
+  - The workspace supervisor maintains the board independently; scheduled checks do not run routine pages commands.
 - A check ends on an ask only for a reason Asks names. A check that finds nothing writes no Log line (see Tracker).
 
 The standing waiting-on list stays in the Resume block and on the board; give it only when the user addresses you or asks, or when an entry on it changes. A check that finds nothing ends with the single line `.` and nothing else. A check that finds something says only what changed, in one short line.
@@ -209,11 +209,12 @@ An item the user owns is theirs. Never propose a dispatch for it, not even as an
 
 When the `## Coordinator` block has a `Board:` line (`- Board: self-hosted; URL http://127.0.0.1:<port>/; dir \`<pages dir>\``), the tracker has a board: a web page rendered from the tracker, never written by hand, and served from this Mac.
 
-- `chief-of-stuff pages --ensure` starts the page server unless it already answers, and prints only its status. It serves the pages dir on 127.0.0.1 only, and `<url>` is always today's board. Open the day, Resume and every check run it.
+- The launcher provisions `chief-of-stuff pages ensure`; direct plugin launches run it once at Open the day or Resume. The supervisor reuses healthy servers and recovers crashes without a coordinator, on the configured loopback port and pages dir.
+- Use `chief-of-stuff pages --ensure` only for a reported server failure.
 - The pages render themselves: the page server re-renders a page from its sources (the tracker, CLAUDE.md, the settings, the decision JSON) whenever one of them changed, so never run `chief-of-stuff board` or `chief-of-stuff decision`, and never write HTML. A tab the user chose to open reloads itself when the page changes.
 - The pages dir is any session's to publish into: a page a session writes there is at `<url>/<name>.html`, and `<url>/all` lists every page.
 - Never Write or Edit the html. Never add a time to the tracker so the board looks complete: a task with no `due` is right as it is; the `due` cell stays blank until a person fills it.
-- If `pages.py` fails or is missing, or a page shows a render error, finish the move and say the board is not served or not rendered, and why. Never start the server on another port: the URL is the board's address. Never patch the html by hand to get around it. The tracker is the truth; the board is a view of it.
+- If the server or rendering fails, finish the move and report why. Never change ports or patch the html to recover it. The tracker is the truth; the board is its view.
 
 ## Requirements
 

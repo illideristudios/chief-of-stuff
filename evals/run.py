@@ -499,7 +499,7 @@ def _no_new_files(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     """`except` entries are exact paths or globs (`Resources/**`)."""
     # The page server's pid, log, sources cache and decisions list, and the mailbox's own ignore file, are the
     # scripts', never the agent's work.
-    allowed = [str(e) for e in g.get("except", [])] + ["pages/.pid", ".chief-of-stuff/pages.log",
+    allowed = [str(e) for e in g.get("except", [])] + ["pages/.pid", "pages/.start.lock", ".chief-of-stuff/pages.log",
                                                       ".chief-of-stuff/mailbox/.gitignore", "pages/.sources*",
                                                       "pages/decisions.html"]
     new = sorted(f for f in _files(rec.fixture_dir) - _files(rec.before_dir) if not any(fnmatch.fnmatch(f, e) for e in allowed))
