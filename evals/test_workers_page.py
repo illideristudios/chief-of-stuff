@@ -123,13 +123,13 @@ class ReviewClassTest(unittest.TestCase):
         import tracker_log as tl
         import workers_page
         lines = []
-        for n, cause in enumerate(("worker's call", "no result file", "timeout", "runtime exit")):
+        for n, cause in enumerate(tl.REVIEW_CLASSES):
             lines.append(tl.started_line("09:00", f"w{n}", "codex", "", "worktree `tree`", "Task"))
             lines.append(tl.ended_line("10:00", f"w{n}", "human_review", "why", "none", review_class=cause))
         html = workers_page.render("## Log\n" + "\n".join(lines), bs.EMPTY, datetime.now(ZONE), Path("/unused"), 4)
-        for cause in ("worker&#x27;s call", "no result file", "timeout", "runtime exit"):
-            self.assertIn(f"human review · {cause}", html)
-        self.assertIn('<b>4</b><span class="cap">need you</span>', html)
+        for cause in tl.REVIEW_CLASSES:
+            self.assertIn(f"human review · {cause}", unescape(html))
+        self.assertIn(f'<b>{len(tl.REVIEW_CLASSES)}</b><span class="cap">need you</span>', html)
 
 
 class Workspace:
@@ -398,6 +398,24 @@ class EndedTodayTest(unittest.TestCase):
                 self.assertIn(at, text.split())
                 self.assertIn(how, text.casefold())
                 self.assertIn(f"/issues/{ref}", links(tr))
+
+
+class MidnightTest(unittest.TestCase):
+    def test_ended_today_finds_the_task_of_a_prior_day_launch(self):
+        import tracker_log as tl
+        import workers_page
+        ws = Workspace(CAP)
+        self.addCleanup(shutil.rmtree, ws.root)
+        yesterday = ws.now.date() - timedelta(days=1)
+        prior = ws.root / "daily" / f"{yesterday}-tracker.md"
+        prior.write_text("## Log\n" + tl.started_line("23:50", "overnight", "codex", "", "worktree `tree`", "Warm the pool"))
+        ws.tracker.write_text(ws.tracker.read_text() + "\n" + tl.ended_line("00:10", "overnight", "human_review", "why", "none", review_class="timeout"))
+        html = workers_page.write(ws.root, ws.pages).read_text()
+        row = next(row for row in re.findall(r"<tr>.*?</tr>", html) if "overnight" in row)
+        self.assertIn("Cache warmup", row)
+        self.assertIn('href="/issues/111"', row)
+        self.assertIn("human review · timeout", row)
+        self.assertNotIn("23:50</td>", html)
 
 
 class HeaderTest(unittest.TestCase):

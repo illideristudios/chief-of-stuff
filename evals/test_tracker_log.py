@@ -62,6 +62,11 @@ class RoundTripTest(unittest.TestCase):
         ):
             self.assertEqual(tl.review_class(line), "")
 
+    def test_invalid_review_class_is_rejected(self):
+        for status in ("human_review", "done"):
+            with self.subTest(status=status), self.assertRaises(ValueError):
+                tl.ended_line("10:20", "w", status, "why", "none", review_class="typo")
+
     def test_a_relaunch_line(self):
         line = tl.relaunch_line("10:20", "worker01", "Security audit", "target PR merged before work began")
         self.assertEqual(tl.RELAUNCH.match(line).groups(), ("10", "20", "worker01", "relaunch"))

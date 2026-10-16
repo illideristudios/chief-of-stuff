@@ -420,6 +420,38 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(status, "human_review")
         self.assertIn("costs", reason)
 
+    def test_non_utf8_result_requires_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result"
+            path.write_bytes(b"\xff")
+            self.assertEqual(one_shot.worker_result(path, 0)[0], "human_review")
+
+    def test_result_symlink_is_not_followed_or_echoed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path, target = Path(tmp) / "result", Path(tmp) / "target"
+            target.write_text("status: done\nreason: do not trust this target\nchanges: none\n")
+            path.symlink_to(target)
+            status, reason, *_ = one_shot.worker_result(path, 0)
+            self.assertEqual(status, "human_review")
+            self.assertNotIn(target.read_text(), reason)
+
+    def test_result_fifo_does_not_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result"
+            os.mkfifo(path)
+            # A subprocess bounds a regressed blocking open without leaving a hung suite.
+            probe = "import sys; from pathlib import Path; import one_shot; print(one_shot.worker_result(Path(sys.argv[1]), 0)[0])"
+            run = subprocess.run([sys.executable, "-c", probe, str(path)], capture_output=True, text=True,
+                                 env={**os.environ, "PYTHONPATH": str(Path(one_shot.__file__).parent)}, timeout=3)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual(run.stdout.strip(), "human_review")
+
+    def test_result_size_is_bounded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result"
+            path.write_text("status: done\nreason: finished\nchanges: none\n" + " " * (1 << 20))
+            self.assertEqual(one_shot.worker_result(path, 0)[0], "human_review")
+
     def test_a_json_result_reads_like_toon(self):
         # Some workers write the result file as JSON; the fields are the same (#154).
         with tempfile.TemporaryDirectory() as tmp:
@@ -694,11 +726,38 @@ class RunTest(unittest.TestCase):
                 self.assertEqual(report.get("review_class"), cause)
                 self.assertEqual(toon_decode((self.tree / one_shot.REPORT).read_text())["review_class"], cause)
                 self.assertIn(detail, report["reason"])
-                if cause in ("timeout", "runtime exit", "no result file"):
+                if cause in ("timeout", "runtime exit", "no result file", "launcher check"):
                     self.assertIn(str(code), report["reason"])
                 self.assertIn(f"HUMAN REVIEW NEEDED [{cause}]", self.tracker.read_text())
                 self.assertIn(cause, comment.call_args.args[2].splitlines()[0])
                 self.assertIn(detail, comment.call_args.args[2])
+                self.assertIn("Why: " + report["reason"], comment.call_args.args[2])
+                self.assertIn(one_shot._brief(report["reason"]), self.tracker.read_text())
+
+    def test_adoption_does_not_invent_an_exit_code_for_a_launcher_hold(self):
+        self.tracker.write_text(TRACKER.replace("| unassigned | open |", "| worker01 | running 09:00 |"))
+        path = self.tree / one_shot.RESULT
+        path.parent.mkdir(exist_ok=True)
+        path.write_text("status: done\nreason: finished\nchanges: none\n")
+        with mock.patch.object(one_shot, "changed_files", return_value="partial.txt"), mock.patch.object(one_shot, "committed_changes", return_value=one_shot.NO_COMMITS):
+            report = one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, 0, adopted=True)
+        self.assertEqual(report["review_class"], "launcher check")
+        self.assertIn("the launcher died", report["reason"])
+        self.assertNotIn("exit 0", report["reason"])
+        self.assertNotIn("exit 0", self.tracker.read_text())
+
+    def test_nonzero_exit_does_not_hide_read_only_or_dirty_tree_violations(self):
+        for read_only, dirty, commits, expected in ((True, "partial.txt", one_shot.NO_COMMITS, "read-only task left changes"), (True, "", "abc commit", "read-only task left changes"), (False, "partial.txt", one_shot.NO_COMMITS, "worktree is not clean")):
+            with self.subTest(read_only=read_only, dirty=dirty):
+                self.tracker.write_text(TRACKER.replace("| unassigned | open |", "| worker01 | running 09:00 |"))
+                path = self.tree / one_shot.RESULT
+                path.parent.mkdir(exist_ok=True)
+                path.write_text("status: done\nreason: finished\nchanges: none\n")
+                with mock.patch.object(one_shot, "changed_files", return_value=dirty), mock.patch.object(one_shot, "committed_changes", return_value=commits):
+                    report = one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, 7, read_only=read_only)
+                self.assertEqual(report["review_class"], "launcher check")
+                self.assertIn(expected, report["reason"])
+                self.assertIn("exit 7", report["reason"])
 
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',
@@ -1320,7 +1379,8 @@ class RunTest(unittest.TestCase):
         report = self._report(again)
         self.assertEqual((report["status"], report["reason"]),
                          ("human_review", "quota stop repeated: codex m-test; resets in about four hours"))
-        self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
+        self.assertEqual(report["review_class"], "launcher check")
+        self.assertIn("HUMAN REVIEW NEEDED [launcher check]", self.tracker.read_text())
 
     def test_a_repeated_quota_stop_without_reset_text_names_only_the_runtime_and_model(self):
         stderr = "429: You exceeded your current Quota.\n"

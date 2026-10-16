@@ -92,19 +92,30 @@ class MovesTest(unittest.TestCase):
 
 class BuildTest(unittest.TestCase):
     def test_board_shows_review_class_beside_the_hold_and_clears_it_on_a_new_launch(self):
-        for cause in ("worker's call", "no result file", "timeout", "runtime exit"):
+        for cause in tl.REVIEW_CLASSES:
             tracker = TODAY_TRACKER + "\n" + tl.started_line("01:00", "w", "codex", "", "worktree `tree`", "Warm the pool")
             tracker += "\n" + tl.ended_line("02:00", "w", "human_review", "why", "none", review_class=cause)
             cfg = parse_coordinator(BoardTest.CLAUDE, today=TODAY)
             html = rb.render(tracker, cfg, NOW, lanes=LANES, kanban=KANBAN)
             from html import unescape
             self.assertIn(f"human review · {cause}", unescape(html))
+            for state, stage in (("open", "pr"), ("done", "main"), ("running 02:01", "pr")):
+                resolved = tracker.replace("| Robin | waiting |", f"| unassigned | {state} |").replace("| build | triage | #111", f"| build | {stage} | #111")
+                self.assertNotIn(f"human review · {cause}", unescape(rb.render(resolved, cfg, NOW, lanes=LANES, kanban=KANBAN)))
             # Earlier stage moves must not hide the cause; subsequent progress clears it.
             progressed = tracker + "\n" + tl.stage_line("02:04", "Cache warmup", "pr")
             self.assertNotIn(f"human review · {cause}", unescape(rb.render(progressed, cfg, NOW, lanes=LANES, kanban=KANBAN)))
             # A fresh run must clear it as well.
             tracker += "\n" + tl.started_line("02:05", "w2", "codex", "", "worktree `tree`", "Warm the pool")
             self.assertNotIn(f"human review · {cause}", unescape(rb.render(tracker, cfg, NOW, lanes=LANES, kanban=KANBAN)))
+
+    def test_board_pairs_a_review_stop_with_yesterdays_launch(self):
+        yesterday = "## Log\n" + tl.started_line("23:50", "w", "codex", "", "worktree `tree`", "Warm the pool")
+        today = TODAY_TRACKER.replace("- 01:40 stage: Cache warmup → triage", "") + "\n" + tl.ended_line("00:10", "w", "human_review", "why", "none", review_class="timeout")
+        cfg = parse_coordinator(BoardTest.CLAUDE, today=TODAY)
+        from html import unescape
+        html = rb.render(today, cfg, NOW, lanes=LANES, kanban=KANBAN, stage_log=[(YESTERDAY, yesterday)])
+        self.assertIn("human review · timeout", unescape(html))
 
     def test_a_segment_runs_from_each_move_to_the_next_and_the_last_to_now(self):
         status, row = rows()["Upload size limit"]
