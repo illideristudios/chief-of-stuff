@@ -340,6 +340,55 @@ class FlowEngineTests(unittest.TestCase):
         self.assertEqual(mock_build.call_args.kwargs["agent_type"], "")
         self.assertNotIn("--type", mock_popen.call_args.args[0])
 
+    def test_a_bad_agent_lifetime_refuses_that_task_and_does_not_abort_the_tick(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| task-a | Fix bug in module A | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| task-a | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        claude = self.root / "CLAUDE.md"
+        claude.write_text(claude.read_text() + "- Agent: ghost immortal\n")
+        tracker_path = self.root / "daily" / "2026-10-08-tracker.md"
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        with mock.patch("subprocess.Popen") as mock_popen:
+            dispatched = flow.dispatch_ready_tasks(self.root, "2026-10-08", tracker_path, settings)
+        self.assertTrue(any("refused worktree" in line for line in dispatched))
+        mock_popen.assert_not_called()
+
+    def test_an_unassigned_standing_placeholder_is_not_dispatched(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| impl02 — standing implementer | impl02: standing implementer. Wait idle. | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| impl02: standing implementer. Wait idle. | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        ready = flow.ready_one_shot_tasks(self.root, tracker_text, settings)
+        self.assertEqual(ready, [])
+
     def test_tick_runs_full_cycle(self):
         tracker_text = """## Tasks
 

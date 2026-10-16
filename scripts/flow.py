@@ -101,7 +101,7 @@ def ready_one_shot_tasks(root: Path, tracker_text: str, settings: Settings) -> l
     for t in tasks:
         if t.kind != "open" or t.owner.strip() != "unassigned":
             continue
-        if t.workflow or t.standing:
+        if t.workflow or t.standing or tracker.STANDING_ITEM.match(t.item.strip()) or tracker.STANDING_NAME.match(t.name.strip()):
             continue
         if t.stage.strip().startswith("hold"):
             continue
@@ -256,10 +256,10 @@ def dispatch_ready_tasks(root: Path, day: str, tracker_path: Path, settings: Set
             first_repo = next(iter(settings.repos.values()))
             clone_repo = root / first_repo
 
-        declared = make_worktree.agent_types((root / "CLAUDE.md").read_text())
-        # §9: cut and launch the declared implementer, else the default agent (empty type).
-        cut_type = "implementer" if "implementer" in declared else ""
         try:
+            declared = make_worktree.agent_types((root / "CLAUDE.md").read_text())
+            # §9: cut and launch the declared implementer, else the default agent (empty type).
+            cut_type = "implementer" if "implementer" in declared else ""
             make_worktree.build(root, clone_repo, trees_base, tree_name, branch_name, agent_type=cut_type)
         except make_worktree.RefusedError as exc:
             dispatched.append(f"refused worktree for {t.label}: {exc}")
