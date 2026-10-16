@@ -1,0 +1,5 @@
+[workers]
+mode = "interactive"
+
+[models.implement]
+rotation = ["claude:opus"]

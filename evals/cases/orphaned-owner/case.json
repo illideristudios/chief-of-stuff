@@ -1,8 +1,8 @@
 {
   "tz": "America/Chicago",
   "peers": "sessions.json",
-  "description": "The session that owns a running task is gone from the list. The task becomes orphaned, the Log says so, and Robin hears once what is at risk in its worktree. No re-dispatch, no message to the dead session. Its Sessions row keeps the state it last reported; `gone` is the board's to derive, never the cell's.",
-  "prompt": "Where are we?",
+  "description": "A running task's owner is gone. Record the orphan and recover the task through a one-shot worker in its existing tree, without asking. Preserve the departed session's last reported state and never message it. Preview the launch to avoid a real nested worker.",
+  "prompt": "Where are we? For this isolated test, use --dry-run on any worker launch and do not start a real worker process.",
   "graders": [
     {
       "name": "lists sessions",
@@ -11,10 +11,10 @@
       "min": 1
     },
     {
-      "name": "task marked orphaned",
+      "name": "task made ready for the recovery launcher",
       "type": "file_matches",
       "path": "daily/{{today}}-tracker.md",
-      "pattern": "(?m)^\\| Security audit \\|[^\\n]*\\|\\s*orphaned\\s*\\|"
+      "pattern": "(?m)^\\| Security audit \\|\\s*unassigned\\s*\\|\\s*open\\s*\\|"
     },
     {
       "name": "Log names the gone owner",
@@ -65,8 +65,29 @@
       "type": "timestamp_tolerance",
       "path": "daily/{{today}}-tracker.md",
       "section": "## Log"
+    },
+    {
+      "name": "one-shot recovery previewed",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "\"command\": \"(?=[^\\n]*--one-shot)(?=[^\\n]*--dry-run)(?=[^\\n]*--cwd\\s+[^\\n]*trees/audit-upload)[^\\n]*(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|spawn_session\\.py)",
+      "min": 1
     }
   ],
   "max_turns": 16,
-  "timeout_seconds": 400
+  "timeout_seconds": 400,
+  "repo": {
+    "clone": "repo",
+    "trees": "trees",
+    "files": {
+      "src/a/upload.py": "def upload():\n    return True\n"
+    },
+    "worktrees": [
+      {
+        "name": "audit-upload",
+        "branch": "fix/upload-audit",
+        "merged": false
+      }
+    ]
+  }
 }

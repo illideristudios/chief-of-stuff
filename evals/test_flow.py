@@ -123,6 +123,24 @@ class FlowEngineTests(unittest.TestCase):
         self.assertEqual(len(ready), 2)
         self.assertEqual([t.name for t in ready], ["task-a", "task-c"])
 
+    def test_reconcile_never_treats_the_user_as_a_dead_worker(self):
+        text = """## Tasks
+
+| item | owner | state | since | due | checklist |
+|---|---|---|---|---|---|
+| Draft release notes | Zach | running 09:10 | 09:00 | | Draft release notes |
+
+## Log
+
+- 09:00 opened the day
+"""
+        make_workspace(self.root, text)
+        path = self.root / "daily/2026-10-08-tracker.md"
+        with mock.patch("flow.live_workers", return_value={}), \
+             mock.patch("flow.live_one_shots", return_value={}):
+            self.assertEqual(flow.reconcile_dead_workers(self.root, path, "2026-10-08"), [])
+        self.assertEqual(path.read_text(), text)
+
     def test_reconcile_dead_workers_marks_orphaned_when_no_report(self):
         tracker_text = """## Tasks
 

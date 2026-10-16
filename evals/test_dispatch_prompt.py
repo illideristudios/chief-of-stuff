@@ -1546,3 +1546,23 @@ class MailboxRootTest(unittest.TestCase):
         self.assertTrue(commands)
         for c in commands:
             self.assertIn(want, c)
+
+
+class OrphanRecoveryAssignmentTest(unittest.TestCase):
+    def test_writable_one_shot_preserves_and_delivers_inherited_work(self):
+        tmp, root = workspace()
+        self.addCleanup(tmp.cleanup)
+        body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree",
+                          name="recovery-01", one_shot=True)
+        self.assertIn("Preserve inherited uncommitted work", body)
+        self.assertIn("rebase", body)
+        self.assertIn("push", body)
+        self.assertIn("open or update", body)
+
+    def test_read_only_recovery_does_not_authorize_delivering_changes(self):
+        tmp, root = workspace(TRACKER.replace("`src/a/`, `notes/audit.md`", "none; read-only review"))
+        self.addCleanup(tmp.cleanup)
+        body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree",
+                          name="recovery-01", one_shot=True)
+        self.assertIn(dp.READ_ONLY, body)
+        self.assertNotIn("Preserve inherited uncommitted work", body)

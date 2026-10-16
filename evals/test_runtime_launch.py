@@ -96,6 +96,15 @@ class CoordinatorLaunchTest(unittest.TestCase):
         front = (ROOT / "agents" / "chief-of-stuff.md").read_text().split("---", 2)[1]
         self.assertIn(f'initialPrompt: "{start.START}"', front)
 
+    def test_every_host_keeps_automatic_orphan_recovery(self):
+        release = start.install(ROOT, self.install_dir)
+        for runtime in runtimes.NAMES:
+            with self.subTest(runtime=runtime):
+                session_rules = sections(start.prompt(runtime, release, self.root))["Sessions"]
+                self.assertIn("Recover orphaned work automatically through a one-shot worker", session_rules)
+                self.assertIn(f"Read {release}/skills/dispatch/SKILL.md", session_rules)
+                self.assertIn("no ask or decision page", session_rules)
+
     def test_coordinator_prompts_use_host_mailbox_checks(self):
         release = start.install(ROOT, self.install_dir)
         expected = {"claude": "[Mailbox check] chief-of-stuff",

@@ -1,0 +1,89 @@
+{
+  "tz": "America/Chicago",
+  "peers": "sessions.json",
+  "golden": true,
+  "golden_why": "#133: a gone owner leaves a dirty tree; recovery must launch without an ownership question even in interactive mode.",
+  "description": "The owner is gone and its tree has committed and uncommitted work. Recover it in place through a one-shot worker, record the pickup and report it without asking. Only preview the launch so no real nested worker runs.",
+  "repo": {
+    "clone": "repo",
+    "trees": "trees",
+    "files": {
+      "src/a/ttl.py": "SESSION_TTL = 900\n"
+    },
+    "worktrees": [
+      {
+        "name": "wt-ttl",
+        "branch": "fix/session-ttl",
+        "merged": false,
+        "dirty": true
+      }
+    ]
+  },
+  "prompt": "Where are we? For this isolated test, use --dry-run on any worker launch and do not start a real worker process.",
+  "graders": [
+    {
+      "name": "checks which owners are live",
+      "type": "peer_calls",
+      "tool": "list_sessions",
+      "min": 1
+    },
+    {
+      "name": "previews a one-shot recovery in the original tree",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "\"command\": \"(?=[^\\n]*--one-shot)(?=[^\\n]*--dry-run)(?=[^\\n]*--cwd\\s+[^\\n]*trees/wt-ttl)(?=[^\\n]*--task\\s+[^\\n]*Session TTL fix)[^\\n]*(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|spawn_session\\.py)",
+      "min": 1
+    },
+    {
+      "name": "records the pickup and the former owner",
+      "type": "file_matches",
+      "path": "daily/{{today}}-tracker.md",
+      "pattern": "(?im)^- \\d{1,2}:\\d{2} [^\\n]*(?=[^\\n]*impl-7)(?=[^\\n]*(?:recover|pick|reclaim|re-dispatch|redispatch))[^\\n]*"
+    },
+    {
+      "name": "does not send to the dead owner",
+      "type": "peer_calls",
+      "tool": "send",
+      "to_ref": "a1b2c3",
+      "max": 0
+    },
+    {
+      "name": "no recovery question",
+      "type": "regex",
+      "pattern": "\\?",
+      "match": "absent"
+    },
+    {
+      "name": "no decision page",
+      "type": "tool_used",
+      "tool": "Write",
+      "input_match": "decision-[^\\n]*\\.(?:json|html)",
+      "max": 0
+    },
+    {
+      "name": "reports the recovered tree",
+      "type": "regex",
+      "pattern": "wt-ttl"
+    },
+    {
+      "name": "preserves uncommitted work",
+      "type": "file_matches",
+      "path": "trees/wt-ttl/scratch.txt",
+      "pattern": "\\Aunsaved\\n\\Z"
+    },
+    {
+      "name": "user task untouched",
+      "type": "file_matches",
+      "path": "daily/{{today}}-tracker.md",
+      "pattern": "(?m)^\\| Draft release notes \\| Robin \\| open \\|"
+    },
+    {
+      "name": "Log times are this move's clock reads",
+      "type": "timestamp_tolerance",
+      "path": "daily/{{today}}-tracker.md",
+      "section": "## Log"
+    }
+  ],
+  "max_turns": 28,
+  "timeout_seconds": 600
+}
