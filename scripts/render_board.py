@@ -13,7 +13,7 @@ import html
 import re
 import sys
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,7 +21,7 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
-from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, task_changes, went_held, worker_names  # noqa: E402
+from task_forge import tab_counts, drifts, effective_stage, forge_ends, held_names, hold_causes, task_changes, worker_names  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
@@ -330,16 +330,11 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
                   f'{columns.render(build_cols)}</section>\n')
     flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
                   for m in tracker_log.moves(text, day, zone)]
-    look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
-    began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks,
-                       [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks])
-    since = looked or datetime.combine(today, time(), zone)
-    shown = since.astimezone(zone)  # a look on another day names its day
-    went = went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == today else f"{shown:%a %H:%M}"
     known = [t for _, text in stage_log or [] for t in parse_tracker(text).tasks] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
-    epics = epic_risk(tasks, sources, ends, zone, now)
+    navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
+                            [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
     flow_rows = flow_chart.build(flow_moves, known, lanes or {}, held_names(held), ends, now,
                                  queue_durations(active, hist), slots,
                                  frozenset(t.name.strip() for t in tasks
@@ -401,7 +396,7 @@ figure{{margin:0;padding:0;background:none;border:0}}
 </style>
 <body>
 <div class="board" data-rendered-at="{_iso(now)}" data-tz="{_esc(cfg.tz)}" data-deadline="{_iso(nearest.at)}" data-deadline-name="{_esc(nearest.name)}">
-{tab_bar("Board", sum(d is not None for _, d, _, _ in pending), since=went, epics=epics)}<div class="header">{panels.header(head)}</div>
+{tab_bar("Board", sum(d is not None for _, d, _, _ in pending), **navigation)}<div class="header">{panels.header(head)}</div>
 {panels.tiles(tiles)}
 {build_html}{panels_html}
 {flow_html}</div>

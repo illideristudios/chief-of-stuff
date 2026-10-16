@@ -16,6 +16,7 @@ Markup contract these tests read (keep to it; everything else is free):
   auto or scroll.
 """
 
+import json
 import re
 import shutil
 import sys
@@ -143,9 +144,12 @@ def served(pending: int, answered: int, lead_counts: bool = False) -> dict[str, 
             import board_sources as bs
             from dataclasses import replace
             tracker = root / "daily" / f"{day}-tracker.md"
-            tracker.write_text(tracker.read_text().replace("| Robin | open |", "| unassigned | open |")
-                               + "\n## File ownership\n\n| context | paths |\n|---|---|\n| Cap uploads | `src/a/` |\n"
-                               .replace("- 00:01 opened the day", "- 00:01 opened the day\n- 00:04 one-shot impl-1: HUMAN REVIEW NEEDED — check. Changes: a.py.\n"))
+            text = tracker.read_text().replace("| Robin | open |", "| unassigned | open |")
+            text = text.replace("- 00:01 opened the day", "- 00:01 opened the day\n- 00:04 one-shot impl-1: HUMAN REVIEW NEEDED — check. Changes: a.py.")
+            text = text.replace("\n## Log", f"| Await choice | Await choice | Robin | open | {day} |  | S |  |  | #110 | c |\n\n## Log")
+            tracker.write_text(text + "\n## File ownership\n\n| context | paths |\n|---|---|\n| Cap uploads | `src/a/` |\n")
+            alpha = json.loads(decision("alpha"))
+            (pages / "decision-alpha.json").write_text(json.dumps({**alpha, "holds": ["#110"], "asked": "00:00"}))
             milestone = bs.Milestone("Release", "https://forge/m/1", datetime.now(ZoneInfo(ZONE)).date() - timedelta(days=1), "open", 1)
             issue = bs.Issue("#109", "https://forge/i/109", "Uploads", "open", (), milestone=milestone)
             bs._write(pages / bs.CACHE, replace(bs.EMPTY, issues={"#109": issue}))
@@ -294,7 +298,8 @@ class LeadCountsTest(unittest.TestCase):
             with self.subTest(page=page):
                 got = tabs(html)
                 expected = {"Workers": ("1", "need"), "Dispatch": ("1", "ready"),
-                            "Epics": ("1 late", "late"), "Decisions": ("2", "pending")}
+                            "Epics": ("1 late", "late"), "Decisions": ("2", "pending"),
+                            "Since you last looked": ("1", "needs input since")}
                 for label, (count, why) in expected.items():
                     found = badges(got[label])
                     self.assertEqual([b.all_text() for b in found], [count], f"{page}: {label}")

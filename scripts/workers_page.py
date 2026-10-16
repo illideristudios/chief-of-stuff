@@ -18,7 +18,7 @@ from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
-from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STARTED
+from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STARTED, needs_input
 from workspace import parse_coordinator, worktrees_dir
 from settings import load as load_settings
 
@@ -69,7 +69,7 @@ def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
 
 
 def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
-           pending: int = 0) -> str:
+           pending: int = 0, navigation: dict | None = None) -> str:
     """The page. `trees` is where one-shot trees sit; `cap` is `[workers] max_concurrency`."""
     tasks = parse_tracker(tracker_text).tasks
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
@@ -88,7 +88,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             t, name = row_of(task_of.get(m[3], ""))
             ended.append([f"{int(m[1]):02d}:{m[2]}", HOW[m[4]], escape(m[3]), _task(t, name)])
     ended.reverse()  # newest first
-    need = sum(e[1] == "human review" for e in ended)
+    need = needs_input(tracker_text)
     shots = sum(w.kind == "one-shot" for w in sources.workers)
     boxes = [("need you", str(need), " hot" if need else ""), ("running", str(len(running)), "")]
     if cap:
@@ -98,7 +98,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
                           '<a href="/">board</a>'])
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Workers</title>\n{HEAD}{CSS}</head>\n<body>\n<main>\n{tab_bar('Workers', pending)}"
+            f"<title>Workers</title>\n{HEAD}{CSS}</head>\n<body>\n<main>\n{tab_bar('Workers', pending, **(navigation or {'workers': need}))}"
             f'  <header class="top">\n    <div>\n      <h1>Workers</h1>\n      <span class="eyebrow">{eyebrow}</span>\n    </div>\n'
             f'    <div class="boxes">{boxes_html}</div>\n  </header>\n'
             f'  <section>\n    <h2>Running · {len(running)}</h2>\n'
@@ -114,9 +114,10 @@ def write(root: Path, pages_dir: Path) -> Path:
     cfg = parse_coordinator(claude_md, today=date.today())
     now = datetime.now(cfg.zone)  # not cut to the second: a time running floors, as panels.hm counts
     tracker = root / cfg.tracker_path(now.date().isoformat())
+    ctx = context(root, now.date().isoformat())
     page = render(tracker.read_text() if tracker.is_file() else "", board_sources.load(pages_dir), now,
                   root / worktrees_dir(claude_md), load_settings(root, cfg.settings_path).workers.max_concurrency,
-                  pending_count(pages_dir, context(root, now.date().isoformat())))
+                  pending_count(pages_dir, ctx), ctx.navigation if ctx else None)
     out = pages_dir / "workers.html"
     write_if_changed(out, page)
     return out

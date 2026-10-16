@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
+from md import section
+
 # A one-shot's end line says one of these. A relaunch line says RELAUNCHED instead, and the launcher looks for it so
 # a task relaunches at most once a day. A quota stop on a model is relaunched once per task and model a day instead,
 # and does not use that daily relaunch. That marker is a launcher-written Log line; a worker's reason can never carry it.
@@ -38,6 +40,12 @@ STARTED_DETAIL = re.compile(r"^-\s+(\d{1,2}:\d{2}) one-shot (\S+) started: (.*?)
 # the user approved. Each names its task last, as a started line does, and matches no pattern above.
 HOLD_FAILED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): review hold failed: (.*), task (.+?)\s*$")
 APPROVED_CLOSE = re.compile(r"^- (\d{1,2}):(\d{2}) forge closure approved by the user: (.*), task (.+?)\s*$")
+
+
+def needs_input(tracker_text: str) -> int:
+    """Today's human-review ends: the Workers page's lead count, also shown in every tab bar."""
+    return sum(1 for line in section(tracker_text, "## Log")
+               if (m := ENDED.match(line.strip())) and m[4] == HUMAN_REVIEW)
 
 
 def stage_line(at: str, name: str, stage: str) -> str:

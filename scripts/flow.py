@@ -28,6 +28,7 @@ import notify
 import ownership
 import process_status
 import tracker
+import task_forge
 import tracker_write
 from one_shot_report import UNREADABLE, read_report
 from settings import Settings, SettingsError, load as load_settings
@@ -84,47 +85,7 @@ def last_worktree_commit_epoch(tree: Path) -> float | None:
 
 def ready_one_shot_tasks(root: Path, tracker_text: str, settings: Settings) -> list[tracker.Task]:
     """Find unassigned open tasks eligible for one-shot launch, bounded by concurrency and file overlap."""
-    parsed = tracker.parse_tracker(tracker_text)
-    tasks = parsed.tasks
-
-    running = [t for t in tasks if t.kind == "running"]
-    max_slots = settings.workers.max_concurrency or 1
-    free_slots = max(0, max_slots - len(running))
-    if free_slots <= 0:
-        return []
-
-    running_paths = [ownership.cell(tracker_text, {t.label, t.name, t.item}) or "" for t in running]
-
-    ready: list[tracker.Task] = []
-    accepted_paths: list[str] = []
-
-    for t in tasks:
-        if t.kind != "open" or t.owner.strip() != "unassigned":
-            continue
-        # standing_for unmarks the item; a bold name (`**impl03**: standing`) is still a placeholder when unassigned.
-        if t.workflow or t.standing or tracker.STANDING_ITEM.match(tracker._unmark(t.item).strip()) or tracker.STANDING_NAME.match(t.name.strip()):
-            continue
-        if t.stage.strip().startswith("hold"):
-            continue
-
-        paths = ownership.cell(tracker_text, {t.label, t.name, t.item})
-        if paths is None:
-            continue
-
-        # Check collision with running tasks
-        if any(ownership.overlaps(r, paths) for r in running_paths):
-            continue
-
-        # Check collision with already accepted candidate tasks
-        if any(ownership.overlaps(a, paths) for a in accepted_paths):
-            continue
-
-        ready.append(t)
-        accepted_paths.append(paths)
-        if len(ready) >= free_slots:
-            break
-
-    return ready
+    return task_forge.ready_tasks(tracker_text, settings.workers.max_concurrency or 1)
 
 
 def reconcile_dead_workers(root: Path, tracker_path: Path, day: str) -> list[str]:

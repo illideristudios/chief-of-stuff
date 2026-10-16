@@ -1,15 +1,19 @@
 """What the forge's cached sources say about the tracker's tasks: the changes naming a task's issue, the stage a
 merged change has moved it to, whether the issue's labels drift from that stage, and when its Flow row ends. Beside
-them, who the workers are and whether a stage holds. The board and the task page read these; nothing here draws.
+them, who the workers are, whether a stage holds, the dispatch candidates and the pages' lead counts. The board and the task page read these; nothing here draws.
 """
 
 from __future__ import annotations
 
 from collections.abc import Container, Mapping
-from datetime import datetime
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 import board_sources
+import ownership
+import tracker
+import tracker_log
+from estimate import estimates, history, task_end
 import kanban as kanban_tool
 from settings import Kanban
 from tracker import Task, issue_key, launcher
@@ -157,3 +161,72 @@ def drifts(task: Task, kanban: Kanban | None, sources: board_sources.Sources, st
     if stage in kanban.terminal_stages:  # a merged change: the forge already answered, mark or not (#240)
         return False
     return bool(kanban_tool.drift(kanban, issue.labels, stage, allow_extra_hold=task.kind == "waiting"))
+
+
+def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
+    """The dispatcher's open, unassigned candidates, bounded by free slots and file ownership overlap."""
+    parsed = tracker.parse_tracker(tracker_text)
+    tasks = parsed.tasks
+
+    running = [t for t in tasks if t.kind == "running"]
+    free_slots = max(0, max_concurrency - len(running))
+    if free_slots <= 0:
+        return []
+
+    running_paths = [ownership.cell(tracker_text, {t.label, t.name, t.item}) or "" for t in running]
+
+    ready: list[tracker.Task] = []
+    accepted_paths: list[str] = []
+
+    for t in tasks:
+        if t.kind != "open" or t.owner.strip() != "unassigned":
+            continue
+        # standing_for unmarks the item; a bold name (`**impl03**: standing`) is still a placeholder when unassigned.
+        if t.workflow or t.standing or tracker.STANDING_ITEM.match(tracker._unmark(t.item).strip()) or tracker.STANDING_NAME.match(t.name.strip()):
+            continue
+        if t.stage.strip().startswith("hold"):
+            continue
+
+        paths = ownership.cell(tracker_text, {t.label, t.name, t.item})
+        if paths is None:
+            continue
+
+        # Check collision with running tasks
+        if any(ownership.overlaps(r, paths) for r in running_paths):
+            continue
+
+        # Check collision with already accepted candidate tasks
+        if any(ownership.overlaps(a, paths) for a in accepted_paths):
+            continue
+
+        ready.append(t)
+        accepted_paths.append(paths)
+        if len(ready) >= free_slots:
+            break
+
+    return ready
+
+
+def tab_counts(tracker_text: str, cfg, now: datetime, lanes: dict, kanban: Kanban | None,
+               sources: board_sources.Sources, pending_refs: Mapping[str, datetime | None],
+               looked: datetime | None = None, earlier=(), slots: int = 1, *, held=None, ends=None,
+               tracker_day: date | None = None) -> dict:
+    """The pages' lead counts from the same tracker, hold rules, forecasts and cached forge facts as the board.
+    `earlier` is (day, tracker text) before this tracker; the board can supply its already computed holds and ends."""
+    tasks = [t for t in tracker.parse_tracker(tracker_text).tasks if not t.standing]
+    held = hold_causes(tasks, kanban, sources, lanes, pending_refs) if held is None else held
+    moves = [m for day, text in [*earlier, (tracker_day or now.date(), tracker_text)]
+             for m in tracker_log.moves(text, day, cfg.zone)]
+    began = hold_began(held, moves, pending_refs, sources.home, tasks,
+                       [t for _, text in earlier for t in tracker.parse_tracker(text).tasks])
+    since = looked or datetime.combine(now.date(), time(), cfg.zone)
+    shown = since.astimezone(cfg.zone)
+    if ends is None:
+        active = [t for t in tasks if t.kind != "done"]
+        est = estimates(active, cfg, now, history(tasks, cfg, now))
+        ends = {t.item: end[0] for t in active
+                if (end := task_end(t, cfg, now, now, est))[1] in ("due", "derived")}
+    return {"workers": tracker_log.needs_input(tracker_text),
+            "dispatch": len(ready_tasks(tracker_text, slots)),
+            "since": (went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == now.date() else f"{shown:%a %H:%M}"),
+            "epics": epic_risk(tasks, sources, ends, cfg.zone, now)}
