@@ -19,7 +19,7 @@ import sys
 import tempfile
 import unittest
 import unittest.mock
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -1799,6 +1799,84 @@ with open({str(self.log)!r}, 'a') as log:
 
 
 class WorkerModeTest(unittest.TestCase):
+    def review_workspace(self):
+        tree, args = self.one_shot_workspace()
+        root = tree.parent.parent
+        (root / "CLAUDE.md").write_text((root / "CLAUDE.md").read_text() + "- Agent: reviewer task\n")
+        (root / "chief-of-stuff.toml").write_text(
+            '[workers]\nmode = "one-shot"\n[lanes.code]\nstages = ["review"]\n'
+            '[stages.review]\nagent = "reviewer"\nskills = ["security-review"]\n')
+        (root / "daily" / "2026-09-18-tracker.md").write_text(
+            TRACKER.replace("| item | owner | state | since | due | checklist |",
+                "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |", 1)
+            .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|---|---|", 1)
+            .replace("| Security audit | unassigned | open | 09:00 |  |",
+                     "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
+        return tree, args
+
+    def test_review_stage_launches_configured_agent_and_names_skills_in_brief(self):
+        tree, args = self.review_workspace()
+        argv = self.dry_run_argv(args)
+        self.assertIn(("--agent", "reviewer"), list(zip(argv, argv[1:])))
+        brief = ss.dispatch_prompt.compose(tree.parent.parent, "2026-09-18", "Security audit",
+                                            worktree=tree, name="worker01", one_shot=True)
+        self.assertIn("Skills: load and follow security-review", brief)
+
+    def test_undeclared_stage_agent_is_omitted_on_both_launch_paths(self):
+        for interactive in (False, True):
+            with self.subTest(interactive=interactive):
+                tree, args = self.review_workspace()
+                claude = tree.parent.parent / "CLAUDE.md"
+                claude.write_text(claude.read_text().replace("- Agent: reviewer task\n", ""))
+                if interactive:
+                    with unittest.mock.patch.object(ss, "resolve", return_value="/bin/fake"), \
+                         unittest.mock.patch.dict(os.environ, {ss.ENV: ""}), \
+                         contextlib.redirect_stdout(io.StringIO()) as out:
+                        self.assertEqual(ss.main(args + ["--interactive", "--launcher", "tmux"]), 0)
+                    self.assertNotIn("--agent", out.getvalue())
+                else:
+                    self.assertNotIn("--agent", self.dry_run_argv(args))
+
+    def test_default_date_is_pinned_before_task_and_stage_lookup(self):
+        tree, args = self.review_workspace()
+        at = args.index("--date")
+        del args[at:at + 2]
+        with unittest.mock.patch.object(ss, "datetime") as clock, \
+             unittest.mock.patch.object(one_shot, "run", return_value=0) as run:
+            clock.now.return_value = datetime(2026, 9, 18)
+            self.assertEqual(ss.main(args), 0)
+        clock.now.assert_called_once()
+        self.assertEqual(run.call_args.kwargs["day"], "2026-09-18")
+        self.assertEqual(run.call_args.kwargs["agent_type"], "reviewer")
+
+    def test_explicit_type_overrides_stage_agent(self):
+        _, args = self.review_workspace()
+        argv = self.dry_run_argv(args + ["--type", "chosen"])
+        self.assertIn(("--agent", "chosen"), list(zip(argv, argv[1:])))
+        self.assertNotIn("reviewer", argv)
+
+    def test_other_runtimes_receive_stage_skills_without_agent_flags(self):
+        tree, args = self.review_workspace()
+        for runtime in ("codex", "cursor", "agy"):
+            with self.subTest(runtime=runtime):
+                argv = self.dry_run_argv(args + ["--runtime", runtime, "--model", "test-model"])
+                self.assertNotIn("--agent", argv)
+                self.assertNotIn("reviewer", argv)
+                brief = ss.dispatch_prompt.compose(tree.parent.parent, "2026-09-18", "Security audit",
+                    worktree=tree, name="worker01", runtime=runtime, one_shot=True)
+                self.assertIn("Skills: load and follow security-review", brief)
+
+    def test_interactive_launch_uses_stage_agent(self):
+        tree, args = self.review_workspace()
+        with unittest.mock.patch.object(ss, "resolve", return_value="/bin/fake"), \
+             unittest.mock.patch.dict(os.environ, {ss.ENV: ""}), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ss.main(args + ["--interactive", "--launcher", "tmux"]), 0)
+        self.assertIn("--agent reviewer", out.getvalue())
+        brief = ss.dispatch_prompt.compose(tree.parent.parent, "2026-09-18", "Security audit",
+                                            worktree=tree, name="worker01")
+        self.assertIn("Skills: load and follow security-review", brief)
+
     def test_toml_requires_one_shot_for_every_dispatch(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

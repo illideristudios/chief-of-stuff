@@ -17,9 +17,9 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backlog_ref import file_with, issue_ref  # noqa: E402
-from tracker import parse_tracker, short_name  # noqa: E402
-from workspace import ConfigError, architecture_document, read_config  # noqa: E402
-from settings import SettingsError, Workflow, load as load_settings  # noqa: E402
+from tracker import Task, parse_tracker, short_name  # noqa: E402
+from workspace import Config, ConfigError, architecture_document, read_config  # noqa: E402
+from settings import Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
 import ownership  # noqa: E402
 import runtimes  # noqa: E402
 
@@ -240,7 +240,13 @@ def architecture_line(root: Path) -> str:
     return f"Architecture: {document}; read it before changing code." if document else ""
 
 
-def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None) -> str:
+def skills_line(skills: tuple[str, ...]) -> str:
+    """Name the stage's skills on demand, without injecting their text into the starting prompt (§2)."""
+    return "Skills: load and follow " + ", ".join(skills) + "." if skills else ""
+
+
+def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
+                  skills: tuple[str, ...] = ()) -> str:
     """Assignment from a store row, forge issue and workspace, never a peer session's instructions (E3)."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
@@ -259,6 +265,7 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
             + review
+            + (skills_line(skills) + "\n" if skills else "")
             + architecture
             + f"\n## Forge issue\n\n{title}\n\n{body}\n")
 
@@ -365,15 +372,8 @@ def _detached(worktree: Path | None) -> bool:
     return head.returncode == 0 and head.stdout.strip() == "HEAD"
 
 
-def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
-            coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
-            one_shot: bool = False) -> str:
-    """The assignment for `task`, read back off disk. A task that is not a row is refused."""
-    cfg = config(root)
-    try:
-        workflow = load_settings(root, cfg.settings_path).workflow
-    except (OSError, SettingsError) as exc:
-        raise RefusedError(f"cannot read workflow settings: {exc}") from None
+def _task_context(root: Path, cfg: Config, day: str | None, task: str) -> tuple[str, str, Task]:
+    """Read the tracker row by the same item match for defaults and assignments."""
     relative = cfg.tracker_path(day or datetime.now(cfg.zone).date().isoformat())
     try:
         text = (root / relative).read_text()
@@ -383,24 +383,66 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     rows = [row for row in parse_tracker(text).tasks if row.item.strip() == wanted]
     if not wanted or not rows:
         raise RefusedError(f"no Tasks row {task!r} in {relative}; a dispatch names a task that is already there")
-    owner = rows[0].owner.strip()
+    return relative, text, rows[0]
+
+
+def stage_defaults(root: Path, day: str | None, task: str) -> Stage | None:
+    """Return the task row's configured stage defaults; day defaults to workspace today."""
+    cfg = config(root)
+    _, _, row = _task_context(root, cfg, day, task)
+    try:
+        return load_settings(root, cfg.settings_path).stages.get(row.stage.strip())
+    except (OSError, SettingsError) as exc:
+        raise RefusedError(f"cannot read workspace settings: {exc}") from None
+
+
+def _task_directives(root: Path, row: Task, skills: str, issue: Any) -> list[str]:
+    """Directive lines shared by one-shot and interactive task assignments."""
+    lines = []
+    if row.stage.strip() == "review":
+        lines.append(CODE_REVIEW)
+    if skills:
+        lines.append(skills)
+    if arch := architecture_line(root):
+        lines.append(arch)
+    if row.checklist.strip():
+        lines.append(f"Requirement: {_clean('the checklist cell', row.checklist.strip())}")
+    if issue:
+        lines.append(f"Issue: {issue.url}")
+    return lines
+
+
+def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
+            coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
+            one_shot: bool = False) -> str:
+    """The assignment for `task`, read back off disk. A task that is not a row is refused."""
+    cfg = config(root)
+    day = day or datetime.now(cfg.zone).date().isoformat()
+    relative, text, row = _task_context(root, cfg, day, task)
+    try:
+        workflow = load_settings(root, cfg.settings_path).workflow
+    except (OSError, SettingsError) as exc:
+        raise RefusedError(f"cannot read workspace settings: {exc}") from None
+    stage = stage_defaults(root, day, task)
+    skills = skills_line(stage.skills) if stage else ""
+    owner = row.owner.strip()
     # Prevent two workers from claiming one task.
     if owner.lower() != UNASSIGNED:
         raise RefusedError(
-            f"task {rows[0].item.strip()!r} is already {owner}'s, not {UNASSIGNED}; it is not a task to dispatch")
+            f"task {row.item.strip()!r} is already {owner}'s, not {UNASSIGNED}; it is not a task to dispatch")
     # Backlog-backed tasks need an issue; the audit checks whether it is open.
     issue = None
     # Standing placeholders do not need issues.
-    if cfg.backlog and not rows[0].standing_for(name):
-        cell = rows[0].issue.strip()
+    if cfg.backlog and not row.standing_for(name):
+        cell = row.issue.strip()
         if not cell:
             raise RefusedError(
-                f"task {rows[0].item.strip()!r} names no issue; file one with {file_with(cfg.backlog)} and write its number in the issue column")
-        issue = None if rows[0].workflow else issue_ref(cell, cfg.backlog)
-        if not issue and not rows[0].workflow:
-            raise RefusedError(f'task {rows[0].item.strip()!r} has "{_clean("the issue cell", cell)}" in its issue column, which is not an issue reference')
+                f"task {row.item.strip()!r} names no issue; file one with {file_with(cfg.backlog)} and write its number in the issue column")
+        issue = None if row.workflow else issue_ref(cell, cfg.backlog)
+        if not issue and not row.workflow:
+            raise RefusedError(f'task {row.item.strip()!r} has "{_clean("the issue cell", cell)}" in its issue column, which is not an issue reference')
     # Workers read the tracker from a different cwd, so its path must be absolute.
-    item = _clean("the Tasks item", rows[0].item.strip())
+    item = _clean("the Tasks item", row.item.strip())
     owns = _owns(text, item, relative)
     read_only = ownership.read_only(owns)
     board_rule = ("Board safety: never automatically open the board URL or rendered board HTML with shell, "
@@ -417,7 +459,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     if one_shot:
         if worktree is None:
             raise RefusedError("one-shot dispatch needs a worktree")
-        if rows[0].kind != "open" or rows[0].standing_for(name):
+        if row.kind != "open" or row.standing_for(name):
             raise RefusedError("one-shot dispatch needs an open, non-standing task")
         refuse_overlap(text, item)
         result = worktree / RESULT_FILE
@@ -441,14 +483,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             REVIEW_RULE,
             f"Task: {item}",
         ]
-        if rows[0].stage.strip() == "review":
-            lines.append(CODE_REVIEW)
-        if arch := architecture_line(root):
-            lines.append(arch)
-        if rows[0].checklist.strip():
-            lines.append(f"Requirement: {_clean('the checklist cell', rows[0].checklist.strip())}")
-        if issue:
-            lines.append(f"Issue: {issue.url}")
+        lines += _task_directives(root, row, skills, issue)
         lines += [
             f"Worktree: {worktree}", f"Workspace: {root.resolve()}",
             f"Tracker: {(root / relative).resolve()}",
@@ -520,14 +555,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         header_text = header_text.replace("When direct messaging is unavailable, send your ask via:", "Send your ask via:")
 
     lines = [header_text, board_rule, WRITING_RULE, REVIEW_RULE, f"Task: {item}"]
-    if rows[0].stage.strip() == "review":
-        lines.append(CODE_REVIEW)
-    if arch := architecture_line(root):
-        lines.append(arch)
-    if rows[0].checklist.strip():
-        lines.append(f"Requirement: {_clean('the checklist cell', rows[0].checklist.strip())}")
-    if issue:
-        lines.append(f"Issue: {issue.url}")
+    lines += _task_directives(root, row, skills, issue)
     if worktree is not None:
         # So a session can tell whether the assignment it is reading was addressed to it.
         lines.append(f"Worktree: {worktree}")

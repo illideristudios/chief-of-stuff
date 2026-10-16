@@ -16,6 +16,8 @@ import guard_binding
 import make_worktree
 import process_status
 import supervisor
+from settings import load as load_settings
+from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import Failure, Request, retry_at
 
@@ -97,11 +99,10 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     store.set_resume(key, data)
 
 
-def _declared_agent(root: Path, agent: str) -> str:
+def _declared_agent(text: str, agent: str) -> str:
     """Pass the agent type only when the workspace's Agent: lines declare it (§9)."""
     if not agent:
         return ""
-    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     return agent if agent in make_worktree.agent_types(text) else ""
 
 
@@ -113,7 +114,6 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
     actor = policies.personas[name]
-    agent = _declared_agent(root, actor.agent or "")
     run_dir = _run_dir(root, issue_key, stage, attempt)
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
@@ -121,11 +121,15 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         store.set_ownership(issue_key, existing["tree"])
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
+    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
+    defaults = load_settings(root, settings_path(text)).stages.get(stage)
+    agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
-    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root)
+    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
+                                               skills=defaults.skills if defaults else ())
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"

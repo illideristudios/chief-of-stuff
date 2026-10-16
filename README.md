@@ -85,6 +85,16 @@ rotation = ["codex:<model-id>@high", "claude:opus@high"]
 
 `chief-of-stuff models --root . --class implement` prints the suggested entry. `--after <entry>` prints the next one, or exits nonzero when the rotation is exhausted. `--not-family <runtime>` skips that runtime's entries, for an independent review. `chief-of-stuff worker --class implement` launches the suggested entry when no `--runtime` or `--model` is given; explicit flags win. Effort is passed to Claude, Codex and Antigravity workers; Cursor takes none, so an entry or `--effort` that sets one for Cursor is refused. A bad runtime, an empty or duplicate rotation, or a bad effort is refused. Without `[models]`, the coordinator follows `chief-of-stuff-models.md`.
 
+Stage launch defaults live beside the model tables in the settings TOML:
+
+```toml
+[stages.review]
+agent = "reviewer"
+skills = ["security-review"]
+```
+
+Each configured stage must appear in a lane's stages or the kanban map (including terminal stages). Both keys are optional. Claude workers launch with the stage's agent profile when the Coordinator block declares it with an `Agent:` line; `worker --type` or the engine persona's declared `Agent:` type takes precedence. Other runtimes receive only the skills. Every worker brief names the stage's skills and instructs the worker to load and follow them on demand. Invalid profile names, skill lists, unknown keys and unknown stages are refused.
+
 Interactive Cursor workers start in [Plan mode](https://cursor.com/docs/cli/overview). Interactive Antigravity workers also start in plan mode. Interactive Codex workers start with a read-only sandbox for planning; after plan approval, use the assignment's `session_exec.py resume-codex` command to resume that session ID with write access and update its process registration. Codex documents `/plan` as a [developer command](https://learn.chatgpt.com/docs/developer-commands), but its CLI has no plan launch flag.
 
 Every interactive worker assignment describes a five-minute mailbox check. Antigravity uses [Schedule or `/schedule`](https://antigravity.google/docs/slash-commands/), Cursor uses its in-session [`/loop`](https://cursor.com/docs/agent/overview), and Claude uses its native cron tools. [Codex CLI has no Scheduled interface](https://learn.chatgpt.com/docs/automations), so its workers check at the start of each turn and after each commit. The prompts keep the approval gate for each new task.
