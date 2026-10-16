@@ -660,7 +660,7 @@ class RunTest(unittest.TestCase):
     def test_run_composes_with_already_loaded_workspace_policy(self):
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")
         (self.root / "cos.toml").write_text(
-            '[workers]\nrules = ["Keep tests."]\n[lanes.code]\nstages = ["review"]\n'
+            '[workers]\nrules = ["Keep tests."]\nrequire_green_tests = true\n[lanes.code]\nstages = ["review"]\n'
             '[stages.review]\nskills = ["security-review"]\n')
         with mock.patch.object(dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")), \
              mock.patch.object(dispatch_prompt, "compose", wraps=dispatch_prompt.compose) as compose, \
@@ -672,6 +672,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(compose.call_args.kwargs["rules"], ("Keep tests.",))
         self.assertIsNotNone(compose.call_args.kwargs["workflow"])
         self.assertEqual(compose.call_args.kwargs["stages"]["review"].skills, ("security-review",))
+        self.assertTrue(compose.call_args.kwargs["require_green_tests"])
 
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',

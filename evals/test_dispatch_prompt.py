@@ -1427,6 +1427,20 @@ class StandingWorkerRulesTest(unittest.TestCase):
             self.assertIn("- Keep tests.\n", body)
             self.assertIn("Skills: load and follow security-review.", body)
 
+    def test_green_suite_policy_with_standing_rules_and_preloaded_settings(self):
+        for enabled in (False, True):
+            self.settings.write_text('[workers]\nrules = ["Keep tests."]\n'
+                                     f'require_green_tests = {str(enabled).lower()}\n')
+            loaded = self.compose("codex", True)
+            with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
+                preloaded = dp.compose(self.root, "2026-09-18", "Security audit",
+                                       worktree=self.root / "tree", name="impl07", runtime="codex",
+                                       one_shot=True, workflow=dp.Workflow(), rules=("Keep tests.",),
+                                       stages={}, require_green_tests=enabled)
+            self.assertEqual(preloaded, loaded)
+            self.assertIn("- Keep tests.\n", preloaded)
+            self.assertEqual("Workspace [workers] require_green_tests is enabled:" in preloaded, enabled)
+
     def test_fallback_settings_error_names_workspace_settings(self):
         self.settings.write_text('[workers]\nrules = false\n')
         with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
