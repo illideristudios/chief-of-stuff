@@ -541,7 +541,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
     # A relaunch in a fresh tree leaves the old tree's copy; `result` would pick it by mtime. Other tasks' copies stay.
     for copy in (root / dispatch_prompt.REPORTS_DIR).glob("*.toon"):
         try:
-            if read_report(copy)["task"] == task:
+            if read_report(copy, git_trees.read_regular)["task"] == task:
                 copy.unlink()
         except UNREADABLE:
             pass
