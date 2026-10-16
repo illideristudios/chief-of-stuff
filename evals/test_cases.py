@@ -2459,7 +2459,7 @@ class RefusalGradersTest(unittest.TestCase):
 
     def test_compound_commands_quotes_and_metadata_cannot_bypass_limits(self):
         for gs in self.severe_cases():
-            for prefix in ('cd "/ws" && ', 'TZ=UTC ', 'date; ', 'date\n'):
+            for prefix in ('  ', 'cd "/ws" && ', 'TZ=UTC ', 'date; ', 'date\n'):
                 for command, name in (
                     ('chief-of-stuff log --root "." --stage "Upload fix" review', 'logging never changes a stage'),
                     ('chief-of-stuff log "Severe process violation: sync #17"', 'violation logged through the command once'),
