@@ -15,6 +15,7 @@ from workspace import ConfigError, read_config
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse argv and print Pipeline TOON; return 0 on reads, 1 on read/config errors; invalid argv exits 2."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, required=True, help="workspace holding CLAUDE.md and its Backlog: line")
     selector = ap.add_mutually_exclusive_group(required=True)
@@ -23,8 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
     if args.id is not None and args.id <= 0:
         ap.error("--id must be a positive integer")
-    if args.ref is not None and not args.ref.strip():
-        ap.error("--ref must not be blank")
+    if args.ref is not None and (not args.ref.strip() or args.ref != args.ref.strip() or args.ref in (".", "..")):
+        ap.error("--ref must be a nonblank, trimmed name other than '.' or '..'")
     try:
         cfg = read_config(args.root)
         if cfg.backlog is None:
