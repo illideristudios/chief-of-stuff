@@ -14,6 +14,7 @@ could not be asked. A caller can branch on it without parsing. Every target gets
 line even when it fails: a missing line would read as a healthy service. No `Settings:` line is no
 settings line, and a settings file that is not there is `absent, defaults`: not a fault, and not ok.
 Settings that name no runtime, or did not load, get no runtimes line.
+Missing files from init's inventory are advice only and do not affect the exit code.
 A usage fault (no config at the path, a `Health:` line that is not a target) is stderr and exit 2.
 """
 
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
 import sys
 import urllib.error
 import urllib.request
@@ -30,6 +32,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from md import section
+from init_workspace import WORKSPACE_FILES
 from runtimes import RUNTIMES
 from settings import ModelEntry, SettingsError, load as load_settings
 from shell_setup import ShellError, resolve
@@ -114,6 +117,25 @@ def check_runtimes(models: dict[str, tuple[ModelEntry, ...]]) -> tuple[list[str]
     return ["runtimes " + ", ".join(said)] if said else [], len(missing)
 
 
+def missing_workspace_files(config: Path, settings: str | None) -> list[str]:
+    """Read init's outputs as data; respect configured paths and never install anything."""
+    root = config.parent
+    paths = {"config": config, "settings": root / settings} if settings else {"config": config}
+    lines = []
+    for key, item in WORKSPACE_FILES.items():
+        path = paths.get(key, root / item.name)
+        try:
+            path.stat()
+        except (FileNotFoundError, NotADirectoryError):
+            command = item.command.format(root=shlex.quote(str(root)))
+            name = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+            lines.append(f"workspace file {name} missing (advice); {command}")
+        except (OSError, ValueError):
+            # Inaccessible or invalid settings paths are diagnosed by check_settings.
+            continue
+    return lines
+
+
 def _safe(url: str) -> str:
     """The url without query or credentials: a probe line is quoted into a tracker people read."""
     parts = urlsplit(url)
@@ -150,7 +172,7 @@ def report(targets: list[Target], timeout: float = TIMEOUT) -> tuple[list[str], 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check the Settings: file and its runtimes, and probe the Health: targets in a ## Coordinator block.")
+    parser = argparse.ArgumentParser(description="Check settings, runtimes and Health: targets; advise about missing files init creates (exit code unaffected).")
     parser.add_argument("--config", default="CLAUDE.md", help="workspace CLAUDE.md holding the block")
     parser.add_argument("--timeout", type=float, default=TIMEOUT, help="seconds per target")
     args = parser.parse_args(argv)
@@ -170,6 +192,8 @@ def main(argv: list[str] | None = None) -> int:
         lines, missing = check_runtimes(models)
         print("\n".join([said, *lines]))
         bad += missing
+    for advice in missing_workspace_files(config, name):
+        print(advice)
     try:
         targets = _targets(text)
     except TargetError as exc:

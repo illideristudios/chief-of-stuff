@@ -7,6 +7,7 @@ import argparse
 import re
 import sys
 import tomllib
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -16,7 +17,7 @@ import backlog  # noqa: E402
 from forge import project_option_ids  # noqa: E402
 import issue_gate  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
-from install_model_guidance import destination as guidance_destination, install as install_guidance
+from install_model_guidance import NAME as GUIDANCE_NAME, destination as guidance_destination, install as install_guidance
 from workspace import ConfigError, parse_coordinator
 from settings import (Kanban, SettingsError, kanban_from_table, load as load_settings, load_policy,
                       unmapped_stages, workflow_stages)
@@ -24,6 +25,21 @@ from settings import (Kanban, SettingsError, kanban_from_table, load as load_set
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COORDINATOR = re.compile(r"(?m)^## Coordinator\s*$")
+
+
+@dataclass(frozen=True)
+class WorkspaceFile:
+    name: str
+    command: str
+
+
+# Init's outputs, also read by health for older workspaces. Init needs user/forge inputs;
+# --help explains those rather than suggesting an incomplete command that would fail.
+WORKSPACE_FILES = {
+    "config": WorkspaceFile("CLAUDE.md", "chief-of-stuff init --help"),
+    "settings": WorkspaceFile("chief-of-stuff.toml", "chief-of-stuff init --help"),
+    "models": WorkspaceFile(GUIDANCE_NAME, "chief-of-stuff models --root {root}"),
+}
 
 
 class InitError(ValueError):
@@ -60,7 +76,7 @@ def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: st
     lines = ["## Coordinator", "", f"- User: {user.strip()}", f"- Daily log dir: `{daily_dir}`",
              f"- Tracker: `{daily_dir}<date>-tracker.md`", f"- Timezone: {timezone}",
              "- Calendars: none", "- Deadlines: none", f"- Worktrees: `{worktrees}`",
-             "- Settings: `chief-of-stuff.toml`"]
+             f"- Settings: `{WORKSPACE_FILES['settings'].name}`"]
     if board_port is not None:
         lines.append(f"- Board: Pages; URL http://127.0.0.1:{board_port}/; dir `pages/`")
     if backlog:
@@ -186,11 +202,11 @@ def main(argv: list[str] | None = None) -> int:
         block = coordinator_block(user=args.user, timezone=args.timezone, daily_dir=args.daily_dir,
                                   worktrees=args.worktrees, agents=args.agent, board_port=args.board_port,
                                   backlog=backlog_spec)
-        claude = root / "CLAUDE.md"
+        claude = root / WORKSPACE_FILES["config"].name
         existing = claude.read_text() if claude.exists() else ""
         if COORDINATOR.search(existing):
             raise InitError(f"{claude} already has a ## Coordinator block")
-        settings = root / "chief-of-stuff.toml"
+        settings = root / WORKSPACE_FILES["settings"].name
         guidance = guidance_destination(root)
         board = None
         if settings.exists():
