@@ -593,7 +593,7 @@ class Page(unittest.TestCase):
         self.body = self.html.split("</style>", 1)[1]
 
     def test_the_board_is_the_flow_artboard_in_order(self) -> None:
-        marks = ['class="panels-head"', 'class="panels-tiles"', '<section id="flow">', 'class="panels"']
+        marks = ['class="panels-head"', 'class="panels-tiles"', '<section id="flow">']
         at = [self.body.index(m) for m in marks]
         self.assertEqual(at, sorted(at), [m for _, m in sorted(zip(at, marks))])
 
@@ -609,17 +609,16 @@ class Page(unittest.TestCase):
     def test_tile_counts(self) -> None:
         # #349: the artboard's label. ALL counts every task (the header's 4 tasks); NEEDS INPUT is what BLOCKED counted, the held
         # cards (none: no kanban hold stage); RUNNING is the two workers; DRIFT: README at triage has stage::implement.
-        # The DECISIONS tile's count is no tile now: the tab bar's badge and the DECISIONS panel carry it.
+        # The DECISIONS tile's count is no tile now: the tab bar's badge carries it.
         tiles = re.findall(r'<span class="panels-label">([A-Z ]+)</span><b class="panels-count">(\d+)</b>', self.body)
         self.assertEqual(tiles, [("ALL", "4"), ("NEEDS INPUT", "0"), ("RUNNING", "2"), ("APPROVED", "3"), ("ORPHANED", "1"), ("DRIFT", "1")])
 
-    def test_each_tile_links_where_it_linked_before(self) -> None:
-        # #349: the artboard's label. BLOCKED linked to #flow, APPROVED to #merge, RUNNING to #workers, ORPHANED and DRIFT to #flow;
-        # ALL had no tile, and the BUILD section whose cards it counts is #flow.
+    def test_each_tile_links_to_the_cards_that_carry_its_facts(self) -> None:
+        # #208: the removed panels no longer have anchors; tiles reach BUILD, and tabs reach the detail pages.
         links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="#([a-z]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
         # #349 review: the kind is what the stylesheet colours a tile by, so each is pinned with its link and label.
-        self.assertEqual(links, [("all", "flow", "ALL"), ("blocked", "flow", "NEEDS INPUT"), ("running", "workers", "RUNNING"),
-                                 ("approved", "merge", "APPROVED"), ("orphaned", "flow", "ORPHANED"), ("drift", "flow", "DRIFT")])
+        self.assertEqual(links, [("all", "flow", "ALL"), ("blocked", "flow", "NEEDS INPUT"), ("running", "flow", "RUNNING"),
+                                 ("approved", "flow", "APPROVED"), ("orphaned", "flow", "ORPHANED"), ("drift", "flow", "DRIFT")])
 
     def test_every_tile_kind_has_a_colour_and_all_draws_in_the_artboards_ink(self) -> None:
         # #349 review: the artboard's tone map gives ALL ink (Flow.dc.html `all: '#2f2630'`, the light --fg); a tile with

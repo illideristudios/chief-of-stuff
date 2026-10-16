@@ -67,6 +67,35 @@ def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources
                                     pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip())))}
 
 
+def _current_tasks(tasks: list[Task], earlier: list[Task], home) -> dict[str, Task]:
+    """Names and items in current and earlier rows, resolved to today's task (renames keep their issue)."""
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip()}
+
+    def today(t: Task) -> Task | None:
+        return by_name.get(t.name.strip().casefold()) or (by_issue.get(issue_key(t.issue, home)) if t.issue.strip() else None)
+
+    return {**{k: cur for t in earlier for k in (t.item.strip().casefold(), t.name.strip().casefold())
+               if k and (cur := today(t))},
+            **{t.item.strip().casefold(): t for t in tasks if t.item.strip()}, **by_name}
+
+
+def looping(tasks: list[Task], moves: list[Move], lanes: dict, home, earlier: list[Task] = ()) -> set[Task]:
+    """Tasks with at least two entries into their lane's fix stage. Repeated logs at the same stage are one
+    entry; launcher lifecycle lines are not lane moves. Earlier row names resolve as they do for hold_began."""
+    find = _current_tasks(tasks, earlier, home)
+    last, visits = {}, {}
+    for move in sorted(moves, key=lambda m: m.at):
+        task = find.get(move.name.strip().casefold())
+        if task is None or move.launch:
+            continue
+        lane = lanes.get(task.lane.strip())
+        if lane and "fix" in lane.stages and move.stage == "fix" and last.get(task) != "fix":
+            visits[task] = visits.get(task, 0) + 1
+        last[task] = move.stage
+    return {t for t, count in visits.items() if count >= 2}
+
+
 def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[str, datetime | None], home,
                tasks: list[Task], earlier: list[Task] = ()) -> dict[Task, datetime | None]:
     """When each of the `held` tasks' holds began (#229): a decision when the first decision holding its issue was asked
@@ -74,15 +103,7 @@ def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[s
     reads them (by name or item in any case, a launcher line only until the task's first `stage:` move); a person's
     wait, which no line records, None. A move may name an `earlier` tracker's row: it is today's task of that row's
     name, or, renamed, of its issue."""
-    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
-    by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip()}
-
-    def today(t: Task) -> Task | None:
-        return by_name.get(t.name.strip().casefold()) or (by_issue.get(issue_key(t.issue, home)) if t.issue.strip() else None)
-
-    find = {**{k: cur for t in earlier for k in (t.item.strip().casefold(), t.name.strip().casefold())
-               if k and (cur := today(t))},
-            **{t.item.strip().casefold(): t for t in tasks if t.item.strip()}, **by_name}
+    find = _current_tasks(tasks, earlier, home)
     row_of = launcher(tasks)
     staged, into = set(), {}
     for m in sorted(moves, key=lambda m: m.at):

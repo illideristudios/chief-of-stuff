@@ -1,7 +1,7 @@
 """Render a tracker-based daily board without opening a server or browser.
 
-The page is the Flow board (Flow.dc.html): header, tiles, BUILD, the MERGE ORDER, DECISIONS and WORKERS
-panels, and the Flow charts. It carries tracker and deadline metadata and ticks its clocks client-side.
+The page is the Flow board (Flow.dc.html): header, tiles, BUILD with merge, decision and looping marks,
+and the Flow charts. It carries tracker and deadline metadata and ticks its clocks client-side.
 The renderer writes the board HTML and prints its path and summary.
 """
 
@@ -21,7 +21,7 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
-from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, task_changes, went_held, worker_names  # noqa: E402
+from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, looping, task_changes, went_held, worker_names  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
@@ -144,10 +144,13 @@ def stage_order(lanes: dict) -> list[str]:
 PIPELINE_MARK = {"passed": "passed", "failed": "failed", "running": "pending", "pending": "pending"}
 
 
-def change_marks(changes: tuple[board_sources.Change, ...]) -> tuple[columns.Mark, ...]:
+def change_marks(changes: tuple[board_sources.Change, ...], queue: dict[str, int] | None = None,
+                 shared: dict[str, list[str]] | None = None) -> tuple[columns.Mark, ...]:
     return tuple(m for c in changes for m in (
         *((columns.Mark(c.pipeline, PIPELINE_MARK[c.pipeline]),) if c.pipeline in PIPELINE_MARK else ()),
-        *((columns.Mark("approved", "approved"),) if c.approved else ())))
+        *((columns.Mark("approved", "approved"),) if c.approved else ()),
+        *((columns.Mark(f"queue {queue[c.ref]}", "queue"),) if queue and c.ref in queue else ()),
+        *(columns.Mark(f"shares file with {ref}", "shared") for ref in (shared or {}).get(c.ref, ()))))
 
 
 def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_sources.Change]:
@@ -157,7 +160,7 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
 
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
-                  held: dict[Task, str] | None = None) -> list[columns.Column]:
+                  held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset()) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
@@ -179,13 +182,18 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         return page(c.issues[0] if c.issues else "", c.url)
 
     workers = worker_names(sources)
+    ready, shared, _ = _merge_facts(sources)
+    queue = {c.ref: i for i, c in enumerate(ready, 1) if c.approved}
 
     def card(task: Task, stage: str | None = None) -> columns.Card:
         changes = task_changes(task, sources)
         url = issue_url(issue_key(task.issue, sources.home), task.issue)
         issue = issue_key(task.issue, sources.home) if changes or url else task.issue.strip()
         refs = ((issue, page(issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
-        marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
+        marks = (change_marks(changes, queue, shared)
+                 + ((columns.Mark("decision pending", "decision"),) if held.get(task) == "decision" else ())
+                 + ((columns.Mark("looping", "looping"),) if task in loops else ())
+                 + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ()))
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
                             flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
@@ -228,15 +236,19 @@ CARD_COLOURS = {**columns.PALETTE, "merged today": columns.PALETTE["done"],
                 "passed": ("var(--surface)", "var(--fg)", "1px solid var(--stage-review)"),
                 "failed": ("var(--surface)", "var(--dl)", "1px solid var(--dl)"),
                 "pending": ("var(--surface)", "var(--fg)", "1px solid var(--stage-pr)"),
-                "drift": ("var(--surface)", "var(--dl)", "1px dashed var(--dl)")}
+                "drift": ("var(--surface)", "var(--dl)", "1px dashed var(--dl)"),
+                "queue": ("var(--surface)", "var(--stage-review)", "1px solid var(--stage-review)"),
+                "shared": ("var(--surface)", "var(--brass)", "1px solid var(--brass)"),
+                "decision": ("var(--surface)", "var(--dl)", "1px solid var(--dl)"),
+                "looping": ("var(--surface)", "var(--stage-fix)", "1px solid var(--stage-fix)")}
 
 
 MERGE_SHOWN = 5
 
 
-def merge_order(sources: board_sources.Sources) -> panels.Panel:
-    """Open changes in the order to merge them: approved first, then in review; within each, a passed pipeline
-    first, then those sharing no file with another open change (#75's least-conflict order, by file overlap)."""
+def _merge_facts(sources: board_sources.Sources) -> tuple[list[board_sources.Change], dict[str, list[str]], dict[str, int]]:
+    """The complete merge order and file overlap, shared by card marks and the legacy panel presenter.
+    Approved first, passed pipelines first, then unshared changes, then change number. Drafts still share files."""
     # ponytail: overlap by file names; #75's trial merge (`git merge-tree`) when overlap proves too coarse.
     open_ = [c for c in sources.changes.values() if c.state == "open"]
     shared = {c.ref: sorted({o.ref for o in open_ if o is not c and set(o.files) & set(c.files)}) for c in open_}
@@ -248,6 +260,12 @@ def merge_order(sources: board_sources.Sources) -> panels.Panel:
 
     ready = sorted((c for c in open_ if not c.draft),
                    key=lambda c: (not c.approved, c.pipeline != "passed", bool(shared[c.ref]), number(c)))
+    return ready, shared, overlap
+
+
+def merge_order(sources: board_sources.Sources) -> panels.Panel:
+    """The legacy merge panel model; card marks use its complete order without the display limit."""
+    ready, shared, overlap = _merge_facts(sources)
     rows = tuple(panels.Row(c.title, " · ".join([
         "approved" if c.approved else "in review",
         *([f"pipeline {c.pipeline}"] if c.pipeline else []),
@@ -288,8 +306,8 @@ def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: i
     task; NEEDS INPUT the held cards; RUNNING workers, or running tasks when no worker source is read."""
     approved = sum(c.state == "open" and c.approved for c in sources.changes.values())
     return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked"),
-            panels.Tile("RUNNING", len(sources.workers) or running, "workers", "running"),
-            panels.Tile("APPROVED", approved, "merge", "approved"),
+            panels.Tile("RUNNING", len(sources.workers) or running, "flow", "running"),
+            panels.Tile("APPROVED", approved, "flow", "approved"),
             panels.Tile("ORPHANED", orphaned, "flow", "orphaned"), panels.Tile("DRIFT", drift, "flow", "drift")]
 
 
@@ -299,11 +317,10 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
            look_log: list[tuple[date, str]] | None = None) -> str:
-    """The board page, the Flow artboard's sections: header, tiles, BUILD (the stage columns), the MERGE ORDER,
-    DECISIONS and WORKERS panels, and the Flow charts. `stage_log` is (day, tracker text) for the earlier days the
-    Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
+    """The board page: header, tiles, BUILD (the stage columns), and the Flow charts.
+    `stage_log` is (day, tracker text) for the earlier days the Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
-    `look_log` the earlier days back to it that `stage_log` does not reach, read only for when a hold began."""
+    `look_log` the earlier days that `stage_log` does not reach, for hold starts and repeated fix entries."""
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
     tracker = parse_tracker(tracker_text)
@@ -325,14 +342,15 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
     held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs)
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
-    build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
-                  f'{columns.render(build_cols)}</section>\n')
     flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
                   for m in tracker_log.moves(text, day, zone)]
     look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
-    began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks,
-                       [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks])
+    earlier = [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks]
+    build_cols = build_columns(tasks, lanes, kanban, sources, now, held,
+                               looping(tasks, look_moves + flow_moves, lanes or {}, sources.home, earlier))
+    build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
+                  f'{columns.render(build_cols)}</section>\n')
+    began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks, earlier)
     since = looked or datetime.combine(today, time(), zone)
     shown = since.astimezone(zone)  # a look on another day names its day
     went = went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == today else f"{shown:%a %H:%M}"
@@ -369,7 +387,6 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
     tiles = flow_tiles(len(tasks), len(held),
                        sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned))
-    panels_html = panels.panels([merge_order(sources), decision_panel(pending, answered, now), worker_panel(sources, now)])
 
     return f"""<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -403,7 +420,7 @@ figure{{margin:0;padding:0;background:none;border:0}}
 <div class="board" data-rendered-at="{_iso(now)}" data-tz="{_esc(cfg.tz)}" data-deadline="{_iso(nearest.at)}" data-deadline-name="{_esc(nearest.name)}">
 {tab_bar("Board", sum(d is not None for _, d, _, _ in pending), since=went, epics=epics)}<div class="header">{panels.header(head)}</div>
 {panels.tiles(tiles)}
-{build_html}{panels_html}
+{build_html}
 {flow_html}</div>
 <script>
 (function(){{
@@ -454,9 +471,9 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
     pending = decision_page.write_all(out.parent, ctx, day, root)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
-    since_day = looked.astimezone(cfg.zone).date() if looked else reach
-    trackers = [(d, path) for d, path in daily_trackers(root, cfg) if min(reach, since_day) <= d < tracker_day]
+    trackers = [(d, path) for d, path in daily_trackers(root, cfg) if d < tracker_day]
     stage_log = [(d, path.read_text()) for d, path in trackers if reach <= d]
+    # Fix-loop marks need the whole task history, including entries before either Flow window.
     look_log = [(d, path.read_text()) for d, path in trackers if d < reach]
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
