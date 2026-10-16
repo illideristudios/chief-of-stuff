@@ -192,6 +192,15 @@ class SettingsTest(unittest.TestCase):
                 with self.subTest(escape=escape, suffix=suffix), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
                     st.load(self.root, self.write('[workers]\nrules = ["Keep tests.' + escape + suffix + '"]\n'))
 
+    def test_worker_rules_reject_peer_markers_and_excessive_length_at_load(self):
+        for prefix in ("", '[notify]\nadapter = "off"\n'):
+            for rule in ("Keep tests. (via peer)", "x" * 2401):
+                with self.subTest(prefix=prefix, rule=rule[:30]), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                    st.load(self.root, self.write(prefix + '[workers]\nrules = ["' + rule + '"]\n'))
+            rule = "x" * 2400
+            got = st.load(self.root, self.write(prefix + '[workers]\nrules = ["' + rule + '"]\n'))
+            self.assertEqual(got.workers.rules, (rule,))
+
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
         # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
         self.assertEqual(st.load(self.root, None).workers.claude_as_profile, "")
