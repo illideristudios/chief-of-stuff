@@ -1410,6 +1410,23 @@ class StandingWorkerRulesTest(unittest.TestCase):
         self.assertIn("- Keep tests.\n", body)
         self.assertIn("Report the branch, head sha", body)
 
+    def test_preloaded_rules_and_stage_skills_share_one_settings_snapshot(self):
+        tracker = next(self.root.glob("daily/*.md"))
+        tracker.write_text(tracker.read_text().replace(
+            "| item | owner | state | since | due | checklist |",
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |")
+            .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|---|---|", 1)
+            .replace("| Security audit | unassigned | open | 09:00 |  |",
+                     "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
+        for one_shot in (False, True):
+            with self.subTest(one_shot=one_shot), mock.patch.object(
+                    dp, "load_settings", side_effect=AssertionError("duplicate read")):
+                body = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
+                                  one_shot=one_shot, workflow=dp.Workflow(), rules=("Keep tests.",),
+                                  stages={"review": dp.Stage(skills=("security-review",))})
+            self.assertIn("- Keep tests.\n", body)
+            self.assertIn("Skills: load and follow security-review.", body)
+
     def test_fallback_settings_error_names_workspace_settings(self):
         self.settings.write_text('[workers]\nrules = false\n')
         with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):

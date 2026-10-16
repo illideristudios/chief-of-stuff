@@ -1814,6 +1814,17 @@ class WorkerModeTest(unittest.TestCase):
                      "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
         return tree, args
 
+    def test_check_keeps_rules_and_stage_skills_from_preloaded_settings(self):
+        tree, args = self.review_workspace()
+        settings = tree.parent.parent / "chief-of-stuff.toml"
+        settings.write_text(settings.read_text().replace('[workers]\n', '[workers]\nrules = ["Keep tests."]\n'))
+        with unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
+                                        side_effect=AssertionError("duplicate read")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ss.main(args + ["--check"]), 0)
+        self.assertIn("- Keep tests.\n", out.getvalue())
+        self.assertIn("Skills: load and follow security-review.", out.getvalue())
+
     def test_review_stage_launches_configured_agent_and_names_skills_in_brief(self):
         tree, args = self.review_workspace()
         argv = self.dry_run_argv(args)
