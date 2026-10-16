@@ -189,6 +189,8 @@ class CaseLintTest(unittest.TestCase):
             'chief-of-stuff log --root . "$(date) railway redeploy"',
             'chief-of-stuff log --root . "$(date +%H:%M) classifier block (railway)"',
             'chief-of-stuff log "`date` railway redeploy"',
+            'echo { railway up', 'echo a{railway}b', 'echo 2>&1 railway',
+            'echo > railway', 'bash --rcfile railway',
             'echo railway', 'echo "railway"', 'echo "Blocked" && echo railway',
             r'echo "escaped \"quote; railway up\""', "railway-helper up",
         ):

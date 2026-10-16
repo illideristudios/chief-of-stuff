@@ -38,7 +38,7 @@ ONE_SHOT_PARAGRAPH = 3_800  # kept: a later slice trims this paragraph
 # Skills are read on demand; no host's prompt appends their bodies.
 # rendered_sizes(1) over the simulated agent, copied into a temporary plugin:
 # Claude 39,241 B; Codex 37,248 B; Cursor 37,356 B; AGY 37,412 B (slice 487 plus the PR 540 review sentence simulated).
-# #67 relay format: agent 39,645 B; Relay 3,178 B; Claude 39,272; Codex 37,279; Cursor 37,387; AGY 37,443.
+# #67 logged relay: agent 39,648 B; Relay 3,190 B; Claude 39,275; Codex 37,282; Cursor 37,390; AGY 37,446.
 PROMPT = {"claude": 39_390, "codex": 37_400, "cursor": 37_510, "agy": 37_560}
 CEILING = {  # `## ` section -> bytes, heading line included
     "Role": 1600, "Dispatch authority": 1100, "Browser safety": 170, "Writing": 580,
@@ -383,7 +383,7 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               'reply` until the reply arrives.')}
 CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bfcd742acbf3dd1ef9',
  # #67: Relay retains the inline `<user> — <action>` row format; no skill read is needed.
- 'Relay': '8f9bb5d431735a2460f06b7ec14e2c26903d7c5231bfe1fbeb632935caa469a9'}
+ 'Relay': '2236f355a9518a07eb173e1bccbb1bb6efcd42374463ef259aef94776264ef0f'}
 
 # Slice 8 (#491): captured once from git show origin/main:agents/chief-of-stuff.md
 # (## Dispatch, 14,905 B). Split like slice 7: strip list prefixes and fences, split at
