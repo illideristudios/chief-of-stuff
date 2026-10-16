@@ -45,6 +45,7 @@ class WorkerTeardownTest(unittest.TestCase):
             "import os, sys\nfrom pathlib import Path\n"
             f"with Path({str(self.root / 'cleanup.log')!r}).open('a') as out:\n"
             "    out.write(str(Path.cwd()) + ' ' + os.environ['CHIEF_OF_STUFF_WORKER'] + '\\n')\n"
+            f"sys.stderr.write(\"cleanup exit {exit_code}\\n\")\n"
             f"sys.exit({exit_code})\n")
         return shlex.join([sys.executable, str(script)])
 
@@ -155,7 +156,9 @@ class WorkerTeardownTest(unittest.TestCase):
         self.addCleanup(fx.doCleanups)
         (fx.root / "CLAUDE.md").write_text(fixtures.CLAUDE + '- Settings: `settings.toml`\n')
         (fx.root / "settings.toml").write_text('[workers]\nteardown = "exit 7"\n')
-        with mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 7, "", "failed")) as run:
+        collect = worker.collect
+        with mock.patch.object(worker, "collect", side_effect=lambda *a, **kw: collect(*a, **kw, teardown_command="exit 7")), \
+             mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 7, "", "failed")) as run:
             segment = fx.finish("done")
         self.assertEqual(segment.outcome, "done")
         run.assert_called_once()
@@ -168,7 +171,7 @@ class WorkerTeardownTest(unittest.TestCase):
         fx.setUp()
         self.addCleanup(fx.doCleanups)
         def start(request, run_dir, **kwargs):
-            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", request.session_id])
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", request.session_id], start_new_session=True)
             self.addCleanup(lambda: child.poll() is None and (child.kill(), child.wait()))
             (run_dir / "command.json").write_text(json.dumps({"cwd": request.cwd, "session_id": request.session_id}))
             (run_dir / "started.json").write_text(json.dumps({"pid": child.pid, "runner_pid": child.pid,
@@ -182,18 +185,30 @@ class WorkerTeardownTest(unittest.TestCase):
         run = Path(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"]["run_dir"])
         self.assertFalse(list((fx.root / ".chief-of-stuff/sessions").glob("*.json")))
         self.assertIn(fx.tree, process_status.engine_trees(fx.root))
+        (fx.root / "CLAUDE.md").write_text(fixtures.CLAUDE + '- Settings: `settings.toml`\n')
+        (fx.root / "daily").mkdir()
+        (fx.root / "daily/2026-09-18-tracker.md").write_text(fixtures.TRACKER)
+        command = self.list_command([{"stack": "engine-vm", "worktree": str(fx.tree)}])
+        (fx.root / "settings.toml").write_text(f"[workers]\nteardown_list = {json.dumps(command)}\n")
+        self.assertEqual(audit_tasks.audit(fx.root, "2026-09-18", check_issues=False).stacks, [])
         # A live unrelated PID must not resurrect a run's ownership.
         started = json.loads((run / "started.json").read_text())
         (run / "started.json").write_text(json.dumps({**started, "session_id": "wrong-session"}))
         self.assertNotIn(fx.tree, process_status.engine_trees(fx.root))
         (run / "started.json").write_text(json.dumps(started))
+        child = worker._runners[str(run)]
+        child.terminate()
+        child.wait(timeout=5)
         fx.report(run)
-        (run / "stdout").write_text('{"result": "done"}')
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code": 0}')
         worker.collect(fx.db, fx.root)
         self.assertEqual(fx.db.segments()[0].outcome, "done")
+        fx.launch()  # Recovering durable exit evidence must not register the exited PID.
+        self.assertFalse(list((fx.root / ".chief-of-stuff/sessions").glob("*.json")))
         self.assertNotIn(fx.tree, process_status.engine_trees(fx.root))
+        self.assertIn("engine-vm", str(audit_tasks.audit(fx.root, "2026-09-18", check_issues=False).stacks[0]))
 
     def list_command(self, rows):
         script = self.root / "stacks.py"
@@ -247,7 +262,7 @@ class WorkerTeardownTest(unittest.TestCase):
     def test_missing_tree_and_shell_lookup_errors_are_cleanup_warnings(self):
         missing = self.root / "trees/removed"
         self.assertEqual(shell_setup.teardown(self.root, missing, "removed", self.cleanup_command()), [])
-        self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.root} removed\n")
+        self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.root.resolve()} removed\n")
         with mock.patch.object(shell_setup, "login_shell", side_effect=KeyError("no user")):
             self.assertTrue(shell_setup.teardown(self.root, self.tree, "worker01", "exit 0"))
         with mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 1, "diagnostic", "\n")):
@@ -271,7 +286,7 @@ class WorkerTeardownTest(unittest.TestCase):
         lines = audit_tasks.audit(self.root, "2026-09-18", check_issues=False).lines
         self.assertIn("stack: stale: worktree trees/worker has no live owner", lines)
         self.assertEqual(sum("outside the configured Worktrees" in line for line in lines), 2)
-        (self.root / "CLAUDE.md").write_text((self.root / "CLAUDE.md").read_text().replace('- Worktrees: `trees`\n', ''))
+        (self.root / "CLAUDE.md").write_text((self.root / "CLAUDE.md").read_text().replace('- Worktrees: `trees/`\n', ''))
         lines = audit_tasks.audit(self.root, "2026-09-18", check_issues=False).lines
         self.assertTrue(any("stack: discovery failed:" in line and "Worktrees" in line for line in lines))
 
@@ -285,11 +300,12 @@ class WorkerTeardownTest(unittest.TestCase):
         self.assertIn("exit 7", prompt)
 
     def test_shell_startup_banner_does_not_corrupt_discovery_stdout(self):
-        (self.root / ".zshrc").write_text("echo startup-banner\n")
-        with mock.patch.dict(os.environ, {"ZDOTDIR": str(self.root)}), \
+        (self.root / ".zshrc").write_text("echo startup-banner\necho loaded > startup-marker\n")
+        with mock.patch.object(shell_setup, "clean_env", return_value={**shell_setup.clean_env(), "ZDOTDIR": str(self.root)}), \
              mock.patch.object(shell_setup, "login_shell", return_value="/bin/zsh"):
             result = shell_setup.run_command("printf '[]'", self.root, workspace=self.root)
         self.assertEqual(json.loads(result.stdout), [])
+        self.assertEqual((self.root / "startup-marker").read_text(), "loaded\n")
 
     def test_shell_rejects_unknown_shell_and_cleans_up_interrupts(self):
         with mock.patch.object(shell_setup, "login_shell", return_value="/bin/echo"):

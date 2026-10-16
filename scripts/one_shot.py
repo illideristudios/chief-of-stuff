@@ -8,10 +8,12 @@ import json
 import os
 import re
 import shlex
+import signal
 import subprocess
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Callable
 
 import backlog
 import dispatch_prompt
@@ -21,7 +23,6 @@ import git_view
 import kanban
 import ownership
 import runtimes
-import shell_setup
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
 from md import cells as _cells, is_separator as _is_separator
@@ -31,7 +32,7 @@ from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
-from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
+from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line, teardown_failed_line
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -350,20 +351,6 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
     return len(rows) == 1 and rows[0].kind == "running" and rows[0].owner.strip().lower() == name.lower()
 
 
-def teardown(root: Path, cwd: Path, name: str, command: str) -> list[str]:
-    """Cleanup is independent of the worker outcome; its failure is report evidence, never a hold."""
-    if not command:
-        return []
-    try:
-        result = shell_setup.run_command(command, cwd, workspace=root, worker=name)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        return [f"teardown: {_brief(dispatch_prompt.CONTROL.sub('', str(exc)))}"]
-    if result.returncode:
-        detail = _brief(dispatch_prompt.CONTROL.sub("", result.stderr or result.stdout))
-        return [f"teardown: exit {result.returncode}" + (f": {detail}" if detail else "")]
-    return []
-
-
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
               before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
               *, adopted: bool = False, expected_common: Path | None = None,
@@ -371,9 +358,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
-    # Adoption also enforces cleanup when the original launcher died. An explicit empty list means
-    # the live launcher already ran it successfully; do not run the command twice.
-    errors = list(teardown_errors) if teardown_errors is not None else teardown(root, cwd, name, settings.workers.teardown)
+    errors = list(teardown_errors or [])
     if expected_common is None:
         commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
         expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
@@ -392,12 +377,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
         path = end
-    for error in errors.copy():
-        try:
-            tracker_write.edit(path, lambda text: tracker_write.append_log(
-                text, f"{tracker_write.stamp(cfg.zone)} one-shot {name} teardown failed: {_brief(error.removeprefix('teardown: '))}"))
-        except (OSError, ValueError) as exc:
-            errors.append(f"{dispatch_prompt.TRACKER_ERROR} could not log teardown failure: {exc}")
     if status == "done" and read_only and (actual or commits != NO_COMMITS):
         # A task that owns nothing changed something: whatever the worker wrote, someone looks (#57).
         left = "\n".join(x for x in (actual, commits) if x and x != NO_COMMITS)
@@ -446,6 +425,14 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                   "changes": summary, **counts,
                   "errors": errors + [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
         return write_report(root, cwd, report)
+    # Ownership is checked before writing any cleanup warning to the tracker.
+    for error in (teardown_errors or []):
+        try:
+            tracker_write.edit(path, lambda text: tracker_write.append_log(
+                text, teardown_failed_line(tracker_write.stamp(cfg.zone), name, task,
+                                           _brief(error.removeprefix("teardown: "))), create=True))
+        except (OSError, ValueError) as exc:
+            errors.append(f"teardown: could not log cleanup failure: {exc}")
     if adopted:
         # #99: the launcher died before reconciling this run; the report, the Log line and any
         # review comment say so, and the tree's evidence is the only word there is.
@@ -533,7 +520,8 @@ def _clear_stale_dispatch(cwd: Path, task: str) -> None:
 
 def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
         runtime: str, agent_type: str | None, model: str, effort: str, dry_run: bool,
-        timeout_minutes: int = 60) -> int:
+        timeout_minutes: int = 60,
+        teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: []) -> int:
     cfg = dispatch_prompt.config(root)
     chosen_day = day or datetime.now(cfg.zone).date().isoformat()
     settings = load_settings(root, cfg.settings_path)
@@ -558,14 +546,14 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
     trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
     _clear_stale_dispatch(cwd, task)
     with slot(trees, cwd, task, workers.max_concurrency):
-        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv, timeout_minutes, common)
+        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv, timeout_minutes, common, teardown, workers.teardown)
 
 
 def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, runtime: str, model: str,
-            effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None) -> int:
+            effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None,
+            teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: [], cleanup: str = "") -> int:
     # Same clean login-shell path as interactive sessions; auth and user PATH come from shell setup.
     # Everything that can refuse runs before anything is written; a refused row takes its dispatch back.
-    cleanup = load_settings(root, cfg.settings_path).workers.teardown
     launch_argv, tree = login_argv(argv), _tree_note(root, cwd, expected_common)
     before_head = git_head(cwd, strict=True, expected_common=expected_common)
     written = dispatch_prompt.write_dispatch(cwd, body)
@@ -636,13 +624,14 @@ def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: 
             try:
                 (cwd / PIDFILE).write_text(f"{worker.pid} {task}\n")
             except OSError:
-                worker.kill()  # a live worker with no pid file would race a fresh launch into this tree
+                os.killpg(worker.pid, signal.SIGKILL)  # no untracked worker may survive
                 worker.wait()
                 raise
             return worker.wait(timeout=timeout_minutes * 60)
     except subprocess.TimeoutExpired:
         if worker is not None:
-            worker.kill()
+            with suppress(ProcessLookupError):
+                os.killpg(worker.pid, signal.SIGKILL)
             worker.wait()
         with (logs / "worker-stderr.log").open("a") as stderr:
             stderr.write(f"One-shot run timed out after {timeout_minutes} minutes\n")
@@ -650,6 +639,9 @@ def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: 
     except OSError as exc:
         (logs / "worker-stderr.log").open("a").write(f"Could not start worker: {exc}\n")
         return 127
+    finally:
+        # The launcher owns the tree throughout cleanup, retry setup and reconciliation.
+        (cwd / PIDFILE).write_text(f"{os.getpid()} {task}\n")
 
 
 ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's running row
@@ -674,7 +666,8 @@ def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tupl
     return None
 
 
-def adopt(root: Path, day: str | None = None) -> list[dict]:
+def adopt(root: Path, day: str | None = None, *,
+          teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: []) -> list[dict]:
     """Reconcile the one-shot runs whose launcher died before reconciling them (#99): a tree whose
     pid file names a worker that is gone, whose task row still says running under that worker, and
     whose launcher report copy was never written, is reconciled from its own evidence - the result
@@ -702,5 +695,6 @@ def adopt(root: Path, day: str | None = None) -> list[dict]:
         # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
         adopted.append(reconcile(root, row_day, task, name, cwd, 0,
                                  read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
-                                 expected_common=commons.get(cwd.resolve())))
+                                 expected_common=commons.get(cwd.resolve()),
+                                 teardown_errors=teardown(root, cwd, name, settings.workers.teardown)))
     return adopted

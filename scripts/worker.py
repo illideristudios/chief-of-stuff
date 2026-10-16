@@ -21,10 +21,7 @@ from settings import load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import Failure, Request, retry_at
-from one_shot import teardown
-from settings import load as load_settings
-from session_exec import register as register_worker
-from workspace import settings_path
+from shell_setup import teardown
 
 _runners: dict[str, Any] = {}
 
@@ -113,7 +110,7 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
+           claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
            clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
@@ -124,9 +121,6 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
     if existing is not None:
-        tree = Path(existing["tree"])
-        register_worker(supervisor.state_dir(root) / "sessions" / f"{tree.name}.json", runtime="claude",
-                        name=tree.name, worktree=str(tree), pid=existing["pid"])
         store.set_ownership(issue_key, existing["tree"])
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
@@ -230,8 +224,6 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                   "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
         if stage == "review":
             record["reviewed_head"] = request_head.head
-        register_worker(supervisor.state_dir(root) / "sessions" / f"{tree.name}.json", runtime="claude",
-                        name=tree.name, worktree=str(tree), pid=pid)
         _save_run(store, issue_key, stage, attempt, record)
     except Exception:
         claude_adapter.cancel(runner)
@@ -241,7 +233,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None, *, require_green: bool = False) -> None:
+            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False) -> None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     for segment in store.segments():
         if segment.ended_at is not None:
@@ -292,10 +284,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
-            path = root / "CLAUDE.md"
-            text = path.read_text() if path.is_file() else ""
-            cleanup = load_settings(root, settings_path(text)).workers.teardown
-            for error in teardown(root, Path(record["tree"]), Path(record["tree"]).name, cleanup):
+            for error in teardown(root, Path(record["tree"]), Path(record["tree"]).name, teardown_command):
                 store.add_log(key, f"worker teardown failed: {error}", now.isoformat())
             if not (run_dir / "exit.json").exists():
                 raise ValueError("missing adapter exit record")

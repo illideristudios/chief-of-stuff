@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import pwd
 import re
+import shlex
 import signal
 import subprocess
+import tempfile
 from pathlib import Path
 
 PROGRAM = re.compile(r"^[A-Za-z][A-Za-z0-9._-]*$")
@@ -83,20 +85,52 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
     env = {**clean_env(), "CHIEF_OF_STUFF_WORKSPACE": str(workspace.resolve()),
            "CHIEF_OF_STUFF_WORKER": worker}
     shell = login_shell()
-    # Interactive job control puts background commands in separate process groups. Disable it
-    # after loading shell setup so the timeout's group kill reaches the command's children too.
-    setup = "status job-control none" if Path(shell).name == "fish" else "set +m"
-    argv = [shell, "-lic", f"{setup}\n{command}"]
-    with subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True) as child:
-        try:
-            stdout, stderr = child.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            # A shell may have spawned children; kill its session as well so a timeout leaves no cleanup running.
+    kind = Path(shell).name
+    if kind not in {"zsh", "bash", "sh", "dash", "ksh", "fish"}:
+        raise ShellError(f"login shell {shell!r} is not supported for command execution")
+    # Keep command stdout separate from shell startup, including banners from login config.
+    # A file also works when shell startup closes inherited descriptors above stderr.
+    with tempfile.TemporaryDirectory(prefix="chief-command-") as directory:
+        output = Path(directory) / "stdout"
+        quoted = shlex.quote(str(output))
+        if kind == "fish":
+            source = f"status job-control none; begin\n{command}\nend > {quoted}"
+        else:
+            source = f"exec 1>{quoted}; set +m\n{command}"
+        argv = [shell, "-lic", source]
+        with subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                              stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True) as child:
             try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.communicate()
-            raise
-        return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+                _, stderr = child.communicate(timeout=timeout)
+            except BaseException as exc:
+                # Even an escaped descendant may retain stderr. Never drain it after a kill.
+                if isinstance(exc, subprocess.TimeoutExpired) or child.poll() is None:
+                    try:
+                        os.killpg(child.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                if child.stdout is not None:
+                    child.stdout.close()
+                child.stderr.close()
+                child.wait()
+                raise
+            stdout = output.read_text(errors="replace") if output.exists() else ""
+            return subprocess.CompletedProcess(argv, child.returncode, stdout, stderr)
+
+
+def teardown(root: Path, cwd: Path, name: str, command: str) -> list[str]:
+    """Run cleanup independently of the worker outcome, returning nonblocking warnings."""
+    if not command:
+        return []
+
+    def brief(text: str) -> str:
+        return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", text).split())[:1000]
+
+    try:
+        result = run_command(command, cwd if cwd.is_dir() else root, workspace=root, worker=name)
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
+        return [f"teardown: {brief(str(exc))}"]
+    if result.returncode:
+        detail = brief(result.stderr.strip() or result.stdout.strip())
+        return [f"teardown: exit {result.returncode}" + (f": {detail}" if detail else "")]
+    return []

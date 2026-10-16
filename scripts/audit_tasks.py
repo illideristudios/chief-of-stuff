@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Audit task completion against worktree and issue state.
 
-The exit code counts tasks to reopen. Tasks without worktrees are excluded. Worktree paths must
-remain inside the workspace root.
+The exit code counts actionable findings, including stale stacks and discovery failures.
+Tasks without worktrees are excluded from reopening. Worktree paths must remain inside the workspace root.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
 from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
-from process_status import process_exists, registrations, running_trees  # noqa: E402
+from process_status import process_exists, registrations, running_trees, engine_trees  # noqa: E402
 from tree_claims import Claims, one_shot_claims, registry_claims  # noqa: E402
 
 # Preserve branch names from ownership rows when worktrees disappear.
@@ -845,34 +845,33 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
     return faults, lines, len(open_rows)
 
 
-def stale_stacks(root: Path, trees: str, command: str) -> list[StackFault]:
-    """Discover configured stacks and join them to the existing process-backed ownership sources.
-
-    Tracker rows alone do not establish a live owner. Missing worktrees can still have stacks.
-    Discovery errors remain visible instead of presenting an empty list as successful discovery.
-    """
+def discover_stacks(root: Path, command: str) -> list[tuple[str, Path]]:
+    """Gather stack facts; invalid command output raises rather than claiming no stacks."""
     if not command:
         return []
     try:
         result = shell_setup.run_command(command, root, workspace=root)
         if result.returncode:
-            raise ValueError(f"exit {result.returncode}: {result.stderr or result.stdout}")
+            raise ValueError(f"exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}")
         rows = json.loads(result.stdout)
         if not isinstance(rows, list) or any(
                 not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key].strip()
                                                 for key in ("stack", "worktree")) for row in rows):
             raise ValueError('expected JSON [{"stack": name, "worktree": path}]')
-        base = (root / trees).resolve()
-        paths = [(root / row["worktree"]).resolve() for row in rows]
-        if any(not path.is_relative_to(base) for path in paths):
-            raise ValueError("stack worktree is outside the configured Worktrees directory")
-        live = {path for path, claims in registry_claims(root, registrations, process_exists).items()
-                if any(claim.live for claim in claims)}
-        live.update(one_shot_claims(base, running_trees))
-        return [StackFault(git_trees.clean(f"{row['stack']}: worktree {path} has no live owner"))
-                for row, path in zip(rows, paths) if path not in live]
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        return [StackFault(git_trees.clean(f"discovery failed: {exc}"))]
+        return [(row["stack"], (root / row["worktree"]).resolve()) for row in rows]
+    except (OSError, KeyError, subprocess.SubprocessError) as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def stale_stacks(rows: list[tuple[str, Path]], base: Path, live: set[Path]) -> list[StackFault]:
+    """Judge discovered stacks using process-backed claims, without reading files or processes."""
+    faults = []
+    for name, path in rows:
+        if path == base or not path.is_relative_to(base):
+            faults.append(StackFault(git_trees.clean(f"{name}: worktree is outside the configured Worktrees directory")))
+        elif path not in live:
+            faults.append(StackFault(git_trees.clean(f"{name}: worktree {path} has no live owner")))
+    return faults
 
 
 def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetime | None = None, call=None) -> Report:
@@ -897,7 +896,27 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
         roster.add(_bare(cfg.user))
 
     report = Report()
-    report.stacks.extend(stale_stacks(root, trees, settings.workers.teardown_list))
+    process_claims: Claims = registry_claims(root, registrations, process_exists)
+    for path, found in one_shot_claims((root / trees).resolve(), running_trees).items():
+        process_claims.setdefault(path, []).extend(found)
+    for path in engine_trees(root):
+        process_claims.setdefault(path, []).append(Claim("engine worker", True))
+    if settings.workers.teardown_list:
+        try:
+            if not trees:
+                raise ValueError("stack discovery requires a nonempty Worktrees directory")
+            discovered = discover_stacks(root, settings.workers.teardown_list)
+            # The gateway normalizes paths relative to the workspace; the judgement remains pure.
+            workspace = root.resolve()
+            base = (workspace / trees).resolve()
+            base = base.relative_to(workspace) if base.is_relative_to(workspace) else base
+            rows = [(name, path.relative_to(workspace) if path.is_relative_to(workspace) else path)
+                    for name, path in discovered]
+            live = {path.relative_to(workspace) if path.is_relative_to(workspace) else path
+                    for path, found in process_claims.items() if any(claim.live for claim in found)}
+            report.stacks.extend(stale_stacks(rows, base, live))
+        except (OSError, ValueError) as exc:
+            report.stacks.append(StackFault(git_trees.clean(f"discovery failed: {exc}")))
     report.lines.extend(str(stack) for stack in report.stacks)
     handled: set[str] = set()
     seen: set[Path] = set()
@@ -985,10 +1004,8 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 path = _resolve(root, trees, name)[0]
                 if path is not None:
                     claims.setdefault(path, []).append(row_claim(row, tasks, roster, refs, cfg.user, tracker.sessions))
-        for source in (registry_claims(root, registrations, process_exists),
-                       one_shot_claims((root / trees).resolve(), running_trees)):
-            for path, found in source.items():
-                claims.setdefault(path, []).extend(found)
+        for path, found in process_claims.items():
+            claims.setdefault(path, []).extend(found)
         for path in order:
             state = git_trees.read_state(path, view_of(path))
             state = replace(state, branch=git_trees.clean(state.branch))  # the branch reaches an audit line (#534)

@@ -17,6 +17,7 @@ from pathlib import Path
 
 from _vendor.toon_format import encode as toon_encode
 from one_shot import adopt
+from shell_setup import teardown
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", type=Path, required=True, help="workspace whose trees hold the runs")
     args = ap.parse_args(argv)
     try:
-        adopted = adopt(args.root.resolve())
+        adopted = adopt(args.root.resolve(), teardown=teardown)
     except (OSError, ValueError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
         return 1

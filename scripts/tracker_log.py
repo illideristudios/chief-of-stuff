@@ -75,6 +75,11 @@ def timed_out_line(at: str, name: str, minutes: int, task: str) -> str:
     return f"- {at} one-shot {name}: timed out after {minutes} minutes — running once more, task {task}"
 
 
+def teardown_failed_line(at: str, name: str, task: str, error: str) -> str:
+    """A nonblocking cleanup warning, attributed to the worker's task."""
+    return f"- {at} one-shot {name}: teardown failed: {error}, task {task}"
+
+
 def hold_failed_line(at: str, name: str, task: str, error: str) -> str:
     """The launcher's line when worker `name`'s review hold could not be applied to `task`'s issue (#566); the
     audit reads it back with HOLD_FAILED and keeps reporting the hold until it lands."""

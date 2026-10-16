@@ -45,7 +45,7 @@ def worker_popen_only(agent: str, *, timeout: bool = False, launched: list | Non
         if launched is not None:
             launched.append(kwargs.get("cwd"))
         if timeout:
-            worker = mock.Mock()
+            worker = mock.Mock(pid=999999999)
             worker.wait.side_effect = [subprocess.TimeoutExpired(argv, 1), 0]  # the kill's wait
             return worker
         return real([sys.executable, "-c", "pass"], *args, **kwargs)  # a worker that merely exits
@@ -655,7 +655,7 @@ class RunTest(unittest.TestCase):
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv):
             return one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=tree or self.tree, name="worker01", runtime=runtime, agent_type=None,
-                                model=model, effort=effort, dry_run=False)
+                                model=model, effort=effort, dry_run=False, teardown=shell_setup.teardown)
 
     def test_run_composes_with_already_loaded_workspace_policy(self):
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")
@@ -859,7 +859,7 @@ class RunTest(unittest.TestCase):
             if argv[0] == "git":  # the launcher's own reads run for real
                 return real_popen(argv, *args, **kwargs)
             trees.append(kwargs.get("cwd"))
-            worker = mock.Mock(returncode=0)
+            worker = mock.Mock(returncode=0, pid=999999999)
             if first:
                 first = False
                 worker.wait.side_effect = [subprocess.TimeoutExpired(argv, 1), 0]  # the kill's wait

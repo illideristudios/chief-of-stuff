@@ -15,6 +15,7 @@ import re
 import shlex
 import subprocess
 import sys
+import shell_setup
 import time
 from datetime import datetime
 from pathlib import Path
@@ -493,7 +494,7 @@ def main(argv_in: list[str] | None = None) -> int:
             return one_shot.run(root=Path(args.root).resolve(), day=args.date, task=args.task,
                                 cwd=Path(args.cwd), name=args.title, runtime=args.runtime,
                                 agent_type=args.agent_type, model=args.model, effort=args.effort,
-                                dry_run=args.dry_run, timeout_minutes=args.timeout_minutes)
+                                dry_run=args.dry_run, timeout_minutes=args.timeout_minutes, teardown=shell_setup.teardown)
         except (ValueError, OSError, dispatch_prompt.RefusedError, ShellError, SettingsError) as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 1
