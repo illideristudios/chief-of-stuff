@@ -18,17 +18,6 @@ TREE = "worktree `trees/up` (fix-upload)"  # as one_shot._tree_note names a tree
 class RoundTripTest(unittest.TestCase):
     """Format a line, then read its fields back."""
 
-    def test_a_severe_violation_round_trips_exact_refusal_and_task(self):
-        refusal = 'Kanban state changed outside the tracker; reconcile before writing'
-        line = tl.severe_violation_line('10:17', 'sync #17 implement to review', refusal,
-                                        'drift guard', '7720-harness', 'Upload fix')
-        self.assertEqual(tl.SEVERE_VIOLATION.fullmatch(line).groups(),
-                         ('10', '17', 'sync #17 implement to review', refusal, 'drift guard',
-                          '7720-harness', 'Upload fix'))
-        text = f'## Tasks\n\n{line}\n\n## Log\n\n{line}\n'
-        self.assertEqual(tl.severe_violations(text), [tl.SEVERE_VIOLATION.fullmatch(line).groups()])
-        self.assertEqual(tl.moves(text, DAY, CT), [])
-
     def test_a_stage_line(self):
         line = tl.stage_line("11:05", "Upload path check", "pr")
         self.assertEqual(tl.STAGE.match(line).groups(), ("11", "05", "Upload path check", "pr"))

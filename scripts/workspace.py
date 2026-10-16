@@ -105,7 +105,7 @@ def harness_defects(text: str) -> str | None:
     if "Harness defects" not in top:
         return None
     match = re.fullmatch(r"session\s+(?:`([A-Za-z0-9][A-Za-z0-9._-]*)`|([A-Za-z0-9][A-Za-z0-9._-]*))", top["Harness defects"].strip())
-    if not match or (name := match[1] or match[2]).lower() in {"user", "coordinator"}:
+    if not match or (name := match[1] or match[2]).lower() in {"user", "coordinator"} or ".." in name:
         raise ConfigError("`Harness defects:` must be `session <name>`; repository targets are unsupported")
     return name
 
