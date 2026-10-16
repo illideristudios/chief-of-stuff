@@ -7,7 +7,7 @@
       "name": "loads refusal procedure before logging",
       "type": "tool_used",
       "tool": "Read",
-      "input_match": "\"file_path\"\\s*:\\s*\"[^\"\\n]*skills/review-pipeline/SKILL\\.md\"",
+      "input_match": "\"file_path\": \"[^\"\\n]*skills/review-pipeline/SKILL\\.md\"",
       "before": "\"command\"\\s*:\\s*\"\\s*(?:python(?:3(?:\\.\\d+)?)?\\s+)?(?:[^\\s\";]+/)?(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+log|tracker_write\\.py)\\b",
       "min": 1,
       "rule": "On an unexpected refusal of an authorized board or task-state write, Read ${CLAUDE_PLUGIN_ROOT}/skills/review-pipeline/SKILL.md"

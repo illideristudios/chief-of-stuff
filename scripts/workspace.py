@@ -55,6 +55,8 @@ class Config:
     settings_path: str | None = None
     # An optional workspace identity rule for dispatched workers.
     identity_policy: str | None = None
+    # Optional harness incident recipient; repository filing is not supported.
+    harness_defects: str | None = None
 
     @property
     def zone(self) -> ZoneInfo:
@@ -95,6 +97,17 @@ def _bullets(body: list[str]) -> tuple[dict[str, str], dict[str, list[tuple[str,
 def settings_path(text: str) -> str | None:
     """The path the block's `Settings:` line names, or None. Asks the block for no other line, so `health` can run on a block `parse_coordinator` refuses."""
     return _first_path(_bullets(_section(text, "## Coordinator"))[0].get("Settings", ""))
+
+
+def harness_defects(text: str) -> str | None:
+    """Validate the optional incident destination independently, so health checks need no full config."""
+    top = _bullets(_section(text, "## Coordinator"))[0]
+    if "Harness defects" not in top:
+        return None
+    match = re.fullmatch(r"session\s+(?:`([^`\r\n]+)`|([^`\s]+))", top["Harness defects"].strip())
+    if not match or not (name := (match[1] or match[2]).strip()):
+        raise ConfigError("`Harness defects:` must be `session <name>`; repository targets are unsupported")
+    return name
 
 
 def architecture_document(root: Path) -> Path | None:
@@ -159,6 +172,7 @@ def parse_coordinator(text: str, today: date) -> Config:
         backlog=backlog,
         settings_path=settings_path(text),
         identity_policy=identity_policy,
+        harness_defects=harness_defects(text),
     )
 
 

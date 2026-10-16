@@ -2,6 +2,12 @@
 start, end and relaunch, a run relaunching after its wait ran out, a hold the launcher could not apply, and a
 closure the user approved.
 
+The coordinator also appends incident text through `chief-of-stuff log` (without `--stage`):
+`- HH:MM Severe process violation: <blocked write>; refusal: <exact refusal>; guard: <rule or guard>;
+report target: <configured session or user>, task <name>` (one physical line). The final task suffix
+associates the durable report with its task; the target records intent, not successful delivery.
+These reports are not stage moves and do not enter `moves` or change a Flow chart.
+
 `chief-of-stuff log --stage` and the one-shot launcher write them with the formatters here; the Flow charts, the
 board's workers, the Workers page and the issue page read them with the patterns here. Both sides live in one
 module that draws nothing, side by side; evals/test_tracker_log.py writes and reads back every line kind, so a

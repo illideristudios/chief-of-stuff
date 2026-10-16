@@ -33,7 +33,7 @@ from md import section
 from runtimes import RUNTIMES
 from settings import ModelEntry, SettingsError, load as load_settings
 from shell_setup import ShellError, resolve
-from workspace import settings_path
+from workspace import ConfigError, harness_defects, settings_path
 
 HEALTH = re.compile(r"^\s*(?:[-*]\s*)?Health:\s*(.+?)\s*$", re.MULTILINE)
 SCHEMES = ("http", "https")
@@ -165,8 +165,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{config}: not UTF-8 ({exc.reason})", file=sys.stderr)
         return 2
     bad = 0
+    try:
+        harness_defects(text)
+    except ConfigError as exc:
+        print(str(exc))
+        bad += 1
     if name := settings_path(text):
-        said, bad, models = check_settings(config.parent, name)
+        said, settings_bad, models = check_settings(config.parent, name)
+        bad += settings_bad
         lines, missing = check_runtimes(models)
         print("\n".join([said, *lines]))
         bad += missing

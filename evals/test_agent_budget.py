@@ -32,20 +32,21 @@ from evals.skill_fixtures import write_plugin, write_skill  # noqa: E402
 # PR 540 review: the Browser safety sentence regains "or ask to open it" (+19 B): agent 39,614 B; Browser safety 170.
 # #547: the approved-forge-closure Log record adds one sentence to Tracker (longest line 3,114 B, Tracker
 # section 5,629 B, agent 39,759 B; rendered sizes measured below). Section ceilings round up to 10 B, TOTAL to 50 B.
-# #92 adds the always-loaded severe process violation rule (911 B).
-# Measured: agent 40,566 B; Write authority 2,695 B; rendered sizes below.
-TOTAL = 40_600            # whole agent file, bytes
+# #92 review moves the refusal procedure on demand, keeping its invariant and pointer.
+# Agent and rendered ceilings below are measured after the move.
+TOTAL = 40_150            # whole agent file, bytes
 MAX_LINE = 3_120          # longest single line
 ONE_SHOT_PARAGRAPH = 3_800  # kept: a later slice trims this paragraph
 # Skills are read on demand; no host's prompt appends their bodies.
 # rendered_sizes(1) over the simulated agent, copied into a temporary plugin:
 # Claude 39,241 B; Codex 37,248 B; Cursor 37,356 B; AGY 37,412 B (slice 487 plus the PR 540 review sentence simulated).
 # #547 adds the approved-forge-closure sentence: Claude 39,386; Codex 37,393; Cursor 37,501; AGY 37,557.
-PROMPT = {"claude": 40_200, "codex": 38_210, "cursor": 38_320, "agy": 38_370}
+# #92 review: Claude 39,755; Codex 37,762; Cursor 37,870; AGY 37,926 B.
+PROMPT = {"claude": 39_760, "codex": 37_770, "cursor": 37_870, "agy": 37_930}
 CEILING = {  # `## ` section -> bytes, heading line included
     "Role": 1600, "Dispatch authority": 1100, "Browser safety": 170, "Writing": 580,
-    "Config": 1400, "Clock": 1850, "Calendar": 910, "Open the day": 2000, "Resume": 4670,
-    "Write authority": 2700, "Filing": 360, "Human-only actions": 1280, "Dispatch": 1_200,
+    "Config": 1480, "Clock": 1850, "Calendar": 910, "Open the day": 2000, "Resume": 4670,
+    "Write authority": 2170, "Filing": 360, "Human-only actions": 1280, "Dispatch": 1_200,
     "Assign": 300, "Pipeline": 1_300, "Check": 2780,
     "Sessions": 1_700, "Relay": 3190, "Tracker": 5_640, "Board": 1460,
     "Requirements": 360, "Share": 460, "Asks": 3900, "Notify": 360,
@@ -58,8 +59,8 @@ CEILING = {  # `## ` section -> bytes, heading line included
 # stage 4 of the page-theme plan: the decision-page skill gains the theme contract (it names the vendored
 # `${CLAUDE_PLUGIN_ROOT}/assets/page-theme.css` the server reads and forbids styling from the JSON), one paragraph;
 # it measures 2,766 B under a 2,800 B ceiling.
-SKILL_CEILING = {"decision-page": 2_800, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 9_250, "coordinator-sessions": 8_950, "dispatch": 14_400}  # measured size rounded up to 50 B
-SKILLS_TOTAL = 45_500  # all SKILL.md files, bytes; the sum of the ceilings above (measured 45,228 B)
+SKILL_CEILING = {"decision-page": 2_800, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 11_950, "coordinator-sessions": 8_950, "dispatch": 14_400}  # measured size rounded up to 50 B
+SKILLS_TOTAL = 48_200  # all SKILL.md files, bytes; sum of the ceilings above
 DESCRIPTION_CAP = 300  # frontmatter description characters, not bytes
 SKILL_POINTER = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/skills/([^/\s`]+)/SKILL\.md")
 DECISION_PAGE_POINTER = "Before writing a decision page, Read ${CLAUDE_PLUGIN_ROOT}/skills/decision-page/SKILL.md"
@@ -181,7 +182,7 @@ REVIEW_PIPELINE_RULES = {
         'For a newly filed issue with no board stage, preview first and use `--initialize` in place of `--from-stage`.',
         'The updater works with GitLab labels, GitHub issue labels, or a configured GitHub Project Status field and issue hold label.',
         'It preserves unrelated labels.',
-        "A sync blocked by a manual board move, missing label or API error uses Write authority's severe process violation rule. Keep the recorded stage; never force or retry `Kanban state changed outside the tracker; reconcile before writing`.",
+        'Keep the recorded task stage. Reconcile a genuine manual board move with the user before syncing; report missing configuration for correction. Normal domain gates (including main-branch, suite and audit gates) are not harness defects. Transient API errors permit retry after recovery, including a partial Project Status/label sync; verify fresh state first. An unexpected refusal on an authorized write follows Write authority and Refusal reports below.',
         'An audit reports drift but never moves cards.',
         'Note a `workflow` row has no issue and takes no sync.',
         'Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record.',

@@ -6,7 +6,7 @@
     {
       "name": "no severe harness incident for an expected failure",
       "type": "regex",
-      "pattern": "(?i)severe process violation",
+      "pattern": "(?im)^(?:[-*] )?(?:\\*\\*)?Severe process violation:",
       "match": "absent",
       "rule": "Normal domain gates (including main-branch, suite and audit gates) are not harness defects."
     },

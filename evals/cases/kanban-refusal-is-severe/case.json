@@ -7,7 +7,7 @@
       "name": "loads refusal procedure before logging",
       "type": "tool_used",
       "tool": "Read",
-      "input_match": "\"file_path\"\\s*:\\s*\"[^\"\\n]*skills/review-pipeline/SKILL\\.md\"",
+      "input_match": "\"file_path\": \"[^\"\\n]*skills/review-pipeline/SKILL\\.md\"",
       "before": "\"command\"\\s*:\\s*\"\\s*(?:python(?:3(?:\\.\\d+)?)?\\s+)?(?:[^\\s\";]+/)?(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+log|tracker_write\\.py)\\b",
       "min": 1,
       "rule": "On an unexpected refusal of an authorized board or task-state write, Read ${CLAUDE_PLUGIN_ROOT}/skills/review-pipeline/SKILL.md"
@@ -19,7 +19,8 @@
       "input_match": "\"command\"\\s*:\\s*\"\\s*(?:python(?:3(?:\\.\\d+)?)?\\s+)?(?:[^\\s\";]+/)?(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+log|tracker_write\\.py)\\b[^\\n]*(?i:severe process violation:)",
       "min": 1,
       "max": 1,
-      "rule": "First append exactly one Log line via `chief-of-stuff log`, without `--stage`: `Severe process violation: <blocked write>; refusal: <exact refusal>; guard: <rule or guard>; report target: <configured session or user>, task <name>`."
+      "rule": "First append exactly one Log line via `chief-of-stuff log`, without `--stage`: `Severe process violation: <blocked write>; refusal: <exact refusal>; guard: <rule or guard>; report target: <configured session or user>, task <name>`.",
+      "before": "\"to\"\\s*:"
     },
     {
       "name": "one severe violation Log line names the destination",

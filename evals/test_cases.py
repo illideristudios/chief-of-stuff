@@ -796,6 +796,7 @@ class CaseLintTest(unittest.TestCase):
         "triage-acts-on-the-reply", "triage-all-clear-fixes-no-ask",
         "triage-clear-fixes-dispatch-automatically", "review-comments-become-fix-work",
         "merge-what-the-user-approved", "over-budget-polls-the-session",
+        "kanban-refusal-is-severe", "kanban-refusal-no-defect-target",
     )
     # The first three require an ask as the reply, with no authorized fix; a
     # mandatory Read would conflict. The last checks readiness and never merges.
@@ -1132,9 +1133,14 @@ class CaseLintTest(unittest.TestCase):
             r'"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+merge-approved\b|(?:scripts/)?merge_approved\.py\b)'
         )
         poll_before = send_before + r'|"(?:session_id|session_ref|session)": "[^"\n]+"'
+        log_before = (r'"command"\s*:\s*"\s*(?:python(?:3(?:\.\d+)?)?\s+)?(?:[^\s";]+/)?'
+                      r'(?:chief[-_]of[-_]stuff(?:\.py)?\s+log|tracker_write\.py)\b')
+        refusal_rule = "On an unexpected refusal of an authorized board or task-state write, Read ${CLAUDE_PLUGIN_ROOT}/skills/review-pipeline/SKILL.md"
         budget_rule = "Poll that task's session and tell the user; never stop or kill it."
         auto_rule = "Send each automatic fix at once, without asking, to the owning session with `Plan: enter plan mode (EnterPlanMode) for this task before anything else; write nothing until the user approves the plan.`, as every assignment is, and leave it out of the ask."
         expected = {
+            "kanban-refusal-is-severe": (refusal_rule, log_before),
+            "kanban-refusal-no-defect-target": (refusal_rule, log_before),
             "over-budget-polls-the-session": (budget_rule, poll_before),
             "triage-acts-on-the-reply": ("Record the reply as a Decisions row quoting it.", edit_before),
             "triage-all-clear-fixes-no-ask": (auto_rule, send_before),
@@ -1145,7 +1151,7 @@ class CaseLintTest(unittest.TestCase):
         carrying = {case.name for case in CASES
                     if any("skills/review-pipeline/SKILL" in g.get("input_match", "")
                            for g in graders(spec(case)))}
-        self.assertEqual(carrying, set(expected), "only the six action scenarios carry this Read grader")
+        self.assertEqual(carrying, set(expected), "only the eight action scenarios carry this Read grader")
         self.assertEqual(set(self.REVIEW_PIPELINE_SKILL_CASES), set(expected))
         text = rules_text()
         read = {"id": "skill", "name": "Read", "input": {"file_path": "/plugin/skills/review-pipeline/SKILL.md"}}
@@ -1192,8 +1198,15 @@ class CaseLintTest(unittest.TestCase):
                         f"python3 /plugin/scripts/{script}.py --root .",
                         f'cd "/ws" && chief-of-stuff {operation} --root .',
                     )]
+                log_actions = [{"name": "Bash", "input": {"command": command}} for command in (
+                    "chief-of-stuff log 'Severe process violation: sync #17'",
+                    "python3 /plugin/chief_of_stuff.py log 'Severe process violation: sync #17'",
+                    "python3 /plugin/scripts/tracker_write.py 'Severe process violation: sync #17'",
+                )]
                 commands["merge-approved"].append({"name": "Bash", "input": {"command": "chief-of-stuff merge-approved --root . --merge 12"}})
                 actions = {
+                    "kanban-refusal-is-severe": log_actions,
+                    "kanban-refusal-no-defect-target": log_actions,
                     "over-budget-polls-the-session": sends + [
                         {"name": "session_poll", "input": {"session_id": "a1b2c3"}},
                         {"name": "session_poll", "input": {"session_ref": "a1b2c3"}},

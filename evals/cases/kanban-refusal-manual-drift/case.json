@@ -6,14 +6,14 @@
     {
       "name": "no severe harness incident for an expected failure",
       "type": "regex",
-      "pattern": "(?i)severe process violation",
+      "pattern": "(?im)^(?:[-*] )?(?:\\*\\*)?Severe process violation:",
       "match": "absent",
       "rule": "Normal domain gates (including main-branch, suite and audit gates) are not harness defects."
     },
     {
       "name": "explains the recovery path",
       "type": "regex",
-      "pattern": "(?is)(?=.*(?:reconcil|confirm|clarif))(?=.*(?:Robin|you|your))",
+      "pattern": "(?is)(?=.*(?:reconcil|confirm|clarif|did you mean|should[^\\n]*board))(?=.*(?:Robin|you|your))",
       "rule": "Reconcile a genuine manual board move with the user before syncing; report missing configuration for correction."
     },
     {

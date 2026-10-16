@@ -709,10 +709,6 @@ class RuntimeCheckTest(unittest.TestCase):
                 self.assertEqual(code, 1)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class HarnessDefectsConfigTest(unittest.TestCase):
     BLOCK = "## Coordinator\n\n- User: Robin\n- Daily log dir: daily/\n- Tracker: daily/<date>-tracker.md\n- Timezone: America/Chicago\n"
 
@@ -735,3 +731,7 @@ class HarnessDefectsConfigTest(unittest.TestCase):
                     code = ph.main(["--config", str(path)])
                 self.assertNotEqual(code, 0)
                 self.assertIn("Harness defects", out.getvalue())
+
+
+if __name__ == "__main__":
+    unittest.main()
