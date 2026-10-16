@@ -100,3 +100,11 @@ Limits belong to an account, not a workspace, so readings are account-wide: two 
 | `limits_history.LimitsHistory.record` | `(readings: list[Reading]) -> None` | Interface Adapters, gateways |
 | `limits_history.LimitsHistory.readings` | `(since: datetime) -> list[Reading]` | Interface Adapters, gateways |
 | `limits_cli.main` | `(argv: list[str] \| None = None) -> int` | Frameworks and Drivers |
+
+## 11. Stack independence
+
+chief-of-stuff is independent of any deployment technology, hosting provider, container runtime, infrastructure tool and application stack. Its code, its agent rules, its skills and its eval fixtures name none of them, and no behaviour depends on one being installed.
+
+What a workspace builds, deploys or runs, and how, reaches chief-of-stuff only through that workspace's own configuration: the `## Coordinator` block (its human-only actions, `Health:` lines and the rest) and the Settings TOML (such as `[workers] teardown` and `teardown_list`). chief-of-stuff runs those commands as given and never interprets them. A rule or a fixture that needs an example of a workspace-specific action uses an invented name, never a real product.
+
+Two things are chief-of-stuff's subject, not a stack, and stay named: the host CLIs it coordinates (claude, codex, cursor and agy, in `runtimes.py`), and the forges it integrates with (GitHub and GitLab, behind `forge.py`). The repository's own CI tooling under `.github/` is how this project is tested, not something chief-of-stuff runs, and is outside this section.
