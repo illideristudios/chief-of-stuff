@@ -103,11 +103,24 @@ class PipelineCliTest(unittest.TestCase):
 
     def test_requires_exactly_one_selector_and_a_positive_id(self):
         for args in ([], ["--id", "71", "--ref", "main"], ["--id", "zero"], ["--id", "0"],
-                     ["--id", "-1"], ["--ref", ""], ["--ref", "."], ["--ref", ".."], ["--ref", " main "]):
+                     ["--id", "-1"]):
             with self.subTest(args=args), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as raised:
                     pipeline_cli.main(["--root", str(self.root), *args])
                 self.assertNotEqual(raised.exception.code, 0)
+
+    def test_invalid_refs_fail_through_the_gateway_without_transport(self):
+        for ref in ("", " ", ".", "..", " main "):
+            with self.subTest(ref=ref):
+                output, error = io.StringIO(), io.StringIO()
+                with mock.patch.object(backlog, "_call") as call:
+                    with redirect_stdout(output), redirect_stderr(error):
+                        code = pipeline_cli.main(["--root", str(self.root), "--ref", ref])
+                self.assertEqual(code, 1)
+                self.assertEqual(output.getvalue(), "")
+                self.assertEqual(error.getvalue(),
+                                 "pipeline: branch head: branch ref must be a nonblank, trimmed name other than '.' or '..'\n")
+                call.assert_not_called()
 
     def test_installed_command_routes_to_pipeline_help(self):
         done = subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), "pipeline", "--help"],
@@ -240,10 +253,12 @@ class ForgePipelineTest(unittest.TestCase):
                 self.assertEqual(got.id, 73)
 
     def test_github_branch_uses_latest_run_per_workflow_even_if_unordered(self):
-        got = self.github_branch([github_row(conclusion="failure"), github_row(id=73),
-                                  github_row(id=72, workflow_id=20)])
-        self.assertEqual(got.status, "passed")
-        self.assertEqual(got.id, 73)
+        older, newer = github_row(conclusion="failure"), github_row(id=73)
+        for rows in ([older, newer], [newer, older]):
+            with self.subTest(rows=rows):
+                got = self.github_branch([*rows, github_row(id=72, workflow_id=20)])
+                self.assertEqual(got.status, "passed")
+                self.assertEqual(got.id, 73)
 
     def test_github_branch_refuses_truncated_or_unidentifiable_workflows(self):
         for rows, payload, detail in (
