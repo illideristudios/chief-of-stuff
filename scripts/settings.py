@@ -97,6 +97,7 @@ class Workers:
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
     require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
+    rules: tuple[str, ...] = ()  # standing workspace rules carried before every dispatched task
 
 
 @dataclass(frozen=True)
@@ -293,8 +294,11 @@ def _workers(table) -> Workers:
     if "claude_as_profile" in table and not (isinstance(profile, str) and CLAUDE_AS_PROFILE.fullmatch(profile)):
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
+    rules = table.get("rules", [])
+    if not isinstance(rules, list) or not all(isinstance(rule, str) and rule.strip() for rule in rules):
+        raise SettingsError("[workers] rules must be a list of non-empty strings")
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green)
+                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))
 
 
 def _repos(table) -> dict[str, str]:

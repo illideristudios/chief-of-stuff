@@ -427,9 +427,12 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     relative, text, row = _task_context(root, cfg, day, task)
     try:
         settings = load_settings(root, cfg.settings_path)
-        workflow = settings.workflow
     except (OSError, SettingsError) as exc:
         raise RefusedError(f"cannot read workspace settings: {exc}") from None
+    workflow = settings.workflow
+    rules_header = ""
+    if settings.workers.rules:
+        rules_header = "\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in settings.workers.rules) + "\n"
     stage = stage_defaults(root, day, task)
     skills = skills_line(stage.skills) if stage else ""
     owner = row.owner.strip()
@@ -481,7 +484,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
                         if workflow.delivery == "pull-request" else
                         "Commit the finished change on this worktree's branch; do not push or merge without existing authorization.")
         lines = [
-            "# One-shot assignment",
+            "# One-shot assignment" + rules_header,
             f"You are {name or 'a worker'} in a single, noninteractive {runtime} run. Complete only this task, then exit.",
             "Do not register, poll a mailbox, schedule checks, start another agent, or send messages.",
             "Do not wait for a plan approval or for a reply. If a decision, missing access, or another blocker prevents completion, stop and report human_review.",
@@ -569,6 +572,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         report_text = report_text.replace("If direct messaging fails, send via mailbox:", "Send via mailbox:")
         header_text = header_text.replace("When direct messaging is unavailable, send your ask via:", "Send your ask via:")
 
+    header_text = header_text.replace("# Assignment\n", "# Assignment" + rules_header + "\n", 1)
     lines = [header_text, board_rule, WRITING_RULE, REVIEW_RULE, f"Task: {item}"]
     lines += _task_directives(root, row, skills, issue)
     if worktree is not None:
