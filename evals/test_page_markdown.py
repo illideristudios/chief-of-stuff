@@ -1,6 +1,7 @@
 """#231: CommonMark plus tables in prose, with plain metadata and offline installs."""
 import re
 import subprocess
+import tempfile
 import sys
 import unittest
 from dataclasses import replace
@@ -12,7 +13,7 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 sys.path.insert(0, str(ROOT / 'evals'))
 import columns
 import decision_page as dp
-import fragment
+import page_common
 import panels
 import source_page as sp
 from test_decision_page import decision, GH
@@ -52,23 +53,23 @@ class MarkdownTest(unittest.TestCase):
         self.assertFalse(Structure(html).blocks_in_p)
 
     def test_shared_block_renderer(self):
-        self.assert_blocks(fragment.markdown_blocks(BLOCK))
+        self.assert_blocks(page_common.markdown_blocks(BLOCK))
 
     def test_inline_has_no_block_elements(self):
-        html = fragment.markdown_inline('## title\n\n- **bold** and *italic*, ``a ` b``, [link](https://example.com/a?q=1&b=2)')
+        html = page_common.markdown_inline('## title\n\n- **bold** and *italic*, ``a ` b``, [link](https://example.com/a?q=1&b=2)')
         self.assertNotRegex(html, r'<(?:p|h\d|ul|li|pre|table)\b')
         self.assertIn('<em>italic</em>', html)
         self.assertIn('<code>a ` b</code>', html)
         self.assertIn('target="_blank" rel="noopener"', html)
 
     def test_commonmark_entities_escapes_and_reference_links(self):
-        html = fragment.markdown_blocks('\\*literal* &amp; **bold *inside***\n\n[docs][d]\n\n[d]: https://example.com')
+        html = page_common.markdown_blocks('\\*literal* &amp; **bold *inside***\n\n[docs][d]\n\n[d]: https://example.com')
         self.assertIn('*literal* &amp;', html)
         self.assertRegex(html, r'<(?:strong|b)>bold <em>inside</em></(?:strong|b)>')
         self.assertIn('href="https://example.com"', html)
 
     def test_raw_html_and_unsafe_links_are_escaped(self):
-        for render in (fragment.markdown_inline, fragment.markdown_blocks):
+        for render in (page_common.markdown_inline, page_common.markdown_blocks):
             html = render('<script>alert(1)</script>\n\n<img src=x onerror=alert(1)> [bad](javascript:alert%281%29)')
             self.assertNotIn('<script>', html)
             self.assertNotIn('<img ', html)
@@ -79,16 +80,33 @@ class MarkdownTest(unittest.TestCase):
         html = dp._md('**#12** and `src/app.py:3` [#12](https://example.com/#12) <https://example.com/#12>', dp.Linker(GH))
         self.assertEqual(html.count('class="ref"'), 2)
         self.assertFalse(Structure(html).nested_links)
-        block = fragment.markdown_blocks('```\n#12 src/app.py:3\n```', dp.Linker(GH).resolve)
+        block = page_common.markdown_blocks('```\n#12 src/app.py:3\n```', dp.Linker(GH).resolve)
         self.assertNotIn('<a', block)
 
     def test_vendored_packages_load_without_site_packages(self):
         proc = subprocess.run([sys.executable, '-S', '-c',
-            'import sys; sys.path.insert(0, sys.argv[1]); from fragment import markdown_blocks; '
+            'import sys; sys.path.insert(0, sys.argv[1]); from page_common import markdown_blocks; '
             'from _vendor.markdown_it import __version__; assert __version__ == "4.2.0"; '
             'assert "<table>" in markdown_blocks("| a |\\n| --- |\\n| b |")', str(ROOT / 'scripts')],
             capture_output=True, text=True)
         self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_pinned_install_includes_parser_and_licenses(self):
+        import start_coordinator
+        with tempfile.TemporaryDirectory() as tmp:
+            release = start_coordinator.install(ROOT, Path(tmp))
+            for name in ('markdown_it/LICENSE', 'markdown_it/LICENSE.markdown-it', 'mdurl/LICENSE'):
+                self.assertIn('Permission is hereby granted', (release / 'scripts' / '_vendor' / name).read_text())
+            proc = subprocess.run([sys.executable, '-S', '-c',
+                'import sys; sys.path.insert(0, sys.argv[1]); from page_common import markdown_blocks; '
+                'assert "<h2>Report</h2>" in markdown_blocks("## Report")', str(release / 'scripts')],
+                cwd=tmp, capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_card_markdown_links_do_not_nest_in_navigation(self):
+        html = columns.render([columns.Column('Build', (columns.Card('[docs](https://example.com)', 'open', href='/issues/12'),))], inline=page_common.markdown_inline)
+        self.assertFalse(Structure(html).nested_links)
+        self.assertIn('href="https://example.com"', html)
 
     def test_decision_sections_render_reports_as_blocks(self):
         self.assert_blocks(dp.render(decision(sections=[{'heading': 'Results', 'text': BLOCK}]), '2026-10-16'))
@@ -110,19 +128,29 @@ class MarkdownTest(unittest.TestCase):
         from test_decision_page import BLOCK as CONFIG
         from test_issue_page import TODAY, today_tracker
         import issue_page
-        cfg = parse_coordinator(CONFIG.format(board='- Backlog: https://github.com/o/app/issues'), today=TODAY)
+        cfg = parse_coordinator(CONFIG.format(board='- Backlog: GitHub; repo o/app'), today=TODAY)
         html = issue_page.render(109, [(TODAY, today_tracker())], sources(MR, issue=replace(ISSUE, body='See #12.')), NOW, cfg=cfg)
         self.assertIn('href="https://github.com/o/app/issues/12"', html)
 
     def test_cards_and_panel_prose_use_inline_markdown(self):
-        html = columns.render([columns.Column('**label**', (columns.Card('**Title** *detail* `code`', 'open', owner='**owner**', state='**state**'),))])
+        html = columns.render([columns.Column('**label**', (columns.Card('**Title** *detail* `code`', 'open', owner='**owner**', state='**state**'),))], inline=page_common.markdown_inline)
         self.assertIn('<em>detail</em>', html)
         self.assertIn('<code>code</code>', html)
         for raw in ('**label**', '**owner**', '**state**'):
             self.assertIn(raw, html)
-        html = panels.panels([panels.Panel('x', '**label**', 'open', 2, (panels.Row('name', '**passed** *check*'),))])
+        html = panels.panels([panels.Panel('x', '**label**', 'open', 2, (panels.Row('name', '**passed** *check*'),))], inline=page_common.markdown_inline)
         self.assertIn('<em>check</em>', html)
         self.assertIn('**label**', html)
+
+    def test_board_passes_markdown_and_forge_resolver_into_cards(self):
+        import render_board
+        from workspace import parse_coordinator
+        from test_render_board import CLAUDE_MD, LANED_TRACKER, NOW
+        cfg = parse_coordinator(CLAUDE_MD.replace('- Calendar tool:', '- Backlog: GitHub; repo o/app\n- Calendar tool:'), today=NOW.date())
+        html = render_board.render(LANED_TRACKER.replace('Write eval README', '**Write** *README* #12'), cfg, NOW)
+        self.assertIn('<b>Write</b> <em>README</em>', html)
+        self.assertIn('href="https://github.com/o/app/issues/12"', html)
+        self.assertFalse(Structure(html).nested_links)
 
     def test_checklist_and_log_prose_use_inline_markdown(self):
         import issue_page
