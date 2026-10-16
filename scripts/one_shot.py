@@ -69,26 +69,30 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
     return [argv[0], *lead, *argv[1:], *flags, *tail, prompt]
 
 
-def worker_result(path: Path, exit_code: int) -> tuple[str, str, str]:
+def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, int | None]]:
     """Do not infer success from the CLI exit code or a free-form final response."""
+    counts = dict.fromkeys(dispatch_prompt.SUITE_KEYS)
     try:
         raw = path.read_text()
     except OSError as exc:
-        return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", ""
+        return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", "", counts
     try:
         data = toon_decode(raw)
     except (ToonDecodeError, ValueError, TypeError) as exc:
         try:  # some workers write JSON instead of TOON (#154); same fields either way
             data = json.loads(raw)
         except ValueError:
-            return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", ""
+            return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", "", counts
+    if isinstance(data, dict):
+        counts = {key: value if type(value := data.get(key)) is int and value >= 0 else None
+                  for key in dispatch_prompt.SUITE_KEYS}
     if not isinstance(data, dict) or data.get("status") not in ("done", "human_review", "relaunch") or any(
         not isinstance(data.get(k), str) or not data[k].strip() for k in ("reason", "changes")
     ):
-        return "human_review", f"worker result is incomplete or invalid; exit {exit_code}", ""
+        return "human_review", f"worker result is incomplete or invalid; exit {exit_code}", "", counts
     if exit_code:
-        return "human_review", f"worker exited {exit_code}: {data['reason']}", data["changes"]
-    return data["status"], data["reason"], data["changes"]
+        return "human_review", f"worker exited {exit_code}: {data['reason']}", data["changes"], counts
+    return data["status"], data["reason"], data["changes"], counts
 
 
 QUOTA_STOP = "quota stop: "
@@ -353,7 +357,12 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     if expected_common is None:
         commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
         expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
-    status, reason, changes = worker_result(cwd / RESULT, exit_code)
+    status, reason, changes, counts = worker_result(cwd / RESULT, exit_code)
+    suite = "Suite: " + ", ".join(f"{key}={value if value is not None else 'missing or invalid'}"
+                                  for key, value in counts.items())
+    if status == "done" and settings.workers.require_green_tests and (
+            any(value is None for value in counts.values()) or any(counts[key] for key in ("failed", "skipped", "xfailed"))):
+        status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     actual = changed_files(cwd, expected_common=expected_common)
     commits = committed_changes(cwd, before_head, expected_common=expected_common)
     # The result lands on the day the run ends, falling back to the launch day's (#93).
@@ -394,7 +403,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
         elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
             status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
-    summary = (changes + f"\nCommits from this run:\n{commits}" +
+    summary = (changes + f"\n{suite}\nCommits from this run:\n{commits}" +
                (f"\nWorking tree:\n{actual}" if actual else "\nWorking tree clean"))
     rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
     row = rows[0] if len(rows) == 1 else None
@@ -404,7 +413,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             row.kind != "running" and not (carried and row.kind == "open")):
         report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
-                  "changes": summary, "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
+                  "changes": summary, **counts,
+                  "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
         return write_report(root, cwd, report)
     if adopted:
         # #99: the launcher died before reconciling this run; the report, the Log line and any
@@ -434,7 +444,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     except (OSError, ValueError) as exc:
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
-              "reason": reason, "changes": summary, "errors": errors}
+              "reason": reason, "changes": summary, **counts, "errors": errors}
     return write_report(root, cwd, report)
 
 

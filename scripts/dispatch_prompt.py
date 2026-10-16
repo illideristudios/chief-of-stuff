@@ -58,7 +58,8 @@ DISPATCH_FILE = f"{PROMPT_DIR}/dispatch.md"
 RESULT_FILE = f"{PROMPT_DIR}/worker-result.toon"
 # The launcher's own copy of each report, under the workspace root as `<tree directory name>.toon`: nothing in a tree can change it.
 REPORTS_DIR = f"{PROMPT_DIR}/reports"
-REPORT_KEYS = ("status", "task", "worker", "runtime_exit", "reason", "changes", "errors")
+SUITE_KEYS = ("passed", "failed", "skipped", "xfailed")
+REPORT_KEYS = ("status", "task", "worker", "runtime_exit", "reason", "changes", *SUITE_KEYS, "errors")
 # The prefix of a report's error for a tracker the launcher could not update.
 TRACKER_ERROR = "tracker:"
 # Use the installed inbox script, not a workspace path.
@@ -420,7 +421,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     day = day or datetime.now(cfg.zone).date().isoformat()
     relative, text, row = _task_context(root, cfg, day, task)
     try:
-        workflow = load_settings(root, cfg.settings_path).workflow
+        settings = load_settings(root, cfg.settings_path)
+        workflow = settings.workflow
     except (OSError, SettingsError) as exc:
         raise RefusedError(f"cannot read workspace settings: {exc}") from None
     stage = stage_defaults(root, day, task)
@@ -491,9 +493,16 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             "Read the workspace rules and the issue if present. Implement the task, verify it, and make the changes this task permits in this one run.",
             READ_ONLY if read_only else delivery,
             "Do not edit the tracker or issue labels yourself; the launcher reconciles them after you exit.",
-            f"Before exiting, write a TOON object to {result} with exactly three string fields:",
+            f"Before exiting, write a TOON object to {result} with these fields:",
             'status: done', 'reason: "what was completed, or why human review is required"',
             'changes: "files changed, tests run, commit or PR if any"',
+            *(f"{key}: null" for key in SUITE_KEYS),
+            "Keep status, reason and changes as strings. Report the final suite run's observed counts as non-negative integers; "
+            "use null when unknown, including when no suite ran. Never infer a missing count as zero. "
+            "Name the suite command in changes; do not add earlier failing TDD runs to the final counts.",
+            *(["Workspace [workers] require_green_tests is enabled: done requires all four counts, "
+               "with failed, skipped and xfailed all zero; otherwise use human_review."]
+              if settings.workers.require_green_tests else []),
             "Use status: human_review if unfinished, including when you made partial changes. State the blocker and the partial changes plainly.",
             ("Use status: relaunch only when the task's premise moved under you before you changed anything, such as its "
              "base or target PR merged or was replaced, and a fresh run from current main would do the task as written. "

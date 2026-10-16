@@ -207,7 +207,7 @@ class ResultTests(unittest.TestCase):
                     for key, value in counts.items():
                         self.assertIn(f"{key}={value}", report["reason"])
                     self.assertIn("completed audit", report["reason"])
-                    self.assertIn("needs human review", self.tracker_path().read_text())
+                    self.assertIn("HUMAN REVIEW NEEDED", self.tracker_path().read_text())
 
     def test_missing_or_invalid_counts_are_unknown_and_hold_opted_in_completion(self):
         self.suite_policy()
@@ -576,7 +576,8 @@ class ResultTests(unittest.TestCase):
         self.plant("other", report("Search pagination", reason="not this one"))
         done = self.result("--task", "Rate limit headers")
         self.assertEqual((done.returncode, done.stderr), (0, ""))
-        self.assertEqual(toon_decode(done.stdout), {**mine, "worktree": "rate-limit"})
+        self.assertEqual(toon_decode(done.stdout), {
+            **mine, **dict.fromkeys(("passed", "failed", "skipped", "xfailed")), "worktree": "rate-limit"})
         self.assertNotIn("not this one", done.stdout)
 
     def test_a_task_is_matched_exactly_not_by_prefix_or_case(self):
