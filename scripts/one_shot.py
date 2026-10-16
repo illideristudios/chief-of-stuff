@@ -408,6 +408,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         row = rows[0] if len(rows) == 1 else None
         if row is None or row.owner.strip().lower() != name.lower() or (
                 row.kind != "running" and not (carried and row.kind == "open")):
+            status, reason = "human_review", "task row changed during the one-shot run; reconcile it manually"
             raise ValueError("task row changed; no issue or tracker update was made")
         at = tracker_write.stamp(cfg.zone)
         # Validate the exact writable row before any forge mutation. Keep the lock through the
@@ -451,7 +452,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     try:
         tracker_write.edit(path, finish)
     except (OSError, ValueError) as exc:
-        status, reason = "human_review", "task row changed during the one-shot run; reconcile it manually"
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
               "reason": reason, "changes": summary, "errors": errors,

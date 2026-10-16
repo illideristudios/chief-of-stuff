@@ -58,7 +58,8 @@ DISPATCH_FILE = f"{PROMPT_DIR}/dispatch.md"
 RESULT_FILE = f"{PROMPT_DIR}/worker-result.toon"
 # The launcher's own copy of each report, under the workspace root as `<tree directory name>.toon`: nothing in a tree can change it.
 REPORTS_DIR = f"{PROMPT_DIR}/reports"
-REPORT_KEYS = ("status", "task", "worker", "runtime_exit", "reason", "changes", "errors")
+REPORT_KEYS = ("status", "task", "worker", "runtime_exit", "reason", "changes", "errors",
+               "hold_release", "hold_release_error")
 # The prefix of a report's error for a tracker the launcher could not update.
 TRACKER_ERROR = "tracker:"
 # Use the installed inbox script, not a workspace path.
