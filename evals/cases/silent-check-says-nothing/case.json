@@ -18,6 +18,14 @@
           "type": "regex",
           "pattern": "\\A\\s*\\.?\\s*\\Z",
           "rule": "A check that finds nothing ends with the single line `.` and nothing else."
+        },
+        {
+          "name": "board maintenance belongs to the supervisor",
+          "type": "tool_used",
+          "tool": "Bash",
+          "input_match": "\\bpages(?:\\.py)?\\s[^\\\"]*(?:--ensure|\\bensure\\b|\\bsupervise\\b)",
+          "max": 0,
+          "rule": "The workspace supervisor maintains the board independently; scheduled checks do not run routine pages commands."
         }
       ]
     },

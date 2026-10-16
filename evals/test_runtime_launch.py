@@ -186,6 +186,25 @@ class CoordinatorLaunchTest(unittest.TestCase):
                 launch.assert_called_once()
                 self.assertIn("test failure", errors.getvalue())
 
+    def test_all_runtime_launchers_provision_the_pinned_board_supervisor_before_launch(self):
+        for runtime in start.runtimes.NAMES:
+            calls = []
+            with self.subTest(runtime=runtime), \
+                 mock.patch.object(start, "resolve", return_value="/bin/fake"), \
+                 mock.patch.object(start, "login_argv", side_effect=lambda cmd: cmd), \
+                 mock.patch.object(start.subprocess, "run", side_effect=lambda argv, **kw:
+                                   calls.append(argv) or subprocess.CompletedProcess(argv, 0, "", "")), \
+                 mock.patch.object(start.subprocess, "call", side_effect=lambda *a, **kw:
+                                   calls.append("launch") or 0), \
+                 mock.patch.object(start.threading, "Thread"):
+                self.assertEqual(start.main(["--runtime", runtime, "--root", str(self.root),
+                                             "--install-dir", str(self.install_dir)]), 0)
+            board = [argv for argv in calls[:-1] if isinstance(argv, list) and argv[1].endswith("/scripts/pages.py")]
+            self.assertEqual(len(board), 1)
+            self.assertEqual(board[0][-3:], ["--root", str(self.root.resolve()), "ensure"])
+            self.assertIn("versions", board[0][1])
+            self.assertEqual(calls[-1], "launch")
+
     def test_watcher_stops_with_its_session_and_notifies_once_per_change(self):
         release = start.install(ROOT, self.install_dir)
         stop = threading.Event()
