@@ -1136,7 +1136,7 @@ class CaseLintTest(unittest.TestCase):
             r'"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+merge-approved\b|(?:scripts/)?merge_approved\.py\b)'
         )
         poll_before = send_before + r'|"(?:session_id|session_ref|session)": "[^"\n]+"'
-        log_before = (r'"command"\s*:\s*"(?:(?:\\.|[^"\\])*(?:[;&|]|\\n)\s*)?'
+        log_before = (r'"command"\s*:\s*"\s*(?:(?:\\.|[^"\\])*(?:[;&|]|\\n)\s*)?'
                       r'(?:[A-Za-z_]\w*=(?:\\.|[^\s"\\])+\s+)*'
                       r'(?:python(?:3(?:\.\d+)?)?\s+)?(?:[^\s";]+/)?'
                       r'(?:chief[-_]of[-_]stuff(?:\.py)?\s+log|tracker_write\.py)\b')
