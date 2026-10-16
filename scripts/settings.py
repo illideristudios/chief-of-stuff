@@ -96,6 +96,7 @@ class Workers:
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
+    require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
 
 
 @dataclass(frozen=True)
@@ -283,6 +284,9 @@ def _workers(table) -> Workers:
     cap = table.get("max_concurrency")
     if cap is not None and (type(cap) is not int or cap < 1):
         raise SettingsError("[workers] max_concurrency must be a positive whole number")
+    green = table.get("require_green_tests", False)
+    if type(green) is not bool:
+        raise SettingsError("[workers] require_green_tests must be a boolean")
     if "claude_profile" in table:
         raise SettingsError("[workers] claude_profile is renamed claude_as_profile")
     profile = table.get("claude_as_profile", "")
@@ -290,7 +294,7 @@ def _workers(table) -> Workers:
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile)
+                   claude_as_profile=profile, require_green_tests=green)
 
 
 def _repos(table) -> dict[str, str]:
