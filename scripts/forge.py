@@ -474,9 +474,10 @@ class Forge:
             if not isinstance(rows, list):
                 raise ValueError("pipeline list is unreadable")
             if self.github:
-                # Single-page reads fail closed at PER_PAGE; only each workflow's highest-ID run attests to its current head state.
+                # Single-page reads trust total_count, else fail closed at PER_PAGE; only each workflow's highest-ID run attests to its current head state.
                 total = payload.get("total_count")
-                if len(rows) >= backlog.PER_PAGE or (isinstance(total, int) and total > len(rows)):
+                truncated = total > len(rows) if type(total) is int else len(rows) >= backlog.PER_PAGE
+                if truncated:
                     raise ValueError("pipeline list was truncated")
             if not rows:
                 return Pipeline(None, ref, sha, "none", "")
