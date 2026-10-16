@@ -105,17 +105,34 @@ def _assignment(token: str) -> bool:
     return True
 
 
-def _unwrap(tokens: list[str]) -> list[str]:
+def unwrap_launch(tokens: list[str], *, split_env: bool = False) -> list[str]:
+    """Remove known launch wrappers; probes return no command.
+
+    Eval inspection can opt into static env -S splitting. The guard leaves it
+    unsupported because env's expansion grammar is broader than shell words.
+    """
     while tokens:
         name = PurePosixPath(tokens[0]).name
         if _assignment(tokens[0]):
             tokens = tokens[1:]
         elif name in {"command", "exec", "nohup", "time", "setsid"}:
             tokens = tokens[1:]
+            while tokens and tokens[0].startswith("-") and tokens[0] != "--":
+                flag = tokens[0]
+                if name == "command" and re.fullmatch(r"-[pvV]+", flag):
+                    if "v" in flag or "V" in flag:
+                        return []
+                    tokens = tokens[1:]
+                elif name == "time" and flag == "-p":
+                    tokens = tokens[1:]
+                elif name == "exec" and flag == "-a" and len(tokens) > 1:
+                    tokens = tokens[2:]
+                elif name == "exec" and flag in {"-c", "-l"}:
+                    tokens = tokens[1:]
+                else:
+                    raise Unparsed()
             if tokens[:1] == ["--"]:
                 tokens = tokens[1:]
-            if tokens and tokens[0].startswith("-"):
-                raise Unparsed()
         elif name == "timeout":
             tokens = tokens[1:]
             if not tokens or not re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", tokens[0]):
@@ -139,6 +156,10 @@ def _unwrap(tokens: list[str]) -> list[str]:
                     tokens = tokens[2:]
                 elif flag.startswith(("--unset=", "--chdir=")):
                     tokens = tokens[1:]
+                elif split_env and flag in {"-S", "--split-string"} and len(tokens) > 1:
+                    tokens = shlex.split(tokens[1]) + tokens[2:]
+                elif split_env and flag.startswith("--split-string="):
+                    tokens = shlex.split(flag.split("=", 1)[1]) + tokens[1:]
                 elif flag.startswith("-"):
                     raise Unparsed()
                 else:
@@ -403,7 +424,7 @@ def _inline_interpreter_text(command: str) -> bool:
 def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
     if depth > 8:
         raise Unparsed()
-    tokens = _unwrap(tokens)
+    tokens = unwrap_launch(tokens)
     if not tokens:
         return False
     name, args = PurePosixPath(tokens[0]).name, tokens[1:]

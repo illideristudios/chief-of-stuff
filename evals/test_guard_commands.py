@@ -460,6 +460,19 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 
+    def test_shared_wrapper_flags_preserve_guarded_writes_and_probes(self):
+        for prefix in ("command -p", "time -p", "exec -a worker", "exec -c",
+                       "env TZ=UTC -i", "sudo -n timeout 30 nice -n 5 command -p"):
+            with self.subTest(prefix=prefix):
+                self.assertEqual(denial_reason(f"{prefix} gh pr merge 12", ("main",)), OWNED)
+                self.assertIsNone(denial_reason(f"{prefix} gh pr view 12", ("main",)))
+        for command in ("command -v gh", "command -V git", "command -pv gh"):
+            with self.subTest(command=command):
+                self.assertIsNone(denial_reason(command, ("main",)))
+        for command in ("command -x gh pr merge 12", "exec -q gh", "env -S 'gh pr view 12'"):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main",)), UNPARSED)
+
     def test_supported_wrapper_reads_are_available(self):
         for command in ("time git status", "timeout 5 gh pr view 12", "nice -n 10 git diff",
                         "true # a comment\ngit status", "env -u TOKEN git status",

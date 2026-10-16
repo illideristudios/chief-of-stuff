@@ -40,7 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import make_repo  # noqa: E402
 # Package-style, as start_coordinator imports it, so `host_prompt` and this module share one copy.
 sys.path.insert(1, str(Path(__file__).resolve().parent.parent))
-from scripts import runtimes  # noqa: E402
+from scripts import guard_commands, runtimes  # noqa: E402
 
 EVALS = Path(__file__).resolve().parent
 PLUGIN_ROOT = EVALS.parent
@@ -312,34 +312,31 @@ def _shell_invokes(command: str, program: str, depth: int = 0) -> bool:
         return bool(re.search(rf"\b{re.escape(program)}\b", command))
 
     def invokes(words: list[str]) -> bool:
-        while words:
-            name = Path(words[0]).name
-            if re.match(r"^[A-Za-z_]\w*=", words[0]):
-                words = words[1:]
-            elif name in {"command", "exec", "nohup", "time", "setsid"}:
-                words = words[1:]
-                if words[:1] == ["--"]:
-                    words = words[1:]
-            elif name == "env":
-                words = words[1:]
-                while words and words[0].startswith("-"):
-                    takes_value = words[0] in {"-u", "--unset", "-C", "--chdir"}
-                    words = words[2 if takes_value else 1:]
-            elif name in {"sh", "bash", "zsh", "dash"}:
-                for i, word in enumerate(words[1:], 1):
-                    if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word) and i + 1 < len(words):
-                        return _shell_invokes(words[i + 1], program, depth + 1)
-                return False
-            else:
-                return name == program
-        return False
+        # Reserved words introduce command positions, unlike ordinary arguments.
+        while words and words[0] in {"!", "if", "then", "elif", "else", "do", "while", "until"}:
+            words = words[1:]
+        try:
+            words = guard_commands.unwrap_launch(words, split_env=True)
+        except (ValueError, TypeError):
+            # Unsupported wrapper syntax cannot prove a named program was absent.
+            return any(Path(word).name == program for word in words)
+        if not words:
+            return False
+        name = Path(words[0]).name
+        if name in {"sh", "bash", "zsh", "dash"}:
+            for i, word in enumerate(words[1:], 1):
+                if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word) and i + 1 < len(words):
+                    return _shell_invokes(words[i + 1], program, depth + 1)
+            return False
+        return name == program
 
     i, found = 0, False
 
-    def scan(closing: str = "") -> None:
+    def scan(closing: str = "", data_end: int | None = None) -> None:
         nonlocal i, found
         words, word = [], []
         quote, started, redirect = "", False, False
+        heredocs = []
 
         def flush_word() -> None:
             nonlocal word, started, redirect
@@ -350,13 +347,24 @@ def _shell_invokes(command: str, program: str, depth: int = 0) -> bool:
                 word, started = [], False
 
         def flush_command() -> None:
-            nonlocal found
+            nonlocal found, redirect
             flush_word()
             found = invokes(words) or found
             words.clear()
+            redirect = False
 
-        while i < len(command):
+        while i < (len(command) if data_end is None else data_end):
             c = command[i]
+            if data_end is not None:
+                # Unquoted heredocs expand substitutions, but their prose is data.
+                if c == "\\" and i + 1 < data_end and command[i + 1] in "$`\\\n":
+                    i += 2
+                elif command.startswith("$(", i) or c == "`":
+                    i += 2 if c == "$" else 1
+                    scan(")" if c == "$" else "`")
+                else:
+                    i += 1
+                continue
             if not quote and closing and c == closing:
                 i += 1
                 break
@@ -397,16 +405,47 @@ def _shell_invokes(command: str, program: str, depth: int = 0) -> bool:
                 i += 1
                 scan(")")
                 continue
+            elif command.startswith(("<(", ">("), i):
+                i += 2
+                scan(")")
+                started = True
+                continue
             elif c in "{}" and not started and not words:
                 # Braces are reserved words only at a command boundary; echo { is data.
                 flush_command()
             elif c in ";&|)\n":
                 flush_command()
+                if c == "\n" and heredocs:
+                    i += 1
+                    for delimiter, quoted, strip_tabs in heredocs:
+                        body_start = i
+                        line_end = len(command)
+                        while i < len(command):
+                            line_end = command.find("\n", i)
+                            if line_end < 0:
+                                line_end = len(command)
+                            line = command[i:line_end]
+                            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                                break
+                            i = min(line_end + 1, len(command))
+                        body_end, after_delimiter = i, min(line_end + 1, len(command))
+                        if not quoted:
+                            i = body_start
+                            scan(data_end=body_end)
+                        i = after_delimiter
+                    heredocs.clear()
+                    continue
             elif c in "<>":
                 # A destination is data, even when named after the forbidden program.
                 if word and all(ch.isdigit() for ch in word):
                     word, started = [], False
                 flush_word()
+                heredoc = re.match(r"<<(-?)(?!<)[ \t]*((?:[^\s;&|()<>'\"\\]|\\.|'[^']*'|\"[^\"]*\")+)", command[i:])
+                if heredoc:
+                    raw = heredoc[2]
+                    heredocs.append((shlex.split(raw)[0], any(q in raw for q in "'\"\\"), bool(heredoc[1])))
+                    i += heredoc.end()
+                    continue
                 redirect = True
                 i += 1
                 while i < len(command) and command[i] in "<>&|":
@@ -431,7 +470,9 @@ def _tool_used(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
         t
         for t in rec.stream.tool_uses
         if name.fullmatch(t["name"]) and (match is None or match.search(json.dumps(t["input"])))
-        and ("command_program" not in g or _shell_invokes(t["input"].get("command", ""), g["command_program"]))
+        and ("command_program" not in g or _shell_invokes(
+            str(t["input"].get("command") or t["input"].get("cmd") or t["input"].get("CommandLine") or ""),
+            g["command_program"]))
     ]
     denied = sum(1 for t in hits if t["id"] in rec.stream.denied_ids)
     lo, hi = g.get("min", 0), g.get("max")
