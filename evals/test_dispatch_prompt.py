@@ -94,6 +94,22 @@ NAMED = """# Tracker 2026-09-18
 """
 
 
+class SuiteCountsTest(unittest.TestCase):
+    def test_suite_counts_keep_only_non_negative_integers_and_fill_unknowns(self):
+        keys = ("passed", "failed", "skipped", "xfailed")
+        self.assertEqual(dp.suite_counts({}), dict.fromkeys(keys))
+        for key in keys:
+            for value, normalized in ((None, None), (True, None), (False, None), (-1, None),
+                                      ("0", None), (1.5, None), ({}, None), ([], None), (0, 0), (23, 23)):
+                with self.subTest(key=key, value=value):
+                    data = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0, "extra": 99, key: value}
+                    before = data.copy()
+                    expected = {k: data[k] for k in keys}
+                    expected[key] = normalized
+                    self.assertEqual(dp.suite_counts(data), expected)
+                    self.assertEqual(data, before)
+
+
 class TaskByNameTest(unittest.TestCase):
     """The coordinator kept a script to turn a Tasks name into the item `--task` wanted (#51)."""
 

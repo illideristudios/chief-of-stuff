@@ -37,6 +37,41 @@ class SettingsTest(unittest.TestCase):
     def test_no_settings_line_is_off(self):
         self.assertEqual(st.load(self.root, None).notify.adapter, "off")
 
+    def test_stage_profiles_and_skills_are_optional(self):
+        text = ('[lanes.code]\nstages = ["implement", "review", "pr"]\n'
+                '[stages.review]\nagent = "reviewer"\nskills = ["security-review", "extras:code-review"]\n'
+                '[stages.implement]\nagent = "builder"\n[stages.pr]\nskills = ["delivery"]\n')
+        for notify in ("", '[notify]\nadapter = "off"\n'):
+            with self.subTest(notify=notify):
+                got = st.load(self.root, self.write(text + notify)).stages
+                self.assertEqual(got["review"].agent, "reviewer")
+                self.assertEqual(got["review"].skills, ("security-review", "extras:code-review"))
+                self.assertEqual(got["implement"].skills, ())
+                self.assertIsNone(got["pr"].agent)
+        self.assertEqual(st.load(self.root, None).stages, {})
+
+    def test_stages_accept_kanban_map_and_terminal_names(self):
+        text = ('[kanban]\nstages = ["Review"]\nhuman_review_label = "Held"\n'
+                'terminal_stages = ["done"]\n[kanban.map]\nreview = 0\n'
+                '[stages.review]\nagent = "reviewer"\n[stages.done]\nskills = ["summary"]\n')
+        self.assertEqual(set(st.load(self.root, self.write(text)).stages), {"review", "done"})
+
+    def test_invalid_stage_configuration_is_refused(self):
+        prefix = '[lanes.code]\nstages = ["review"]\n'
+        for text in ('[stages]\nreview = "reviewer"',
+                     '[stages.missing]\nagent = "reviewer"',
+                     '[stages.review]\nagent = 3', '[stages.review]\nagent = ""',
+                     '[stages.review]\nagent = "--reviewer"',
+                     '[stages.review]\nskills = "security-review"',
+                     '[stages.review]\nskills = [3]', '[stages.review]\nskills = [""]',
+                     '[stages.review]\nskills = ["security\\nreview"]',
+                     '[stages.review]\nskills = ["security", "security"]',
+                     '[stages.review]\nunknown = "ignored"'):
+            with self.subTest(text=text), self.assertRaises(st.SettingsError):
+                st.load(self.root, self.write(prefix + text))
+        with self.assertRaises(st.SettingsError):
+            st.load(self.root, self.write('stages = []\n' + prefix))
+
     def test_a_named_file_that_is_absent_is_off(self):
         self.assertEqual(st.load(self.root, "chief-of-stuff.toml").notify.adapter, "off")
 
@@ -124,6 +159,15 @@ class SettingsTest(unittest.TestCase):
         for bad in ("0", "-1", "2.5", '"3"', "true"):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write(f"[workers]\nmax_concurrency = {bad}\n"))
+
+    def test_green_test_requirement_is_opt_in_and_strictly_boolean(self):
+        self.assertFalse(st.load(self.root, None).workers.require_green_tests)
+        for value, expected in (("true", True), ("false", False)):
+            self.assertEqual(st.load(self.root, self.write(
+                f"[workers]\nrequire_green_tests = {value}\n")).workers.require_green_tests, expected)
+        for bad in ('"true"', "1", "0", "[]"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "require_green_tests"):
+                st.load(self.root, self.write(f"[workers]\nrequire_green_tests = {bad}\n"))
 
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
         # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
