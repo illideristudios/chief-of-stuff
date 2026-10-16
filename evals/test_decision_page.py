@@ -437,7 +437,7 @@ class DerivationTest(unittest.TestCase):
         tasks = (task("Budget", "Connection budget", "triage", "#111"), task("Pool", "Warm pool !58", "merge"),
                  task("Upload", "Upload limit", "review", "#109"))
         ctx = self.ctx(tasks=tasks, sources=SOURCES, hold="status::hold")
-        self.assertEqual(ctx.where("#111"), "triage · hold")
+        self.assertEqual(ctx.where("#111"), "triage · needs input")
         self.assertEqual(ctx.where("!58"), "merge · passed")
         self.assertEqual(ctx.where("!52"), "open · failed")
         self.assertEqual(ctx.where("#99"), "merged 01:15")
@@ -519,13 +519,13 @@ class IndexTest(unittest.TestCase):
                      '<label class="o"><input type="radio" name="key" value="A"><span class="key">A</span>keep the pool<span class="tag">recommended</span></label>',
                      '<label class="o"><input type="radio" name="key" value="B"><span class="key">B</span>start cold</label>',
                      '<form class="stack" method="post" action="/decisions/cache-warmup">', '<input type="hidden" name="back" value="/decisions">',
-                     '<input type="text" name="words"', '<button type="submit">save</button>', '<a class="ref" href="https://x/#111" target="_blank" rel="noopener">#111</a> triage · hold', '<a class="ref" href="https://x/!58" target="_blank" rel="noopener">!58</a> merge · passed',
+                     '<input type="text" name="words"', '<button type="submit">save</button>', '<a class="ref" href="https://x/#111" target="_blank" rel="noopener">#111</a> triage · needs input', '<a class="ref" href="https://x/!58" target="_blank" rel="noopener">!58</a> merge · passed',
                      "The pool stays."):
             with self.subTest(text=text):
                 self.assertIn(text, pending)
         self.assertNotIn("checked", pending)
         self.assertNotRegex(pending, r'class="[^"]*\brec\b')
-        self.assertIn("1 pending · oldest 29m · holding 1 issue, 1 merge request · 0 completed today", page)  # (#215) no render clock
+        self.assertIn("1 pending · oldest 29m · needs input: 1 issue, 1 merge request · 0 completed today", page)  # (#215) no render clock
 
     def test_two_decisions_holding_one_issue_hold_it_once(self):
         page = self.render(dp.Context(NOW), a=decision(holds=["#111"], references=[]), b=decision(holds=["#111"], references=[]))
@@ -627,7 +627,7 @@ class DerivedPageTest(unittest.TestCase):
         ctx = dp.Context(NOW, tasks=(task("Budget", "Connection budget", "triage", "#111"),), sources=SOURCES, hold="status::hold")
         page = dp.render(dp.parse(decision(references=refs)), "2026-09-26", ctx=ctx, slug="x")
         self.assertIn('<span class="st">open · passed</span>', page)
-        self.assertIn('<span class="st">triage · hold</span>', page)
+        self.assertIn('<span class="st">triage · needs input</span>', page)
         self.assertIn('<span class="st">said</span>', page)
 
     def test_without_sources_the_page_still_renders(self):

@@ -235,7 +235,7 @@ class Palette(unittest.TestCase):
 
     def test_the_legend_lists_categories_then_kinds(self) -> None:
         html = gantt.legend({"alpha": "#123456", "beta": "#654321"})
-        self.assertEqual(re.findall(r"</span>([^<]+)</span>", html), ["alpha", "beta", "forecast", "hold"])
+        self.assertEqual(re.findall(r"</span>([^<]+)</span>", html), ["alpha", "beta", "forecast", "needs input"])
         self.assertIn('data-cat="alpha"', html)
         self.assertIn('class="gantt-bar gantt-hold"', html)
 

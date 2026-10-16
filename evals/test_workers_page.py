@@ -89,7 +89,7 @@ USAGE = ({"input_tokens": 100, "output_tokens": 200, "cache_creation_input_token
 TOKENS = 56000
 # Today's launcher end lines: worker -> (Log time, what the line says, how it ended as the page words it, task ref).
 ENDED = {"impl-c3": ("00:20", "done", "completed", "120"),
-         "impl-d4": ("00:30", "human_review", "human review", "121"),
+         "impl-d4": ("00:30", "human_review", "needs input", "121"),
          "impl-e5": ("00:40", "relaunch", "relaunch", "122")}
 TASK = {"impl-c3": "Review r1", "impl-d4": "Verify r1", "impl-e5": "Fix r1"}
 
@@ -395,7 +395,7 @@ class HeaderTest(unittest.TestCase):
         self.assertNotRegex(page(), r"\brendered \d{1,2}:\d{2}")
 
     def test_need_you_counts_todays_human_review_ends(self):
-        self.assertEqual(box(page(), "need you"), "1")
+        self.assertEqual(box(page(), "needs input"), "1")
 
     def test_running_counts_the_running_workers(self):
         self.assertEqual(box(page(), "running"), "3")

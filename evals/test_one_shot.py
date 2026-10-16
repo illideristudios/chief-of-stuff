@@ -952,8 +952,10 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self._run(fake), 1)
         tracker = self.tracker.read_text()
         self.assertIn("| Security audit | Robin | waiting |", tracker)
-        self.assertIn("HUMAN REVIEW NEEDED", tracker)
+        self.assertIn("NEEDS INPUT", tracker)
         self.assertIn("needs product decision", tracker)
+        self.assertEqual(self._report()["status"], "human_review")
+        self.assertEqual(self._report()["outcome"], "NEEDS INPUT")
         self.assertIn("partial.txt", tracker)
 
     def test_claimed_completion_with_uncommitted_edits_needs_review(self):
@@ -979,7 +981,7 @@ class RunTest(unittest.TestCase):
         self.assertIn("partial.txt", report["reason"])
         tracker = self.tracker.read_text()
         self.assertIn("| Security audit | Robin | waiting |", tracker)
-        self.assertIn("HUMAN REVIEW NEEDED", tracker)
+        self.assertIn("NEEDS INPUT", tracker)
 
     def test_a_read_only_task_that_left_an_uncommitted_file_needs_review_whatever_the_worker_wrote(self):
         self._read_only()
@@ -987,7 +989,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(report["status"], "human_review")
         self.assertTrue(report["reason"].startswith("read-only task left changes:"), report["reason"])
         self.assertIn("partial.txt", report["reason"])
-        self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
+        self.assertIn("NEEDS INPUT", self.tracker.read_text())
 
     def _rewrites_the_tracker(self, edit: str) -> str:
         """Worker code that edits the launch day's tracker, as a worker with write access to the workspace could."""
@@ -1091,7 +1093,7 @@ class RunTest(unittest.TestCase):
         tracker = self.tracker.read_text()
         self.assertIn("| Security audit | unassigned | open |", tracker)
         self.assertIn("one-shot worker01: relaunch requested for Security audit — target PR merged", tracker)
-        self.assertNotIn("HUMAN REVIEW", tracker)
+        self.assertNotIn("NEEDS INPUT", tracker)
         self.assertEqual(toon_decode((self.tree / one_shot.REPORT).read_text())["status"], "relaunch")
 
     def test_the_assignment_offers_relaunch_for_a_moved_premise(self):
@@ -1173,7 +1175,7 @@ class RunTest(unittest.TestCase):
         tracker = self.tracker.read_text()
         self.assertIn("| Security audit | unassigned | open |", tracker)
         self.assertIn(f"one-shot worker01: relaunch requested for Security audit — {self.QUOTA_REASON}.", tracker)
-        self.assertNotIn("HUMAN REVIEW", tracker)
+        self.assertNotIn("NEEDS INPUT", tracker)
 
     def test_a_quota_stop_puts_no_hold_label_and_no_comment_on_the_issue(self):
         self._with_an_issue_and_kanban()
@@ -1277,7 +1279,7 @@ class RunTest(unittest.TestCase):
         report = self._report(again)
         self.assertEqual((report["status"], report["reason"]),
                          ("human_review", "quota stop repeated: codex m-test; resets in about four hours"))
-        self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
+        self.assertIn("NEEDS INPUT", self.tracker.read_text())
 
     def test_a_repeated_quota_stop_without_reset_text_names_only_the_runtime_and_model(self):
         stderr = "429: You exceeded your current Quota.\n"
@@ -1374,7 +1376,7 @@ class RunTest(unittest.TestCase):
         self._stopped(stderr="", result=self.ORDINARY, exit_code=0, tree=again)
         report = self._report(again)
         self.assertEqual((report["status"], report["reason"]), ("relaunch", "base moved"))
-        self.assertNotIn("HUMAN REVIEW", self.tracker.read_text())
+        self.assertNotIn("NEEDS INPUT", self.tracker.read_text())
 
     def test_a_second_ordinary_relaunch_after_a_quota_relaunch_is_still_limited(self):
         self._quota_relaunched()
@@ -1398,7 +1400,7 @@ class RunTest(unittest.TestCase):
         self.assertEqual(report["status"], "human_review")
         # The worker's own failure to write a result, not a relaunch refused for its changes (#422 review R1).
         self.assertTrue(report["reason"].startswith("worker did not write a valid TOON result"), report["reason"])
-        self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
+        self.assertIn("NEEDS INPUT", self.tracker.read_text())
 
     def _twice(self, first: dict, second: dict | None = None) -> tuple[dict, dict]:
         """Two launches of one task on one day, each on a fresh tree and the second after the first's relaunch; the
@@ -1539,7 +1541,7 @@ class RunTest(unittest.TestCase):
     def test_a_429_that_is_not_a_quota_stop_needs_review(self):
         self._stopped(stderr="Error: 429 Too Many Requests\n")
         self.assertEqual(self._report()["status"], "human_review")
-        self.assertIn("HUMAN REVIEW NEEDED", self.tracker.read_text())
+        self.assertIn("NEEDS INPUT", self.tracker.read_text())
 
     def test_quota_text_without_a_429_needs_review(self):
         self._stopped(stderr="Error: billing quota page moved\n")

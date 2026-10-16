@@ -42,7 +42,7 @@ class RoundTripTest(unittest.TestCase):
                          [("09:15", "Security audit", "implement", True, "worker01")])
 
     def test_an_ended_line(self):
-        for status, outcome in (("done", tl.COMPLETED), ("human_review", tl.HUMAN_REVIEW)):
+        for status, outcome in (("done", tl.COMPLETED), ("human_review", "NEEDS INPUT")):
             with self.subTest(status=status):
                 line = tl.ended_line("10:20", "worker01", status, "fixed the cap", "a.py b.py")
                 self.assertEqual(tl.ENDED.match(line).groups(), ("10", "20", "worker01", outcome))
@@ -81,7 +81,7 @@ class RoundTripTest(unittest.TestCase):
         for reason, tail in (("Resets in 3h46m46s.", "Resets in 3h46m46s."), ("fixed the cap", "fixed the cap."), ("", ".")):
             with self.subTest(reason=reason):
                 line = tl.ended_line("10:20", "worker01", "human_review", reason, "a.py")
-                self.assertEqual(line, f"- 10:20 one-shot worker01: {tl.HUMAN_REVIEW} — {tail} Changes: a.py.")
+                self.assertEqual(line, f"- 10:20 one-shot worker01: NEEDS INPUT — {tail} Changes: a.py.")
 
     def test_the_moves_read_from_the_written_lines(self):
         text = "\n".join(("# Tracker", "", "## Log", "",
@@ -144,7 +144,7 @@ class WordingTest(unittest.TestCase):
             (tl.ended_line("10:20", "worker01", "done", "fixed the cap", "a.py b.py"),
              "- 10:20 one-shot worker01: completed; awaiting integration — fixed the cap. Changes: a.py b.py."),
             (tl.ended_line("10:20", "worker01", "human_review", "needs a decision", "changed parser"),
-             "- 10:20 one-shot worker01: HUMAN REVIEW NEEDED — needs a decision. Changes: changed parser."),
+             "- 10:20 one-shot worker01: NEEDS INPUT — needs a decision. Changes: changed parser."),
             (tl.relaunch_line("10:20", "worker01", "Security audit", "target PR merged before work began"),
              "- 10:20 one-shot worker01: relaunch requested for Security audit — target PR merged before work began."),
         ):

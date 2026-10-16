@@ -207,7 +207,7 @@ class ResultTests(unittest.TestCase):
                     for key, value in counts.items():
                         self.assertIn(f"{key}={value}", report["reason"])
                     self.assertIn("completed audit", report["reason"])
-                    self.assertIn("HUMAN REVIEW NEEDED", self.tracker_path().read_text())
+                    self.assertIn("NEEDS INPUT", self.tracker_path().read_text())
 
     def test_missing_or_invalid_counts_are_unknown_and_hold_opted_in_completion(self):
         self.suite_policy()
