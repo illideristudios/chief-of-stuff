@@ -416,6 +416,28 @@ class FlowEngineTests(unittest.TestCase):
         ready = flow.ready_one_shot_tasks(self.root, tracker_text, settings)
         self.assertEqual(ready, [])
 
+    def test_a_bold_unassigned_standing_item_is_not_dispatched(self):
+        tracker_text = """## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| impl03 | **impl03**: standing implementer. Wait idle. | unassigned | open | 2026-10-08 | | S | build | build | #1 | |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| **impl03**: standing implementer. Wait idle. | `src/a.py` |
+
+## Log
+
+- 10:00 started
+"""
+        make_workspace(self.root, tracker_text)
+        settings = load_settings(self.root, "chief-of-stuff.toml")
+        ready = flow.ready_one_shot_tasks(self.root, tracker_text, settings)
+        self.assertEqual(ready, [])
+
     def test_tick_runs_full_cycle(self):
         tracker_text = """## Tasks
 

@@ -101,7 +101,8 @@ def ready_one_shot_tasks(root: Path, tracker_text: str, settings: Settings) -> l
     for t in tasks:
         if t.kind != "open" or t.owner.strip() != "unassigned":
             continue
-        if t.workflow or t.standing or tracker.STANDING_ITEM.match(t.item.strip()) or tracker.STANDING_NAME.match(t.name.strip()):
+        # standing_for unmarks the item; a bold name (`**impl03**: standing`) is still a placeholder when unassigned.
+        if t.workflow or t.standing or tracker.STANDING_ITEM.match(tracker._unmark(t.item).strip()) or tracker.STANDING_NAME.match(t.name.strip()):
             continue
         if t.stage.strip().startswith("hold"):
             continue
