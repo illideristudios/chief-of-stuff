@@ -18,7 +18,9 @@ The shared helpers the page modules use (the stylesheet head, the file write tha
 
 ## 4. Circles
 
-Each script under `scripts/`, the two launchers and each hook file belong to one circle. A module that does the work of two circles is a gap against this section until it is split. `inbox.py`, `audit_tasks.py` and `flow.py` are placed by the parts section 8 splits them into; each is a gap until the split lands.
+Each script under `scripts/`, the two launchers and each hook file belong to one circle. A module that does the work of two circles is a gap against this section until it is split. `inbox.py`, `audit_tasks.py` and `flow.py` are placed by their parts, as section 8 describes.
+
+The owner decisions in the 1.0 ledger (`docs/specs/2026-10-09-chief-of-stuff-1.0-ledger.md`, section "Owner decisions", Zach, 2026-10-10) amend this document. Where a section here disagrees with one of them, the owner decision stands and the section is rewritten to match. A module the ledger retires, such as the file mailbox, the tracker parser and its command lines, the flow tick, the notify service, the terminal launchers or the non-Claude watcher, keeps its circle in this table until it is deleted. A gap against a retiring module closes when the module is deleted.
 
 | Circle | Modules |
 |---|---|
@@ -45,7 +47,7 @@ The path is read from the `Canonical document:` bullet of the workspace's own `#
 
 ## 8. Single responsibility
 
-A module has one reason to change. `inbox.py` and `audit_tasks.py`, the two largest, and `flow.py` each carry more than one and are split by responsibility, each part landing in one circle of section 4.
+A module has one reason to change. `inbox.py` and `audit_tasks.py`, the two largest, and `flow.py` each carry more than one. The 1.0 ledger retires the mailbox and the flow tick (G1, E1, E2) and rewrites the task audit (F5), so these modules are not split for their own sake. The parts the engine carries, such as the ready predicate, the stagnation rule and the audit's judgements, land in the circles below as they move. The rest goes when the module is deleted.
 
 | Module today | Responsibility | Circle |
 |---|---|---|
@@ -63,23 +65,24 @@ Each module keeps re-exporting the names its callers import until they import fr
 
 ## 9. Agent performance
 
-Agent performance is measured from the one-shot launcher lines in the `## Log` of every day's tracker, listed by `workspace.daily_trackers`. No other store, cache or copy is kept. The one-shot reports are not a source, because a launch deletes the earlier reports for its task and a report holds no runtime, model or times. Interactive sessions are not measured.
+Agent performance is measured from the store's stage segments, as the 1.0 ledger's owner decision A3 settles: a query over segments, not a parser of Log lines. A run is one segment, keyed (issue, stage, attempt), with its start and end times and its outcome. The engine records the segment when it launches a worker, through `store.record_segment` with the runtime, model, effort and agent type it launched with, and closes it with the outcome when it collects the worker. The tracker Log, the one-shot reports and interactive sessions are not sources.
 
-The started line records the agent type as `type=<agent type>` after the effort, only when one is set, as it records the model and effort. `one_shot.record_launch` passes the type the launcher already receives, and every caller that launches a one-shot passes the launcher the type it dispatched, as `--type`, only when the workspace's `Agent:` lines declare that type. Without that declaration `--type` is left out, the default agent runs, and the started line records no type, as the dispatch rules require. The automatic dispatch in `flow.py` follows the same rule for the type it cut the worktree for, checked with `make_worktree.agent_types`. Runs started before this have no type.
+The agent type follows the declaration rule: a segment records an agent type only when the workspace's `Agent:` lines declare the type the worker was launched as, checked with `make_worktree.agent_types`. Without that declaration the default agent runs and the segment records no type. Segments recorded before this have no runtime fields.
 
-A run is a started line paired with the same worker's completed, human-review or relaunch line, across consecutive days' trackers, so a run that ends after midnight keeps its end. The pairing is one function in `tracker_log.py`, which returns `Run` records, and every reader that pairs runs uses it: the issue page drops its own same-day pairing. A Log line's time is HH:MM on its tracker's day in the workspace zone, so a time in the hour repeated when daylight saving ends is read as its first occurrence; a run there can be off by an hour, and the Log format is not changed for it.
+Segment times are full timestamps, so a run that ends after midnight keeps its end, and no daylight-saving rule is needed.
 
 | Boundary | Signature | Circle |
 |---|---|---|
-| `tracker_log.Run` | `worker: str, task: str, runtime: str, model: str, effort: str, agent_type: str, started: datetime, ended: datetime \| None, outcome: str \| None` | Entities |
-| `tracker_log.runs` | `(trackers: list[tuple[date, str]], zone: ZoneInfo) -> list[Run]` | Entities |
+| `store.Segment` | `issue_key: str, stage: str, attempt: int, started_at: str, ended_at: str \| None, outcome: str \| None, runtime: str, model: str, effort: str, agent_type: str` | Interface Adapters, gateways |
 | `performance.Row` | `period: date, runtime: str, model: str, effort: str, agent_type: str, runs: int, completed: int, human_review: int, relaunched: int, median_minutes: int \| None` | Use Cases |
-| `performance.table` | `(runs: list[Run], since: date, until: date, by: str) -> list[Row]`, where `by` is `day` or `week` | Use Cases |
+| `performance.table` | `(segments: Iterable[Segment], since: date, until: date, by: str, zone: ZoneInfo) -> list[Row]`, where `by` is `day` or `week` | Use Cases |
 | `performance_report.main` | `(argv: list[str] \| None = None) -> int` | Frameworks and Drivers |
 
-For each day or week and each key of runtime, model, effort and agent type, the report counts the runs started, completed, sent to human review and relaunched, and the median whole minutes from start to end, taking the lower middle value for an even count. A run belongs to the period of its start, in the workspace zone. A week starts on Monday, and `Row.period` is the period's first day: the day itself, or the week's Monday. `--since` and `--until` are dates in the workspace zone and both are inclusive; `--until` defaults to today and `--by` to `day`. A run with no model, effort or type on its started line is keyed by what is there, and an empty key field prints as `-`. `performance.py` reads no file; `performance_report.py` reads the trackers, calls `performance.table` and prints one table. It is the `performance` entry of `COMMANDS` in `chief_of_stuff.py`: `chief-of-stuff performance --since DATE [--until DATE] [--by day|week]`. No board panel or page shows it.
+For each day or week and each key of runtime, model, effort and agent type, the report counts the runs started, completed, sent to human review and relaunched, and the median whole minutes from start to end, taking the lower middle value for an even count. A run belongs to the period of its start, in the workspace zone. A week starts on Monday, and `Row.period` is the period's first day: the day itself, or the week's Monday. `--since` and `--until` are dates in the workspace zone and both are inclusive; `--until` defaults to today and `--by` to `day`. A segment with no model, effort or type is keyed by what is there, and an empty key field prints as `-`. `performance.py` reads no file. `performance_report.py` reads the segments through `store_access`, calls `performance.table` and prints one table. It is the `performance` entry of `COMMANDS` in `chief_of_stuff.py`: `chief-of-stuff performance --since DATE [--until DATE] [--by day|week]`.
 
-Review findings are not counted until review reports have one shape (issue #563). Then findings per task are joined to runs by the task on the started line.
+A page may show the same measures over time: each runtime, model and effort pair's trend and success rate per kind of task, with its sample size. The scoring is in `performance.py` (Use Cases), over segments passed in. Review rounds are the count of review-stage attempts per issue, the kind of task is the issue's workflow, and the pipeline result is read through the forge adapter, the source of truth. A presenter renders the page from rows handed to it and reads no file. Scoring makes no billed call and never blocks a launch.
+
+Review findings are not counted until review reports have one shape (issue #563). Then findings are joined to runs by the issue key.
 
 ## 10. Runtime limits
 
@@ -89,7 +92,7 @@ Each runtime's limits are read without a billed call, recorded over time, and sh
 
 Limits belong to an account, not a workspace, so readings are account-wide: two workspaces on one account share one history, and two accounts on one machine never mix. A reading's account is the runtime's account as the workspace launches it: the `[workers] claude_as_profile` for claude, empty for a runtime's default login. The probe reads that account's limits, and every history query names the account it wants. `limits_history.py` (Interface Adapters, gateways) keeps the readings behind the ORM, in their own SQLite database at `$XDG_STATE_HOME/chief-of-stuff/limits.sqlite` (default `~/.local/state/chief-of-stuff/limits.sqlite`), with migrations of their own. It reuses the store's migration setup through a shared helper rather than a copy. `store.py` stays the issue-keyed workspace store and holds no readings. Section 9's single source applies to agent performance and is not changed by this store.
 
-`limits_cli.py` is the `limits` entry of `COMMANDS` in `chief_of_stuff.py`: `chief-of-stuff limits` takes one reading of every runtime, records it, and prints it. Readings are taken on a schedule by the tick orchestration of `flow.py`: each tick takes one reading, one `limits_probe.read` per runtime and account, and records it through `limits_history`, and a failed reading never stops the tick. The board reads the history and judges it through `limits.py`. It never probes a runtime itself. The point-in-time query that chooses a dispatch runtime reads the same history.
+`limits_cli.py` is the `limits` entry of `COMMANDS` in `chief_of_stuff.py`: `chief-of-stuff limits` takes one reading of every runtime, records it, and prints it. Readings are taken on a schedule by the engine's pass: each pass takes one reading, one `limits_probe.read` per runtime and account, and records it through `limits_history`, and a failed reading never stops the pass. The board reads the history and judges it through `limits.py`. It never probes a runtime itself. The point-in-time query that chooses a dispatch runtime reads the same history.
 
 | Boundary | Signature | Circle |
 |---|---|---|
