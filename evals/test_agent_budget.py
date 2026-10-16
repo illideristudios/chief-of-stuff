@@ -32,18 +32,20 @@ from evals.skill_fixtures import write_plugin, write_skill  # noqa: E402
 # PR 540 review: the Browser safety sentence regains "or ask to open it" (+19 B): agent 39,614 B; Browser safety 170.
 # #547: the approved-forge-closure Log record adds one sentence to Tracker (longest line 3,114 B, Tracker
 # section 5,629 B, agent 39,759 B; rendered sizes measured below). Section ceilings round up to 10 B, TOTAL to 50 B.
-TOTAL = 39_800            # whole agent file, bytes
+# #92 adds the always-loaded severe process violation rule (911 B).
+# Measured: agent 40,566 B; Write authority 2,695 B; rendered sizes below.
+TOTAL = 40_600            # whole agent file, bytes
 MAX_LINE = 3_120          # longest single line
 ONE_SHOT_PARAGRAPH = 3_800  # kept: a later slice trims this paragraph
 # Skills are read on demand; no host's prompt appends their bodies.
 # rendered_sizes(1) over the simulated agent, copied into a temporary plugin:
 # Claude 39,241 B; Codex 37,248 B; Cursor 37,356 B; AGY 37,412 B (slice 487 plus the PR 540 review sentence simulated).
 # #547 adds the approved-forge-closure sentence: Claude 39,386; Codex 37,393; Cursor 37,501; AGY 37,557.
-PROMPT = {"claude": 39_390, "codex": 37_400, "cursor": 37_510, "agy": 37_560}
+PROMPT = {"claude": 40_200, "codex": 38_210, "cursor": 38_320, "agy": 38_370}
 CEILING = {  # `## ` section -> bytes, heading line included
     "Role": 1600, "Dispatch authority": 1100, "Browser safety": 170, "Writing": 580,
     "Config": 1400, "Clock": 1850, "Calendar": 910, "Open the day": 2000, "Resume": 4670,
-    "Write authority": 1790, "Filing": 360, "Human-only actions": 1280, "Dispatch": 1_200,
+    "Write authority": 2700, "Filing": 360, "Human-only actions": 1280, "Dispatch": 1_200,
     "Assign": 300, "Pipeline": 1_300, "Check": 2780,
     "Sessions": 1_700, "Relay": 3190, "Tracker": 5_640, "Board": 1460,
     "Requirements": 360, "Share": 460, "Asks": 3900, "Notify": 360,
@@ -179,7 +181,7 @@ REVIEW_PIPELINE_RULES = {
         'For a newly filed issue with no board stage, preview first and use `--initialize` in place of `--from-stage`.',
         'The updater works with GitLab labels, GitHub issue labels, or a configured GitHub Project Status field and issue hold label.',
         'It preserves unrelated labels.',
-        'If it reports a manual board move, missing label or API error, leave the tracker stage as recorded, report the drift and reconcile it with the user; do not force the update.',
+        "A sync blocked by a manual board move, missing label or API error uses Write authority's severe process violation rule. Keep the recorded stage; never force or retry `Kanban state changed outside the tracker; reconcile before writing`.",
         'An audit reports drift but never moves cards.',
         'Note a `workflow` row has no issue and takes no sync.',
         'Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record.',
