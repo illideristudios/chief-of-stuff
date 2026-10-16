@@ -1,0 +1,64 @@
+{
+  "tz": "America/Chicago",
+  "description": "#279: audit prints a merged: finding for PR #12 on develop. Only its branch suite is green. The coordinator acknowledges the merge after the ref with the remaining reason, keeps the task waiting and its checklist unticked.",
+  "prompt": "[Scheduled check] chief-of-stuff: check the day",
+  "gh_issues": [
+    {
+      "number": 8,
+      "title": "Retry jitter",
+      "state": "OPEN",
+      "url": "https://github.com/o/app/issues/8",
+      "body": "Cap retry jitter."
+    }
+  ],
+  "gh_graphql": {
+    "data": {
+      "repository": {
+        "n12": {
+          "number": 12,
+          "state": "MERGED",
+          "baseRefName": "develop",
+          "mergeCommit": {
+            "oid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+          }
+        }
+      }
+    }
+  },
+  "graders": [
+    {
+      "name": "the merged finding is acknowledged with the remaining reason",
+      "type": "file_matches",
+      "path": "daily/{{today}}-tracker.md",
+      "pattern": "(?im)^\\| Retry jitter \\|[^\\n]*PR #12\\W+merged\\b[^|\\n]*(?:suite|test|green|verif)[^|\\n]*\\|"
+    },
+    {
+      "name": "the task waits for the suite on the integration branch",
+      "type": "file_matches",
+      "path": "daily/{{today}}-tracker.md",
+      "pattern": "(?m)^\\| Retry jitter \\|[^\\n]*\\|\\s*waiting\\s*\\|"
+    },
+    {
+      "name": "the checklist stays unticked",
+      "type": "file_matches",
+      "path": "daily/{{today}}.md",
+      "pattern": "(?m)^- \\[ \\] Retry jitter"
+    },
+    {
+      "name": "the audit is run",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "audit(?:_tasks\\.py)?(?:[^\\n])*--date",
+      "min": 1
+    },
+    {
+      "name": "log append only",
+      "type": "lines_preserved",
+      "path": "daily/{{today}}-tracker.md",
+      "section": "## Log",
+      "min_added": 1
+    }
+  ],
+  "max_turns": 20,
+  "timeout_seconds": 420
+}
