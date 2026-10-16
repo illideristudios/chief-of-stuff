@@ -720,7 +720,9 @@ class HarnessDefectsConfigTest(unittest.TestCase):
 
     def test_invalid_and_unsupported_destinations_fail_config_and_health(self):
         from datetime import date
-        for value in ("repo org/repo", "session", "", "worker 7720-harness", "session `unterminated"):
+        for value in ("repo org/repo", "session", "", "worker 7720-harness", "session `unterminated", "session `repo org/repo`", "session `a; b, task x`",
+                      "session a;b", "session a,b", "session a/b", "session user", "session `USER`",
+                      "session coordinator", "session `Coordinator`", "session `only-one-quote", "session only-one-quote`"):
             with self.subTest(value=value), tempfile.TemporaryDirectory() as d:
                 text = self.BLOCK + f"- Harness defects: {value}\n"
                 with self.assertRaisesRegex(workspace.ConfigError, "Harness defects"):

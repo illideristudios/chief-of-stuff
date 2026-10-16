@@ -166,6 +166,25 @@ REVIEW_RETAINED_MERGE = (REVIEW_DEFAULT_MERGE, REVIEW_APPROVAL_MERGE, REVIEW_NO_
 # Verbatim sentence pins captured before slice 6; never derive these from the
 # current agent/skill at test time, or a deletion would delete its own test.
 REVIEW_PIPELINE_RULES = {
+    'Refusal reports': (
+        "Report an unexpected refusal in the same move, overriding Relay's permission-only reply.",
+        'Start the defect report with `Severe process violation:` and include the blocked write (task/issue and intended transition), exact refusal, and rule or guard; never leave it only as a user to-do.',
+        'A guard incorrectly blocking a verified, authorized transition (for example after a launcher changes only a hold) is a harness defect; genuine external board changes still need reconciliation.',
+        'First append exactly one Log line via `chief-of-stuff log`, without `--stage`: `Severe process violation: <blocked write>; refusal: <exact refusal>; guard: <rule or guard>; report target: <configured session or user>, task <name>`.',
+        'Make exactly one attempt, including launch or path failures: after any unsuccessful Log call, report its exact error without trying another command form.',
+        'The command supplies the clock and appends under the tracker lock; flatten multiline error text into one line.',
+        'Use the bare session name (no `session` prefix), or the literal `user`, for the target.',
+        'The target is the intended destination, not a delivery receipt.',
+        'If logging is denied, do not retry or edit the tracker: carry that exact logging refusal in the outgoing report.',
+        "Then send the full defect report to `Harness defects: session <name>` using Sessions' direct/dual-transport messaging (Read ../coordinator-sessions/SKILL.md first).",
+        "This is an incident report, not an assignment: send it directly even in one-shot mode, without Assign's poll-first barrier, and never ask the recipient to perform the blocked write.",
+        'When direct delivery is unavailable or when the configured session is not listed, use `chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to <name> --from coordinator --type report --body "<full defect report>"`, with the absolute workspace root; this fallback is authorized even for an unlisted configured session.',
+        'Without a configured target, give the full report to the user.',
+        'If direct messaging and mailbox delivery fail, give the user the full report plus both delivery failures.',
+        'Do not rewrite or append another Log line to change the original target.',
+        'One reply line says `Severe process violation: <write>; reported to <destination>`; if delivery fails, the destination is `user`.',
+        'Use that exact single-line reply format without paraphrasing: `Severe process violation: sync #17 implement to review; reported to user` (substitute the write and bare session name when configured).',
+    ),
     'Pipeline': (
         "A task with a `lane` moves through that lane's stages (see Tracker).",
         'In one-shot mode, represent review and follow-up fix work as scoped Tasks rows and launch fresh one-shot workers; do not send assignments to persistent reviewer or implementer sessions.',
@@ -182,7 +201,11 @@ REVIEW_PIPELINE_RULES = {
         'For a newly filed issue with no board stage, preview first and use `--initialize` in place of `--from-stage`.',
         'The updater works with GitLab labels, GitHub issue labels, or a configured GitHub Project Status field and issue hold label.',
         'It preserves unrelated labels.',
-        'Keep the recorded task stage. Reconcile a genuine manual board move with the user before syncing; report missing configuration for correction. Normal domain gates (including main-branch, suite and audit gates) are not harness defects. Transient API errors permit retry after recovery, including a partial Project Status/label sync; verify fresh state first. An unexpected refusal on an authorized write follows Write authority and Refusal reports below.',
+        'Keep the recorded task stage.',
+        'Reconcile a genuine manual board move with the user before syncing; report missing configuration for correction.',
+        'Normal domain gates (including main-branch, suite and audit gates) are not harness defects.',
+        'Transient API errors permit retry after recovery, including a partial Project Status/label sync; verify fresh state first.',
+        'An unexpected refusal on an authorized write follows Write authority and Refusal reports below.',
         'An audit reports drift but never moves cards.',
         'Note a `workflow` row has no issue and takes no sync.',
         'Advancing on a covering yes: move `stage` with `chief-of-stuff log --stage` (see Tracker) and write a Decisions row citing the yes, except for a Triage pass that leaves nothing for the user, whose Log line is the record.',
@@ -1078,6 +1101,14 @@ class AgentBudgetTest(unittest.TestCase):
         for sentence in TRACKER_DELETED_RULES:
             with self.subTest(sentence=sentence):
                 self.assertNotIn(sentence, text)
+
+    def test_write_refusal_pointer_loads_classification_before_diagnosis(self):
+        pointer = "On any board or task-state write refusal or kanban error, Read ${CLAUDE_PLUGIN_ROOT}/skills/review-pipeline/SKILL.md"
+        self.assertEqual(sections(self.text)['Write authority'].count(pointer), 1)
+        body = (ROOT / 'skills/review-pipeline/SKILL.md').read_text()
+        self.assertIn('--type report', body)
+        self.assertIn('when the configured session is not listed', body)
+        self.assertNotIn('Use the full `python3 ${CLAUDE_PLUGIN_ROOT}/chief_of_stuff.py log` command', body)
 
     def test_review_pipeline_pointer_occurs_once_as_its_own_paragraph(self):
         self.assertEqual(self.text.count(REVIEW_PIPELINE_POINTER), 1)
