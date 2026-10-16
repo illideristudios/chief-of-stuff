@@ -302,6 +302,7 @@ class FlowEngineTests(unittest.TestCase):
         import one_shot
         for declarations, expected in (("- Agent: implementer task\n- Agent: reviewer task\n", "reviewer"),
                                        ("- Agent: reviewer task\n", "reviewer"),
+                                       ("- Agent: reviewer standing\n", "reviewer"),
                                        ("- Agent: implementer task\n", ""), ("", "")):
             with self.subTest(declarations=declarations):
                 make_workspace(self.root, tracker_text, SAMPLE_TOML +
