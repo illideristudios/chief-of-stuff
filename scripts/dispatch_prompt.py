@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backlog_ref import file_with, issue_ref  # noqa: E402
 from tracker import Task, parse_tracker, short_name  # noqa: E402
 from workspace import Config, ConfigError, architecture_document, read_config  # noqa: E402
-from settings import Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
+from settings import Settings, Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
 import ownership  # noqa: E402
 import runtimes  # noqa: E402
 
@@ -431,30 +431,24 @@ def _task_directives(root: Path, row: Task, skills: str, issue: Any) -> list[str
 
 def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
             coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
-            one_shot: bool = False, *, workflow: Workflow | None = None,
-            rules: tuple[str, ...] | None = None, stages: dict[str, Stage] | None = None,
-            require_green_tests: bool | None = None) -> str:
-    """Compose a tracker assignment using preloaded policy, or load missing workflow/rules and stage defaults.
+            one_shot: bool = False, *, settings: Settings | None = None) -> str:
+    """Compose a tracker assignment from one workspace settings snapshot.
 
-    Pass stages and require_green_tests with preloaded workflow/rules to preserve the same
-    settings snapshot without rereading it; omitted green-test policy defaults to disabled.
+    Pass preloaded settings to reuse the caller's snapshot without rereading it;
+    otherwise load the complete settings once from the configured workspace path.
     Invalid data, settings or launch conditions raise RefusedError.
     """
     cfg = config(root)
     day = day or datetime.now(cfg.zone).date().isoformat()
     relative, text, row = _task_context(root, cfg, day, task)
-    if workflow is None or rules is None:
+    if settings is None:
         try:
             settings = load_settings(root, cfg.settings_path)
         except (OSError, SettingsError) as exc:
             raise RefusedError(f"cannot read workspace settings: {exc}") from None
-        workflow = settings.workflow if workflow is None else workflow
-        rules = settings.workers.rules if rules is None else rules
-        stages = settings.stages if stages is None else stages
-        if require_green_tests is None:
-            require_green_tests = settings.workers.require_green_tests
-    rules_header = standing_rules(rules)
-    stage = (stages or {}).get(row.stage.strip())
+    workflow = settings.workflow
+    rules_header = standing_rules(settings.workers.rules)
+    stage = settings.stages.get(row.stage.strip())
     skills = skills_line(stage.skills) if stage else ""
     owner = row.owner.strip()
     # Prevent two workers from claiming one task.
@@ -532,7 +526,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             *(["Workspace [workers] require_green_tests is enabled: the launcher holds done as human_review "
                "unless all four counts are reported with passed > 0 and failed, skipped and xfailed all zero. "
                "Completed runs still report status: done with observed counts; the launcher applies this gate."]
-              if require_green_tests else []),
+              if settings.workers.require_green_tests else []),
             "Use status: human_review if unfinished, including when you made partial changes. State the blocker and the partial changes plainly.",
             ("Use status: relaunch only when the task's premise moved under you before you changed anything, such as its "
              "base or target PR merged or was replaced, and a fresh run from current main would do the task as written. "
