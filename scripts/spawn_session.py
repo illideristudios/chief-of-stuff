@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,6 +24,7 @@ import dispatch_prompt  # noqa: E402
 import runtimes  # noqa: E402
 from settings import HERDR_NAME, SettingsError, load as load_settings  # noqa: E402
 from shell_setup import ShellError, resolve  # noqa: E402
+from tracker import parse_tracker  # noqa: E402
 
 ENV = "CHIEF_OF_STUFF_LAUNCHER"
 # Keep assignments and stop files in the worktree's ignored metadata directory.
@@ -387,7 +389,7 @@ def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None 
 
 def main(argv_in: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--type", dest="agent_type", help="an agent type from the Coordinator block; omitted runs the default agent")
+    ap.add_argument("--type", dest="agent_type", help="an agent type from the Coordinator block; overrides the stage's agent profile")
     ap.add_argument("--cwd", help="the worktree the session starts in")
     ap.add_argument("--name", "--title", dest="title",
                     help="the session's name, e.g. impl07; the listing, the prompt box and the tab all show it")
@@ -453,6 +455,17 @@ def main(argv_in: list[str] | None = None) -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
     args.runtime = args.runtime or "claude"
+    if args.agent_type is None and settings.stages and args.runtime == "claude":
+        day = args.date or datetime.now(config.zone).date().isoformat()
+        try:
+            tasks = parse_tracker((Path(args.root) / config.tracker_path(day)).read_text()).tasks
+        except OSError as exc:
+            print(f"refused: cannot read tracker: {exc}", file=sys.stderr)
+            return 1
+        row = next((t for t in tasks if t.item.strip() == args.task.strip()), None)
+        stage = settings.stages.get(row.stage.strip()) if row else None
+        if stage is not None:
+            args.agent_type = stage.agent
     runtime = runtimes.get(args.runtime)
     if (args.model or runtime.needs_model) and not MODEL.fullmatch(args.model):
         print(f"refused: --model needs a model id (agy: one from `agy models`, and it is required), not {args.model!r}", file=sys.stderr)

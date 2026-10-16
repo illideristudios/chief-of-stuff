@@ -240,7 +240,13 @@ def architecture_line(root: Path) -> str:
     return f"Architecture: {document}; read it before changing code." if document else ""
 
 
-def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None) -> str:
+def skills_line(skills: tuple[str, ...]) -> str:
+    """Name the stage's skills on demand, without injecting their text into the starting prompt (§2)."""
+    return "Skills: load and follow " + ", ".join(skills) + "." if skills else ""
+
+
+def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
+                  skills: tuple[str, ...] = ()) -> str:
     """Assignment from a store row, forge issue and workspace, never a peer session's instructions (E3)."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
@@ -259,6 +265,7 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
             + review
+            + (skills_line(skills) + "\n" if skills else "")
             + architecture
             + f"\n## Forge issue\n\n{title}\n\n{body}\n")
 
@@ -371,7 +378,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     """The assignment for `task`, read back off disk. A task that is not a row is refused."""
     cfg = config(root)
     try:
-        workflow = load_settings(root, cfg.settings_path).workflow
+        settings = load_settings(root, cfg.settings_path)
+        workflow = settings.workflow
     except (OSError, SettingsError) as exc:
         raise RefusedError(f"cannot read workflow settings: {exc}") from None
     relative = cfg.tracker_path(day or datetime.now(cfg.zone).date().isoformat())
@@ -383,6 +391,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     rows = [row for row in parse_tracker(text).tasks if row.item.strip() == wanted]
     if not wanted or not rows:
         raise RefusedError(f"no Tasks row {task!r} in {relative}; a dispatch names a task that is already there")
+    stage = settings.stages.get(rows[0].stage.strip())
+    skills = skills_line(stage.skills) if stage else ""
     owner = rows[0].owner.strip()
     # Prevent two workers from claiming one task.
     if owner.lower() != UNASSIGNED:
@@ -443,6 +453,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         ]
         if rows[0].stage.strip() == "review":
             lines.append(CODE_REVIEW)
+        if skills:
+            lines.append(skills)
         if arch := architecture_line(root):
             lines.append(arch)
         if rows[0].checklist.strip():
@@ -522,6 +534,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     lines = [header_text, board_rule, WRITING_RULE, REVIEW_RULE, f"Task: {item}"]
     if rows[0].stage.strip() == "review":
         lines.append(CODE_REVIEW)
+    if skills:
+        lines.append(skills)
     if arch := architecture_line(root):
         lines.append(arch)
     if rows[0].checklist.strip():

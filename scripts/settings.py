@@ -65,6 +65,13 @@ class Lane:
 
 
 @dataclass(frozen=True)
+class Stage:
+    """Launch defaults for a tracker stage; an explicit worker choice takes precedence."""
+    agent: str | None = None
+    skills: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class GitHubProject:
     owner: str
     number: int
@@ -183,6 +190,35 @@ class Settings:
     graph: Graph | None = None
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
     repos: dict[str, str] = field(default_factory=dict)
+    stages: dict[str, Stage] = field(default_factory=dict)
+
+
+def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
+    if not isinstance(table, dict):
+        raise SettingsError("[stages] must be a table of stage launch defaults")
+    known = {stage for lane in lanes.values() for stage in lane.stages}
+    if kanban is not None:
+        known.update(kanban.stage_map)
+        known.update(kanban.terminal_stages)
+    stages = {}
+    for name, entry in table.items():
+        where = f"[stages.{name}]"
+        if name not in known:
+            raise SettingsError(f"{where}: no lane or kanban map names this stage")
+        if not isinstance(entry, dict) or set(entry) - {"agent", "skills"}:
+            raise SettingsError(f"{where}: a table with only agent and/or skills")
+        agent = entry.get("agent")
+        if "agent" in entry and not (isinstance(agent, str) and WORKER_NAME.fullmatch(agent)):
+            raise SettingsError(f"{where}: agent must be an agent profile name")
+        skills = entry.get("skills", [])
+        if (not isinstance(skills, list)
+                or any(not isinstance(s, str) or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:/-]*", s)
+                       for s in skills)):
+            raise SettingsError(f"{where}: skills must be a list of skill names")
+        if len(set(skills)) != len(skills):
+            raise SettingsError(f"{where}: a skill appears twice")
+        stages[name] = Stage(agent, tuple(skills))
+    return stages
 
 
 def _entry(where: str, text) -> ModelEntry:
@@ -456,6 +492,7 @@ def load(root: Path, settings_path: str | None) -> Settings:
         raise SettingsError(f"{settings_path}: [lanes] is not a table")
     lanes = {name: _lane(name, t) for name, t in lanes.items()}
     kanban = _kanban(data["kanban"]) if "kanban" in data else None
+    stages = _stages(data["stages"], lanes, kanban) if "stages" in data else {}
     workflow = _workflow(data["workflow"]) if "workflow" in data else Workflow()
     workers = _workers(data["workers"]) if "workers" in data else Workers()
     models = _models(data["models"]) if "models" in data else {}
@@ -468,11 +505,11 @@ def load(root: Path, settings_path: str | None) -> Settings:
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:
