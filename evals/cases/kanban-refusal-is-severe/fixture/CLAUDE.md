@@ -10,3 +10,4 @@
 - Calendars: none
 - Human-only actions: dashboard or console changes; spending money
 - Harness defects: session `7720-harness`
+- Sessions: list `mcp__peers__list_sessions`; send `mcp__peers__send`

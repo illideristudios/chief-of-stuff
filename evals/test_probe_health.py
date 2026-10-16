@@ -711,3 +711,27 @@ class RuntimeCheckTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessDefectsConfigTest(unittest.TestCase):
+    BLOCK = "## Coordinator\n\n- User: Robin\n- Daily log dir: daily/\n- Tracker: daily/<date>-tracker.md\n- Timezone: America/Chicago\n"
+
+    def test_optional_session_is_parsed(self):
+        from datetime import date
+        self.assertIsNone(workspace.parse_coordinator(self.BLOCK, date.today()).harness_defects)
+        self.assertEqual(workspace.parse_coordinator(self.BLOCK + "- Harness defects: session `7720-harness`\n",
+                                                    date.today()).harness_defects, "7720-harness")
+
+    def test_invalid_and_unsupported_destinations_fail_config_and_health(self):
+        from datetime import date
+        for value in ("repo org/repo", "session", "", "worker 7720-harness", "session `unterminated"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as d:
+                text = self.BLOCK + f"- Harness defects: {value}\n"
+                with self.assertRaisesRegex(workspace.ConfigError, "Harness defects"):
+                    workspace.parse_coordinator(text, date.today())
+                path = Path(d) / "CLAUDE.md"
+                path.write_text(text)
+                with contextlib.redirect_stdout(io.StringIO()) as out:
+                    code = ph.main(["--config", str(path)])
+                self.assertNotEqual(code, 0)
+                self.assertIn("Harness defects", out.getvalue())
