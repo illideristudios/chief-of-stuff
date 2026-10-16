@@ -1,0 +1,7 @@
+status: human_review
+task: Cache design
+worker: cache-design
+runtime_exit: 0
+reason: specify needs your review; completed
+changes: "Design artifact: notes/cache-design.md. Working tree clean."
+errors[0]:

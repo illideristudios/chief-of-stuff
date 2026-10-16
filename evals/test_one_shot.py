@@ -2043,6 +2043,38 @@ class RunTest(unittest.TestCase):
         self.assertIn("partial.txt", body)
         self.assertIn("| Security audit | Security audit | Robin | waiting |", self.tracker.read_text())
 
+    def test_completed_marked_stage_holds_without_advancing_and_keeps_the_artifact(self):
+        for stage, entry, held in (("plan", "", True), ("plan", "review_after = false", False),
+                                   ("implement", "review_after = true", True), ("implement", "", False)):
+            with self.subTest(stage=stage, entry=entry):
+                (self.root / "CLAUDE.md").write_text(CLAUDE + '- Settings: `chief-of-stuff.toml`\n'
+                    '- Backlog: GitHub issues; repo https://github.com/team/repo (private)\n')
+                (self.root / "chief-of-stuff.toml").write_text(
+                    '[kanban]\nstages = ["Build"]\nhuman_review_label = "Held"\n'
+                    f'[kanban.map]\n{stage} = 0\n[stages.{stage}]\n{entry}\n')
+                self.tracker.write_text(
+                    '## Tasks\n| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n'
+                    '|---|---|---|---|---|---|---|---|---|---|---|\n'
+                    f'| Audit | Security audit | worker01 | running 09:00 | 09:00 | | M | code | {stage} | #7 | Audit |\n')
+                result = self.tree / one_shot.RESULT
+                result.parent.mkdir(exist_ok=True)
+                (result.parent / ".gitignore").write_text("*\n")
+                result.write_text('status: done\nreason: completed\nchanges: "Plan: https://example.test/plan.md"\n')
+                with mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
+                     mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
+                    report = one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, 0,
+                                                one_shot.git_head(self.tree))
+                self.assertEqual(report["status"], "human_review" if held else "done")
+                self.assertEqual(hold.call_count, int(held))
+                self.assertIn(f'| code | {stage} | #7 |', self.tracker.read_text())
+                self.assertIn('| Robin | waiting |', self.tracker.read_text())
+                self.assertEqual(report["errors"], [])
+                if held:
+                    self.assertIn("needs your review", report["reason"])
+                    self.assertIn("https://example.test/plan.md", comment.call_args.args[2])
+                else:
+                    comment.assert_not_called()
+
     def _commented_with(self, backlog_line: str, issue: str):
         """The backlog config a human_review outcome posts its issue comment through."""
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `chief-of-stuff.toml`\n" + f"- Backlog: {backlog_line}\n")

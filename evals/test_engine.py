@@ -78,6 +78,31 @@ class FakeForge:
 
 
 class EngineTest(unittest.TestCase):
+    def test_review_after_holds_completed_stage_until_the_user_clears_the_forge_hold(self):
+        (self.root / "CLAUDE.md").write_text('## Coordinator\n- Settings: `cos.toml`\n')
+        (self.root / "cos.toml").write_text('[lanes.code]\nstages = ["implement", "review"]\n'
+                                            '[stages.implement]\nreview_after = true\n')
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, started_at=(NOW - timedelta(hours=1)).isoformat())
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        self.forge.rows[0]["human_review"] = False
+
+        def hold(number):
+            self.forge.rows[0]["human_review"] = True
+            return ""
+
+        self.forge.add_human_hold = mock.Mock(side_effect=hold)
+        self.run_pass()
+        self.forge.add_human_hold.assert_called_once_with(1)
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.db.items()[0].stage, "implement")
+        self.run_pass()
+        self.forge.add_human_hold.assert_called_once()
+        self.assertEqual(self.launched, [])
+        self.forge.rows[0]["human_review"] = False
+        self.run_pass()
+        self.assertEqual(self.launched[0][1], "review")
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

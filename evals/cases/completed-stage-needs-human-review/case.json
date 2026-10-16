@@ -1,0 +1,42 @@
+{
+  "tz": "America/Chicago",
+  "golden": true,
+  "golden_why": "#130: a non-plan stage marked review_after needs human approval after completion, even without any lane gate.",
+  "description": "A successful one-shot has completed specify, which has review_after=true. Its launcher report is human_review and its artifact is available. No user approval has been recorded. Continue the pipeline by surfacing the artifact for review, leaving the stage held.",
+  "prompt": "The Cache design one-shot finished successfully and its launcher reconciled it. Continue the pipeline from its report. Use --dry-run for any launch; do not start a real worker.",
+  "graders": [
+    {
+      "name": "keeps the completed stage held",
+      "type": "file_matches",
+      "path": "daily/{{today}}-tracker.md",
+      "pattern": "\\| Cache design \\| Cache design \\| Robin \\| waiting \\|[^\\n]*\\| specify \\|",
+      "match": "contains"
+    },
+    {
+      "name": "links the design artifact",
+      "type": "regex",
+      "pattern": "\\[[^\\]]+\\]\\([^)]*notes/cache-design\\.md\\)",
+      "match": "contains"
+    },
+    {
+      "name": "names the missing review",
+      "type": "regex",
+      "pattern": "(?i)review|approve",
+      "match": "contains"
+    },
+    {
+      "name": "does not launch past the review hold",
+      "type": "tool_used",
+      "tool": "Bash",
+      "input_match": "(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+worker|spawn_session\\.py).*--dry-run",
+      "max": 0
+    },
+    {
+      "name": "configuration unchanged",
+      "type": "file_unchanged",
+      "path": "chief-of-stuff.toml"
+    }
+  ],
+  "max_turns": 18,
+  "timeout_seconds": 600
+}

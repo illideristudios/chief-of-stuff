@@ -1,0 +1,9 @@
+[workers]
+mode = "one-shot"
+[lanes.code]
+stages = ["specify", "implement", "merge"]
+gates = []
+[stages.specify]
+review_after = true
+[stages.implement]
+review_after = false

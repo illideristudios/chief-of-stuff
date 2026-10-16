@@ -71,6 +71,16 @@ class ReconcileTest(unittest.TestCase):
     def test_completed_stage_follows_its_edge_and_launches_review(self):
         self.assertEqual(self.plan(history=[Segment("implement")]), [reconcile.Review(KEY, 1)])
 
+    def test_completed_marked_stage_asks_until_that_attempt_is_reviewed(self):
+        expected = reconcile.Ask(KEY, "review_after:implement:1", "implement needs your review")
+        self.assertEqual(self.plan(history=[Segment("implement")], review_stages={"implement"}), [expected])
+        self.assertEqual(self.plan(history=[Segment("implement")], review_stages={"implement"},
+                                   reviewed_stages={KEY: {"review_after:implement:1"}}), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(history=[Segment("implement", attempt=2)], review_stages={"implement"},
+                                   reviewed_stages={KEY: {"review_after:implement:1"}}),
+                         [reconcile.Ask(KEY, "review_after:implement:2", "implement needs your review")])
+        self.assertEqual(self.plan(review_stages={"implement"}), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
     def test_gated_edge_asks_only_when_its_resolved_policy_requires_zach(self):
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
         self.assertEqual(self.plan(history=[Segment("implement")]),

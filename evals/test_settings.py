@@ -37,6 +37,21 @@ class SettingsTest(unittest.TestCase):
     def test_no_settings_line_is_off(self):
         self.assertEqual(st.load(self.root, None).notify.adapter, "off")
 
+    def test_review_after_defaults_to_plan_and_can_be_overridden_per_stage(self):
+        defaults = st.load(self.root, None)
+        self.assertTrue(defaults.reviews("plan"))
+        self.assertFalse(defaults.reviews("implement"))
+        text = ('[lanes.code]\nstages = ["plan", "implement", "review"]\n'
+                '[stages.plan]\nreview_after = false\n'
+                '[stages.implement]\nreview_after = true\n')
+        got = st.load(self.root, self.write(text))
+        self.assertFalse(got.reviews("plan"))
+        self.assertTrue(got.reviews("implement"))
+        self.assertFalse(got.reviews("review"))
+        for value in ('"true"', '1', '[]'):
+            with self.subTest(value=value), self.assertRaises(st.SettingsError):
+                st.load(self.root, self.write(text.replace('review_after = true', f'review_after = {value}')))
+
     def test_stage_profiles_and_skills_are_optional(self):
         text = ('[lanes.code]\nstages = ["implement", "review", "pr"]\n'
                 '[stages.review]\nagent = "reviewer"\nskills = ["security-review", "extras:code-review"]\n'
