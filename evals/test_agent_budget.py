@@ -382,7 +382,8 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               "A poll to it is a mailbox message, and its row's `waiting on` reads `<its name> — its mailbox "
               'reply` until the reply arrives.')}
 CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bfcd742acbf3dd1ef9',
- 'Relay': '3a31080acd47efa080232fac9d181f81dd0c1b30c1721fe7177c78dfbd6469e7'}
+ # #67: the permission relay updates its Sessions row before giving the one-line reply.
+ 'Relay': '63d02319b51f10a259d8da134a8d8d857bb78e3c091b0ed1647d2f4e7f8676f4'}
 
 # Slice 8 (#491): captured once from git show origin/main:agents/chief-of-stuff.md
 # (## Dispatch, 14,905 B). Split like slice 7: strip list prefixes and fences, split at
