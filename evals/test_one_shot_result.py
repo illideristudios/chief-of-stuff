@@ -49,7 +49,7 @@ def report(task: str = "Rate limit headers", **over) -> dict:
     """What `one_shot.reconcile` writes for a worker that finished and left the tracker updated."""
     return {"status": "human_review", "task": task, "worker": "rate-limit", "runtime_exit": 0,
             "reason": "the 429 path sends Retry-After in milliseconds", "changes": "M src/a/headers.py\nWorking tree clean",
-            "errors": [], **over}
+            "errors": [], "hold_release": "", "hold_release_error": "", **over}
 
 
 def padded(data: dict, size: int) -> str:
@@ -468,8 +468,10 @@ class ResultTests(unittest.TestCase):
     def test_the_launcher_writes_the_prefix_the_list_reads_for_a_tracker_it_could_not_update(self):
         # Both of the launcher's own tracker errors, written by its own `reconcile`: reword either and the list calls it reconciled.
         self.reconcile("changed", changed=True)
-        with mock.patch.object(one_shot, "update_tracker", side_effect=ValueError("the tracker went away")):
-            self.reconcile("failed", "Search pagination")
+        cwd = self.launched("failed", "Search pagination")
+        with mock.patch.object(one_shot.tracker_write, "edit", side_effect=ValueError("the tracker went away")):
+            one_shot.reconcile(self.root, datetime.now(timezone.utc).date().isoformat(),
+                               "Search pagination", "rate-limit", cwd, 0)
         self.assertEqual({row["worktree"]: row["reconciled"] for row in self.rows()}, {"changed": False, "failed": False})
         self.reconcile("fine")  # and a run that updated the tracker is reconciled
         self.assertEqual({row["worktree"]: row["reconciled"] for row in self.rows()},
@@ -486,6 +488,12 @@ class ResultTests(unittest.TestCase):
             self.assertEqual(literals, [], f"{name}.py spells the tracker error prefix itself")
 
     # With --task: that task's newest report, as the launcher wrote it.
+
+    def test_hold_release_fields_survive_the_result_command(self):
+        self.plant("rate-limit", report(hold_release="failed", hold_release_error="board changed"))
+        printed = self.one("--task", "Rate limit headers")
+        self.assertEqual(printed["hold_release"], "failed")
+        self.assertEqual(printed["hold_release_error"], "board changed")
 
     def test_a_task_prints_its_whole_report_and_the_tree_it_ran_in(self):
         mine = report(reason="the 429 path sends Retry-After in milliseconds", errors=["review hold: x"],
