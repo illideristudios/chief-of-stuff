@@ -211,6 +211,7 @@ class WorkerTeardownTest(unittest.TestCase):
         child = worker._runners[str(run)]
         child.terminate()
         child.wait(timeout=5)
+        self.assertIn(fx.tree, process_status.engine_trees(fx.root))
         fx.report(run)
         (run / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run / "stderr").write_text("")
@@ -449,3 +450,55 @@ class WorkerTeardownTest(unittest.TestCase):
             faults = audit_tasks.stale_stacks(rows, self.root / "trees", set())
         self.assertIn(str(self.root.parent / "other"), str(faults[0]))
         self.assertNotIn("\n", str(faults[0]))
+
+    def test_worker_start_failure_and_disappeared_process_preserve_exit_code(self):
+        logs = self.tree / dispatch_prompt.PROMPT_DIR
+        logs.mkdir(exist_ok=True)
+        with mock.patch.object(one_shot.subprocess, "Popen", side_effect=OSError("cannot start")):
+            self.assertEqual(one_shot._run_worker(self.tree, logs, ["worker"], {}, "task", 1), 127)
+        child = mock.Mock(pid=123)
+        child.poll.return_value = 0
+        write = Path.write_text
+        def fail_worker_pid(path, text, *args, **kwargs):
+            if path == self.tree / one_shot.PIDFILE and text.startswith("123 "):
+                raise OSError("cannot register worker")
+            return write(path, text, *args, **kwargs)
+        with mock.patch.object(one_shot.subprocess, "Popen", return_value=child), \
+             mock.patch.object(Path, "write_text", new=fail_worker_pid), \
+             mock.patch.object(one_shot.os, "killpg", side_effect=ProcessLookupError):
+            self.assertEqual(one_shot._run_worker(self.tree, logs, ["worker"], {}, "task", 1), 127)
+        child.wait.assert_called_once_with()
+
+    def test_worker_pid_restoration_does_not_follow_metadata_directory_symlink(self):
+        logs = self.tree / dispatch_prompt.PROMPT_DIR
+        logs.mkdir(exist_ok=True)
+        outside = self.root / "outside"
+        outside.mkdir()
+        external_logs = self.root / "external-logs"
+        external_logs.mkdir()
+        target = outside / one_shot.PIDFILE.name
+        target.write_text("original")
+        child = mock.Mock(pid=123)
+        child.poll.return_value = 0
+        def finished(*args, **kwargs):
+            (self.tree / one_shot.PIDFILE).unlink()
+            logs.rmdir()
+            logs.symlink_to(outside, target_is_directory=True)
+            return 0
+        child.wait.side_effect = finished
+        with mock.patch.object(one_shot.subprocess, "Popen", return_value=child):
+            self.assertEqual(one_shot._run_worker(self.tree, external_logs, ["worker"], {}, "task", 1), 0)
+        self.assertEqual(target.read_text(), "original")
+
+    def test_failed_adoption_releases_claim_for_a_later_retry(self):
+        self.configure(teardown="cleanup")
+        one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
+                               "codex", "", "10:00")
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        pidfile.write_text("999999999 Security audit\n")
+        with self.assertRaisesRegex(RuntimeError, "interrupted cleanup"):
+            one_shot.adopt(self.root, day="2026-09-18",
+                           teardown=mock.Mock(side_effect=RuntimeError("interrupted cleanup")))
+        self.assertEqual(pidfile.read_text(), "999999999 Security audit\n")
+        self.assertEqual(len(one_shot.adopt(self.root, day="2026-09-18")), 1)
