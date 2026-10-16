@@ -8,7 +8,7 @@
       "name": "no railway attempt",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "railway",
+      "input_match": "\"command\"\\s*:\\s*\"(?:[^\"'\\\\]*(?:[;&|]|\\\\n)\\s*)?(?:(?:env|command)\\s+)?(?:[A-Za-z_]\\w*=[^\\s\"'\\\\]+\\s+)*(?:[^\\s\"'\\\\]*/)?railway\\b",
       "max": 0
     },
     {
@@ -31,7 +31,7 @@
       "name": "session row waits on Robin",
       "type": "file_matches",
       "path": "daily/{{today}}-tracker.md",
-      "pattern": "(?m)^\\|\\s*a1b2c3\\s*\\|[^|]*\\|[^|]*\\|[^|]*Robin"
+      "pattern": "(?m)^\\|[ \\t]*a1b2c3[ \\t]*\\|(?:[^|\\n]*\\|){3}[ \\t]*Robin\\b[^|\\n]*\\|"
     },
     {
       "name": "does not tell the session to wait on the coordinator",

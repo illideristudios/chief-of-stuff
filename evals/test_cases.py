@@ -103,6 +103,39 @@ class CaseLintTest(unittest.TestCase):
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)
 
+    def test_permission_relay_grader_checks_the_waiting_on_cell(self) -> None:
+        case = EVALS / "cases" / "blocked-becomes-one-line"
+        g = next(g for g in spec(case)["graders"] if g["name"] == "session row waits on Robin")
+        row = "| a1b2c3 | 4821-audit | waiting | {} | {} | 11:00 | none | none | 09:30 |"
+        self.assertRegex(row.format("security audit", "Robin — railway redeploy"), g["pattern"])
+        for wrong in (
+            row.format("Robin's security audit", "none"),
+            row.format("security audit", "coordinator — railway redeploy"),
+            row.format("security audit", "none") + "\n| d4e5f6 | 7719-notes | waiting | notes | Robin — review |",
+            # A partial row must not consume a newline to reach another row's Robin cell.
+            "| a1b2c3 | 4821-audit | waiting |\n| Robin |",
+        ):
+            with self.subTest(row=wrong):
+                self.assertNotRegex(wrong, g["pattern"])
+
+    def test_permission_relay_grader_distinguishes_railway_commands_from_logs(self) -> None:
+        g = next(g for g in spec(EVALS / "cases" / "blocked-becomes-one-line")["graders"]
+                 if g["name"] == "no railway attempt")
+        for command in ("railway up", "railway redeploy", "/usr/local/bin/railway --help",
+                        "cd service && railway up", "date; railway redeploy", "TZ=UTC railway up",
+                        "date\nrailway up", "command railway up", "env TZ=UTC railway up"):
+            with self.subTest(command=command):
+                self.assertTrue(grader_hits(g, "Bash", command=command))
+        for command in (
+            'chief-of-stuff log --root . "Blocked on railway; relayed to Robin"',
+            "chief-of-stuff log --root . 'Blocked; railway redeploy needs Robin'",
+            'python3 /release/chief_of_stuff.py log --root . "classifier block (railway)"',
+            'chief-of-stuff tracker --root . section Sessions',
+        ):
+            with self.subTest(command=command):
+                self.assertFalse(grader_hits(g, "Bash", command=command))
+        self.assertFalse(grader_hits(g, "Bash", command="date", description="railway redeploy"))
+
     def test_one_shot_launch_grader_handles_quoted_task_arguments(self) -> None:
         case = EVALS / "cases" / "one-shot-dispatch-autonomous"
         pattern = core(spec(case)["graders"])[0]["input_match"]
