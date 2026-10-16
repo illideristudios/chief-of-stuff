@@ -10,6 +10,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent / "scripts"), str(HERE)]
@@ -17,7 +18,6 @@ import backlog_ref as backlog  # noqa: E402
 import board_sources as bs  # noqa: E402
 import columns  # noqa: E402
 import decision_page  # noqa: E402
-import panels  # noqa: E402
 import render_board as rb  # noqa: E402
 import task_forge  # noqa: E402
 import tracker_log  # noqa: E402
@@ -217,62 +217,7 @@ class SinceLookedTest(unittest.TestCase):
         self.assertEqual(self.since(None, kanban=gate, log=move), [("1 went needs input since 00:00", "1")])
 
 
-class MergeOrder(unittest.TestCase):
-    def setUp(self) -> None:
-        self.panel = rb.merge_order(SOURCES)
-
-    def test_approved_first_ready_before_failed_unshared_before_shared_then_in_review(self) -> None:
-        self.assertEqual([(r.num, r.ref) for r in self.panel.rows], [("1", "!41"), ("2", "!42"), ("3", "!52"), ("4", "!48")])
-
-    def test_drafts_and_closed_changes_are_not_in_the_order(self) -> None:
-        self.assertNotIn("!50", [r.ref for r in self.panel.rows])
-        self.assertNotIn("!37", [r.ref for r in self.panel.rows])
-
-    def test_facts_are_approval_pipeline_base_and_shared_files(self) -> None:
-        facts = {r.ref: r.facts for r in self.panel.rows}
-        self.assertEqual(facts["!41"], "approved · pipeline passed · base main · no shared files")
-        self.assertEqual(facts["!42"], "approved · pipeline passed · base main · shares 1 file with !48, !50")
-        self.assertEqual(facts["!48"], "in review · pipeline passed · base main · shares 1 file with !42, !50")
-        self.assertEqual(facts["!52"], "approved · pipeline failed · base main · no shared files")
-
-    def test_head_counts(self) -> None:
-        self.assertEqual((self.panel.id, self.panel.count, self.panel.note), ("merge", 4, "3 approved · 1 in review"))
-        self.assertEqual((self.panel.rows[0].name, self.panel.rows[0].href), ("Password reset copy", "https://forge/41"))
-
-    def test_the_order_shows_five_and_counts_the_rest(self) -> None:
-        many = bs.Sources({}, {}, {f"!{n}": change(f"!{n}") for n in range(1, 9)}, (), {})
-        p = rb.merge_order(many)
-        self.assertEqual((p.count, len(p.rows), p.foot), (8, 5, "+ 3 more"))
-
-    def test_empty_sources_leave_an_empty_order(self) -> None:
-        p = rb.merge_order(bs.EMPTY)
-        self.assertEqual((p.count, p.rows, p.note), (0, (), "0 approved · 0 in review"))
-
-
-class Workers(unittest.TestCase):
-    def test_one_row_per_worker_with_age_and_facts(self) -> None:
-        p = rb.worker_panel(SOURCES, NOW)
-        self.assertEqual((p.id, p.count, p.note), ("workers", 2, "1 one-shot · 1 session"))
-        # (#199) facts are `<kind> · <runtime model> · <task> · <tree>`, empty parts skipped: impl-04 has
-        # no tree, so nothing stands in for it — not the old "last reply" fallback.
-        self.assertEqual([(r.name, r.side, r.facts) for r in p.rows], [
-            ("impl-07", "0h42m", "one-shot · claude opus · Cut the release · trees/cut"),
-            ("impl-04", "1h23m", "session · codex · Audit"),
-        ])
-
-    def test_empty(self) -> None:
-        self.assertEqual(rb.worker_panel(bs.EMPTY, NOW).rows, ())
-
-
 class Decisions(unittest.TestCase):
-    def test_pending_rows_carry_asked_recommended_and_default(self) -> None:
-        d = {"headline": "Cache warmup: keep the pool?", "recommended": "A", "default": "pool stays"}
-        p = rb.decision_panel([("cache", d, NOW.replace(hour=1, minute=41), ""), ("bad", None, None, "no ask")], 4, NOW)
-        self.assertEqual((p.id, p.count, p.foot, p.link), ("decisions", 1, "4 answered today", ("decisions page", "/decisions")))
-        self.assertEqual(p.rows[0], panels.Row("Cache warmup: keep the pool?", "asked 01:41 · recommended A · default: pool stays",
-                                               href="/decisions/cache"))
-        self.assertEqual(p.rows[1], panels.Row("decision-bad.json", "unreadable: no ask"))
-
     def test_the_pending_list_is_the_decisions_page_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pages = Path(tmp)
@@ -371,12 +316,14 @@ class CardFactsTest(unittest.TestCase):
         sources = replace(SOURCES, changes={c.ref: c for c in changes})
         lanes = lanes or {"build": st.Lane(("implement", "review", "fix", "merge"))}
         html = rb.render(tracker + log, parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
-                         lanes=lanes, sources=sources, pending_refs=refs, stage_log=list(earlier))
+                         lanes=lanes, sources=sources, pending_refs=refs,
+                         stage_log=[(d, text) for d, text in earlier if d >= NOW.date() - timedelta(days=2)],
+                         look_log=[(d, text) for d, text in earlier if d < NOW.date() - timedelta(days=2)])
         # Capture the actual cards produced by render, including stage history and decision holds.
         return html.split("</style>", 1)[1]
 
     def marks(self, html, name="Cut the release"):
-        card = html.split(f'>{name}</a>', 1)[1].split('<div class="columns-card', 1)[0]
+        card = re.split(rf'>{re.escape(name)}</(?:a|div)>', html, maxsplit=1)[1].split('<div class="columns-card', 1)[0]
         return re.findall(r'class="columns-tag columns-mark" data-cat="[^"]+">([^<]+)<', card)
 
     def test_approved_cards_keep_the_complete_merge_order_past_the_old_five_row_limit(self):
@@ -388,7 +335,10 @@ class CardFactsTest(unittest.TestCase):
                    change("!1", approved=True, files=("a",)),
                    change("!7", approved=True), change("!2", approved=True, pipeline="failed"),
                    change("!4", approved=False)]
-        self.assertIn("queue 3", self.marks(self.cols(changes)))
+        for ref, position in (("!7", 1), ("!1", 2), ("!3", 3), ("!2", 4)):
+            with self.subTest(ref=ref):
+                rows = [replace(c, issues=("#9",) if c.ref == ref else ()) for c in changes]
+                self.assertIn(f"queue {position}", self.marks(self.cols(rows)))
 
     def test_only_open_approved_non_draft_changes_receive_a_queue_mark(self):
         for attrs in ({"approved": False}, {"approved": True, "draft": True},
@@ -438,10 +388,79 @@ class CardFactsTest(unittest.TestCase):
             (root / "daily").mkdir()
             today = datetime.now(NOW.tzinfo).date()
             (root / f"daily/{today}-tracker.md").write_text(TRACKER + "- 11:00 stage: Cut the release → fix\n")
-            earlier = TRACKER + "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+            earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+            earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
             (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(earlier)
-            html = rb.write(root)[0].read_text().split("</style>", 1)[1]
+            html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
             self.assertIn("looping", self.marks(html))
+
+    def test_a_reused_name_keeps_moves_with_the_issue_on_their_day(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+        earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+        tracker = TRACKER.replace("| Write README | Write eval README |", "| Draft | Draft release |")
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n- 11:30 stage: Draft → fix\n",
+                         tracker=tracker, earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertIn("looping", self.marks(html))
+        self.assertNotIn("looping", self.marks(html, "Draft"))
+
+    def test_a_new_issue_with_the_same_name_does_not_inherit_fix_visits(self):
+        earlier = TRACKER.replace("| #9 |", "| #99 |")
+        earlier += "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertNotIn("looping", self.marks(html))
+
+    def test_unrelated_workflow_rows_do_not_share_fix_visits(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Prior workflow | Prior item |")
+        earlier = earlier.replace("| #9 |", "| workflow |")
+        earlier += "- 09:00 stage: Prior workflow → fix\n- 10:00 stage: Prior item → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         tracker=TRACKER.replace("| #9 |", "| workflow |"),
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertNotIn("looping", self.marks(html))
+
+    def test_finished_tasks_have_no_looping_mark(self):
+        log = "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n- 11:00 stage: Cut the release → fix\n"
+        lanes = {"build": st.Lane(("implement", "review", "fix", "merge", "main"))}
+        for tracker, changes in (
+                (TRACKER.replace("running 10:30", "done 10:30"), []),
+                (TRACKER.replace("| build | review |", "| build | main |"), []),
+                (TRACKER, [change("!3", state="merged", issues=("#9",))])):
+            with self.subTest(tracker=tracker, changes=changes):
+                self.assertNotIn("looping", self.marks(self.cols(changes, log, tracker=tracker, lanes=lanes)))
+
+    def test_old_loop_history_does_not_suppress_a_recent_launcher_hold(self):
+        old = TRACKER + "- 09:00 stage: Cut the release → review\n"
+        log = "- 12:00 one-shot w1 started: claude, task Cut the release branch\n- 13:00 one-shot w1: completed; awaiting integration\n"
+        html = rb.render(TRACKER.replace("| build | review |", "| build | pr |") + log,
+                         parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=LANES, kanban=replace(KANBAN, hold_stages=("pr",)),
+                         look_log=[(NOW.date() - timedelta(days=5), old)], looked=NOW - timedelta(hours=3),
+                         sources=SOURCES)
+        self.assertIn('title="1 went needs input since 11:30"', html)
+
+    def test_write_stops_loop_history_at_the_tasks_first_absent_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            for days, text in ((0, TRACKER), (5, TRACKER), (6, "## Tasks\n"), (100, TRACKER)):
+                (root / f"daily/{today - timedelta(days=days)}-tracker.md").write_text(text)
+            # Isolate board history reads from the pre-existing decision deadline/context readers.
+            original = Path.read_text
+            reads = []
+            def read(path, *args, **kwargs):
+                reads.append(path)
+                return original(path, *args, **kwargs)
+            with mock.patch.object(rb, "with_workspace_decision_deadlines", side_effect=lambda root, cfg, *a: cfg), \
+                    mock.patch.object(rb.decision_page, "decision_context", return_value=decision_page.Context(NOW)), \
+                    mock.patch.object(rb, "render", wraps=rb.render) as render, \
+                    mock.patch.object(Path, "read_text", read):
+                rb.write(root, day=today.isoformat())
+            self.assertNotIn(root / f"daily/{today - timedelta(days=100)}-tracker.md", reads)
+            self.assertEqual(render.call_args.kwargs["look_log"], [])  # no previous look: today only for holds
 
     def test_tiles_and_tabs_still_reach_their_destinations_without_the_panels(self):
         html = self.cols([])

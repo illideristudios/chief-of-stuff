@@ -5,7 +5,7 @@ Two computations are in play and these tests keep them apart:
 - `board_sources.workers()` decides a session's `task`: the open task row it owns (its issue ref and row
   name), not the Sessions row's `doing` prose. Tests that check this run the real function over a minimal
   tracker (no registered process, no live one-shot trees), the exact seam the issue's bug lives in.
-- `render_board.worker_panel` and `workers_page.render` draw whatever `task` they are handed. Tests of the
+- `workers_page.render` draws whatever `task` they are handed. Tests of the
   facts format, the note order and the name links build `board_sources.Worker` rows directly, since those
   are markup contracts independent of how `task` was computed.
 """
@@ -24,7 +24,6 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent / "scripts"), str(HERE)]
 
 import board_sources as bs  # noqa: E402
-import panels  # noqa: E402
 import render_board as rb  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 import workers_page  # noqa: E402
@@ -79,19 +78,13 @@ class SessionTaskOwnershipTest(unittest.TestCase):
         self.assertEqual(session.task, "")
 
 
-class PanelFactsFormatTest(unittest.TestCase):
-    """(#199) The board panel's facts read `<kind> · <runtime model> · <task> · <tree>`, skipping empty
-    parts (Acceptance line 2)."""
-
-    def test_a_one_shot_shows_every_part(self):
-        w = bs.Worker("impl-07", "one-shot", "claude", "opus", "Cut the release", "trees/cut", NOW, None)
-        panel = rb.worker_panel(replace(bs.EMPTY, workers=(w,)), NOW)
-        self.assertEqual(panel.rows[0].facts, "one-shot · claude opus · Cut the release · trees/cut")
-
-    def test_a_session_with_no_model_and_no_tree_skips_both(self):
-        w = bs.Worker("impl-04", "session", "codex", "", "Audit", "", NOW, NOW)
-        panel = rb.worker_panel(replace(bs.EMPTY, workers=(w,)), NOW)
-        self.assertEqual(panel.rows[0].facts, "session · codex · Audit")
+class WorkersPageFactsTest(unittest.TestCase):
+    def test_worker_kind_runtime_model_and_task_are_rendered(self):
+        ws = (bs.Worker("impl-07", "one-shot", "claude", "opus", "Cut the release", "", NOW, None),
+              bs.Worker("impl-04", "session", "codex", "", "Audit", "", NOW, NOW))
+        html = workers_page.render("", replace(bs.EMPTY, workers=ws), NOW, Path(tempfile.mkdtemp()), None)
+        self.assertIn("<td>impl-07</td><td>claude opus</td><td>one-shot</td><td>Cut the release</td>", html)
+        self.assertIn("<td>impl-04</td><td>codex</td><td>session</td><td>Audit</td>", html)
 
 
 class WorkersPageSessionTaskTest(unittest.TestCase):
@@ -108,33 +101,6 @@ class WorkersPageSessionTaskTest(unittest.TestCase):
         self.assertNotIn(SENTINEL, html)
 
 
-class PanelWorkerNameLinksTest(unittest.TestCase):
-    """(#199) The panel's worker names link to /workers (Acceptance line 4)."""
-
-    def test_each_worker_row_links_its_name_to_the_workers_page(self):
-        ws = (bs.Worker("impl-07", "one-shot", "claude", "opus", "Cut the release", "trees/cut", NOW, None),
-              bs.Worker("planner", "session", "claude", "", "Tidy config", "", NOW, None))
-        panel = rb.worker_panel(replace(bs.EMPTY, workers=ws), NOW)
-        for row, w in zip(panel.rows, ws):
-            with self.subTest(worker=w.name):
-                self.assertEqual(row.href, "/workers")
-        html = panels.panels([panel])
-        for w in ws:
-            with self.subTest(worker=w.name, check="markup"):
-                self.assertIn(f'<a class="panels-name" href="/workers">{w.name}</a>', html)
-
-
-class PanelNoteOrderTest(unittest.TestCase):
-    """(#199) The panel note counts one-shots first: `N one-shot · M session` (Acceptance line 5)."""
-
-    def test_one_shots_are_counted_before_sessions_regardless_of_list_order(self):
-        ws = (bs.Worker("planner", "session", "claude", "", "Tidy", "", NOW, None),
-              bs.Worker("impl-1", "one-shot", "claude", "opus", "A", "trees/a", NOW, None),
-              bs.Worker("impl-2", "one-shot", "claude", "opus", "B", "trees/b", NOW, None))
-        panel = rb.worker_panel(replace(bs.EMPTY, workers=ws), NOW)
-        self.assertEqual(panel.note, "2 one-shot · 1 session")
-
-
 class NoTrackerProseTest(unittest.TestCase):
     """(#199) No worker fact is longer than its parts: no tracker prose reaches either view (Acceptance
     line 6)."""
@@ -144,10 +110,6 @@ class NoTrackerProseTest(unittest.TestCase):
                             f"| abc123 | reviewer-2 | working | {SENTINEL} | nothing |  |  | none | 14:00 |\n")
         self.workers = make_workers(self.body)
         self.sources = replace(bs.EMPTY, workers=self.workers)
-
-    def test_the_sentinel_is_absent_from_the_board_panel(self):
-        panel = rb.worker_panel(self.sources, NOW)
-        self.assertNotIn(SENTINEL, repr(panel.rows))
 
     def test_the_sentinel_is_absent_from_the_workers_page(self):
         html = workers_page.render(self.body, self.sources, NOW, Path(tempfile.mkdtemp()), None)
