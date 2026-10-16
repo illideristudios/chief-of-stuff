@@ -270,6 +270,10 @@ class ForgePipelineTest(unittest.TestCase):
                     self.github_branch(rows, **payload)
                 self.assertEqual(str(raised.exception), f"branch head: {detail}")
 
+    def test_github_branch_accepts_a_full_page_whose_total_count_matches(self):
+        got = self.github_branch([github_row()] * backlog.PER_PAGE, total_count=backlog.PER_PAGE)
+        self.assertEqual(got.status, "passed")
+
     def test_every_pipeline_must_match_the_requested_branch_head(self):
         for home in (GL, GH):
             for field in ("sha", "ref"):
