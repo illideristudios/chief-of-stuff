@@ -48,6 +48,20 @@ class RoundTripTest(unittest.TestCase):
                 self.assertEqual(tl.ENDED.match(line).groups(), ("10", "20", "worker01", outcome))
                 self.assertIsNone(tl.RELAUNCH.match(line))
 
+    def test_review_class_round_trip_and_legacy_prose(self):
+        for cause in ("worker's call", "no result file", "timeout", "runtime exit", "launcher check"):
+            line = tl.ended_line("10:20", "w", "human_review", "why", "none", review_class=cause)
+            self.assertEqual(tl.review_class(line), cause)
+            self.assertEqual(tl.ENDED.match(line)[4], tl.HUMAN_REVIEW)
+            start = tl.started_line("09:15", "w", "codex", "", TREE, "Audit")
+            self.assertEqual(tl.moves(f"## Log\n{start}\n{line}\n", DAY, CT)[-1].stage, "review")
+        for line in (
+            tl.ended_line("10:20", "w", "human_review", "[timeout] was quoted", "none"),
+            tl.ended_line("10:20", "w", "done", "timeout", "none"),
+            "- 10:20 note: HUMAN REVIEW NEEDED [timeout] — example",
+        ):
+            self.assertEqual(tl.review_class(line), "")
+
     def test_a_relaunch_line(self):
         line = tl.relaunch_line("10:20", "worker01", "Security audit", "target PR merged before work began")
         self.assertEqual(tl.RELAUNCH.match(line).groups(), ("10", "20", "worker01", "relaunch"))

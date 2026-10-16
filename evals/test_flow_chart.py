@@ -91,6 +91,18 @@ class MovesTest(unittest.TestCase):
 
 
 class BuildTest(unittest.TestCase):
+    def test_board_shows_review_class_beside_the_hold_and_clears_it_on_a_new_launch(self):
+        for cause in ("worker's call", "no result file", "timeout", "runtime exit"):
+            tracker = TODAY_TRACKER + "\n" + tl.started_line("01:00", "w", "codex", "", "worktree `tree`", "Warm the pool")
+            tracker += "\n" + tl.ended_line("02:00", "w", "human_review", "why", "none", review_class=cause)
+            cfg = parse_coordinator(BoardTest.CLAUDE, today=TODAY)
+            html = rb.render(tracker, cfg, NOW, lanes=LANES, kanban=KANBAN)
+            from html import unescape
+            self.assertIn(f"human review · {cause}", unescape(html))
+            # Explicit stage moves must not hide a launcher's cause. A fresh run must clear it.
+            tracker += "\n" + tl.started_line("02:05", "w2", "codex", "", "worktree `tree`", "Warm the pool")
+            self.assertNotIn(f"human review · {cause}", unescape(rb.render(tracker, cfg, NOW, lanes=LANES, kanban=KANBAN)))
+
     def test_a_segment_runs_from_each_move_to_the_next_and_the_last_to_now(self):
         status, row = rows()["Upload size limit"]
         self.assertEqual((status, row.ref, row.note), ("running", "#109", "pr"))

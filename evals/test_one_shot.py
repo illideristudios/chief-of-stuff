@@ -406,7 +406,7 @@ class CommandTest(unittest.TestCase):
 
     def test_exit_zero_without_structured_result_requires_review(self):
         with tempfile.TemporaryDirectory() as tmp:
-            status, reason, changes, counts = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
+            status, reason, changes, counts, _ = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
         self.assertEqual(status, "human_review")
         self.assertIn("did not write", reason)
         self.assertEqual(changes, "")
@@ -416,7 +416,7 @@ class CommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('status: done\nreason: "costs \\$5"\nchanges: "a.py"\n')
-            status, reason, _, _ = one_shot.worker_result(path, 0)
+            status, reason, _, _, _ = one_shot.worker_result(path, 0)
         self.assertEqual(status, "human_review")
         self.assertIn("costs", reason)
 
@@ -426,14 +426,14 @@ class CommandTest(unittest.TestCase):
             path = Path(tmp) / "worker-result.toon"
             path.write_text('{"status": "done", "reason": "fixed: the \\"cap\\"", "changes": "a.py, b.py"}\n')
             self.assertEqual(one_shot.worker_result(path, 0), (
-                "done", 'fixed: the "cap"', "a.py, b.py", dict.fromkeys(("passed", "failed", "skipped", "xfailed"))))
+                "done", 'fixed: the "cap"', "a.py, b.py", dict.fromkeys(("passed", "failed", "skipped", "xfailed")), ""))
 
     def test_toon_result_carries_observed_suite_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             counts = {"passed": 23, "failed": 0, "skipped": 2, "xfailed": 11}
             path.write_text(toon_encode({"status": "done", "reason": "finished", "changes": "tested", **counts}))
-            self.assertEqual(one_shot.worker_result(path, 0), ("done", "finished", "tested", counts))
+            self.assertEqual(one_shot.worker_result(path, 0), ("done", "finished", "tested", counts, ""))
 
 
 class CodexAddDirArgsTest(unittest.TestCase):
@@ -656,6 +656,49 @@ class RunTest(unittest.TestCase):
             return one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=tree or self.tree, name="worker01", runtime=runtime, agent_type=None,
                                 model=model, effort=effort, dry_run=False)
+
+    def test_review_causes_reach_report_log_and_issue_comment(self):
+        valid = "status: human_review\nreason: requirement conflicts with the test\nchanges: none\n"
+        for result, code, cause, detail in (
+            (valid, 0, "worker's call", "requirement conflicts with the test"),
+            (None, 0, "no result file", "did not write"),
+            ("not a result", 0, "no result file", "incomplete or invalid"),
+            ('status: done\n', 0, "no result file", "incomplete or invalid"),
+            (None, 124, "timeout", "did not write"),
+            (valid, 124, "timeout", "result complete"),
+            (None, 7, "runtime exit", "did not write"),
+            (valid, 7, "runtime exit", "result complete"),
+            ('status: done\nreason: finished\nchanges: none\n', 0, "launcher check", "not clean"),
+        ):
+            with self.subTest(cause=cause, code=code, result=result):
+                (self.root / "CLAUDE.md").write_text(CLAUDE + "- Backlog: GitHub issues; repo https://github.com/example/app (private)\n")
+                self.tracker.write_text(TRACKER.replace(
+                    "| item | owner | state | since | due | checklist |",
+                    "| name | item | owner | state | since | due | size | issue | checklist |")
+                    .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|")
+                    .replace("| Security audit | unassigned | open | 09:00 | | Inspect upload handler |",
+                             "| Security audit | Security audit | unassigned | open | 09:00 | | S | #7 | Inspect upload handler |"))
+                one_shot.record_launch(self.tracker, "Security audit", "worker01", "worktree `worker`", "codex", "m", "09:00")
+                path = self.tree / one_shot.RESULT
+                path.parent.mkdir(exist_ok=True)
+                if result is None:
+                    path.unlink(missing_ok=True)
+                else:
+                    path.write_text(result)
+                # Only the final case has a dirty tree, to exercise a launcher-imposed hold.
+                with mock.patch.object(one_shot, "changed_files", return_value="partial.txt" if cause == "launcher check" else ""), \
+                     mock.patch.object(one_shot, "committed_changes", return_value=one_shot.NO_COMMITS), \
+                     mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
+                    report = one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, code)
+                self.assertEqual(report["status"], "human_review")
+                self.assertEqual(report.get("review_class"), cause)
+                self.assertEqual(toon_decode((self.tree / one_shot.REPORT).read_text())["review_class"], cause)
+                self.assertIn(detail, report["reason"])
+                if cause in ("timeout", "runtime exit", "no result file"):
+                    self.assertIn(str(code), report["reason"])
+                self.assertIn(f"HUMAN REVIEW NEEDED [{cause}]", self.tracker.read_text())
+                self.assertIn(cause, comment.call_args.args[2].splitlines()[0])
+                self.assertIn(detail, comment.call_args.args[2])
 
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',

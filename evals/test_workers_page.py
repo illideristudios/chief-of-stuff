@@ -118,6 +118,20 @@ def elapsed(start: datetime, now: datetime) -> set[str]:
     return {f"{m // 60}h{m % 60:02d}m" for m in (int((now - start).total_seconds() // 60) + d for d in (0, 1))}
 
 
+class ReviewClassTest(unittest.TestCase):
+    def test_ended_today_shows_each_review_class_and_counts_all_as_needing_you(self):
+        import tracker_log as tl
+        import workers_page
+        lines = []
+        for n, cause in enumerate(("worker's call", "no result file", "timeout", "runtime exit")):
+            lines.append(tl.started_line("09:00", f"w{n}", "codex", "", "worktree `tree`", "Task"))
+            lines.append(tl.ended_line("10:00", f"w{n}", "human_review", "why", "none", review_class=cause))
+        html = workers_page.render("## Log\n" + "\n".join(lines), bs.EMPTY, datetime.now(ZONE), Path("/unused"), 4)
+        for cause in ("worker&#x27;s call", "no result file", "timeout", "runtime exit"):
+            self.assertIn(f"human review · {cause}", html)
+        self.assertIn('<b>4</b><span class="cap">need you</span>', html)
+
+
 class Workspace:
     """A workspace on disk: today's tracker with two running one-shots (impl-a1 with a session log, impl-b2
     without), a session (planner), today's three end lines, yesterday's tracker, and the sources cache."""
