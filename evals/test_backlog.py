@@ -633,6 +633,15 @@ class GitHubReadTest(unittest.TestCase):
                 self.assertIn(needle, got.error)
                 self.assertEqual(got.issues, ())
 
+    def test_run_gh_has_a_bounded_timeout(self):
+        import subprocess
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", bl.TIMEOUT)) as run:
+            code, out, error = bl.run_gh(["issue", "view", "7"])
+        self.assertEqual(run.call_args.kwargs["timeout"], bl.TIMEOUT)
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "")
+        self.assertIn("timed out", error)
+
     def test_run_gh_without_gh_installed(self):
         with patch("subprocess.run", side_effect=FileNotFoundError("gh")):
             self.assertEqual(bl.run_gh(["issue", "list"]), (127, "", "gh not found"))

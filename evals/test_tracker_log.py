@@ -117,6 +117,16 @@ class RoundTripTest(unittest.TestCase):
         text = "\n".join(("# Tracker", "", "## Log", "", first, second, ""))
         self.assertEqual(tl.hold_failures(text), {"Security audit": "lab was down"})
 
+    def test_a_later_run_clears_only_its_own_hold_failure(self):
+        start = tl.started_line("11:00", "worker01", "codex", "m", "worktree `tree`", "Security audit")
+        ends = [start, start + "\n" + tl.relaunch_line("11:10", "worker01", "Security audit", "base moved"),
+                start + "\n" + tl.ended_line("11:10", "worker01", "done", "finished", "none")]
+        for end in ends:
+            with self.subTest(end=end):
+                text = "## Log\n" + tl.hold_failed_line("10:00", "old", "Other", "offline") + "\n" + start + "\n"
+                text += tl.hold_failed_line("10:20", "worker01", "Security audit", "offline") + "\n" + end
+                self.assertEqual(tl.hold_failures(text), {"Other": "offline"})
+
     def test_an_approved_forge_closure_line_reads_back_its_task(self):
         # #547: the coordinator records the user's approval; the audit does not reopen the task it names.
         line = tl.approved_close_line("10:05", "Open branch work",

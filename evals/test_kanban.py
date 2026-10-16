@@ -337,13 +337,30 @@ class CliTest(unittest.TestCase):
         self.assertIn("would update", output.getvalue())
 
     def test_release_hold_uses_the_guarded_stage_command(self):
-        result = kanban.Sync(backlog.IssueRef("team/app", 7, "labs.example.test"), "plan review", done=True)
-        with mock.patch.object(forge.Forge, "write_stage", return_value=result) as sync, redirect_stdout(io.StringIO()):
-            self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25",
-                                             "--issue", "#7", "--from-stage", "plan review",
-                                             "--release-hold", "--commit"]), 0)
-        self.assertTrue(sync.call_args.kwargs["release_hold"])
-        self.assertEqual(sync.call_args.kwargs["expected"], "plan review")
+        for github in (False, True):
+            with self.subTest(github=github):
+                if github:
+                    config = self.root / "CLAUDE.md"
+                    config.write_text(config.read_text().replace(
+                        "GitLab issues; host https://labs.example.test; project team/app",
+                        "GitHub issues; repo https://github.com/team/app"))
+                result = kanban.Sync(backlog.IssueRef("team/app", 7), "plan review",
+                                     kanban.Delta(remove=(FLOW.human_review_label,)), done=True)
+                output = io.StringIO()
+                with mock.patch.object(forge.Forge, "write_stage", return_value=result) as sync, redirect_stdout(output):
+                    self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25",
+                                                     "--issue", "#7", "--from-stage", "plan review",
+                                                     "--release-hold", "--commit"]), 0)
+                self.assertTrue(sync.call_args.kwargs["release_hold"])
+                self.assertEqual(sync.call_args.kwargs["expected"], "plan review")
+                self.assertIn("updated", output.getvalue())
+                self.assertIn(FLOW.human_review_label, output.getvalue())
+
+    def test_release_requires_issue_and_prior_stage_even_in_preview(self):
+        for flags in ([], ["--issue", "#7"], ["--from-stage", "plan"],
+                      ["--issue", "#7", "--initialize"]):
+            with self.subTest(flags=flags), redirect_stderr(io.StringIO()):
+                self.assertEqual(kanban_cli.main(["--root", str(self.root), "--release-hold", *flags]), 2)
 
     def _two_rows_on_issue_7(self):
         """Two lane rows sharing issue #7 (#69): the feature row and an MR-fix row at a further stage."""
@@ -492,6 +509,15 @@ class AuditTest(unittest.TestCase):
                                                hold_failures={"Security audit": "lab was down"})
         self.assertEqual(clean, [])
         self.assertEqual([f.why for f in failed], ["review hold failed: lab was down; the issue has no hold label"])
+
+    def test_old_hold_failure_does_not_fault_an_open_row(self):
+        task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
+                               label="Build it", kind="open", item="Security audit")
+        cfg = backlog.Backlog("https://labs.example.test", "team/app")
+        issue = backlog.Issue(7, "Build it", "opened", ("03 - BUILD",))
+        with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+            self.assertEqual(audit_tasks.kanban_faults([task], cfg, FLOW,
+                hold_failures={"Security audit": "lab was down"}), [])
 
     def test_a_failed_hold_whose_hold_landed_is_not_reported(self):
         task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",

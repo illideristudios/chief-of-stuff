@@ -1120,14 +1120,95 @@ class RunTest(unittest.TestCase):
     def test_a_failed_hold_release_does_not_leave_the_task_ready(self):
         self._with_an_issue_and_kanban()
         fake = self._fake(self.ORDINARY, write_partial=False)
-        with mock.patch.object(one_shot.forge.Forge, "write_stage",
+        with mock.patch.object(one_shot.backlog, "run_gh", return_value=(0, '{"labels": [{"name": "!! - HUMAN REVIEW REQUIRED"}]}', "")), \
+             mock.patch.object(one_shot.forge.Forge, "write_stage",
                                return_value=SimpleNamespace(done=False, error="board changed")), \
-             mock.patch.object(one_shot.forge, "add_human_hold", return_value=""), \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")):
             self._run(fake)
-        self.assertNotIn("| unassigned | open |", self.tracker.read_text())
+        self.assertIn("| Security audit | Robin | waiting |", self.tracker.read_text())
+        self.assertEqual(self._report()["errors"], ["release review hold: board changed"])
         self.assertEqual(self._report()["status"], "human_review")
         self.assertIn("board changed", self._report()["reason"])
+        hold.assert_not_called()
+        self.assertEqual(self._report()["hold_release"], "failed")
+        self.assertIn("hold release failed: board changed, task Security audit", self.tracker.read_text())
+
+    def test_unlaned_quota_stop_never_syncs_a_board_stage(self):
+        self._with_an_issue_and_kanban()
+        self.tracker.write_text(self.tracker.read_text().replace("| build | implement |", "| | |"))
+        with mock.patch.object(one_shot.forge.Forge, "write_stage") as sync:
+            _, hold, comment = self._stopped()
+        sync.assert_not_called()
+        hold.assert_not_called()
+        comment.assert_not_called()
+        self.assertEqual(self._report()["status"], "relaunch")
+
+    def test_uninitialized_issue_without_hold_does_not_block_quota_relaunch(self):
+        self._with_an_issue_and_kanban()
+        fake = self._fake(None, exit_code=3, write_partial=False, stderr=self.QUOTA)
+        with mock.patch.object(one_shot.backlog, "run_gh", return_value=(0, '{"labels": []}', "")) as gh:
+            self._run(fake)
+        self.assertEqual(self._report()["status"], "relaunch")
+        self.assertEqual(self._report()["hold_release"], "absent")
+        self.assertTrue(all(c.args[0][:2] == ["issue", "view"] for c in gh.call_args_list))
+
+    def test_completed_worker_releases_a_previous_launcher_hold(self):
+        self._with_an_issue_and_kanban()
+        labels = ["03 - BUILD", "!! - HUMAN REVIEW REQUIRED"]
+        def gh(args):
+            if args[:2] == ["issue", "view"]:
+                return 0, json.dumps({"labels": [{"name": x} for x in labels]}), ""
+            if args[:2] == ["issue", "edit"]:
+                labels.remove(args[args.index("--remove-label") + 1])
+                return 0, "", ""
+            self.fail(args)
+        with mock.patch.object(one_shot.backlog, "run_gh", side_effect=gh):
+            self._run(self._fake('status: done\nreason: finished\nchanges: none\n', write_partial=False))
+        self.assertEqual(self._report()["status"], "done")
+        self.assertEqual(self._report()["hold_release"], "removed")
+        self.assertEqual(labels, ["03 - BUILD"])
+        self.assertIn("hold release removed: , task Security audit", self.tracker.read_text())
+
+    def test_shared_issue_uses_furthest_stage_and_preserves_any_waiting_sibling_hold(self):
+        for waiting in (False, True):
+            with self.subTest(waiting=waiting):
+                self._with_an_issue_and_kanban()
+                settings = self.root / "chief-of-stuff.toml"
+                settings.write_text(settings.read_text() + "review = 0\n")
+                body = self.tracker.read_text().replace("\n## File ownership", 
+                    "| Other | Other | Robin | " + ("waiting" if waiting else "open") + " | 09:00 | | M | build | implement | #7 | |\n\n## File ownership")
+                self.tracker.write_text(body.replace("| build | implement | #7 | Inspect", "| build | review | #7 | Inspect"))
+                labels = ["03 - BUILD", "!! - HUMAN REVIEW REQUIRED"]
+                def gh(args):
+                    if args[:2] == ["issue", "view"]:
+                        return 0, json.dumps({"labels": [{"name": x} for x in labels]}), ""
+                    if args[:2] == ["issue", "edit"]:
+                        self.assertEqual(args[args.index("--remove-label") + 1], "!! - HUMAN REVIEW REQUIRED")
+                        labels.remove("!! - HUMAN REVIEW REQUIRED")
+                        return 0, "", ""
+                    self.fail(args)
+                with mock.patch.object(one_shot.backlog, "run_gh", side_effect=gh):
+                    self._run(self._fake(self.ORDINARY, write_partial=False))
+                self.assertEqual(self._report()["status"], "relaunch")
+                self.assertEqual("!! - HUMAN REVIEW REQUIRED" in labels, waiting)
+
+    def test_tracker_lock_revalidates_before_any_forge_mutation(self):
+        self._with_an_issue_and_kanban()
+        edit = one_shot.tracker_write.edit
+        def raced(path, change):
+            # A coordinator edit lands after reconcile's initial reads and before it takes the lock.
+            if "running" in path.read_text():
+                path.write_text(path.read_text().replace("| worker01 | running", "| another | running"))
+            return edit(path, change)
+        with mock.patch.object(one_shot.tracker_write, "edit", side_effect=raced), \
+             mock.patch.object(one_shot.backlog, "run_gh") as gh, \
+             mock.patch.object(one_shot.forge, "add_human_hold") as hold:
+            self._run(self._fake(self.ORDINARY, write_partial=False))
+        gh.assert_not_called()
+        hold.assert_not_called()
+        self.assertEqual(self._report()["status"], "human_review")
+        self.assertTrue(self._report()["errors"])
 
     def test_relaunch_with_changes_needs_review(self):
         fake = self._fake('status: relaunch\nreason: base moved\nchanges: none\n')
@@ -1158,7 +1239,7 @@ class RunTest(unittest.TestCase):
         fake = self._fake(result, exit_code=exit_code, write_partial=write_partial, commit_partial=commit_partial,
                           stderr=stderr, during=during)
         with mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
-             mock.patch.object(one_shot.forge.Forge, "write_stage", return_value=SimpleNamespace(done=True, error="")), \
+             mock.patch.object(one_shot.backlog, "run_gh", return_value=(0, '{"labels": [{"name": "03 - BUILD"}]}', "")), \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             return self._run(fake, tree, model=model, runtime=runtime), hold, comment
 

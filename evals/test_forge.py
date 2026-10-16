@@ -350,21 +350,36 @@ class StageWriteBackTest(unittest.TestCase):
     def test_release_hold_retains_stage_holds_and_refuses_board_drift(self):
         for config in (FLOW, BOARD):
             for held_stage in (False, True):
-                with self.subTest(project=config.github_project is not None, held_stage=held_stage):
-                    cfg = replace(config, hold_stages=("doing",)) if held_stage else config
-                    labels = [FLOW.human_review_label]
-                    if cfg.github_project is None:
-                        labels.append("stage: doing" if held_stage else "stage: review")
-                    url = gh_issue(4, "Add a flag")["url"]
-                    gh = FakeGh(issues=[gh_issue(4, "Add a flag", labels)],
-                                status={url: "Doing" if held_stage else "Review"})
-                    got = forge.Forge(GH, kanban=cfg, gh=gh).write_stage(
-                        4, "doing", expected="doing", release_hold=True, commit=True)
-                    if held_stage:
-                        self.assertTrue(got.done, got.error)
-                    else:
-                        self.assertIn("changed outside the tracker", got.error)
-                    self.assertEqual(self.edits(gh), [])
+                for drifted in (False, True):
+                    for commit in (False, True):
+                        with self.subTest(project=bool(config.github_project), held=held_stage,
+                                          drift=drifted, commit=commit):
+                            cfg = replace(config, hold_stages=("doing",)) if held_stage else config
+                            labels = [FLOW.human_review_label]
+                            if cfg.github_project is None:
+                                labels.append("stage: review" if drifted else "stage: doing")
+                            url = gh_issue(4, "Add a flag")["url"]
+                            gh = FakeGh(issues=[gh_issue(4, "Add a flag", labels)],
+                                        status={url: "Review" if drifted else "Doing"})
+                            got = forge.Forge(GH, kanban=cfg, gh=gh).write_stage(
+                                4, "doing", expected="doing", release_hold=True, commit=commit)
+                            if drifted:
+                                self.assertIn("changed outside the tracker", got.error)
+                            else:
+                                self.assertTrue(got.ok, got.error)
+                            self.assertEqual(len(self.edits(gh)), int(commit and not drifted and not held_stage))
+
+    def test_release_requires_a_prior_stage_and_refuses_initialization(self):
+        for home in (GH, GL):
+            for kwargs in ({}, {"initialize": True}, {"initialize": True, "expected": "doing"}):
+                with self.subTest(home=home, kwargs=kwargs):
+                    with mock.patch.object(backlog, "_get") as get:
+                        gh = FakeGh(issues=[gh_issue(4, "Add a flag", [FLOW.human_review_label])])
+                        got = forge.Forge(home, kanban=FLOW, gh=gh).write_stage(
+                            4, "doing", release_hold=True, commit=True, **kwargs)
+                    self.assertIn("release", got.error)
+                    self.assertEqual(gh.all_calls, [])
+                    get.assert_not_called()
 
     def test_release_hold_reports_failed_or_unverified_writes(self):
         for fail in (True, False):
