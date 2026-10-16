@@ -37,6 +37,7 @@ STARTED_DETAIL = re.compile(r"^-\s+(\d{1,2}:\d{2}) one-shot (\S+) started: (.*?)
 # The launcher's line when the forge refused the review hold, and the coordinator's record of a forge closure
 # the user approved. Each names its task last, as a started line does, and matches no pattern above.
 HOLD_FAILED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): review hold failed: (.*), task (.+?)\s*$")
+HOLD_RELEASE = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): hold release (removed|retained|absent|failed): (.*), task (.+?)\s*$")
 APPROVED_CLOSE = re.compile(r"^- (\d{1,2}):(\d{2}) forge closure approved by the user: (.*), task (.+?)\s*$")
 
 
@@ -81,6 +82,11 @@ def hold_failed_line(at: str, name: str, task: str, error: str) -> str:
     return f"- {at} one-shot {name}: review hold failed: {error}, task {task}"
 
 
+def hold_release_line(at: str, name: str, task: str, outcome: str, error: str = "") -> str:
+    """Durable release result, paired with HOLD_RELEASE; distinguish removal from no-op and failure."""
+    return f"- {at} one-shot {name}: hold release {outcome}: {error}, task {task}"
+
+
 def approved_close_line(at: str, task: str, why: str) -> str:
     """The coordinator's record that the user approved `task` done because its issue closed on the forge (#547);
     the audit does not reopen a task this line names."""
@@ -106,10 +112,21 @@ def _log_lines(text: str) -> list[str]:
 def hold_failures(text: str) -> dict[str, str]:
     """Task -> the reason of the last hold failure the Log records for it (#566)."""
     out: dict[str, str] = {}
+    workers: dict[str, str] = {}
     for line in _log_lines(text):
-        m = HOLD_FAILED.match(line)
-        if m:
+        if m := HOLD_FAILED.match(line):
             out[m[5]] = m[4]
+            workers[m[3]] = m[5]
+        elif m := STARTED.match(line):
+            workers[m[3]] = m[4]
+            out.pop(m[4], None)
+        elif m := RELAUNCH.match(line):
+            # Use the explicit task name even for a Log whose started line is on the previous day.
+            task, sep, _ = line[m.end():].rpartition(" — ")
+            if sep:
+                out.pop(task, None)
+        elif (m := ENDED.match(line)) and m[4] == COMPLETED:
+            out.pop(workers.get(m[3], ""), None)
     return out
 
 

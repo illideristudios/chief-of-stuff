@@ -29,19 +29,20 @@ class Sync:
     current_status: str | None = None
     project_status: str | None = None
     project_add: bool = False
+    hold_release: str = ""
 
     @property
     def ok(self) -> bool:
         return not self.error
 
 
-def _managed(config: Kanban) -> set[str]:
+def managed_labels(config: Kanban) -> set[str]:
     return set(config.stages) | set(config.terminal_stages) | {config.human_review_label}
 
 
-def _canonical(config: Kanban, labels: tuple[str, ...]) -> tuple[str, ...]:
+def canonical_labels(config: Kanban, labels: tuple[str, ...]) -> tuple[str, ...]:
     """Forge label names are case-insensitive: read a managed label in its configured spelling."""
-    names = {name.casefold(): name for name in _managed(config)}
+    names = {name.casefold(): name for name in managed_labels(config)}
     return tuple(names.get(label.casefold(), label) for label in labels)
 
 
@@ -49,7 +50,7 @@ def label_delta(config: Kanban, current: tuple[str, ...], stage: str, keep_hold:
     """Exactly one numbered stage and an independent hold, preserving every other label."""
     desired = config.label_for(stage)
     hold = config.holds(stage) or keep_hold
-    managed = _managed(config)
+    managed = managed_labels(config)
     remove = tuple(label for label in current if label in managed and label != desired
                    and not (label == config.human_review_label and hold))
     add = tuple(label for label in (desired, config.human_review_label if hold else None)
@@ -64,14 +65,14 @@ def after(current: tuple[str, ...], delta: Delta) -> tuple[str, ...]:
 def drift(config: Kanban, labels: tuple[str, ...], stage: str,
           *, project_status: str | None = None, allow_extra_hold: bool = False) -> str:
     """Describe a board disagreement; the audit never repairs one silently."""
-    labels = _canonical(config, labels)
+    labels = canonical_labels(config, labels)
     try:
         target = config.label_for(stage)
     except KeyError:
         return f"unmapped tracker stage {stage}"
     hold = config.human_review_label if (config.holds(stage) or
            (allow_extra_hold and config.human_review_label in labels)) else None
-    managed = _managed(config)
+    managed = managed_labels(config)
     expected = {x for x in (hold, target if config.github_project is None else None) if x}
     actual = set(labels) & managed
     problems = []
@@ -86,12 +87,13 @@ def drift(config: Kanban, labels: tuple[str, ...], stage: str,
     return "; ".join(problems)
 
 
-def extra_hold(config: Kanban, current, expected_stage: str | None) -> bool:
-    """A review hold the recorded stage did not set: retained unless explicitly released for relaunch."""
-    return config.human_review_label in current and not (expected_stage and config.holds(expected_stage))
+def extra_hold(config: Kanban, current, expected_stage: str | None, *, release_hold: bool = False) -> bool:
+    """Retain a launcher hold unless its caller explicitly releases it through the stage guard."""
+    return (not release_hold and config.human_review_label in current
+            and not (expected_stage and config.holds(expected_stage)))
 
 
-def _guard(current, desired, priors, *, expected_stage: str | None, initialize: bool, blanks=(frozenset(),)) -> str:
+def guard(current, desired, priors, *, expected_stage: str | None, initialize: bool, blanks=(frozenset(),)) -> str:
     """Write only over a state the tracker explains: the recorded stage, with or without the launcher's hold."""
     if current == desired or (expected_stage is not None and current in priors) or (initialize and current in blanks):
         return ""
@@ -100,7 +102,7 @@ def _guard(current, desired, priors, *, expected_stage: str | None, initialize: 
     return "Kanban state changed outside the tracker; reconcile before writing"
 
 
-def _github_label_delta(config: Kanban, current: tuple[str, ...], stage: str, keep_hold: bool = False) -> Delta:
+def github_label_delta(config: Kanban, current: tuple[str, ...], stage: str, keep_hold: bool = False) -> Delta:
     if config.github_project is None:
         return label_delta(config, current, stage, keep_hold)
     # A Project Status is the numbered stage; only the human hold lives on its issue.
@@ -110,3 +112,10 @@ def _github_label_delta(config: Kanban, current: tuple[str, ...], stage: str, ke
                    (x == config.human_review_label and not hold))
     add = (config.human_review_label,) if hold and config.human_review_label not in current else ()
     return Delta(add, remove)
+
+
+def furthest(config: Kanban, tasks):
+    """The active card row at the furthest mapped stage; one issue has one board stage."""
+    rows = [task for task in tasks if not task.standing and task.kind != "done"
+            and task.lane.strip() and task.stage.strip()]
+    return max(rows, key=lambda task: config.stage_map.get(task.stage.strip(), -1), default=None)

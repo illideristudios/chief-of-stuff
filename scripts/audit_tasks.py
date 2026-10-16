@@ -341,7 +341,7 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
             continue  # issue_faults already reports a missing issue
         for task, _ in rows:
             failed = (hold_failures or {}).get(task.item.strip()) if config.human_review_label else None
-            if failed and config.human_review_label not in found.labels:
+            if failed and task.kind == "waiting" and config.human_review_label not in found.labels:
                 faults.append(KanbanFault(clip_name(task.label),
                                           f"review hold failed: {failed}; the issue has no hold label"))
         if found.state == CLOSED:
@@ -353,9 +353,7 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
                                           f"expected no managed labels, found {', '.join(present)}"))
             continue
         # #87: one expected stage per issue — the furthest row by the board's stage order decides the label.
-        known = [(config.stage_map.get(task.stage.strip()), task) for task, _ in rows]
-        furthest = max((pair for pair in known if pair[0] is not None),
-                       key=lambda pair: pair[0], default=(None, rows[0][0]))[1]
+        furthest = kanban_tool.furthest(config, [task for task, _ in rows]) or rows[0][0]
         status = None
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
@@ -371,7 +369,7 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
             status = project_items[ref.url.casefold()]
         issue_config = config if ref.host == GITHUB else replace(config, github_project=None)
         why = kanban_tool.drift(issue_config, found.labels, furthest.stage.strip(), project_status=status,
-                                allow_extra_hold=furthest.kind == "waiting")
+                                allow_extra_hold=any(task.kind == "waiting" for task, _ in rows))
         if why:
             faults.append(KanbanFault(clip_name(furthest.label), why))
     return faults

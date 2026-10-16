@@ -322,6 +322,55 @@ class GitHubTest(unittest.TestCase):
                               ("github:example/app#4", "open", "doing", "")])
 
 
+class StageGatewayTest(unittest.TestCase):
+    def test_github_sibling_release_uses_the_issue_repository(self):
+        ref = backlog.IssueRef("other/app", 4)
+        calls = []
+        def gh(args):
+            calls.append(args)
+            self.assertEqual(args[args.index("-R") + 1], ref.repo)
+            return 0, '{"labels": []}', ""
+        got = forge.sync_stage(ref, GH, FLOW, "doing", expected="doing", release_hold=True,
+                               only_if_held=True, commit=True, gh=gh)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.hold_release, "absent")
+        self.assertEqual(len(calls), 1)
+
+    def test_gitlab_unreadable_labels_cannot_be_treated_as_an_absent_hold(self):
+        ref = backlog.IssueRef(GL.project, 4, backlog.home_of(GL)[0])
+        for labels in (None, "needs human"):
+            with self.subTest(labels=labels), \
+                 mock.patch.object(backlog, "_get", return_value=({"iid": 4, "labels": labels}, {}, "")), \
+                 mock.patch.object(backlog, "_call") as write:
+                got = forge.sync_stage(ref, GL, FLOW, "doing", expected="doing", release_hold=True,
+                                       only_if_held=True, commit=True, token="test")
+                self.assertFalse(got.done)
+                self.assertIn("readable labels", got.error)
+                write.assert_not_called()
+
+    def test_gitlab_sibling_release_round_trips_through_the_gateway(self):
+        ref = backlog.IssueRef("other/app", 4, backlog.home_of(GL)[0])
+        labels = ["stage: doing", FLOW.human_review_label, "bug"]
+        urls = []
+        def get(url, token, timeout):
+            urls.append(url)
+            return {"iid": 4, "title": "Flag", "state": "opened", "labels": list(labels)}, {}, ""
+        def put(method, url, token, timeout, payload):
+            self.assertEqual(payload, {"remove_labels": FLOW.human_review_label})
+            labels.remove(FLOW.human_review_label)
+            return {}, {}, ""
+        with mock.patch.object(backlog, "_get", side_effect=get), \
+             mock.patch.object(backlog, "_call", side_effect=put) as write, \
+             mock.patch.object(backlog, "existing_labels", return_value=(set(FLOW.stages), "")):
+            got = forge.sync_stage(ref, GL, FLOW, "doing", expected="doing", release_hold=True,
+                                   only_if_held=True, commit=True, token="test")
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(got.hold_release, "removed")
+        self.assertEqual(labels, ["stage: doing", "bug"])
+        write.assert_called_once()
+        self.assertTrue(all("other%2Fapp/issues/4" in url for url in urls), urls)
+
+
 class StageWriteBackTest(unittest.TestCase):
     def edits(self, gh):
         return [c for c in gh.all_calls if c[:2] == ["issue", "edit"]]

@@ -29,7 +29,7 @@ from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
-from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
+from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, hold_release_line, relaunch_line, started_line, timed_out_line
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -282,35 +282,35 @@ def record_launch(path: Path, task: str, name: str, tree: str, runtime: str, mod
     tracker_write.edit(path, change)
 
 
-def update_tracker(path: Path, task: str, name: str, owner: str, status: str, reason: str, changes: str,
-                   at: str, hold_error: str = "", carried: bool = False) -> None:
-    """Set the dispatched row to waiting, or back to ready on a relaunch, and append a durable local result note.
-
-    A row the midnight rollover carried over starts open under the worker (#576), not running. A failed
-    review hold (#566) rides the same locked edit into the Log, so the audit still sees the hold attempt
-    after this run's report is gone.
-    """
+def _tracker_result(text: str, task: str, name: str, owner: str, status: str, reason: str, changes: str,
+                    at: str, hold_error: str = "", carried: bool = False,
+                    hold_release: str = "", release_error: str = "") -> str:
+    """Validate and transform a result while the caller holds the tracker lock."""
     if "|" in owner or "\n" in owner:
         raise ValueError("configured user name cannot be written as a tracker owner")
+    lines = text.splitlines(keepends=True)
+    i = _task_line(lines, task)
+    running = _carried(name) if carried else _running(name)
+    why = "task row changed during the one-shot run; tracker needs manual reconciliation"
+    if status == "relaunch":
+        lines[i] = _set_owner_state(lines[i], running, "| unassigned | open |", why)
+        note = relaunch_line(at, name, task, _brief(reason))
+    else:
+        lines[i] = _set_owner_state(lines[i], running, f"| {owner} | waiting |", why)
+        note = ended_line(at, name, status, _brief(reason), _brief(changes))
+    text = tracker_write.append_log("".join(lines), note, create=True)
+    if hold_error:
+        text = tracker_write.append_log(text, hold_failed_line(at, name, task, _brief(hold_error)))
+    if hold_release:
+        text = tracker_write.append_log(text, hold_release_line(at, name, task, hold_release, _brief(release_error)))
+    return text
 
-    def change(text: str) -> str:
-        lines = text.splitlines(keepends=True)
-        i = _task_line(lines, task)
-        running = _carried(name) if carried else _running(name)
-        why = "task row changed during the one-shot run; tracker needs manual reconciliation"
-        if status == "relaunch":
-            # Back to unassigned and open: ready, so the coordinator dispatches it again.
-            lines[i] = _set_owner_state(lines[i], running, "| unassigned | open |", why)
-            note = relaunch_line(at, name, task, _brief(reason))
-        else:
-            lines[i] = _set_owner_state(lines[i], running, f"| {owner} | waiting |", why)
-            note = ended_line(at, name, status, _brief(reason), _brief(changes))
-        text = tracker_write.append_log("".join(lines), note, create=True)
-        if hold_error:
-            text = tracker_write.append_log(text, hold_failed_line(at, name, task, hold_error))
-        return text
 
-    tracker_write.edit(path, change)
+def update_tracker(path: Path, task: str, name: str, owner: str, status: str, reason: str, changes: str,
+                   at: str, hold_error: str = "", carried: bool = False) -> None:
+    """Set the dispatched row to waiting, or back to ready, with a durable result under its lock."""
+    tracker_write.edit(path, lambda text: _tracker_result(text, task, name, owner, status, reason, changes,
+                                                        at, hold_error, carried))
 
 
 def launcher_copy(root: Path, cwd: Path) -> Path:
@@ -396,54 +396,66 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
     summary = (changes + f"\nCommits from this run:\n{commits}" +
                (f"\nWorking tree:\n{actual}" if actual else "\nWorking tree clean"))
-    rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
-    row = rows[0] if len(rows) == 1 else None
     errors = []
-    if row is None or row.owner.strip().lower() != name.lower() or (
-            # The rollover twin is the same row, open (#576); any other drift from running is a changed row.
-            row.kind != "running" and not (carried and row.kind == "open")):
-        report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
-                  "reason": "task row changed during the one-shot run; reconcile it manually",
-                  "changes": summary, "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
-        return write_report(root, cwd, report)
+    hold_release, release_error = "", ""
     if adopted:
-        # #99: the launcher died before reconciling this run; the report, the Log line and any
-        # review comment say so, and the tree's evidence is the only word there is.
         reason = f"the launcher died before reconciling this run; {reason}"
-    ref = backlog.issue_ref(row.issue, cfg.backlog) if row and row.issue.strip() else None
-    home = (backlog.GitHubBacklog(ref.repo) if ref and ref.host == backlog.GITHUB else
-            cfg.backlog.sibling(ref.repo)
-            if ref and isinstance(cfg.backlog, backlog.Backlog) else None)
-    if status == "relaunch" and ref and settings.kanban:
-        # Release only through the stage guard, before making the task dispatchable again (#68).
-        released = (forge.Forge(home, kanban=settings.kanban, gh=backlog.run_gh).write_stage(
-            ref.number, row.stage.strip(), expected=row.stage.strip(), commit=True, release_hold=True)
-            if home is not None else None)
-        if released is None or not released.done:
-            error = released.error if released is not None else "no configured backlog for this issue"
-            errors.append(f"release review hold: {error}")
-            status, reason = "human_review", f"could not release review hold for relaunch: {error}; worker said: {reason}"
-    hold_error = ""
-    if status == "human_review" and ref:
-        if settings.kanban:
-            error = forge.add_human_hold(ref, cfg.backlog, settings.kanban)
-            if error:
-                hold_error = error
-                errors.append(f"review hold: {error}")
-        else:
-            errors.append("review hold: workspace has no [kanban] configuration")
-        if home is not None:
+
+    def finish(text: str) -> str:
+        nonlocal status, reason, hold_release, release_error
+        tasks = parse_tracker(text).tasks
+        rows = [row for row in tasks if row.item.strip() == task]
+        row = rows[0] if len(rows) == 1 else None
+        if row is None or row.owner.strip().lower() != name.lower() or (
+                row.kind != "running" and not (carried and row.kind == "open")):
+            raise ValueError("task row changed; no issue or tracker update was made")
+        at = tracker_write.stamp(cfg.zone)
+        # Validate the exact writable row before any forge mutation. Keep the lock through the
+        # bounded forge calls and the final tracker edit so a coordinator cannot change it between them.
+        _tracker_result(text, task, name, cfg.user, status, reason, summary, at, carried=row.kind == "open")
+        ref = backlog.issue_ref(row.issue, cfg.backlog) if row.issue.strip() else None
+        if status in ("relaunch", "done") and ref and settings.kanban and row.lane.strip() and row.stage.strip():
+            siblings = [other for other in tasks if other is not row and not other.standing
+                        and other.kind != "done" and backlog.issue_ref(other.issue, cfg.backlog) == ref]
+            if any(other.kind == "waiting" for other in siblings):
+                hold_release = "retained"
+            else:
+                furthest = kanban.furthest(settings.kanban, [row, *siblings])
+                stage = furthest.stage.strip()
+                released = forge.sync_stage(ref, cfg.backlog, settings.kanban, stage, expected=stage,
+                                            commit=True, release_hold=True, only_if_held=True)
+                hold_release = released.hold_release
+                if not released.done:
+                    release_error = released.error
+                    hold_release = "failed"
+                    errors.append(f"release review hold: {release_error}")
+                    status, reason = "human_review", f"could not release review hold: {release_error}; worker said: {reason}"
+        hold_error = ""
+        if status == "human_review" and ref:
+            # A refused stage guard is evidence to reconcile; do not overwrite its board state with a hold.
+            if hold_release != "failed":
+                if settings.kanban:
+                    hold_error = forge.add_human_hold(ref, cfg.backlog, settings.kanban)
+                    if hold_error:
+                        errors.append(f"review hold: {hold_error}")
+                else:
+                    errors.append("review hold: workspace has no [kanban] configuration")
             body = f"One-shot worker {name} needs human review.\n\nWhy: {reason}\n\nChanges made:\n{summary}"
-            commented = backlog.comment(home, ref.number, body, commit=True)
+            commented = forge.comment_issue(ref, cfg.backlog, settings.kanban, body)
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")
+        return _tracker_result(text, task, name, cfg.user, status, reason, summary, at,
+                               hold_error=hold_error, carried=row.kind == "open",
+                               hold_release=hold_release, release_error=release_error)
+
     try:
-        update_tracker(path, task, name, cfg.user, status, reason, summary,
-                       tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
+        tracker_write.edit(path, finish)
     except (OSError, ValueError) as exc:
+        status, reason = "human_review", "task row changed during the one-shot run; reconcile it manually"
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
-              "reason": reason, "changes": summary, "errors": errors}
+              "reason": reason, "changes": summary, "errors": errors,
+              "hold_release": hold_release, "hold_release_error": release_error}
     return write_report(root, cwd, report)
 
 

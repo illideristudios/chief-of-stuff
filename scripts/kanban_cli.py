@@ -28,6 +28,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--release-hold", action="store_true", help="release a launcher hold; retain stage-required holds")
     ap.add_argument("--commit", action="store_true", help="apply one verified move; default is preview")
     args = ap.parse_args(argv)
+    if args.release_hold and (not args.issue or not args.from_stage or args.initialize):
+        print("kanban: --release-hold requires --issue and --from-stage; forbids --initialize", file=sys.stderr)
+        return 2
     if args.commit and not args.issue:
         print("kanban: --commit requires --issue; bulk updates are preview only", file=sys.stderr)
         return 2
@@ -90,18 +93,10 @@ def main(argv: list[str] | None = None) -> int:
         stage = task.stage.strip()
         if not stage:
             result = kanban.Sync(ref, stage, error="tracker stage is blank")
-        elif ref.host == backlog.GITHUB:
-            result = forge.Forge(backlog.GitHubBacklog(ref.repo), kanban=settings.kanban).write_stage(
-                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit,
-                release_hold=args.release_hold)
-        elif isinstance(cfg.backlog, backlog.Backlog):
-            # write_stage rebuilds the IssueRef from Forge.home; keep a sibling project's repo.
-            home = cfg.backlog if ref.repo == cfg.backlog.project else cfg.backlog.sibling(ref.repo)
-            result = forge.Forge(home, kanban=settings.kanban).write_stage(
-                ref.number, stage, expected=args.from_stage, initialize=args.initialize, commit=args.commit,
-                release_hold=args.release_hold)
         else:
-            result = kanban.Sync(ref, stage, error="no configured GitLab host for this issue")
+            result = forge.sync_stage(ref, cfg.backlog, settings.kanban, stage,
+                                      expected=args.from_stage, initialize=args.initialize, commit=args.commit,
+                                      release_hold=args.release_hold)
         changed = result.delta.changed or result.project_add or result.current_status != result.project_status
         rows.append({"issue": ref.label(cfg.backlog), "stage": stage,
                      "add": ", ".join(result.delta.add), "remove": ", ".join(result.delta.remove),

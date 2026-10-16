@@ -69,3 +69,5 @@ The second call writes the assignment into the tree and prints where. You do not
 `--coordinator` is how a session learns who to register with. It has no ref of its own to report until it looks itself up, and you have no way to reach it until it does. Your own name is the one in the tracker header, or the one a listing shows beside your ref. Pass it when you have it and drop it when you do not: a name you guessed at is worse than the assignment's own wording, which already says to register with the chief-of-stuff coordinator.
 
 Then, for an interactive session, update the File ownership row's context cell to name the tree the first call printed (a one-shot launch records it itself), never the one you asked for: a row naming a tree that was never created sat in the tracker for eight hours. If either call refuses, the task stays `open`, say what was refused, and create nothing by hand.
+
+Cleared blocker: `kanban --release-hold`.

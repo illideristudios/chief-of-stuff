@@ -20,6 +20,7 @@ import audit_tasks  # noqa: E402
 import forge  # noqa: E402
 import kanban  # noqa: E402
 import kanban_cli  # noqa: E402
+from _vendor.toon_format import decode as toon_decode
 from evals.project_cli import validate as validate_project_cli  # noqa: E402
 from settings import GitHubProject, Kanban  # noqa: E402
 
@@ -175,13 +176,17 @@ class GitLabUpdaterTest(unittest.TestCase):
         self.assertEqual(write.call_args.args[-1], {"remove_labels": FLOW.human_review_label})
 
     def test_release_hold_does_not_bypass_gitlab_stage_guard(self):
-        held = {"labels": ["05 - FIX", FLOW.human_review_label]}
-        with mock.patch.object(backlog, "_get", return_value=(held, {}, "")), \
-             mock.patch.object(backlog, "_call") as write:
-            got = forge.Forge(self.cfg, kanban=FLOW, token="test").write_stage(
-                7, "implement", expected="implement", release_hold=True, commit=True)
-        self.assertIn("changed outside the tracker", got.error)
-        write.assert_not_called()
+        for held_stage in (False, True):
+            for commit in (False, True):
+                with self.subTest(held=held_stage, commit=commit):
+                    held = {"labels": ["05 - FIX", FLOW.human_review_label]}
+                    config = replace(FLOW, hold_stages=("implement",)) if held_stage else FLOW
+                    with mock.patch.object(backlog, "_get", return_value=(held, {}, "")), \
+                         mock.patch.object(backlog, "_call") as write:
+                        got = forge.Forge(self.cfg, kanban=config, token="test").write_stage(
+                            7, "implement", expected="implement", release_hold=True, commit=commit)
+                    self.assertIn("changed outside the tracker", got.error)
+                    write.assert_not_called()
 
     def test_dry_run_reads_but_does_not_write(self):
         with mock.patch.object(forge.backlog, "_get", return_value=(self.before, {}, "")), \
@@ -353,8 +358,9 @@ class CliTest(unittest.TestCase):
                                                      "--release-hold", "--commit"]), 0)
                 self.assertTrue(sync.call_args.kwargs["release_hold"])
                 self.assertEqual(sync.call_args.kwargs["expected"], "plan review")
-                self.assertIn("updated", output.getvalue())
-                self.assertIn(FLOW.human_review_label, output.getvalue())
+                row = toon_decode(output.getvalue())[0]
+                self.assertEqual(row["action"], "updated")
+                self.assertEqual(row["remove"], FLOW.human_review_label)
 
     def test_release_requires_issue_and_prior_stage_even_in_preview(self):
         for flags in ([], ["--issue", "#7"], ["--from-stage", "plan"],
@@ -486,6 +492,15 @@ class AuditTest(unittest.TestCase):
         self.assertEqual(len(faults), 1)
         self.assertIn("expected 03 - BUILD", str(faults[0]))
         write.assert_not_called()
+
+    def test_any_waiting_sibling_can_explain_the_shared_issue_hold(self):
+        tasks = [SimpleNamespace(standing=False, lane="build", stage=stage, issue="#7",
+                                 label=stage, kind=kind, item=stage)
+                 for stage, kind in (("plan", "waiting"), ("implement", "open"))]
+        cfg = backlog.Backlog("https://labs.example.test", "team/app")
+        issue = backlog.Issue(7, "Build it", "opened", ("03 - BUILD", FLOW.human_review_label))
+        with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+            self.assertEqual(audit_tasks.kanban_faults(tasks, cfg, FLOW), [])
 
     def test_gitlab_audit_uses_labels_even_with_github_project_configured(self):
         task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",

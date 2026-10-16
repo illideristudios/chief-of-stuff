@@ -1101,6 +1101,13 @@ class RunTest(unittest.TestCase):
                 return 0, json.dumps({"labels": [{"name": x} for x in labels]}), ""
             if args[:2] == ["issue", "edit"]:
                 self.assertIn("| worker01 | running ", self.tracker.read_text())
+                import fcntl
+                lock = os.open(one_shot.tracker_write.lock_path(self.tracker), os.O_RDONLY)
+                try:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                finally:
+                    os.close(lock)
                 edits.append(args)
                 labels.remove(args[args.index("--remove-label") + 1])
                 return 0, "", ""
@@ -1122,7 +1129,7 @@ class RunTest(unittest.TestCase):
         fake = self._fake(self.ORDINARY, write_partial=False)
         with mock.patch.object(one_shot.backlog, "run_gh", return_value=(0, '{"labels": [{"name": "!! - HUMAN REVIEW REQUIRED"}]}', "")), \
              mock.patch.object(one_shot.forge.Forge, "write_stage",
-                               return_value=SimpleNamespace(done=False, error="board changed")), \
+                               return_value=one_shot.kanban.Sync(one_shot.backlog.IssueRef("team/repo", 7), "implement", error="board changed")), \
              mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")):
             self._run(fake)
@@ -1238,8 +1245,11 @@ class RunTest(unittest.TestCase):
         """One launch of a worker that wrote `stderr`; returns the exit code and the hold and comment mocks."""
         fake = self._fake(result, exit_code=exit_code, write_partial=write_partial, commit_partial=commit_partial,
                           stderr=stderr, during=during)
+        def gh(args):
+            self.assertEqual(args[:2], ["issue", "view"])
+            return 0, '{"labels": [{"name": "03 - BUILD"}]}', ""
         with mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
-             mock.patch.object(one_shot.backlog, "run_gh", return_value=(0, '{"labels": [{"name": "03 - BUILD"}]}', "")), \
+             mock.patch.object(one_shot.backlog, "run_gh", side_effect=gh), \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             return self._run(fake, tree, model=model, runtime=runtime), hold, comment
 
