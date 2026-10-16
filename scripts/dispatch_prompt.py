@@ -572,7 +572,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         report_text = report_text.replace("If direct messaging fails, send via mailbox:", "Send via mailbox:")
         header_text = header_text.replace("When direct messaging is unavailable, send your ask via:", "Send your ask via:")
 
-    header_text = header_text.replace("# Assignment\n", "# Assignment" + rules_header + "\n", 1)
+    if rules_header:
+        header_text = header_text.replace("# Assignment\n", "# Assignment" + rules_header, 1)
     lines = [header_text, board_rule, WRITING_RULE, REVIEW_RULE, f"Task: {item}"]
     lines += _task_directives(root, row, skills, issue)
     if worktree is not None:
