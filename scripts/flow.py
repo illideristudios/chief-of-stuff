@@ -155,7 +155,7 @@ def reconcile_dead_workers(root: Path, tracker_path: Path, day: str) -> list[str
             matching_reports: list[tuple[float, dict]] = []
             for p in reports_dir.glob("*.toon"):
                 try:
-                    data = read_report(p)
+                    data = read_report(p, git_trees.read_regular)
                     if data.get("task") in (t.label, t.name, t.item):
                         matching_reports.append((p.stat().st_mtime, data))
                 except UNREADABLE:

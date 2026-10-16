@@ -264,7 +264,6 @@ OUTWARD_IMPORTS = frozenset({
     "one_shot→shell_setup",
     "one_shot→tracker_write",
     "one_shot→workspace",
-    "one_shot_report→git_trees",
     "review_threads→backlog",
     "review_threads→forge_review",
     "review_threads→settings",
