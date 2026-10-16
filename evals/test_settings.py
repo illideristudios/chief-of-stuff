@@ -160,6 +160,15 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write(f"[workers]\nmax_concurrency = {bad}\n"))
 
+    def test_green_test_requirement_is_opt_in_and_strictly_boolean(self):
+        self.assertFalse(st.load(self.root, None).workers.require_green_tests)
+        for value, expected in (("true", True), ("false", False)):
+            self.assertEqual(st.load(self.root, self.write(
+                f"[workers]\nrequire_green_tests = {value}\n")).workers.require_green_tests, expected)
+        for bad in ('"true"', "1", "0", "[]"):
+            with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "require_green_tests"):
+                st.load(self.root, self.write(f"[workers]\nrequire_green_tests = {bad}\n"))
+
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
         # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
         self.assertEqual(st.load(self.root, None).workers.claude_as_profile, "")

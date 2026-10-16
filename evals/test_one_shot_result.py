@@ -176,6 +176,88 @@ class ResultTests(unittest.TestCase):
         self.assertEqual(chief_of_stuff.COMMANDS.get("result"), "scripts/one_shot_result.py")
         self.assertEqual(self.result().returncode, 0)  # not "unknown chief-of-stuff command"
 
+    def suite_policy(self, enabled=True):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(
+            f"[workers]\nrequire_green_tests = {str(enabled).lower()}\n")
+
+    def test_suite_counts_survive_both_report_sites_and_the_result_command(self):
+        counts = {"passed": 23, "failed": 0, "skipped": 2, "xfailed": 11}
+        for _, changed in SITES:
+            with self.subTest(changed=changed):
+                written = self.reconcile("rate-limit", changed=changed, result={
+                    "status": "done", "reason": "finished", "changes": "tested", **counts})
+                self.assertEqual({k: written[k] for k in counts}, counts)
+                shown = self.one("--task", "Rate limit headers")
+                self.assertEqual({k: shown[k] for k in counts}, counts)
+                for key, value in counts.items():
+                    self.assertIn(f"{key}={value}", shown["changes"])
+
+    def test_opted_in_completion_requires_known_green_suite_counts(self):
+        self.suite_policy()
+        green = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
+        for counts in (green, {**green, "skipped": 2}, {**green, "xfailed": 11}, {**green, "failed": 1}):
+            with self.subTest(counts=counts):
+                report = self.reconcile("rate-limit", result={
+                    "status": "done", "reason": "completed audit", "changes": "tested", **counts})
+                bad = any(counts[k] for k in ("failed", "skipped", "xfailed"))
+                self.assertEqual(report["status"], "human_review" if bad else "done")
+                self.assertEqual(report["errors"], [])
+                if bad:
+                    for key, value in counts.items():
+                        self.assertIn(f"{key}={value}", report["reason"])
+                    self.assertIn("completed audit", report["reason"])
+                    self.assertIn("needs human review", self.tracker_path().read_text())
+
+    def test_missing_or_invalid_counts_are_unknown_and_hold_opted_in_completion(self):
+        self.suite_policy()
+        green = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
+        for key in green:
+            for bad in (None, True, -1, "0", 1.5, {}, []):
+                with self.subTest(key=key, value=bad):
+                    counts = {**green, key: bad}
+                    if bad is None:
+                        del counts[key]
+                    report = self.reconcile("rate-limit", result={
+                        "status": "done", "reason": "finished", "changes": "tested", **counts})
+                    self.assertEqual(report["status"], "human_review")
+                    self.assertIsNone(report[key])
+                    self.assertIn(f"{key}=missing or invalid", report["reason"])
+
+    def test_opt_out_keeps_completion_but_reports_missing_counts(self):
+        for enabled in (None, False):
+            if enabled is not None:
+                self.suite_policy(enabled)
+            report = self.reconcile("rate-limit", result={
+                "status": "done", "reason": "finished", "changes": "tested", "skipped": 2, "xfailed": 11})
+            self.assertEqual(report["status"], "done")
+            self.assertEqual(report["skipped"], 2)
+            self.assertEqual(report["xfailed"], 11)
+            for key in ("passed", "failed"):
+                self.assertIsNone(report[key])
+                self.assertIn(f"{key}=missing or invalid", report["changes"])
+
+    def test_suite_policy_preserves_relaunch_and_failed_worker_results(self):
+        self.suite_policy()
+        for status, exit_code, expected in (("relaunch", 0, "relaunch"), ("human_review", 0, "human_review"),
+                                             ("done", 1, "human_review")):
+            with self.subTest(status=status, exit_code=exit_code):
+                report = self.reconcile("rate-limit", exit_code=exit_code, result={
+                    "status": status, "reason": "premise moved", "changes": "checked", "skipped": 2})
+                self.assertEqual(report["status"], expected)
+                self.assertEqual(report["skipped"], 2)
+
+    def test_one_shot_assignment_requests_observed_counts_and_explains_the_opt_in_gate(self):
+        self.suite_policy()
+        body = dispatch_prompt.compose(self.root, self.tracker_path().name[:10], "Rate limit headers",
+                                       worktree=self.root / "tree", one_shot=True)
+        for key in ("passed", "failed", "skipped", "xfailed"):
+            self.assertIn(f"{key}: null", body)
+        self.assertIn("non-negative integers", body)
+        self.assertIn("null when unknown", body)
+        self.assertIn("require_green_tests", body)
+        self.assertNotIn("exactly three string fields", body)
+
     # The launcher keeps its own copy of the report, outside the tree.
 
     def test_the_launcher_keeps_a_copy_of_the_report_outside_the_tree_at_each_write_site(self):
