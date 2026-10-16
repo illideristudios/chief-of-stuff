@@ -3,6 +3,7 @@
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "scripts"), str(Path(__file__).resolve().parent)]
@@ -12,10 +13,11 @@ import decision_page as dp
 import flow_chart as fc
 import issue_page as ip
 import render_board as rb
+import settings
 import tracker_log as tl
 import workers_page as wp
 from tracker import parse_tracker
-from test_flow_chart import CT, LANES, NOW, TODAY, TODAY_TRACKER
+from test_flow_chart import CT, KANBAN, LANES, NOW, TODAY, TODAY_TRACKER
 from test_issue_page import page, section, text, today_tracker
 
 
@@ -27,6 +29,8 @@ class NeedsInputTest(unittest.TestCase):
         self.assertEqual(card.kind, "waiting")
         self.assertEqual(card.state, "needs input")
         self.assertEqual(card.flag, columns.Mark("NEEDS INPUT", "hold"))
+        html = columns.render([columns.Column("triage", (card,))])
+        self.assertEqual(html.casefold().count('>needs input<'), 1)
 
     def test_old_and_new_end_lines_stop_the_same_flow_run(self):
         start = tl.started_line("01:00", "impl-1", "codex", "test", "worktree `a` (a)", "Cap uploads")
@@ -68,6 +72,66 @@ class NeedsInputTest(unittest.TestCase):
                 html = ip.render(111, [(TODAY, text)], bs.EMPTY, NOW, LANES)
                 self.assertIn('>NEEDS INPUT</span>', html)
 
+    def test_a_nameless_task_with_log_moves_still_names_its_person_wait(self):
+        tracker = TODAY_TRACKER.replace("| Cache warmup |", "| |")
+        html = ip.render(111, [(TODAY, tracker)], bs.EMPTY, NOW, LANES)
+        self.assertIn('<span class="chip needs-input">NEEDS INPUT</span>', html)
+
+    def test_a_person_wait_in_any_current_task_sets_the_issue_status(self):
+        tracker = TODAY_TRACKER.replace('#111', '#109').replace('#107', '#109')
+        html = ip.render(109, [(TODAY, tracker)], bs.EMPTY, NOW, LANES)
+        self.assertIn('>NEEDS INPUT</span>', html)
+
+    def test_a_person_wait_does_not_override_a_closed_issue(self):
+        sources = replace(bs.EMPTY, issues={'#111': bs.Issue('#111', '', 'Cache', 'closed', (), closed_at=NOW)})
+        html = ip.render(111, [(TODAY, TODAY_TRACKER)], sources, NOW, LANES)
+        self.assertIn('>CLOSED</span>', html)
+
     def test_decision_context_names_a_person_wait_even_without_a_hold_label(self):
         ctx = dp.Context(NOW, tasks=tuple(parse_tracker(TODAY_TRACKER).tasks))
         self.assertEqual(ctx.where('#111'), 'triage · needs input')
+
+    def test_a_change_inherits_its_issues_person_wait(self):
+        for ref in ('!58', '#58'):
+            with self.subTest(ref=ref):
+                change = bs.Change(ref, '', 'Cache', 'open', False, None, False, 0, None, 'main', (), ('#111',))
+                ctx = dp.Context(NOW, tasks=tuple(parse_tracker(TODAY_TRACKER).tasks),
+                                 sources=replace(bs.EMPTY, changes={ref: change}))
+                self.assertEqual(ctx.where(ref), 'triage · needs input')
+
+    def test_decision_waits_match_the_issue_cell_and_its_repository(self):
+        from backlog_ref import GitHubBacklog
+        tasks = tuple(parse_tracker(TODAY_TRACKER).tasks)
+        wait = next(t for t in tasks if t.issue == '#111')
+        for issue in ('#112', 'other/repo#111', 'https://github.com/other/repo/issues/111'):
+            with self.subTest(issue=issue):
+                ctx = dp.Context(NOW, tasks=(replace(wait, issue=issue, item='Related to #111'),),
+                                 sources=replace(bs.EMPTY, home=GitHubBacklog('o/app')))
+                self.assertNotIn('needs input', ctx.where('#111'))
+
+    def test_decision_waits_ignore_standing_placeholders(self):
+        wait = next(t for t in parse_tracker(TODAY_TRACKER).tasks if t.issue == '#111')
+        standing = replace(wait, owner='impl02', item='impl02: standing implementer. Wait idle')
+        self.assertTrue(standing.standing)
+        self.assertNotIn('needs input', dp.Context(NOW, tasks=(standing,)).where('#111'))
+
+    def test_decision_waits_respect_terminal_and_effective_stages(self):
+        wait = next(t for t in parse_tracker(TODAY_TRACKER).tasks if t.issue == '#111')
+        merged = bs.Change('!58', '', 'Cache', 'merged', False, None, False, 0, NOW, 'main', (), ('#111',))
+        for task, sources in ((replace(wait, stage='main'), bs.EMPTY),
+                              (wait, replace(bs.EMPTY, changes={'!58': merged}))):
+            with self.subTest(stage=task.stage, merged=bool(sources.changes)):
+                ctx = dp.Context(NOW, tasks=(task,), sources=sources, lanes=LANES)
+                self.assertNotIn('needs input', ctx.where('#111'))
+
+    def test_decision_context_loads_lane_and_kanban_holds_from_the_workspace(self):
+        from test_decision_page import BLOCK, BOARD
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'CLAUDE.md').write_text(BLOCK.format(board=BOARD))
+            (root / 'daily').mkdir()
+            (root / 'daily' / f'{TODAY}-tracker.md').write_text(TODAY_TRACKER.replace('| Robin | waiting |', '| unassigned | open |'))
+            from unittest.mock import patch
+            with patch.object(dp, 'load_settings', return_value=settings.Settings(lanes=LANES, kanban=KANBAN)):
+                ctx = dp.decision_context(root, TODAY, NOW)
+            self.assertEqual(ctx.where('#111'), 'triage · needs input')

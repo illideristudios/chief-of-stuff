@@ -2153,7 +2153,8 @@ class CaseLintTest(unittest.TestCase):
             report = decode((work / "trees" / "rate-limit" / one_shot.REPORT).read_text())
             self.assertEqual({k: report[k] for k in ("status", "task", "worker", "runtime_exit", "errors")},
                              {"status": "human_review", "task": "Rate limit headers", "worker": "rate-limit", "runtime_exit": 0, "errors": []})
-            self.assertEqual(sorted(report), sorted(["status", "task", "worker", "runtime_exit", "reason", "changes", "errors"]))
+            self.assertEqual(report["outcome"], tracker_log.NEEDS_INPUT)
+            self.assertEqual(sorted(report), sorted(one_shot.dispatch_prompt.REPORT_KEYS))
             self.assertRegex(report["reason"], reply)
             self.assertTrue((tree / "worker-stdout.log").is_file())
             self.assertIn('mode = "one-shot"', (work / "chief-of-stuff.toml").read_text())  # the workspace runs one-shots
@@ -2162,8 +2163,8 @@ class CaseLintTest(unittest.TestCase):
             self.assertRegex(tracker, r"(?m)^\| Rate limit headers \| Robin \| waiting \| \d\d:\d\d \|")
             self.assertNotRegex(tracker, r"running \d\d:\d\d")
             ended = next(line for line in tracker.splitlines() if tracker_log.ENDED.match(line))
-            self.assertEqual(tracker_log.ENDED.match(ended)[4], "HUMAN REVIEW NEEDED")
-            self.assertTrue(ended.replace("HUMAN REVIEW NEEDED", "NEEDS INPUT").startswith(tracker_log.ended_line(ended[2:7], "rate-limit", "human_review", "", "")[:-len(" — . Changes: .")]), ended)
+            self.assertEqual(tracker_log.ENDED.match(ended)[4], tracker_log.NEEDS_INPUT)
+            self.assertTrue(ended.startswith(tracker_log.ended_line(ended[2:7], "rate-limit", "human_review", "", "")[:-len(" — . Changes: .")]), ended)
             self.assertIn(one_shot._brief(report["reason"]), ended)  # the reason as the launcher writes it: whitespace joined, cut at 500
             self.assertLess(len(one_shot._brief(report["reason"])), len(" ".join(report["reason"].split())))  # and it is cut
             # The fact is in the report, the launcher's copy of it and the worker's log, and nowhere the coordinator reads without `result`.
