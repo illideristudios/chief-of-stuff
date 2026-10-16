@@ -174,6 +174,14 @@ class SinceLookedTest(unittest.TestCase):
                 began = task_forge.hold_began({task: "triage"}, moves, {}, None, tasks, [(day, parse_tracker(earlier).tasks)])
                 self.assertEqual(began[task], datetime.combine(day, time(11, 0), NOW.tzinfo))
 
+    def test_an_unnamed_task_still_resolves_moves_by_its_item(self):
+        task = replace(parse_tracker(TRACKER).tasks[0], name="", issue="")
+        moves = tracker_log.moves(TRACKER + "- 09:00 stage: Cut the release branch → fix\n"
+                                  "- 10:00 stage: Cut the release branch → review\n"
+                                  "- 11:00 stage: Cut the release branch → fix\n", NOW.date(), NOW.tzinfo)
+        self.assertEqual(task_forge.looping([task], moves, {"build": st.Lane(("review", "fix", "merge"))}, None), {task})
+        self.assertEqual(task_forge.hold_began({task: "fix"}, moves, {}, None, [task])[task], NOW.replace(hour=11, minute=0))
+
     def test_a_historical_launcher_cannot_start_a_reused_names_new_issue_hold(self):
         day = NOW.date() - timedelta(days=1)
         old = TRACKER.replace("| #9 |", "| #99 |")

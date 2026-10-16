@@ -70,14 +70,14 @@ def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources
 def current_tasks(tasks: list[Task], rows: list[Task], home) -> dict[str, Task | None]:
     """Resolve a snapshot's names/items to today's tasks. Issue identity wins over a reused name.
     Unmatched aliases stay explicitly unmatched, so that day's moves cannot fall back to today's names."""
-    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    by_name = {(t.name.strip() or t.item.strip()).casefold(): t for t in tasks if t.name.strip() or t.item.strip()}
     by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip() and not t.workflow}
 
     def today(t: Task) -> Task | None:
         key = issue_key(t.issue, home) if t.issue.strip() and not t.workflow else None
         if key and key in by_issue:
             return by_issue[key]
-        named = by_name.get(t.name.strip().casefold())
+        named = by_name.get((t.name.strip() or t.item.strip()).casefold())
         if key and named and named.issue.strip() and not named.workflow and issue_key(named.issue, home) != key:
             return None
         return named
