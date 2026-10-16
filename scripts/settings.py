@@ -96,7 +96,7 @@ class Workers:
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
-    require_green_tests: bool = False  # one-shot completion requires known counts and no failures, skips or xfails
+    require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
 
 
 @dataclass(frozen=True)

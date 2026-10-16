@@ -79,6 +79,11 @@ NON_CLAUDE_REGISTER = ("**Register first, before you read anything else.** You r
     "before each step and after each commit. The coordinator writes tracker and board updates on its next turn.")
 
 
+def suite_counts(data: dict) -> dict[str, int | None]:
+    """Normalize observed suite counts; exact int excludes bool, which is an int subclass."""
+    return {key: value if type(value := data.get(key)) is int and value >= 0 else None for key in SUITE_KEYS}
+
+
 def mailbox_check(runtime: str, name: str, inbox_script: str) -> str:
     """Give each worker the check its interactive host can actually run."""
     command = f'python3 {inbox_script} list --recipient "{name}" --unread'

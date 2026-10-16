@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode
-from dispatch_prompt import SUITE_KEYS
+from dispatch_prompt import suite_counts
 
 LIMIT = 1 << 20  # a report is a few lines; the cap bounds what a runaway writer could leave
 FIELD_MAX = LIMIT // 16  # characters of `reason` or `changes` the launcher keeps: two fields, 6 bytes a character, stay under LIMIT
@@ -25,7 +25,5 @@ def read_report(path: Path, read) -> dict:
     data = toon_decode(raw.decode())
     if not (isinstance(data, dict) and all(isinstance(data.get(k), str) for k in ("task", "worker", "status"))):
         raise ValueError("not a report")
-    for key in SUITE_KEYS:
-        value = data.get(key)
-        data[key] = value if type(value) is int and value >= 0 else None
+    data.update(suite_counts(data))
     return data

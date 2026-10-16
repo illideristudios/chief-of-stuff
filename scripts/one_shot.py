@@ -70,7 +70,7 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
 
 
 def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, int | None]]:
-    """Return (status, reason, changes, counts) for the report; exact int counts reject bool."""
+    """Return (status, reason, changes, counts); never infer success from the CLI exit code or free-form final response."""
     counts = dict.fromkeys(dispatch_prompt.SUITE_KEYS)
     try:
         raw = path.read_text()
@@ -84,8 +84,7 @@ def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, 
         except ValueError:
             return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", "", counts
     if isinstance(data, dict):
-        counts = {key: value if type(value := data.get(key)) is int and value >= 0 else None
-                  for key in dispatch_prompt.SUITE_KEYS}
+        counts = dispatch_prompt.suite_counts(data)
     if not isinstance(data, dict) or data.get("status") not in ("done", "human_review", "relaunch") or any(
         not isinstance(data.get(k), str) or not data[k].strip() for k in ("reason", "changes")
     ):
@@ -352,6 +351,7 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
               before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
               *, adopted: bool = False, expected_common: Path | None = None) -> dict:
+    """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
     if expected_common is None:
@@ -379,6 +379,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     if status == "done" and actual:
         status = "human_review"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
+    # Git/worktree violations take precedence over the suite gate.
     if status == "done" and settings.workers.require_green_tests and (
             any(value is None for value in counts.values()) or counts["passed"] == 0
             or any(counts[key] for key in ("failed", "skipped", "xfailed"))):
