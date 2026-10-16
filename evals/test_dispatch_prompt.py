@@ -1340,7 +1340,7 @@ class StandingWorkerRulesTest(unittest.TestCase):
 
     def compose(self, runtime, one_shot):
         return dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
-                          runtime=runtime, one_shot=one_shot)
+                          name="impl07", runtime=runtime, one_shot=one_shot)
 
     def test_rules_precede_the_task_for_every_runtime_and_mode(self):
         rules = ["Never skip or weaken tests.", "Verify the change before reporting completion."]
@@ -1349,12 +1349,12 @@ class StandingWorkerRulesTest(unittest.TestCase):
             for one_shot in (False, True):
                 with self.subTest(runtime=runtime, one_shot=one_shot):
                     body = self.compose(runtime, one_shot)
-                    header = body.split("Task: Security audit", 1)[0]
-                    self.assertIn("Standing worker rules:", header)
-                    self.assertLess(header.index(rules[0]), header.index(rules[1]))
+                    heading = "# One-shot assignment" if one_shot else "# Assignment"
+                    block = ("\n\nStanding worker rules:\n\n- Never skip or weaken tests.\n"
+                             "- Verify the change before reporting completion.\n\n")
+                    self.assertTrue(body.startswith(heading + block + "You are"))
                     for rule in rules:
                         self.assertEqual(body.count(rule), 1)
-                        self.assertIn(rule, header)
                         self.assertLess(body.index(rule), body.index("Security audit"))
 
     def test_absent_and_empty_rules_leave_assignments_unchanged(self):
