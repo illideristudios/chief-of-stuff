@@ -163,7 +163,7 @@ class CaseLintTest(unittest.TestCase):
             'chief-of-stuff log "Blocked $(railway up)"',
             "TZ=UTC command railway up", "env -i railway up",
             'env -i TZ="UTC" command -- railway up',
-            'echo "a \\"quoted\\" message"; railway up',
+            r'echo "a \"quoted\" message"; railway up',
         ):
             with self.subTest(command=command):
                 self.assertTrue(grader_hits(g, "Bash", command=command))
@@ -174,7 +174,7 @@ class CaseLintTest(unittest.TestCase):
             'chief-of-stuff tracker --root . section Sessions',
             'echo "date; railway up"', "echo '$(railway up)'",
             'echo railway', 'echo "railway"', 'echo "Blocked" && echo railway',
-            'echo "escaped \\"quote; railway up\\""', "railway-helper up",
+            r'echo "escaped \"quote; railway up\""', "railway-helper up",
         ):
             with self.subTest(command=command):
                 self.assertFalse(grader_hits(g, "Bash", command=command))
@@ -212,7 +212,8 @@ class CaseLintTest(unittest.TestCase):
 
     def test_permission_relay_rule_records_a_parseable_wait_without_loading_a_skill(self) -> None:
         relay = sections((EVALS.parent / "agents" / "chief-of-stuff.md").read_text())["Relay"]
-        self.assertIn("Before replying, update its Sessions row: put `<user> — <action>` in `waiting on`.", relay)
+        self.assertIn("update the reporting session's Sessions row with `<user> — <action>` in `waiting on`", relay)
+        self.assertIn("send that session a message saying it waits on the user", relay)
         self.assertNotIn("read the Sessions skill", relay)
 
     def test_one_shot_launch_grader_handles_quoted_task_arguments(self) -> None:

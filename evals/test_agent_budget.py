@@ -38,7 +38,7 @@ ONE_SHOT_PARAGRAPH = 3_800  # kept: a later slice trims this paragraph
 # Skills are read on demand; no host's prompt appends their bodies.
 # rendered_sizes(1) over the simulated agent, copied into a temporary plugin:
 # Claude 39,241 B; Codex 37,248 B; Cursor 37,356 B; AGY 37,412 B (slice 487 plus the PR 540 review sentence simulated).
-# #547 adds the approved-forge-closure sentence: Claude 39,386; Codex 37,393; Cursor 37,501; AGY 37,557.
+# #67 relay format: agent 39,645 B; Relay 3,178 B; Claude 39,272; Codex 37,279; Cursor 37,387; AGY 37,443.
 PROMPT = {"claude": 39_390, "codex": 37_400, "cursor": 37_510, "agy": 37_560}
 CEILING = {  # `## ` section -> bytes, heading line included
     "Role": 1600, "Dispatch authority": 1100, "Browser safety": 170, "Writing": 580,
@@ -382,8 +382,8 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               "A poll to it is a mailbox message, and its row's `waiting on` reads `<its name> — its mailbox "
               'reply` until the reply arrives.')}
 CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bfcd742acbf3dd1ef9',
- # #67: the permission relay updates its Sessions row before giving the one-line reply.
- 'Relay': '63d02319b51f10a259d8da134a8d8d857bb78e3c091b0ed1647d2f4e7f8676f4'}
+ # #67: Relay retains the inline `<user> — <action>` row format; no skill read is needed.
+ 'Relay': '8f9bb5d431735a2460f06b7ec14e2c26903d7c5231bfe1fbeb632935caa469a9'}
 
 # Slice 8 (#491): captured once from git show origin/main:agents/chief-of-stuff.md
 # (## Dispatch, 14,905 B). Split like slice 7: strip list prefixes and fences, split at
@@ -747,7 +747,7 @@ class AgentBudgetTest(unittest.TestCase):
                          "start_coordinator.py replaces Check/Sessions using these adjacent headings")
         for name, digest in CHECK_RELAY_SHA256.items():
             self.assertEqual(hashlib.sha256(sections(self.text)[name].encode()).hexdigest(), digest,
-                             f"slice 7 must leave {name} verbatim (Relay: slice 487 merged Notices in)")
+                             f"{name} must match its pin (Relay includes slice 487 Notices and the #67 waiting-on format)")
 
     def test_slice_487_removed_fragments_are_absent(self):
         low = self.text.lower()
