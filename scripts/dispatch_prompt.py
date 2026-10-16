@@ -25,7 +25,7 @@ import runtimes  # noqa: E402
 
 
 class RefusedError(ValueError):
-    """Invalid tracker data; no assignment composed."""
+    """Invalid task data, settings or launch parameters; no assignment composed."""
 
 
 def config(root: Path):
@@ -252,7 +252,7 @@ def skills_line(skills: tuple[str, ...]) -> str:
 
 
 def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
-                  skills: tuple[str, ...] = ()) -> str:
+                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = ()) -> str:
     """Assignment from a store row, forge issue and workspace, never a peer session's instructions (E3)."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
@@ -266,7 +266,8 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
     if root is not None and stage in ("implement", "fix"):
         line = architecture_line(root)
         architecture = f"{line}\n" if line else ""
-    return (f"{ISSUE_HEADER}\nIssue: {key}\nStore title: {name}\nStage: {stage}\n"
+    header = ISSUE_HEADER.replace("# Assignment\n", "# Assignment" + standing_rules(rules), 1) if rules else ISSUE_HEADER
+    assignment = (f"{header}\nIssue: {key}\nStore title: {name}\nStage: {stage}\n"
             f"Job: {ISSUE_JOBS.get(stage, persona.role)}\nPersona: {persona.role}\n"
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
@@ -274,6 +275,9 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
             + (skills_line(skills) + "\n" if skills else "")
             + architecture
             + f"\n## Forge issue\n\n{title}\n\n{body}\n")
+    if len(assignment) > BODY_CAP:
+        raise RefusedError(f"the assignment is {len(assignment)} characters, over the {BODY_CAP} cap")
+    return assignment
 
 
 def commit_rule(workflow: Workflow, root: Path) -> str:
@@ -313,6 +317,18 @@ def _clean(label: str, value: str) -> str:
     if len(value) > LINE_CAP:
         raise RefusedError(f"{label} is {len(value)} characters, over the {LINE_CAP} cap")
     return value
+
+
+def standing_rules(rules: tuple[str, ...]) -> str:
+    """Render workspace rules as bounded single-line bullets with their source."""
+    if not rules:
+        return ""
+    for rule in rules:
+        _clean("[workers] rules", rule)
+        if not rule.strip() or re.search(r"[\n\r\t\u2028\u2029]", rule):
+            raise RefusedError("[workers] rules must be non-blank single lines without control characters")
+    return ("\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in rules)
+            + "\n\nThese rules come from workspace settings (`[workers] rules`).\n")
 
 
 def task_keys(item: str, name: str = "") -> set[str]:
@@ -420,19 +436,20 @@ def _task_directives(root: Path, row: Task, skills: str, issue: Any) -> list[str
 
 def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
             coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
-            one_shot: bool = False) -> str:
-    """The assignment for `task`, read back off disk. A task that is not a row is refused."""
+            one_shot: bool = False, *, workflow: Workflow | None = None,
+            rules: tuple[str, ...] | None = None) -> str:
+    """Compose task for worktree/coordinator/name/runtime/one_shot, prefixing preloaded rules; invalid data, settings or launch conditions raise RefusedError."""
     cfg = config(root)
     day = day or datetime.now(cfg.zone).date().isoformat()
     relative, text, row = _task_context(root, cfg, day, task)
-    try:
-        settings = load_settings(root, cfg.settings_path)
-    except (OSError, SettingsError) as exc:
-        raise RefusedError(f"cannot read workspace settings: {exc}") from None
-    workflow = settings.workflow
-    rules_header = ""
-    if settings.workers.rules:
-        rules_header = "\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in settings.workers.rules) + "\n"
+    if workflow is None or rules is None:
+        try:
+            settings = load_settings(root, cfg.settings_path)
+        except (OSError, SettingsError) as exc:
+            raise RefusedError(f"cannot read workspace settings: {exc}") from None
+        workflow = settings.workflow if workflow is None else workflow
+        rules = settings.workers.rules if rules is None else rules
+    rules_header = standing_rules(rules)
     stage = stage_defaults(root, day, task)
     skills = skills_line(stage.skills) if stage else ""
     owner = row.owner.strip()
@@ -526,7 +543,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     # Pin the workspace mailbox; worktree discovery can select a different one.
     inbox_script = f"{INBOX_SCRIPT} --mailbox-dir {shlex.quote(str(root.resolve() / PROMPT_DIR / 'mailbox'))}"
 
-    header_text = HEADER.replace("\\\n", "").format(
+    header_text = HEADER.replace(UNNAMED, name or UNNAMED).replace("\\\n", "").format(
         user=cfg.user,
         stop_file=STOP_FILE,
         coordinator=f"the chief-of-stuff coordinator{f' `{who.group()}`' if who else ''}",
@@ -564,7 +581,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             header_text += "\n\n**Cursor plan gate.** This session starts in Cursor Plan mode. Ask the user to approve the plan before switching to Agent mode.\n"
     header_text = header_text.replace("**Your name is fixed.**",
         mailbox_check(runtime, name or UNNAMED, inbox_script) + "\n\n**Your name is fixed.**", 1)
-    report_text = REPORT.format(
+    report_text = REPORT.replace(UNNAMED, name or UNNAMED).format(
         inbox_script=inbox_script,
         coord_mailbox=coord_mailbox,
     )
@@ -589,8 +606,6 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         report_text,
     ]
     body = "\n".join(lines) + "\n"
-    if name:
-        body = body.replace(UNNAMED, name)
     if len(body) > BODY_CAP:
         raise RefusedError(f"the assignment is {len(body)} characters, over the {BODY_CAP} cap")
     return body

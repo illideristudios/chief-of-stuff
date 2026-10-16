@@ -64,7 +64,7 @@ require_green_tests = true # optional: hold one-shot completions with unknown or
 rules = ["Never skip or weaken tests."] # optional: standing rules for every worker
 ```
 
-`[workers] rules` is an ordered list of non-empty strings. Every interactive and one-shot assignment puts these rules in its header, before the task, for Claude, Codex, Cursor and Antigravity. Omitting `rules` or setting it to `[]` leaves the assignment unchanged.
+`[workers] rules` is an ordered list of non-blank, single-line strings without control characters; surrounding spaces are preserved. Every interactive, one-shot and engine assignment puts these rules in its header, before the task, for Claude, Codex, Cursor and Antigravity. Omitting `rules` or setting it to `[]` leaves the assignment unchanged.
 
 With `claude_as_profile` set, every Claude-runtime worker, interactive or one-shot, launches through `claude-as run <profile>` instead of a bare `claude`, so it runs under that account profile. `claude-as` must be on the login shell's PATH, or the launch is refused. Codex, Cursor and Antigravity workers are unaffected.
 

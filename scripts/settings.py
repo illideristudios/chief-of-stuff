@@ -90,6 +90,7 @@ class Workflow:
 
 @dataclass(frozen=True)
 class Workers:
+    """Worker launch configuration and standing workspace instructions."""
     launcher: str = "ghostty"
     mode: str = "interactive"
     # #100: one-shots running at once across every session in the workspace; None is no cap.
@@ -295,8 +296,12 @@ def _workers(table) -> Workers:
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
     rules = table.get("rules", [])
-    if not isinstance(rules, list) or not all(isinstance(rule, str) and rule.strip() for rule in rules):
-        raise SettingsError("[workers] rules must be a list of non-empty strings")
+    if not isinstance(rules, list) or not all(
+        isinstance(rule, str) and rule.strip() and len(rule.splitlines()) == 1
+        and not re.search(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]", rule) for rule in rules
+    ):
+        raise SettingsError("[workers] rules must be a list of non-blank, single-line strings without control characters")
+    # Preserve the user's wording, including surrounding spaces.
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
                    claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))
 

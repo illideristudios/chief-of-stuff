@@ -661,12 +661,14 @@ class RunTest(unittest.TestCase):
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")
         (self.root / "cos.toml").write_text('[workers]\nrules = ["Keep tests."]\n')
         with mock.patch.object(dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")), \
+             mock.patch.object(dispatch_prompt, "compose", wraps=dispatch_prompt.compose) as compose, \
              mock.patch.object(one_shot, "resolve", return_value="/fake/agent"), \
-             contextlib.redirect_stdout(io.StringIO()) as out:
+             contextlib.redirect_stdout(io.StringIO()):
             code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree,
                                 name="worker01", runtime="codex", agent_type=None, model="example", effort="", dry_run=True)
         self.assertEqual(code, 0)
-        self.assertIn("- Keep tests.\n", out.getvalue())
+        self.assertEqual(compose.call_args.kwargs["rules"], ("Keep tests.",))
+        self.assertIsNotNone(compose.call_args.kwargs["workflow"])
 
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',

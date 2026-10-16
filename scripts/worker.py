@@ -108,7 +108,8 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
+           claude_as_profile: str = "", rules: tuple[str, ...] = (),
+           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -129,7 +130,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
-                                               skills=defaults.skills if defaults else ())
+                                               skills=defaults.skills if defaults else (), rules=rules)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
