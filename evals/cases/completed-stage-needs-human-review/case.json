@@ -2,7 +2,7 @@
   "tz": "America/Chicago",
   "golden": true,
   "golden_why": "#130: a non-plan stage marked review_after needs human approval after completion, even without any lane gate.",
-  "description": "A successful one-shot has completed specify, which has review_after=true. Its launcher report is human_review and its artifact is available. No user approval has been recorded. Continue the pipeline by surfacing the artifact for review, leaving the stage held.",
+  "description": "A successful specify one-shot has a done report and an artifact. The configured review_after must keep it held until the user approves, without an existing human_review signal.",
   "prompt": "The Cache design one-shot finished successfully and its launcher reconciled it. Continue the pipeline from its report. Use --dry-run for any launch; do not start a real worker.",
   "graders": [
     {
@@ -28,7 +28,7 @@
       "name": "does not launch past the review hold",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "(?:chief[-_]of[-_]stuff(?:\\.py)?\\s+worker|spawn_session\\.py).*--dry-run",
+      "input_match": "(?:chief[-_]of[-_]stuff(?:\\.py)?\\b[^\\n]*(?:\\bworker\\b|\\btick\\b)|\\b(?:spawn_session|flow)\\.py\\b)",
       "max": 0
     },
     {

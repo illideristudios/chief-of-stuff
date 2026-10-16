@@ -52,6 +52,10 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write(text.replace('review_after = true', f'review_after = {value}')))
 
+    def test_plan_default_can_be_disabled_without_a_lane_or_kanban_stage(self):
+        config = st.load(self.root, self.write('[stages.plan]\nreview_after = false\n'))
+        self.assertNotIn("plan", config.review_stages())
+
     def test_stage_profiles_and_skills_are_optional(self):
         text = ('[lanes.code]\nstages = ["implement", "review", "pr"]\n'
                 '[stages.review]\nagent = "reviewer"\nskills = ["security-review", "extras:code-review"]\n'

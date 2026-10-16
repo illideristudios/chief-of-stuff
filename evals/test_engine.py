@@ -103,6 +103,59 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.launched[0][1], "review")
 
+    def completed_review(self, held=False):
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, started_at=(NOW - timedelta(hours=1)).isoformat())
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        self.forge.rows[0]["human_review"] = held
+        self.forge.add_human_hold = mock.Mock(return_value="")
+
+    def test_existing_hold_records_pending_gate_without_network_write(self):
+        self.completed_review(held=True)
+        self.run_pass(review_stages={"implement"})
+        self.forge.add_human_hold.assert_not_called()
+        self.assertEqual(self.db.resume(KEY)["pending_review"], "review_after:implement:1")
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "Ask")
+        self.forge.rows[0]["human_review"] = False
+        self.run_pass(review_stages={"implement"})
+        self.assertEqual(self.launched[0][1], "review")
+        self.assertTrue(any(e.message == "approved: review_after:implement:1" for e in self.db.log(KEY)))
+
+    def test_hold_write_that_applies_then_fails_verification_recovers(self):
+        self.completed_review()
+        def failed_write(number):
+            self.assertEqual(self.db.resume(KEY)["pending_review"], "review_after:implement:1")
+            self.forge.rows[0]["human_review"] = True
+            raise ForgeError("verification failed")
+        self.forge.add_human_hold.side_effect = failed_write
+        self.run_pass(review_stages={"implement"})
+        self.run_pass(review_stages={"implement"})
+        self.forge.add_human_hold.assert_called_once()
+        self.forge.rows[0]["human_review"] = False
+        self.run_pass(review_stages={"implement"})
+        self.assertEqual(self.launched[0][1], "review")
+
+    def test_failed_hold_write_is_not_approval(self):
+        self.completed_review()
+        self.forge.add_human_hold.return_value = "write refused"
+        self.run_pass(review_stages={"implement"})
+        self.run_pass(review_stages={"implement"})
+        self.assertEqual(self.launched, [])
+        self.assertFalse(self.db.resume(KEY).get("reviewed_stages"))
+        self.assertEqual(self.forge.add_human_hold.call_count, 2)
+
+    def test_closed_or_moved_issue_cannot_approve_a_pending_review(self):
+        for change in ({"forge_state": "closed"}, {"stage": "review"}):
+            with self.subTest(change=change):
+                self.completed_review(held=True)
+                self.run_pass(review_stages={"implement"})
+                self.forge.rows[0].update(human_review=False, **change)
+                self.run_pass(review_stages={"implement"})
+                self.assertFalse(self.db.resume(KEY).get("reviewed_stages"))
+                if "stage" in change:
+                    self.assertNotIn("pending_review", self.db.resume(KEY))
+                self.forge.rows[0].update(stage="implement", forge_state="open")
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -136,7 +189,8 @@ class EngineTest(unittest.TestCase):
 
     def run_pass(self, **kwargs):
         return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                               trees=self.trees, launch=self.launch, clock=lambda: self.now, **kwargs)
+                               trees=self.trees, launch=self.launch, clock=lambda: self.now,
+                               review_stages=kwargs.pop("review_stages", {"implement"} if (self.root / "cos.toml").exists() else {"plan"}), **kwargs)
 
     def finish(self, stage, attempt=1, outcome="done"):
         seg = next(s for s in self.db.segments(KEY) if s.stage == stage and s.attempt == attempt)
@@ -427,7 +481,7 @@ class EngineTest(unittest.TestCase):
         })
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "plan", "builder", 1)])
         self.finish("plan")
-        self.assertEqual(self.run_pass(), [reconcile.Ask(KEY, "review_after:plan:1", "plan needs your review")])
+        self.assertEqual(self.run_pass(), [reconcile.Ask(KEY, "review_after:plan:1", "plan needs your review", review_stage="plan")])
         self.assertEqual(self.db.items()[0].stage, "plan")
         gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])

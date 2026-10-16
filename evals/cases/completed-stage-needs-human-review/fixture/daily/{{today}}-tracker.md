@@ -12,4 +12,4 @@
 | Cache design | `notes/cache-design.md`; worktree `cache-design` (work/cache-design) |
 ## Log
 - {{now-1h|hhmm}} one-shot cache-design started: claude opus, trees/cache-design, task Cache design
-- {{now|hhmm}} one-shot cache-design: HUMAN REVIEW NEEDED — specify needs your review; completed. Changes: notes/cache-design.md.
+- {{now|hhmm}} one-shot cache-design: completed; awaiting integration — completed. Changes: notes/cache-design.md.

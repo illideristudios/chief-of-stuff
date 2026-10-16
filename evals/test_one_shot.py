@@ -2064,7 +2064,9 @@ class RunTest(unittest.TestCase):
                      mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
                     report = one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, 0,
                                                 one_shot.git_head(self.tree))
-                self.assertEqual(report["status"], "human_review" if held else "done")
+                self.assertEqual(report["status"], "done")
+                self.assertEqual(report.get("review_stage", ""), stage if held else "")
+                self.assertIn("[review_after=" + stage + "]" if held else "completed; awaiting integration", self.tracker.read_text())
                 self.assertEqual(hold.call_count, int(held))
                 self.assertIn(f'| code | {stage} | #7 |', self.tracker.read_text())
                 self.assertIn('| Robin | waiting |', self.tracker.read_text())

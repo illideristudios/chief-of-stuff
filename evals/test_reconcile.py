@@ -72,14 +72,20 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement")]), [reconcile.Review(KEY, 1)])
 
     def test_completed_marked_stage_asks_until_that_attempt_is_reviewed(self):
-        expected = reconcile.Ask(KEY, "review_after:implement:1", "implement needs your review")
+        expected = reconcile.Ask(KEY, "review_after:implement:1", "implement needs your review", review_stage="implement")
         self.assertEqual(self.plan(history=[Segment("implement")], review_stages={"implement"}), [expected])
         self.assertEqual(self.plan(history=[Segment("implement")], review_stages={"implement"},
                                    reviewed_stages={KEY: {"review_after:implement:1"}}), [reconcile.Review(KEY, 1)])
         self.assertEqual(self.plan(history=[Segment("implement", attempt=2)], review_stages={"implement"},
                                    reviewed_stages={KEY: {"review_after:implement:1"}}),
-                         [reconcile.Ask(KEY, "review_after:implement:2", "implement needs your review")])
+                         [reconcile.Ask(KEY, "review_after:implement:2", "implement needs your review", review_stage="implement")])
         self.assertEqual(self.plan(review_stages={"implement"}), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
+    def test_existing_human_hold_still_records_completed_review_gate(self):
+        action = self.plan(replace(Item(), human_review=True), history=[Segment("implement")],
+                           review_stages={"implement"})[0]
+        self.assertIsInstance(action, reconcile.Ask)
+        self.assertEqual(action.review_stage, "implement")
 
     def test_gated_edge_asks_only_when_its_resolved_policy_requires_zach(self):
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
