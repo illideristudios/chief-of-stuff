@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_prompt as dp  # noqa: E402
 import inbox  # noqa: E402
 import make_repo  # noqa: E402
+from settings import Settings, Stage, Workers, Workflow  # noqa: E402
 from evals.rules_text import one_shot_paragraph, rules_text, sections, skill_body  # noqa: E402
 
 CLAUDE = """# Workspace
@@ -1404,9 +1405,9 @@ class StandingWorkerRulesTest(unittest.TestCase):
                         self.assertIn('--from "impl07"', body)
 
     def test_preloaded_policy_avoids_reading_settings(self):
+        settings = Settings(workflow=Workflow(delivery="branch"), workers=Workers(rules=("Keep tests.",)))
         with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
-            body = dp.compose(self.root, "2026-09-18", "Security audit", workflow=dp.Workflow(delivery="branch"),
-                              rules=("Keep tests.",))
+            body = dp.compose(self.root, "2026-09-18", "Security audit", settings=settings)
         self.assertIn("- Keep tests.\n", body)
         self.assertIn("Report the branch, head sha", body)
 
@@ -1419,24 +1420,34 @@ class StandingWorkerRulesTest(unittest.TestCase):
             .replace("| Security audit | unassigned | open | 09:00 |  |",
                      "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
         for one_shot in (False, True):
+            settings = Settings(workflow=Workflow(delivery="branch"),
+                                workers=Workers(rules=("Keep tests.",), require_green_tests=True),
+                                stages={"review": Stage(skills=("security-review",))})
+            # A later disk edit must not mix policy from different snapshots.
+            self.settings.write_text('[workers]\nrules = ["Changed on disk."]\n')
             with self.subTest(one_shot=one_shot), mock.patch.object(
                     dp, "load_settings", side_effect=AssertionError("duplicate read")):
                 body = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
-                                  one_shot=one_shot, workflow=dp.Workflow(), rules=("Keep tests.",),
-                                  stages={"review": dp.Stage(skills=("security-review",))})
-            self.assertIn("- Keep tests.\n", body)
-            self.assertIn("Skills: load and follow security-review.", body)
+                                  one_shot=one_shot, settings=settings)
+                self.assertIn("- Keep tests.\n", body)
+                self.assertNotIn("Changed on disk.", body)
+                self.assertIn("Skills: load and follow security-review.", body)
+                if one_shot:
+                    self.assertIn("Workspace [workers] require_green_tests is enabled:", body)
+                    self.assertIn("do not push or merge without existing authorization", body)
+                else:
+                    self.assertIn("Report the branch, head sha", body)
 
     def test_green_suite_policy_with_standing_rules_and_preloaded_settings(self):
         for enabled in (False, True):
             self.settings.write_text('[workers]\nrules = ["Keep tests."]\n'
                                      f'require_green_tests = {str(enabled).lower()}\n')
+            settings = dp.load_settings(self.root, "cos.toml")
             loaded = self.compose("codex", True)
             with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
                 preloaded = dp.compose(self.root, "2026-09-18", "Security audit",
                                        worktree=self.root / "tree", name="impl07", runtime="codex",
-                                       one_shot=True, workflow=dp.Workflow(), rules=("Keep tests.",),
-                                       stages={}, require_green_tests=enabled)
+                                       one_shot=True, settings=settings)
             self.assertEqual(preloaded, loaded)
             self.assertIn("- Keep tests.\n", preloaded)
             self.assertEqual("Workspace [workers] require_green_tests is enabled:" in preloaded, enabled)

@@ -1818,12 +1818,17 @@ class WorkerModeTest(unittest.TestCase):
         tree, args = self.review_workspace()
         settings = tree.parent.parent / "chief-of-stuff.toml"
         settings.write_text(settings.read_text().replace('[workers]\n', '[workers]\nrules = ["Keep tests."]\n'))
-        with unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
+        snapshot = ss.load_settings(tree.parent.parent, "chief-of-stuff.toml")
+        with unittest.mock.patch.object(ss, "load_settings", return_value=snapshot) as load, \
+             unittest.mock.patch.object(ss.dispatch_prompt, "compose", wraps=ss.dispatch_prompt.compose) as compose, \
+             unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
                                         side_effect=AssertionError("duplicate read")), \
              contextlib.redirect_stdout(io.StringIO()) as out:
             self.assertEqual(ss.main(args + ["--check"]), 0)
         self.assertIn("- Keep tests.\n", out.getvalue())
         self.assertIn("Skills: load and follow security-review.", out.getvalue())
+        load.assert_called_once()
+        self.assertIs(compose.call_args.kwargs["settings"], snapshot)
 
     def test_review_stage_launches_configured_agent_and_names_skills_in_brief(self):
         tree, args = self.review_workspace()

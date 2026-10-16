@@ -662,17 +662,17 @@ class RunTest(unittest.TestCase):
         (self.root / "cos.toml").write_text(
             '[workers]\nrules = ["Keep tests."]\nrequire_green_tests = true\n[lanes.code]\nstages = ["review"]\n'
             '[stages.review]\nskills = ["security-review"]\n')
-        with mock.patch.object(dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")), \
+        settings = one_shot.load_settings(self.root, "cos.toml")
+        with mock.patch.object(one_shot, "load_settings", return_value=settings) as load, \
+             mock.patch.object(dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")), \
              mock.patch.object(dispatch_prompt, "compose", wraps=dispatch_prompt.compose) as compose, \
              mock.patch.object(one_shot, "resolve", return_value="/fake/agent"), \
              contextlib.redirect_stdout(io.StringIO()):
             code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree,
                                 name="worker01", runtime="codex", agent_type=None, model="example", effort="", dry_run=True)
         self.assertEqual(code, 0)
-        self.assertEqual(compose.call_args.kwargs["rules"], ("Keep tests.",))
-        self.assertIsNotNone(compose.call_args.kwargs["workflow"])
-        self.assertEqual(compose.call_args.kwargs["stages"]["review"].skills, ("security-review",))
-        self.assertTrue(compose.call_args.kwargs["require_green_tests"])
+        load.assert_called_once_with(self.root, "cos.toml")
+        self.assertIs(compose.call_args.kwargs["settings"], settings)
 
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',
