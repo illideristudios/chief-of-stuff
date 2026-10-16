@@ -1092,6 +1092,43 @@ class RunTest(unittest.TestCase):
         self.assertIn("status: relaunch", dispatch)
         self.assertRegex(dispatch, r"(?i)status: relaunch[^\n]*before you changed anything[^\n]*merged")
 
+    def test_relaunch_releases_the_launcher_hold_before_returning_the_row_to_ready(self):
+        self._with_an_issue_and_kanban()
+        labels = ["03 - BUILD", "!! - HUMAN REVIEW REQUIRED", "kind::code"]
+        edits = []
+        def gh(args):
+            if args[:2] == ["issue", "view"]:
+                return 0, json.dumps({"labels": [{"name": x} for x in labels]}), ""
+            if args[:2] == ["issue", "edit"]:
+                self.assertIn("| worker01 | running ", self.tracker.read_text())
+                edits.append(args)
+                labels.remove(args[args.index("--remove-label") + 1])
+                return 0, "", ""
+            self.fail(f"unexpected forge call: {args}")
+        fake = self._fake(self.ORDINARY, write_partial=False)
+        with mock.patch.object(one_shot.backlog, "run_gh", side_effect=gh), \
+             mock.patch.object(one_shot.backlog, "comment") as comment, \
+             mock.patch.object(one_shot.forge, "add_human_hold") as hold:
+            self.assertEqual(self._run(fake), 1)
+        self.assertEqual(labels, ["03 - BUILD", "kind::code"])
+        self.assertEqual(len(edits), 1)
+        self.assertIn("| unassigned | open |", self.tracker.read_text())
+        self.assertEqual(self._report()["status"], "relaunch")
+        hold.assert_not_called()
+        comment.assert_not_called()
+
+    def test_a_failed_hold_release_does_not_leave_the_task_ready(self):
+        self._with_an_issue_and_kanban()
+        fake = self._fake(self.ORDINARY, write_partial=False)
+        with mock.patch.object(one_shot.forge.Forge, "write_stage",
+                               return_value=SimpleNamespace(done=False, error="board changed")), \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value=""), \
+             mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")):
+            self._run(fake)
+        self.assertNotIn("| unassigned | open |", self.tracker.read_text())
+        self.assertEqual(self._report()["status"], "human_review")
+        self.assertIn("board changed", self._report()["reason"])
+
     def test_relaunch_with_changes_needs_review(self):
         fake = self._fake('status: relaunch\nreason: base moved\nchanges: none\n')
         self.assertEqual(self._run(fake), 1)
@@ -1121,6 +1158,7 @@ class RunTest(unittest.TestCase):
         fake = self._fake(result, exit_code=exit_code, write_partial=write_partial, commit_partial=commit_partial,
                           stderr=stderr, during=during)
         with mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
+             mock.patch.object(one_shot.forge.Forge, "write_stage", return_value=SimpleNamespace(done=True, error="")), \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             return self._run(fake, tree, model=model, runtime=runtime), hold, comment
 

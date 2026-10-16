@@ -326,6 +326,60 @@ class StageWriteBackTest(unittest.TestCase):
     def edits(self, gh):
         return [c for c in gh.all_calls if c[:2] == ["issue", "edit"]]
 
+    def test_release_launcher_hold_keeps_stage_and_unrelated_labels_and_is_idempotent(self):
+        for config in (FLOW, BOARD):
+            with self.subTest(project=config.github_project is not None):
+                url = gh_issue(4, "Add a flag")["url"]
+                labels = [FLOW.human_review_label, "bug"]
+                if config.github_project is None:
+                    labels.append("stage: doing")
+                gh = FakeGh(issues=[gh_issue(4, "Add a flag", labels)], status={url: "Doing"})
+                f = forge.Forge(GH, kanban=config, gh=gh)
+                preview = f.write_stage(4, "doing", expected="doing", release_hold=True)
+                self.assertEqual(preview.delta.remove, (FLOW.human_review_label,))
+                self.assertFalse(preview.done)
+                self.assertEqual(self.edits(gh), [])
+                for _ in range(2):
+                    got = f.write_stage(4, "doing", expected="doing", release_hold=True, commit=True)
+                    self.assertTrue(got.done, got.error)
+                self.assertEqual(len(self.edits(gh)), 1)
+                self.assertEqual([x["name"] for x in gh.issues[4]["labels"]],
+                                 [x for x in labels if x != FLOW.human_review_label])
+                self.assertFalse(any(c[:2] == ["project", "item-edit"] for c in gh.all_calls))
+
+    def test_release_hold_retains_stage_holds_and_refuses_board_drift(self):
+        for config in (FLOW, BOARD):
+            for held_stage in (False, True):
+                with self.subTest(project=config.github_project is not None, held_stage=held_stage):
+                    cfg = replace(config, hold_stages=("doing",)) if held_stage else config
+                    labels = [FLOW.human_review_label]
+                    if cfg.github_project is None:
+                        labels.append("stage: doing" if held_stage else "stage: review")
+                    url = gh_issue(4, "Add a flag")["url"]
+                    gh = FakeGh(issues=[gh_issue(4, "Add a flag", labels)],
+                                status={url: "Doing" if held_stage else "Review"})
+                    got = forge.Forge(GH, kanban=cfg, gh=gh).write_stage(
+                        4, "doing", expected="doing", release_hold=True, commit=True)
+                    if held_stage:
+                        self.assertTrue(got.done, got.error)
+                    else:
+                        self.assertIn("changed outside the tracker", got.error)
+                    self.assertEqual(self.edits(gh), [])
+
+    def test_release_hold_reports_failed_or_unverified_writes(self):
+        for fail in (True, False):
+            with self.subTest(failed_write=fail):
+                gh = FakeGh(issues=[gh_issue(4, "Add a flag", ["stage: doing", FLOW.human_review_label])],
+                            fail=[("issue", "edit")] if fail else [])
+                def run(args):
+                    if not fail and args[:2] == ["issue", "edit"]:
+                        return 0, "", ""  # success without removing the label
+                    return gh(args)
+                got = forge.Forge(GH, kanban=FLOW, gh=run).write_stage(
+                    4, "doing", expected="doing", release_hold=True, commit=True)
+                self.assertFalse(got.done)
+                self.assertIn("rate limited" if fail else "labels differ", got.error)
+
     def test_a_stage_write_previews_by_default(self):
         gh = github()
         got = forge.Forge(GH, kanban=FLOW, gh=gh).write_stage(4, "review", expected="doing")

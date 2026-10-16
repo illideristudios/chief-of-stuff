@@ -160,6 +160,29 @@ class GitLabUpdaterTest(unittest.TestCase):
         self.before = {"iid": 7, "state": "opened", "labels": ["00 - PLAN", "kind::code"]}
         self.after = {"iid": 7, "state": "opened", "labels": ["01 - PLAN REVIEW", "!! - HUMAN REVIEW REQUIRED", "kind::code"]}
 
+    def test_release_launcher_hold_preserves_stage_and_other_labels(self):
+        held = {"labels": ["03 - BUILD", FLOW.human_review_label, "kind::code"]}
+        released = {"labels": ["03 - BUILD", "kind::code"]}
+        with mock.patch.object(backlog, "_get", side_effect=[(held, {}, ""), (released, {}, ""),
+                                                            (released, {}, "")]), \
+             mock.patch.object(backlog, "existing_labels", return_value=(set(FLOW.stages), "")), \
+             mock.patch.object(backlog, "_call", return_value=(released, {}, "")) as write:
+            f = forge.Forge(self.cfg, kanban=FLOW, token="test")
+            for _ in range(2):
+                got = f.write_stage(7, "implement", expected="implement", release_hold=True, commit=True)
+                self.assertTrue(got.done, got.error)
+        write.assert_called_once()
+        self.assertEqual(write.call_args.args[-1], {"remove_labels": FLOW.human_review_label})
+
+    def test_release_hold_does_not_bypass_gitlab_stage_guard(self):
+        held = {"labels": ["05 - FIX", FLOW.human_review_label]}
+        with mock.patch.object(backlog, "_get", return_value=(held, {}, "")), \
+             mock.patch.object(backlog, "_call") as write:
+            got = forge.Forge(self.cfg, kanban=FLOW, token="test").write_stage(
+                7, "implement", expected="implement", release_hold=True, commit=True)
+        self.assertIn("changed outside the tracker", got.error)
+        write.assert_not_called()
+
     def test_dry_run_reads_but_does_not_write(self):
         with mock.patch.object(forge.backlog, "_get", return_value=(self.before, {}, "")), \
              mock.patch.object(forge.backlog, "_call") as write:
@@ -312,6 +335,15 @@ class CliTest(unittest.TestCase):
             self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25", "--issue", "#7"]), 0)
         self.assertFalse(sync.call_args.kwargs["commit"])
         self.assertIn("would update", output.getvalue())
+
+    def test_release_hold_uses_the_guarded_stage_command(self):
+        result = kanban.Sync(backlog.IssueRef("team/app", 7, "labs.example.test"), "plan review", done=True)
+        with mock.patch.object(forge.Forge, "write_stage", return_value=result) as sync, redirect_stdout(io.StringIO()):
+            self.assertEqual(kanban_cli.main(["--root", str(self.root), "--date", "2026-09-25",
+                                             "--issue", "#7", "--from-stage", "plan review",
+                                             "--release-hold", "--commit"]), 0)
+        self.assertTrue(sync.call_args.kwargs["release_hold"])
+        self.assertEqual(sync.call_args.kwargs["expected"], "plan review")
 
     def _two_rows_on_issue_7(self):
         """Two lane rows sharing issue #7 (#69): the feature row and an MR-fix row at a further stage."""
