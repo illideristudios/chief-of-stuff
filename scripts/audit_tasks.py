@@ -248,7 +248,7 @@ def merged_faults(tasks, changes: dict, home: Backlog | GitHubBacklog, answered:
         if any(c.state == "open" for c in named):
             continue
         said = [" ".join(filter(None, (board_sources.spelled(c.ref), "merged into", c.base, c.merge_sha[:7]))) for c in named if c.state == "merged"]
-        how = '; write the task done once main is green with it, or write "merged" after the ref' if said else ""
+        how = '; write the task done once main (the integration branch, whatever its name) is green with it, or write "merged" after the ref with the remaining reason' if said else ""
         if answered:
             said += [f"{board_sources.spelled(ref)} not found" for ref in refs if ref not in changes]
         if said:

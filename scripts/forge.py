@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import urlencode
 
 import backlog
+import board_sources
 import forge_review
 import kanban
 import merge_approved
@@ -719,3 +720,38 @@ def for_workspace(root: Path | str, **options: Any) -> Forge | None:
     config = Path(root) / "CLAUDE.md"
     home = backlog_from_config(config) if config.is_file() else None
     return Forge(home, **options) if home else None
+
+
+def verify_merge_claim(row, home, reason: str, changes: str) -> tuple[str, str]:
+    """(failure, verified evidence) for a merge claim the reconciler has identified.
+
+    This checks the change's state, not the post-integration suite: even a confirmed merge
+    leaves the tracker waiting for the coordinator's integration and suite gates.
+    """
+    if home is None:
+        return "merge claim unverified: workspace has no Backlog", ""
+    issue = backlog.issue_ref(row.issue, home) if row.issue.strip() else None
+    if issue is not None and (issue.host.lower(), issue.repo.lower()) != tuple(p.lower() for p in backlog.home_of(home)):
+        home = (backlog.GitHubBacklog(issue.repo) if issue.host == backlog.GITHUB else
+                home.sibling(issue.repo) if isinstance(home, backlog.Backlog)
+                and issue.host.lower() == backlog.home_of(home)[0].lower() else None)
+        if home is None:
+            return "merge claim unverified: change forge is not configured", ""
+    reported = replace(row, name="", item=reason + "\n" + changes, issue="", checklist="")
+    numbers = board_sources.change_numbers(reported, home) or board_sources.change_numbers(row, home)
+    if not numbers:
+        return "merge claim unverified: report names no pull or merge request", ""
+    try:
+        states, error = board_sources.change_states(home, numbers, backlog.run_gh, backlog._call)
+        if error:
+            return f"merge claim unverified: {error}", ""
+        confirmed = []
+        for number in sorted(numbers):
+            ref = board_sources.change_ref(home, number)
+            state = states.get(ref)
+            if state is None or state.state != "merged":
+                return f"merge claim unverified: {board_sources.spelled(ref)} is {state.state if state else 'not found'} on the forge", ""
+            confirmed.append(" ".join(filter(None, (board_sources.spelled(ref), "merged into", state.base, state.merge_sha[:7]))))
+        return "", "Forge merge verified: " + "; ".join(confirmed)
+    except Exception as exc:
+        return f"merge claim unverified: {type(exc).__name__}: {exc}", ""

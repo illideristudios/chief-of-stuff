@@ -85,6 +85,8 @@ Four round trips, not ten.
 3. Serve the board: `chief-of-stuff pages --ensure` (see Board); when the block has a Settings line, ensure the notification service (see Notify), and arm the check: `CronList`, then `CronCreate` only when no job's prompt starts `[Scheduled check]` (see Check).
 4. Reply: the Clock line, what changed while no session was watching (tasks reopened, owners gone, anything unhealthy), and at most one question.
 
+For each audit `merged:` finding, update its Tasks row now: `done` only after integration and a green suite on the integration branch; otherwise `waiting`, with `merged` immediately after its ref and the remaining reason in the item (for example, `PR #12 merged; suite on develop pending`). Here main means the integration branch, whatever its name. A one-shot's merge claim needs the forge's confirmation before `done`.
+
 `Re-arm` names what dies with a session — the check's cron job, a watch, a subscription. Step 3 arms the check again; anything else is marked and said. Re-arming restores checks. After reconciling state, dispatch ready one-shot tasks under Dispatch authority; new interactive sessions still need approval.
 
 The block itself, rewritten in full as the last edit of any move that writes the tracker, so it can never be staler than the file it sits in. Six lines, one each, every time in it your own clock read:

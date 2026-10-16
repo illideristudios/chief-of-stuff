@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """The forge and worker facts the pages draw, read in one place and cached beside the pages.
 
-    chief-of-stuff sources --root R [--refresh]    # print what the cache holds; --refresh reads it all first
+    chief-of-stuff sources --root R [--refresh | --open]
+
+--open reads all open changes directly, without updating the cache; --refresh reads every source and caches it.
 
 Only what today's tracker names is fetched: its tasks' issues, the pull or merge requests their rows
 mention (`!58` on GitLab, `PR #58` on GitHub, or the request's URL), and the requests merged today, in
@@ -101,6 +103,7 @@ class Change:          # a PR or MR
     jobs: tuple[Job, ...] = ()
     conflicts: bool = False
     threads: tuple[ReviewThread, ...] = ()
+    mergeability: str = "unknown"  # forge fact, never the policy's merge-ready verdict
 
 
 @dataclass(frozen=True)
@@ -235,11 +238,13 @@ def _gh_change(key: str, p: dict, approver: str) -> Change:
                   None if pipeline == "none" else pipeline, approved,
                   sum(r.get("state") == "APPROVED" for r in reviews), _when(p.get("mergedAt")),
                   p.get("baseRefName") or "", tuple(f["path"] for f in files), _closes(p.get("body")),
-                  p.get("headRefOid") or "", _stats(files), jobs, p.get("mergeable") == "CONFLICTING", threads)
+                  p.get("headRefOid") or "", _stats(files), jobs, p.get("mergeable") == "CONFLICTING", threads,
+                  {"MERGEABLE": "mergeable", "CONFLICTING": "conflicting"}.get(p.get("mergeable"), "unknown"))
 
 
-def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: datetime, approver: str, gh):
-    """(issues, changes, error) from one `gh api graphql` call; issues and changes are None when it failed."""
+def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: datetime, approver: str, gh, *, include_open=False):
+    """(issues, changes, error) from GraphQL; include_open adds cursor pages of all open PRs.
+    The default board read remains one call. Issues and changes are None when that call failed."""
     repos = sorted(wanted)
     parts = []
     for i, repo in enumerate(repos):
@@ -274,7 +279,32 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
     for node in ((data.get("merged") or {}).get("nodes") or []):
         if node and _when(node.get("mergedAt")) and _when(node["mergedAt"]) >= since:
             changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver))
-    return issues, changes, _graphql_errors(body) or (err.strip() if code else "")
+    error = _graphql_errors(body) or ((err.strip() or f"gh exited {code}") if code else "")
+    cursor = "" if include_open and not error else None
+    while cursor is not None:
+        after = f", after: {json.dumps(cursor)}" if cursor else ""
+        owner, name = home.repo.split("/", 1)
+        query = (f"query {{ open: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ "
+                 f"pullRequests(states: OPEN, first: 100{after}) {{ nodes {{ {GH_CHANGE} }} "
+                 "pageInfo { hasNextPage endCursor } } } }")
+        code, out, err = gh(["api", "graphql", "-f", "query=" + query])
+        try:
+            body = json.loads(out)
+            connection = body["data"]["open"]["pullRequests"]
+            error = _graphql_errors(body) or ((err.strip() or f"gh exited {code}") if code else "")
+            if error:
+                break
+            for node in connection["nodes"]:
+                key = f"#{node['number']}"
+                changes[key] = _gh_change(key, node, approver)
+            info = connection["pageInfo"]
+            cursor = info["endCursor"] if info["hasNextPage"] else None
+            if info["hasNextPage"] and not cursor:
+                raise ValueError("open changes page has no cursor")
+        except (ValueError, KeyError, TypeError) as exc:
+            error = err.strip() or f"open changes: {exc}"
+            break
+    return issues, changes, error
 
 
 # --- GitLab ----------------------------------------------------------------------------------------
@@ -306,10 +336,11 @@ def _gl_change(m: dict, approver: str) -> Change:
                   approver in by if approver else bool(m.get("approved")), len(by), _when(m.get("mergedAt")),
                   m.get("targetBranch") or "", tuple(d["path"] for d in m.get("diffStats") or []),
                   _closes(m.get("description")), m.get("diffHeadSha") or "", _stats(m.get("diffStats") or []), (),
-                  bool(m.get("conflicts")))
+                  bool(m.get("conflicts")), (),
+                  "conflicting" if m.get("conflicts") is True else "mergeable" if m.get("conflicts") is False else "unknown")
 
 
-def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], since: datetime, approver: str, call):
+def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], since: datetime, approver: str, call, *, include_open=False):
     """(issues, changes, errors) from the host's /api/graphql, with the Backlog's token: one POST per connection (a project's issues,
     the named merge requests, the merged page), each under GitLab's complexity cap, then one for open changes' jobs and threads.
     A connection answers at most GL_PAGE nodes, so past that it goes again for the next GL_PAGE iids or the next merged page.
@@ -370,6 +401,25 @@ def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], si
             changes.setdefault(f"!{node['iid']}", _gl_change(node, approver))  # a named change wins over the same one here
         info = (got.get("merged") or {}).get("pageInfo") or {}
         cursor = info.get("endCursor") if info.get("hasNextPage") else None
+    cursor = "" if include_open else None
+    while cursor is not None:
+        after = f", after: {json.dumps(cursor)}" if cursor else ""
+        got = ask(home.project, f"open: mergeRequests(state: opened, first: {GL_PAGE}{after}) "
+                                f"{{ nodes {{ {GL_CHANGE} }} pageInfo {{ hasNextPage endCursor }} }}", "merge requests")
+        if got is None:
+            break
+        connection = got.get("open")
+        if not isinstance(connection, dict) or not isinstance(connection.get("nodes"), list):
+            errors.setdefault("merge requests", "open changes did not answer")
+            lost.add("merge requests")
+            break
+        for node in connection.get("nodes") or []:
+            changes[f"!{node['iid']}"] = _gl_change(node, approver)
+        info = connection.get("pageInfo") or {}
+        cursor = info.get("endCursor") if info.get("hasNextPage") else None
+        if info.get("hasNextPage") and not cursor:
+            errors.setdefault("merge requests", "open changes page has no cursor")
+            lost.add("merge requests")
     for node in pages(home.project, "mergeRequests", sorted(int(k[1:]) for k, c in changes.items() if c.state == "open"),
                       GL_DETAIL, "merge requests", lose=False):
         if (key := f"!{node['iid']}") in changes:
@@ -392,8 +442,10 @@ def change_numbers(task, home, then: str = "") -> set[int]:
     """The pull or merge requests a task's row names: `!N` on GitLab, `PR #N` on GitHub, or the request's URL.
     With `then`, only those a cell follows with it. Each cell is read alone, so nothing is read across two."""
     github_home = isinstance(home, backlog.GitHubBacklog)
-    url = (rf"github\.com/{re.escape(home.repo)}/pull/(\d+)" if github_home
-           else rf"{re.escape(backlog.home_of(home)[0])}/{re.escape(home.project)}/-/merge_requests/(\d+)")
+    path = (rf"github\.com/{re.escape(home.repo)}/pull" if github_home
+            else rf"{re.escape(backlog.home_of(home)[0])}/{re.escape(home.project)}/-/merge_requests")
+    # Include the entire URL tail before `then`, so /files or /diffs can be acknowledged too.
+    url = rf"(?i:(?<![\w./:@-])(?:https?://)?{path}/(\d+)\b(?:[/#?][^\s<>`\])]*?)?)(?=$|[\s<>`\]),;.!])"
     return {int(n) for cell in (task.name, task.item, task.issue, task.checklist)
             for named in ((GH_PR if github_home else GL_MR).pattern, url) for n in re.findall(named + then, cell)}
 
@@ -419,8 +471,12 @@ def change_states(home, numbers, gh, call) -> tuple[dict[str, ChangeState], str]
             ref = change_ref(home, p["number"])
             states[ref] = ChangeState(ref, p["state"].lower(), p.get("baseRefName") or "", (p.get("mergeCommit") or {}).get("oid") or "")
         # A number that is not a pull request is a null node, a NOT_FOUND at its alias, and a failing `gh`.
-        return states, _graphql_errors({"errors": [e for e in body.get("errors") or [] if not (
-            isinstance(e, dict) and e.get("type") == "NOT_FOUND" and len(e.get("path") or ()) == 2)]})
+        errors = body.get("errors") or []
+        unexpected = [e for e in errors if not (
+            isinstance(e, dict) and e.get("type") == "NOT_FOUND"
+            and e.get("path") in (["repository", f"n{n}"] for n in numbers))]
+        return states, _graphql_errors({"errors": unexpected}) or (
+            (err.strip() or f"gh exited {code}") if code and not errors else "")
     secret = backlog.token(home)
     if not secret:
         return {}, home.missing_token
@@ -438,7 +494,7 @@ def change_states(home, numbers, gh, call) -> tuple[dict[str, ChangeState], str]
     return states, _graphql_errors(body)
 
 
-def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
+def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call, *, include_open=False):
     """What the tracker's tasks name, from the Backlog's forge: (issues, changes, errors), each side None when it failed,
     `errors` mapping a panel ("kanban", "merge requests") to its error."""
     home = cfg.backlog
@@ -461,9 +517,9 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
     if github_home:
         if changes:
             wanted.setdefault(home.repo, set()).update(changes)
-        issues, found, error = github(home, wanted, since, approver, gh)
+        issues, found, error = github(home, wanted, since, approver, gh, include_open=include_open)
         return issues, found, {"kanban": error, "merge requests": error} if error else {}
-    return gitlab(home, wanted, changes, since, approver, call)
+    return gitlab(home, wanted, changes, since, approver, call, include_open=include_open)
 
 
 # --- workers ---------------------------------------------------------------------------------------
@@ -557,7 +613,9 @@ def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call) ->
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--root", type=Path, default=Path("."), help="workspace root holding CLAUDE.md")
-    ap.add_argument("--refresh", action="store_true", help="read every source now and rewrite the cache")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--refresh", action="store_true", help="read every source now and rewrite the cache")
+    mode.add_argument("--open", action="store_true", help="read open changes from the forge, with mergeability, pipeline and paths; write nothing")
     args = ap.parse_args(argv)
     now = datetime.now().astimezone()
     try:
@@ -565,6 +623,20 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ConfigError) as e:
         print(f"sources: {e}", file=sys.stderr)
         return 2
+    if args.open:
+        local = now.astimezone(cfg.zone)
+        try:
+            _, changes, errors = forge(args.root, cfg, parse_tracker(""), datetime.combine(local.date(), time(0), cfg.zone),
+                                       backlog.run_gh, backlog._call, include_open=True)
+        except Exception as exc:
+            changes, errors = {}, {"merge requests": f"{type(exc).__name__}: {exc}"}
+        if cfg.backlog is None:
+            errors = {"config": "workspace has no Backlog"}
+        print(toon_encode({"changes": [{"ref": c.ref, "url": c.url, "title": c.title, "draft": c.draft,
+                                       "mergeability": c.mergeability, "pipeline": c.pipeline, "files": list(c.files)}
+                                      for _, c in sorted((changes or {}).items()) if c.state == "open"],
+                           "errors": errors}))
+        return 1 if errors else 0
     got = refresh(args.root, now) if args.refresh else load(pages_dir(args.root, cfg, now.astimezone(cfg.zone).date().isoformat()))
     print(toon_encode({"fetched": {k: v.astimezone(cfg.zone).strftime("%H:%M") for k, v in got.fetched.items()},
                        "issues": len(got.issues), "changes": len(got.changes), "workers": len(got.workers),

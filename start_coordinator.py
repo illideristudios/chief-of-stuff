@@ -187,7 +187,7 @@ def check_once(root: Path, release: Path) -> str:
                     lines.append(f"worker {entry['name']} process is {entry['status']}")
         except (ValueError, TypeError, KeyError, ToonDecodeError):
             lines.append("worker process check could not be parsed")
-    return " | ".join(lines[:5])[:400]
+    return " | ".join(lines)
 
 
 def watcher(root: Path, release: Path, stop: threading.Event, interval: float = WATCH_INTERVAL) -> None:

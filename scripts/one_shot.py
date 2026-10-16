@@ -427,6 +427,13 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         # #99: the launcher died before reconciling this run; the report, the Log line and any
         # review comment say so, and the tree's evidence is the only word there is.
         reason = f"the launcher died before reconciling this run; {reason}"
+    if status == "done" and re.search(r"\bmerged\b|\bon (?:origin/)?main\b", reason + "\n" + changes, re.I):
+        failure, verified = forge.verify_merge_claim(row, cfg.backlog, reason, changes)
+        if failure:
+            status, reason = "human_review", f"{failure}; worker said: {reason}"
+        if verified:
+            summary = verified + "\n" + summary
+            log_summary = verified + "; " + log_summary
     ref = backlog.issue_ref(row.issue, cfg.backlog) if row and row.issue.strip() else None
     hold_error = ""
     if status == "human_review" and ref:
