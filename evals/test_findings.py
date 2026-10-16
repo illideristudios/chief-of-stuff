@@ -20,7 +20,7 @@ import findings  # noqa: E402
 import start_coordinator as start  # noqa: E402
 
 # The watcher's pattern as it was typed before it was built from `findings.WATCHED`.
-LITERAL = re.compile(r"(?i)^(orphaned work:|stopped:|reopen:|issue:|merged:|lane:|kanban:|decision queue:|next decision:|overdue:|waiting:)")
+LITERAL = re.compile(r"(?i)^(orphaned work:|stopped:|reopen:|issue:|merged:|lane:|kanban:|decision queue:|next decision:|stack:|overdue:|waiting:)")
 
 TRACKER = """## Decision queue
 
@@ -84,7 +84,7 @@ class VocabularyTest(unittest.TestCase):
         # `over budget:` and `unclaimed work:` are printed and not forwarded; `overdue:` and `waiting:` are
         # forwarded and never printed. Closing either gap is a behaviour change, and changes this test with it.
         words = {word for word, _ in printed()}
-        self.assertEqual(findings.UNWATCHED, (findings.OVER, findings.UNCLAIMED, findings.STACK))
+        self.assertEqual(findings.UNWATCHED, (findings.OVER, findings.UNCLAIMED))
         self.assertEqual(set(findings.WATCHED) - words, {"overdue:", "waiting:"})
 
 
