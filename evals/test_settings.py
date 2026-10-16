@@ -169,6 +169,23 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "require_green_tests"):
                 st.load(self.root, self.write(f"[workers]\nrequire_green_tests = {bad}\n"))
 
+    def test_worker_rules_default_to_empty(self):
+        self.assertEqual(st.load(self.root, None).workers.rules, ())
+        for text in ("", "[workers]\n", "[workers]\nrules = []\n"):
+            with self.subTest(text=text):
+                self.assertEqual(st.load(self.root, self.write(text)).workers.rules, ())
+
+    def test_worker_rules_preserve_wording_and_order(self):
+        for prefix in ("", '[notify]\nadapter = "off"\n'):
+            with self.subTest(prefix=prefix):
+                got = st.load(self.root, self.write(prefix + '[workers]\nrules = ["Keep tests.", "  Verify changes.  "]\n'))
+                self.assertEqual(got.workers.rules, ("Keep tests.", "  Verify changes.  "))
+
+    def test_invalid_worker_rules_are_refused(self):
+        for value in ('"Keep tests."', "true", "17", "{}", '["Keep tests.", 1]', '[""]', '["  "]'):
+            with self.subTest(value=value), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                st.load(self.root, self.write(f"[workers]\nrules = {value}\n"))
+
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
         # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
         self.assertEqual(st.load(self.root, None).workers.claude_as_profile, "")

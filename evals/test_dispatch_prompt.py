@@ -1332,6 +1332,55 @@ class ReviewerRoutingTest(unittest.TestCase):
         self.assertNotIn("--reply", dp.compose(root, "2026-09-18", "Security audit"))
 
 
+class StandingWorkerRulesTest(unittest.TestCase):
+    def setUp(self):
+        tmp, self.root = workspace(claude_md=CLAUDE + "- Settings: `cos.toml`\n")
+        self.addCleanup(tmp.cleanup)
+        self.settings = self.root / "cos.toml"
+
+    def compose(self, runtime, one_shot):
+        return dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
+                          runtime=runtime, one_shot=one_shot)
+
+    def test_rules_precede_the_task_for_every_runtime_and_mode(self):
+        rules = ["Never skip or weaken tests.", "Verify the change before reporting completion."]
+        self.settings.write_text('[workers]\nrules = ' + json.dumps(rules) + '\n')
+        for runtime in ("claude", "codex", "cursor", "agy"):
+            for one_shot in (False, True):
+                with self.subTest(runtime=runtime, one_shot=one_shot):
+                    body = self.compose(runtime, one_shot)
+                    header = body.split("Task: Security audit", 1)[0]
+                    self.assertIn("Standing worker rules:", header)
+                    self.assertLess(header.index(rules[0]), header.index(rules[1]))
+                    for rule in rules:
+                        self.assertEqual(body.count(rule), 1)
+                        self.assertIn(rule, header)
+                        self.assertLess(body.index(rule), body.index("Security audit"))
+
+    def test_absent_and_empty_rules_leave_assignments_unchanged(self):
+        for runtime in ("claude", "codex", "cursor", "agy"):
+            for one_shot in (False, True):
+                with self.subTest(runtime=runtime, one_shot=one_shot):
+                    self.settings.unlink(missing_ok=True)
+                    original = self.compose(runtime, one_shot)
+                    self.assertNotIn("Standing worker rules:", original)
+                    for text in ("[workers]\n", "[workers]\nrules = []\n"):
+                        self.settings.write_text(text)
+                        self.assertEqual(self.compose(runtime, one_shot), original)
+
+    def test_invalid_rules_refuse_dispatch(self):
+        self.settings.write_text('[workers]\nrules = "Keep tests."\n')
+        for one_shot in (False, True):
+            with self.subTest(one_shot=one_shot), self.assertRaisesRegex(dp.RefusedError, r"\[workers\] rules"):
+                self.compose("claude", one_shot)
+
+    def test_rules_count_toward_the_assignment_size_limit(self):
+        self.settings.write_text('[workers]\nrules = ["' + 'x' * dp.BODY_CAP + '"]\n')
+        for one_shot in (False, True):
+            with self.subTest(one_shot=one_shot), self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
+                self.compose("claude", one_shot)
+
+
 class DetachedWorktreeTest(unittest.TestCase):
     """#115: a one-shot dispatched into a detached (from-branch) tree — a fixer whose MR branch a
     stale tree may hold — is told to push `HEAD:<branch>` instead of committing on a branch."""
