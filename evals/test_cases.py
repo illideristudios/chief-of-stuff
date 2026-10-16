@@ -104,14 +104,21 @@ class CaseLintTest(unittest.TestCase):
         # Split the name so this regression check also meets #726's grep acceptance.
         retired = "rail" + "way"
         root = EVALS.parent
-        paths = subprocess.check_output(["git", "ls-files", "-z"], cwd=root).decode().split("\0")
         found = []
-        for name in paths:
-            if not name or name.startswith("docs/archive/"):
-                continue
-            path = root / name
-            if path.is_file() and retired.encode() in path.read_bytes().lower():
-                found.append(name)
+        # CI copies a worktree without its git directory; scan source files directly.
+        for directory, subdirs, files in os.walk(root):
+            folder = Path(directory)
+            subdirs[:] = [d for d in subdirs if d not in {".git", ".claude", "__pycache__"}
+                          and folder / d != root / "docs/archive"]
+            if folder == EVALS / "results":
+                subdirs.clear()
+                files = ["PROGRESS.md"]
+            for name in files:
+                if name == ".git" or name == ".DS_Store" or name.endswith(".pyc"):
+                    continue
+                path = folder / name
+                if retired.encode() in path.read_bytes().lower():
+                    found.append(str(path.relative_to(root)))
         self.assertEqual(found, [])
 
     def test_there_are_cases(self) -> None:

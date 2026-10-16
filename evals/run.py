@@ -85,7 +85,7 @@ def allowed_tools(root: Path) -> list[str]:
 
 
 ALLOWED = allowed_tools(PLUGIN_ROOT)
-DISALLOWED = ["Bash(railway:*)", "Bash(git commit:*)", "Bash(git add:*)", "Bash(git push:*)"]
+DISALLOWED = ["Bash(git commit:*)", "Bash(git add:*)", "Bash(git push:*)"]
 # These reach real Claude sessions on this machine. No eval run may expose them.
 PEER_TOOLS = ("ListAgents", "SendMessage")
 MOCK_CALENDAR = EVALS / "mock_calendar.py"
@@ -1418,16 +1418,6 @@ with open({log!r}, "a") as log:
 print("spawn: recorded by the eval harness")
 """
 
-RAILWAY_SHIM = '''#!/usr/bin/env python3
-import sys
-from pathlib import Path
-
-with open(Path(__file__).parent / "calls.log", "a") as log:
-    log.write(" ".join(["railway", *sys.argv[1:]]) + "\\n")
-print("railway: blocked by eval harness", file=sys.stderr)
-sys.exit(1)
-'''
-
 GH_SHIM = '''#!/usr/bin/env python3
 import json, sys
 from pathlib import Path
@@ -1506,9 +1496,6 @@ def write_recorder(shim_dir: Path, calls_log: Path, tz: str) -> list[str]:
 def write_shims(shim_dir: Path, prs: list | None = None, graphql: dict | None = None,
                 issues: list | None = None) -> None:
     shim_dir.mkdir(parents=True, exist_ok=True)
-    railway = shim_dir / "railway"
-    railway.write_text(RAILWAY_SHIM)
-    railway.chmod(0o755)
     gh = shim_dir / "gh"
     gh.write_text(GH_SHIM)
     gh.chmod(0o755)

@@ -185,20 +185,6 @@ class SandboxGuardTest(unittest.TestCase):
 
 
 class ShimTest(unittest.TestCase):
-    def test_railway_shim_is_python_logs_and_refuses(self) -> None:
-        import subprocess
-        import sys
-
-        with tempfile.TemporaryDirectory() as d:
-            shims = Path(d)
-            run.write_shims(shims)
-            shim = shims / "railway"
-            self.assertTrue(shim.read_text().startswith("#!/usr/bin/env python3\n"))
-            proc = subprocess.run([sys.executable, str(shim), "up", "--detach"], capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 1)
-            self.assertIn("blocked by eval harness", proc.stderr)
-            self.assertEqual((shims / "calls.log").read_text(), "railway up --detach\n")
-
     def test_gh_shim_lists_the_cases_pull_requests_and_logs_a_merge(self) -> None:
         import subprocess
         import sys
