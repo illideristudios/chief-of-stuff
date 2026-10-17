@@ -842,7 +842,7 @@ class MainTest(unittest.TestCase):
 
     def test_loaded_suite_policy_reaches_collect_and_launch(self):
         with (self.root / "settings.toml").open("a") as config:
-            config.write("\n[workers]\nrequire_green_tests = true\n")
+            config.write("\nrequire_green_tests = true\n")
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
@@ -852,16 +852,20 @@ class MainTest(unittest.TestCase):
     def test_rules_that_exceed_a_stage_budget_refuse_before_the_engine_loop(self):
         from dataclasses import replace
         import dispatch_prompt as dp
+        workspace_rules = self.root / "CLAUDE.md"
+        workspace_rules.write_text(workspace_rules.read_text() +
+                                   "\n## Architecture\n- Canonical document: `design/ARCHITECTURE.md`\n")
         path = self.root / "settings.toml"
-        path.write_text(path.read_text() + '\nrules = ["Keep tests."]\nrequire_green_tests = true\n')
+        path.write_text(path.read_text() + '\nrules = ["Keep tests."]\nrequire_green_tests = true\n'
+                        '[stages.implement]\nskills = ["verify"]\n')
         rules = ("p" * 1000,)
         policies = engine.settings.load_policy()
         policies.personas["implementer"] = replace(policies.personas["implementer"], rules=rules)
         row = SimpleNamespace(issue_key="k" * dp.LINE_CAP, title="t" * dp.LINE_CAP)
         prompt = dp.compose_issue(row, "", "", "implement", policies.personas["implementer"],
-                                  root=self.root, rules=("Keep tests.",), require_green=True)
+                                  root=self.root, skills=("verify",), rules=("Keep tests.",), require_green=True)
         budget = len(prompt.split("\n## Forge issue\n")[0])
-        # The startup check must include implement delivery, persona rules and the suite gate.
+        # Include implement delivery, persona rules, skills, architecture and the suite gate.
         for cap, expected in ((budget, 0), (budget - 1, 2)):
             errors = io.StringIO()
             with self.subTest(cap=cap), mock.patch.object(dp, "BODY_CAP", cap), \

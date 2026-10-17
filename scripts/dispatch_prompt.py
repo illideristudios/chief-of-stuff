@@ -13,13 +13,14 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backlog_ref import file_with, issue_ref  # noqa: E402
 from tracker import Task, parse_tracker, short_name  # noqa: E402
 from workspace import Config, ConfigError, architecture_document, read_config  # noqa: E402
-from settings import Settings, Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
+from settings import Settings, Stage, SettingsError, Workflow, load as load_settings, standing_rules  # noqa: E402
 import ownership  # noqa: E402
 import runtimes  # noqa: E402
 
@@ -285,6 +286,27 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
     return assignment + f"\n## Forge issue\n\n{title}\n\n{body}\n"
 
 
+def validate_worker_rules(root: Path, settings: Settings, policies: Any) -> None:
+    """Refuse rules that cannot fit a configured engine stage before it can reserve a worker.
+
+    Budget the two bounded row fields at LINE_CAP; the rest uses the same renderer,
+    workspace paths, stage skills, persona rules and suite policy as launch.
+    """
+    if not settings.workers.rules:
+        return
+    row = SimpleNamespace(issue_key="k" * LINE_CAP, title="t" * LINE_CAP)
+    for stage, place in policies.stages.items():
+        if place.persona is None:
+            continue
+        defaults = settings.stages.get(stage)
+        try:
+            compose_issue(row, "", "", stage, policies.personas[place.persona], root=root,
+                          skills=defaults.skills if defaults else (), rules=settings.workers.rules,
+                          require_green=settings.workers.require_green_tests)
+        except RefusedError as exc:
+            raise RefusedError(f"[workers] rules do not fit the {stage} assignment: {exc}") from None
+
+
 def commit_rule(workflow: Workflow, root: Path) -> str:
     if workflow.delivery == "branch":
         return ("Commits: Commit small and often on your own branch. Report the branch, head sha and "
@@ -322,14 +344,6 @@ def _clean(label: str, value: str) -> str:
     if len(value) > LINE_CAP:
         raise RefusedError(f"{label} is {len(value)} characters, over the {LINE_CAP} cap")
     return value
-
-
-def standing_rules(rules: tuple[str, ...]) -> str:
-    """Render workspace rules already validated at the settings boundary, with their source."""
-    if not rules:
-        return ""
-    return ("\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in rules)
-            + "\n\nThese rules come from workspace settings (`[workers] rules`).\n")
 
 
 def task_keys(item: str, name: str = "") -> set[str]:

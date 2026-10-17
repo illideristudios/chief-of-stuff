@@ -564,9 +564,10 @@ class WorkerTest(unittest.TestCase):
         return forge
 
     def suite_pass(self, forge, launch):
-        with mock.patch.object(engine.cleanup, "execute", return_value=0):
+        with mock.patch.object(engine.cleanup, "execute", return_value=0), mock.patch.object(engine, "_record_limits"):
             return engine.run_pass(store=self.db, root=self.root, trees=self.trees,
                                    forge=forge, policies=self.p, launch=launch,
+                                   workers=engine.settings.Workers(),
                                    clock=lambda: NOW + timedelta(minutes=1), require_green=True)
 
     def test_a_non_done_report_is_not_suite_gated(self):

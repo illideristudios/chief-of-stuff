@@ -14,6 +14,7 @@ from typing import Any
 
 import cleanup
 import clock as engine_clock
+import dispatch_prompt
 import engine_merge
 import forge
 import issue_gate
@@ -393,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:
                 raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
+            dispatch_prompt.validate_worker_rules(root, config, policies)
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
             db = store_access.migrated_store(root, engine_owned=True)
