@@ -92,6 +92,26 @@ class ShellSetupTest(unittest.TestCase):
                     else:
                         self.assertNotIn(f"pid {child.pid}", str(raised.exception))
 
+    def test_signal_failure_still_runs_bounded_cleanup(self):
+        for stuck in (False, True):
+            with self.subTest(stuck=stuck):
+                child = mock.Mock(pid=798, returncode=None)
+                failure = subprocess.TimeoutExpired("workspace command", 0.1)
+                child.wait.side_effect = [failure, subprocess.TimeoutExpired("cleanup", 1) if stuck else 0]
+                pending = []
+                with tempfile.TemporaryDirectory() as directory, \
+                     mock.patch.object(shell, "login_shell", return_value="/bin/sh"), \
+                     mock.patch.object(shell.subprocess, "Popen", return_value=child), \
+                     mock.patch.object(shell, "_unreaped_children", pending), \
+                     mock.patch.object(shell.os, "killpg", side_effect=PermissionError("signal denied")) as kill:
+                    root = Path(directory)
+                    with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                        shell.run_command("cleanup", root, workspace=root, timeout=0.1)
+                    self.assertIs(raised.exception, failure)
+                    kill.assert_called_once_with(child.pid, shell.signal.SIGKILL)
+                    self.assertEqual(child.wait.call_args_list, [mock.call(timeout=0.1), mock.call(timeout=1)])
+                    self.assertEqual(pending, [child] if stuck else [])
+
     def test_teardown_warning_distinguishes_an_unreaped_child(self):
         for stuck in (False, True):
             with self.subTest(stuck=stuck):
