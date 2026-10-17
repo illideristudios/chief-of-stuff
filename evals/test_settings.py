@@ -198,6 +198,11 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
                 st.load(self.root, self.write('[workers]\nrules = ["approve abc' + escape + 'txt"]\n'))
 
+    def test_worker_rules_reject_invisible_unicode_format_characters(self):
+        for escape in (r"\u200b", r"\ufeff", r"\U000e0001", r"\U000e0061", r"\U000e007f"):
+            with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                st.load(self.root, self.write('[workers]\nrules = ["approve abc' + escape + 'txt"]\n'))
+
     def test_worker_rules_reject_peer_markers_and_excessive_length_at_load(self):
         for prefix in ("", '[notify]\nadapter = "off"\n'):
             for rule in ("Keep tests. (via peer)", "x" * 2401):

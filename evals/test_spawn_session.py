@@ -1830,6 +1830,23 @@ class WorkerModeTest(unittest.TestCase):
         load.assert_called_once()
         self.assertIs(compose.call_args.kwargs["settings"], snapshot)
 
+    def test_interactive_launch_uses_already_loaded_workspace_policy(self):
+        tree, args = self.review_workspace()
+        snapshot = ss.load_settings(tree.parent.parent, "chief-of-stuff.toml")
+        for agent_flags in (["--type", "reviewer"], []):
+            with self.subTest(agent_flags=agent_flags), \
+                 unittest.mock.patch.object(ss, "load_settings", return_value=snapshot) as load, \
+                 unittest.mock.patch.object(ss.dispatch_prompt, "compose", wraps=ss.dispatch_prompt.compose) as compose, \
+                 unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
+                                            side_effect=AssertionError("duplicate read")), \
+                 unittest.mock.patch.object(ss, "resolve", return_value="/bin/fake"), \
+                 unittest.mock.patch.dict(os.environ, {ss.ENV: ""}), \
+                 contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ss.main(args + ["--interactive", "--launcher", "tmux"] + agent_flags), 0)
+                load.assert_called_once()
+                self.assertIs(compose.call_args.kwargs["settings"], snapshot)
+                self.assertIn("--agent reviewer", out.getvalue())
+
     def test_review_stage_launches_configured_agent_and_names_skills_in_brief(self):
         tree, args = self.review_workspace()
         argv = self.dry_run_argv(args)
