@@ -505,6 +505,21 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertTrue(any("not on main" in row.message for row in self.db.log(KEY)))
 
+    def test_squash_landed_final_stage_clean_tree_completes_without_a_hold(self):
+        # Squash deletes the branch: the commits are not ancestors of origin/main and have no upstream.
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement")
+        self.run_pass()
+        self.publish_exit()
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged")
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="squash-sha", status="passed")
+        self.forge.landings = lambda pipeline, keys, **kwargs: {KEY: (True, True)}
+        with mock.patch.object(engine.engine_facts, "_tree_facts",
+                               return_value=(TreeState("work", 0, 2, None), False, NOW)):
+            self.assertEqual(self.run_pass(), [])
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertFalse(any("not on origin/main" in row.message for row in self.db.log(KEY)))
+
     def test_both_completion_paths_use_the_same_missing_and_unknown_facts(self):
         self.run_pass()
         segment = self.db.segments(KEY)[0]
