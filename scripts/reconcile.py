@@ -82,6 +82,7 @@ class Ask:
 class Escalate:
     issue_key: str
     reason: str
+    stage: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -89,6 +90,7 @@ class Limit:
     issue_key: str
     kind: str
     reason: str
+    stage: str = field(default="", compare=False)
 
 
 @dataclass(frozen=True)
@@ -160,7 +162,7 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
             rounds = attempt - initial - sum(s.stage == stage and s.outcome in RETRYABLE and s.started_at
                                              and _time(s.started_at) >= review for s in history)
     if rounds > _policy(policies, stage, room).retry_limit:
-        return Escalate(key, f"retry limit reached for {stage}")
+        return Escalate(key, f"retry limit reached for {stage}", stage=stage)
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
@@ -309,7 +311,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             target = action.source if isinstance(action, Ask) else action.stage if isinstance(action, Dispatch) else "review"
             kind = breach(_policy(policies, target, room), (usage or {}).get(item.issue_key)) if target in policies.stages else None
             if kind:
-                action = Limit(item.issue_key, kind, f"reached {kind} limit")
+                action = Limit(item.issue_key, kind, f"reached {kind} limit", stage=target)
             elif reset is not None and _time(reset) > now:
                 action = Wait(item.issue_key, "quota reset pending")
             elif (pending_asks or {}).get(item.issue_key):

@@ -1140,10 +1140,16 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(model.n, 3)
         self.run_pass(model=model)
         self.assertEqual(model.n, 3)
-        self.finish("review")
-        self.findings()
         self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
         self.assertEqual(model.n, 3)
+        self.assertFalse(any(s.stage == "review" for s in self.db.segments(KEY)))
+        ask, = self.db.asks(KEY)
+        self.db.answer_ask(ask.id, "Keep")
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
+        self.finish("review")
+        self.findings()
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
 
     def test_unrouted_ask_blocks_merge_even_without_a_model(self):
         self._merge_gate()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Sequence
@@ -19,10 +20,10 @@ def retryable_failure(record: Any) -> bool:
 
 
 @dataclass(frozen=True)
-class Reversal:
+class DecisionUpdate:
     topic: str
     question: str
-    answer: None
+    answer: str | None
     decided_by: str
     record: dict[str, Any]
 
@@ -72,24 +73,25 @@ def open_reversal(decisions: Sequence[Any], history: Sequence[Any] = (), start: 
     return any(is_reversed(d) and not is_restarted(d, history, start) for d in rows.values())
 
 
-def reverse(decisions: Sequence[Any], topic: str, question: str, *, instance: str | None = None) -> Reversal:
+def reverse(decisions: Sequence[Any], topic: str, question: str, *, instance: str | None = None) -> DecisionUpdate:
     """Board reversal: reopen an adopted decision so the planner routes the work again."""
     rows = [row for row in decisions if row.topic == topic and row.question == question
             and (instance is None or identity(row)[2] == instance)]
     if not rows or not (rows[-1].answer or "").strip():
         raise ValueError("only an adopted decision can be reversed")
     prior = rows[-1].record if isinstance(rows[-1].record, dict) else {}
-    return Reversal(topic=topic, question=question, answer=None, decided_by="",
-                    record={"reversed": True, "recommendation": rows[-1].answer,
-                            "decision": prior.get("decision")})
+    return DecisionUpdate(topic=topic, question=question, answer=None, decided_by="",
+                          record={"reversed": True, "recommendation": rows[-1].answer,
+                                  "decision": prior.get("decision")})
 
 
-def restarted(decisions: Sequence[Any], stage: str, attempt: int | None = None) -> list[Reversal]:
+def restarted(decisions: Sequence[Any], stage: str, attempt: int | None = None) -> list[DecisionUpdate]:
     """Resolving rows for open reversals once `stage` (`workflow.start`) is dispatched."""
     rows = latest(decisions)
-    return [Reversal(topic=d.topic, question=d.question, answer=None, decided_by="",
-                     record={"restarted": stage, "restart_attempt": attempt, "recommendation": d.record.get("recommendation"),
-                             "decision": d.record.get("decision")})
+    return [DecisionUpdate(topic=d.topic, question=d.question, answer=None, decided_by="",
+                           record={"restarted": stage, "restart_attempt": attempt,
+                                   "recommendation": d.record.get("recommendation"),
+                                   "decision": d.record.get("decision")})
             for d in rows.values() if is_reversed(d)]
 
 
@@ -123,3 +125,53 @@ def replacements(decisions: Sequence[Any], history: Sequence[Any], start: str,
         if segment is not None:
             result.append((origin, segment))
     return result
+
+
+def ask_decision(decisions: Sequence[Any], ask: Any) -> Any | None:
+    """Find only the decision this ask can answer, including a replacement's explicit link."""
+    for row in reversed(tuple(latest(decisions).values())):
+        record = row.record if isinstance(row.record, dict) else {}
+        prior = record.get("decision")
+        if not isinstance(prior, dict):
+            continue
+        linked = record.get("answer_ask_id")
+        matches = linked == ask.id if linked is not None else identity(row) == ("ask", ask.question, f"ask-{ask.id}")
+        if (matches and row.question == ask.question and prior.get("context", "") == ask.context
+                and tuple(prior.get("options") or ()) == tuple(ask.options)):
+            return row
+    return None
+
+
+def answer_ask(decisions: Sequence[Any], ask: Any) -> DecisionUpdate | None:
+    """Settle an answered ask without reviving an old context or changing the trio's votes."""
+    row = ask_decision(decisions, ask)
+    if (not ask.answer or row is None or row.answer or is_reversed(row) or is_restarted(row)):
+        return None
+    return DecisionUpdate(row.topic, row.question, ask.answer, "user",
+                          {**row.record, "recommendation": ask.answer})
+
+
+def ask_scope(decisions: Sequence[Any], ask: Any) -> dict:
+    row = ask_decision(decisions, ask)
+    topic, question, instance = identity(row) if row is not None else ("ask", ask.question, f"ask-{ask.id}")
+    return {"decision": {"topic": topic, "question": question, "instance": instance, "context": ask.context}}
+
+
+def replacement_context(row: Any, segment: Any) -> str:
+    prior = row.record.get("decision") or {}
+    return (f"{prior.get('context', '')}\nRestart completed: {segment.stage}-{segment.attempt}"
+            f"\nDecision instance: {json.dumps(identity(row))}")
+
+
+def replacement_ask(row: Any, segment: Any, decisions: Sequence[Any], asks: Sequence[Any]) -> tuple[Any, Any] | None:
+    """An unresolved replacement needs its own answerable ask, linked to the original decision."""
+    pending = latest(decisions).get(identity(row))
+    if pending is None or pending.answer or is_reversed(pending) or is_restarted(pending):
+        return None
+    prior = pending.record.get("decision") or {}
+    context = replacement_context(row, segment)
+    if prior.get("context") != context:
+        return None
+    existing = next((ask for ask in asks if ask.question == pending.question and ask.context == context
+                     and tuple(ask.options) == tuple(prior.get("options") or ())), None)
+    return pending, existing
