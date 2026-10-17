@@ -105,9 +105,10 @@ On the engine path, file ownership is declared on the issue, because the forge i
 - **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
 - **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
 - **Workers declare nothing.** They report what they changed, and `completion.py` judges that report against the issue's declared scope. A read-only run that changed anything is held for human review, with the paths named. They never grant themselves a scope.
-- **The engine absorbs a write outside the declared scope, with no human hold** (Zach, 2026-10-17). Real fixes often touch a test, a README or a shared helper nobody listed.
+- **The engine handles a write outside the declared scope by judgement, with no automatic human hold** (Zach, 2026-10-17). Real fixes often touch a test, a README or a shared helper nobody listed, but a change with no reason to be there is a defect.
   - **Widen.** When a write run changed paths outside its declared write paths, the engine widens the issue's scope to what the run actually changed. It writes the widened scope to the issue's `## File ownership` section and to the store, so later readiness checks use the truth.
-  - **No overlap.** If the widened scope overlaps no other in-flight issue's write scope, the run proceeds normally.
+  - **Judge.** The review panel judges each out-of-scope path against the issue's outcome. The engine hands it the list of paths as an explicit check, so no extra model call is needed. A path the change needs, such as its test, its documentation or a helper it uses, is justified and stays. A path with no reason in the issue is a finding of at least Medium severity, "unjustified change outside scope", and it is fixed like any other: the fix stage reverts it, or the PR shows why it belongs. The architect's dispositions apply. A person is involved through the existing escalations: the three-round ping, or human review when the panel or the architect rules that a person must decide. The scope narrows again once a revert lands.
+  - **No overlap.** If the widened scope overlaps no other in-flight issue's write scope, the run proceeds to review normally.
   - **Overlap.** If it does overlap, the engine orders the two issues' merges, so the one that finishes first lands first. The other rebases onto it and is reviewed again on its new head, which the merge gate already requires (a review of the current head, then main's CI). A conflict the rebase cannot settle goes back to the fix stage like any other finding, and a person is involved only through the existing three-round ping.
   - **No new dispatch.** While the overlap lasts, readiness counts the widened scope, so it dispatches no new issue into those paths.
 - **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (Zach, 2026-10-17).
@@ -128,11 +129,16 @@ Wd(r) := the engine widens r's issue scope to the paths r changed (issue section
 X(r) := the widened scope overlaps another in-flight write scope
 Q(r) := the merges are ordered and r is re-reviewed on its rebased head
 H(r) := r is held for human review
+J(p) := out-of-scope path p is justified by the issue's outcome (judged by the review panel)
+F(p) := p is a Medium+ finding, fixed by reverting it or justifying it in the PR
 
-∀r: ¬O(r) → Wd(r) ∧ ¬H(r)     [Zach 2026-10-17: no hold; the orchestrator handles it]
-∀r: Wd(r) ∧ X(r) → Q(r)       [merge gate: review of the current head, then main's CI]
+∀r: ¬O(r) → Wd(r)              [Zach 2026-10-17: the orchestrator handles it]
+∀p: J(p) → p stays             [a test, docs or a helper the change needs]
+∀p: ¬J(p) → F(p)               [Zach 2026-10-17: no excuse → rework, or human review]
+H(r) only through the existing escalations   [the three-round ping, or a panel or architect ruling]
+∀r: Wd(r) ∧ X(r) → Q(r)        [merge gate: review of the current head, then main's CI]
 ∀r: Wd(r) → readiness uses the widened scope   [no new dispatch into those paths]
-∴ no parallel run is overwritten unnoticed, and nobody is asked unless a rebase conflict outlasts three fix rounds
+∴ justified edits flow through; unjustified ones are reworked, or go to a person; no parallel run is overwritten unnoticed
 ```
 
 ## 9. Agent performance
