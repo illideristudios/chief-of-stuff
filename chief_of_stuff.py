@@ -32,7 +32,7 @@ COMMANDS = {
     "processes": "scripts/process_status.py",
     "result": "scripts/one_shot_result.py",
     "adopt": "scripts/adopt_one_shots.py",
-    "board": "scripts/render_board.py",
+    "board": "scripts/pages.py",
     "inbox": "scripts/inbox.py",
     "backlog": "scripts/backlog.py",
     "kanban": "scripts/kanban_cli.py",
@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     else:
         python = sys.executable
-    os.execv(python, [python, str(target), *args[1:]])
+    os.execv(python, [python, str(target), *(["--board"] if args[0] == "board" else []), *args[1:]])
     return 0
 
 

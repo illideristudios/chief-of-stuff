@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from collections.abc import Container, Mapping
 from datetime import date, datetime, time
+from dataclasses import dataclass
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import board_sources
@@ -283,3 +285,38 @@ def tab_counts(tracker_text: str, cfg, now: datetime, lanes: dict, kanban: Kanba
             "dispatch": len(ready_tasks(tracker_text, slots)),
             "since": (went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == now.date() else f"{shown:%a %H:%M}"),
             "epics": epic_risk(tasks, sources, ends, cfg.zone, now)}
+
+
+@dataclass(frozen=True)
+class PageData:
+    """Detached rows for all page presenters; never retains a store connection."""
+    work_items: tuple
+    stage_segments: tuple
+    board_decisions: tuple
+    stage_reports: tuple
+    resumes: dict[str, Any]
+
+    def items(self):
+        return self.work_items
+
+    def item(self, key):
+        return next((i for i in self.work_items if i.issue_key == key), None)
+
+    def segments(self):
+        return self.stage_segments
+
+    def decisions(self):
+        return self.board_decisions
+
+    def reports(self, key, *, stage, attempt):
+        return [r for r in self.stage_reports if (r.issue_key, r.stage, r.attempt) == (key, stage, attempt)]
+
+    def resume(self, key):
+        return self.resumes.get(key)
+
+
+def page_data(store) -> PageData:
+    """Read the store through the use case once, before handing rows to presenters."""
+    items = tuple(store.items())
+    return PageData(items, tuple(store.segments()), tuple(store.decisions()), tuple(store.reports()),
+                    {i.issue_key: store.resume(i.issue_key) for i in items})

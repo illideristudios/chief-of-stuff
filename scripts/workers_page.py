@@ -16,7 +16,7 @@ from pathlib import Path
 
 import board_sources
 import panels
-import store
+from task_forge import PageData
 from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar
 from md import section as _section
@@ -96,7 +96,7 @@ def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
 
 
 def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
-           pending: int = 0, navigation: dict | None = None, db: store.Store | None = None) -> str:
+           pending: int = 0, navigation: dict | None = None, db: PageData | None = None) -> str:
     """The page. `trees` is where one-shot trees sit; `cap` is `[workers] max_concurrency`."""
     tasks = parse_tracker(tracker_text).tasks
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
@@ -164,6 +164,9 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
                                 panels.hm(started_dt, now),
                                 f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""])
             else:
+                ended_dt = datetime.fromisoformat(seg.ended_at).astimezone(now.tzinfo)
+                if ended_dt.date() != now.date():
+                    continue
                 reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
                 summary = reports[-1].summary if reports else (seg.outcome or "")
                 done = seg.outcome == "done"
@@ -194,23 +197,17 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             + "\n  </section>\n</main>\n</body>\n</html>\n")
 
 
-def write(root: Path, pages_dir: Path) -> Path:
+def write(root: Path, pages_dir: Path, *, db: PageData | None = None, navigation: dict | None = None) -> Path:
     """Render `workers.html`; the page server calls this in process on every request."""
     claude_md = (root / "CLAUDE.md").read_text()
     cfg = parse_coordinator(claude_md, today=date.today())
     now = datetime.now(cfg.zone)  # not cut to the second: a time running floors, as panels.hm counts
     tracker = root / cfg.tracker_path(now.date().isoformat())
     ctx = context(root, now.date().isoformat())
-    has_store = (root / "store.db").is_file()
-    db = store.Store(root / "store.db", clock=lambda: now) if has_store else None
-    try:
-        store_pending = sum(1 for d in db.decisions() if d.status in ("open", "blocked")) if db is not None else 0
-        page = render(tracker.read_text() if tracker.is_file() else "", board_sources.load(pages_dir), now,
-                      root / worktrees_dir(claude_md), load_settings(root, cfg.settings_path).workers.max_concurrency,
-                      pending_count(pages_dir, ctx) + store_pending, ctx.navigation if ctx else None, db=db)
-    finally:
-        if db is not None:
-            db.engine.dispose()
+    store_pending = sum(1 for d in db.decisions() if d.status in ("open", "blocked")) if db is not None else 0
+    page = render(tracker.read_text() if tracker.is_file() else "", board_sources.load(pages_dir), now,
+                  root / worktrees_dir(claude_md), load_settings(root, cfg.settings_path).workers.max_concurrency,
+                  pending_count(pages_dir, ctx) + store_pending, navigation, db=db)
     out = pages_dir / "workers.html"
     write_if_changed(out, page)
     return out

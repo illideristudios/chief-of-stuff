@@ -238,7 +238,7 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
         segs_by_key.setdefault(seg.issue_key, []).append(seg)
     open_decs_by_key: dict[str, list] = {}
     for dec in all_decisions:
-        if dec.status == "open":
+        if dec.status in ("open", "blocked"):
             open_decs_by_key.setdefault(dec.issue_key, []).append(dec)
 
     out: list[tuple[str, gantt.Row]] = []

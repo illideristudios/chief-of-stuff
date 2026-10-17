@@ -15,6 +15,7 @@ from typing import Any
 import cleanup
 import clock as engine_clock
 import decision_actions
+import notify
 import engine_merge
 import forge
 import issue_gate
@@ -202,6 +203,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 _write_stage(forge, store, key, stage, stages[key])
         except Exception as exc:
             store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
+    try:
+        notify.sync_workspace(root, now)
+    except Exception as exc:
+        print(f"engine: exception pings failed: {exc}", file=sys.stderr)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions

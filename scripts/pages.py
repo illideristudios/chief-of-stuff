@@ -106,7 +106,7 @@ class PagesError(RuntimeError):
 
 def _sources(root: Path, cfg, pages_dir: Path, day: str) -> list[Path]:
     return [root / "CLAUDE.md", *([root / cfg.settings_path] if cfg.settings_path else []), root / cfg.log_path(day),
-            root / "store.db", *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
+            root / "store.db", root / "store.db-wal", *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
             pages_dir / CACHE]
 
 
@@ -125,6 +125,50 @@ def today_board(root: Path) -> str | None:
     cfg = read_config(root)
     day = datetime.now(cfg.zone).date().isoformat()
     return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() or (root / "store.db").is_file() else None
+
+
+def _page_data(root: Path):
+    """The driver opens under the migrate lock; use cases hand detached rows to presenters."""
+    import store_access
+    import task_forge
+    if not (root / "store.db").is_file():
+        return None
+    db = store_access.migrated_store(root)
+    try:
+        return task_forge.page_data(db)
+    finally:
+        db.engine.dispose()
+
+
+def write_board(root: Path, day: str | None = None, *, now: datetime | None = None):
+    """The board command's driver, shared with request rendering."""
+    import render_board
+    return render_board.write(root, day, now=now, db=_page_data(root))
+
+
+def _navigation(root: Path, pages_dir: Path, data):
+    import board_sources
+    import decision_page
+    import task_forge
+    from settings import load
+    from workspace import looked_before, with_workspace_decision_deadlines
+    cfg = read_config(root)
+    now = datetime.now(cfg.zone)
+    day = now.date()
+    path = root / cfg.tracker_path(day.isoformat())
+    text = path.read_text() if path.is_file() else ""
+    cfg = with_workspace_decision_deadlines(root, cfg, text, day)
+    settings = load(root, cfg.settings_path)
+    ctx = decision_page.context(root, day.isoformat())
+    pending = decision_page.entries(pages_dir, ctx) if ctx else []
+    earlier = [(d, p.read_text()) for d, p in daily_trackers(root, cfg) if d < day]
+    counts = task_forge.tab_counts(text, cfg, now, settings.lanes, settings.kanban,
+                                   board_sources.load(pages_dir), decision_page.held_refs(pending, ctx),
+                                   looked_before(pages_dir), earlier, settings.workers.max_concurrency or 1)
+    if data is not None:
+        counts["workers"] += sum(1 for seg in data.segments() if seg.outcome == "human_review"
+                                  and seg.ended_at and datetime.fromisoformat(seg.ended_at).astimezone(cfg.zone).date() == day)
+    return counts
 
 
 def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()) -> str:
@@ -183,16 +227,21 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                     return ""
             started = time.time_ns()
             with slots:
-                if name == "workers.html":
-                    workers_page.write(root, pages_dir)
-                elif name.startswith("decision-"):
+                if name.startswith("decision-"):
                     decision_page.write(root, pages_dir, name[len("decision-"):-5], day)
-                elif name.endswith("-source.html"):
-                    source_page.write(root, pages_dir, int(name[len("issue-"):-len("-source.html")]))
-                elif name.startswith("issue-"):
-                    issue_page.write(root, pages_dir, int(name[len("issue-"):-5]))
                 else:
-                    render_board.write(root, day)
+                    data = _page_data(root)
+                    if name == "workers.html" or name.startswith("issue-"):
+                        navigation = _navigation(root, pages_dir, data)
+                        if name == "workers.html":
+                            workers_page.write(root, pages_dir, db=data, navigation=navigation)
+                        elif name.endswith("-source.html"):
+                            source_page.write(root, pages_dir, int(name[len("issue-"):-len("-source.html")]),
+                                              db=data, navigation=navigation)
+                        else:
+                            issue_page.write(root, pages_dir, int(name[len("issue-"):-5]), db=data, navigation=navigation)
+                    else:
+                        render_board.write(root, day, db=data)
             RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
         return ""
     except Exception as e:  # any renderer failure: the server keeps serving the last good page
@@ -385,16 +434,28 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                                               answered_at=now_iso, current_stage=item.stage if item else "")
             else:
                 return self.send_error(400, "unknown decision action")
-            db.update_decision(tr.store_write)
             fg = forge.for_workspace(root)
-            for fw in tr.actions:
-                if isinstance(fw, decision_actions.ForgeStageWrite):
-                    if fg is not None:
-                        fg.write_stage(fw.issue_key, fw.stage)
-                    db.upsert_item(fw.issue_key, stage=fw.stage)
-                elif isinstance(fw, decision_actions.ForgeComment):
-                    if fg is not None:
-                        fg.comment(fw.issue_key, fw.body)
+            try:
+                for fw in tr.actions:
+                    number = int(fw.issue_key.rpartition("#")[2])
+                    if fg is None:
+                        raise RuntimeError("no forge configured")
+                    if isinstance(fw, decision_actions.ForgeStageWrite):
+                        result = fg.write_stage(number, fw.stage, expected=fw.previous_stage or None, commit=True)
+                        if not result.ok or not result.done:
+                            raise RuntimeError(result.error or "stage write was not committed")
+                        db.upsert_item(fw.issue_key, stage=fw.stage)
+                    elif isinstance(fw, decision_actions.ForgeComment):
+                        error = fg.comment(number, fw.body, commit=True)
+                        if error:
+                            raise RuntimeError(error)
+            except Exception as exc:
+                import reconcile
+                blocked = decision_actions.meet_action(tr.decision, reconcile.Wait(dec.issue_key, str(exc)))
+                db.update_decision(blocked.store_write)
+                db.add_log(dec.issue_key, f"decision action failed: {exc}", now_iso)
+                return self.send_error(409, str(exc))
+            db.update_decision(tr.store_write)
         finally:
             db.engine.dispose()
         for page in Path(self.directory).iterdir():
@@ -414,7 +475,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.headers.get("Host", "") not in own or (origin is not None and origin not in [f"http://{h}" for h in own]):
             return self.send_error(403, "not a page of this server")
         route_path = re.split(r"[?#]", self.path, maxsplit=1)[0]
-        if route_path == "/decisions":
+        if route_path == "/":
             try:
                 size = int(self.headers["Content-Length"])
             except (TypeError, ValueError):
@@ -436,8 +497,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.close_connection = True
             return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
         form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
-        if "decision_id" in form and not (key := form.get("key", [""])[0]):
-            return self._post_store_decision(form)
         key, words = form.get("key", [""])[0], form.get("words", [""])[0].strip()
         import decision_page
         with page_lock(Path(self.directory) / f"decision-{m[1]}.html"):
@@ -606,13 +665,18 @@ def from_config(root: Path) -> tuple[Path, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list[:1] == ["--board"]:
+        import render_board
+        render_board.main(args_list[1:], writer=write_board)
+        return 0
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
     ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
     ap.add_argument("command", nargs="?", choices=("serve",))
     ap.add_argument("--dir")
     ap.add_argument("--port", type=int)
-    args = ap.parse_args(argv)
+    args = ap.parse_args(args_list)
     if args.command == "serve":
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
         return 0

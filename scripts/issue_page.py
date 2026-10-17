@@ -17,7 +17,7 @@ from pathlib import Path
 
 import board_sources
 import flow_chart
-import store
+from task_forge import PageData
 import tracker_log
 from decision_page import HEAD, _md, _section, context, entries, held_refs, span, write_if_changed
 from fragment import href, tab_bar
@@ -189,7 +189,7 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
 def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
-           pending_refs: Container[str] = frozenset(), navigation: dict | None = None) -> str | None:
+           pending_refs: Container[str] = frozenset(), navigation: dict | None = None, db: PageData | None = None) -> str | None:
     """The page, or None when no task in `trackers` or the store names issue `number`. `cfg` resolves a task's due (the
     board's deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
     ref = f"#{number}"
@@ -197,23 +197,19 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
     mine = [t for t in known if issue_number(t.issue) == number]
     store_rows = None
-    if not mine and root is not None and (root / "store.db").is_file():
-        db = store.Store(root / "store.db")
-        try:
-            item = next((i for i in db.all_items() if issue_number(i.issue_key) == number), None)
-            if item is not None:
-                title = item.title or (sources.issues[ref].title if ref in sources.issues else ref)
-                task = Task(item=title, owner="",
-                            state="waiting" if item.human_review else "open",
-                            since=now.date().isoformat(), due="", checklist="",
-                            name=title, lane=item.workflow or "build",
-                            stage=item.stage, issue=item.issue_key)
-                known = [task]
-                mine = [task]
-                store_rows = [(s, r) for s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
-                              if issue_number(r.ref) == number]
-        finally:
-            db.engine.dispose()
+    if not mine and db is not None:
+        item = next((i for i in db.items() if issue_number(i.issue_key) == number), None)
+        if item is not None:
+            title = item.title or (sources.issues[ref].title if ref in sources.issues else ref)
+            task = Task(item=title, owner="",
+                        state="waiting" if item.human_review else "open",
+                        since=now.date().isoformat(), due="", checklist="",
+                        name=title, lane=item.workflow or "build",
+                        stage=item.stage, issue=item.issue_key)
+            known = [task]
+            mine = [task]
+            store_rows = [(s, r) for s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
+                          if issue_number(r.ref) == number]
     if not mine:
         return None
     keys = set().union(*map(names, mine))
@@ -344,7 +340,7 @@ def put(out: Path, page: str | None) -> Path | None:
     return out
 
 
-def write(root: Path, pages_dir: Path, number: int) -> Path | None:
+def write(root: Path, pages_dir: Path, number: int, *, db: PageData | None = None, navigation: dict | None = None) -> Path | None:
     """Render `issue-<number>.html`; with no page, remove the file and return None. The page server calls this in
     process."""
     cfg, now, trackers, settings = inputs(root)
@@ -352,5 +348,5 @@ def write(root: Path, pages_dir: Path, number: int) -> Path | None:
     pending = entries(pages_dir, ctx) if ctx else []
     page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
                   sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx),
-                  ctx.navigation if ctx else None)
+                  navigation, db=db)
     return put(pages_dir / f"issue-{number}.html", page)

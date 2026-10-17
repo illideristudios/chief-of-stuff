@@ -37,13 +37,12 @@ import argparse
 import json
 import re
 import sys
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from html import escape, unescape
 from pathlib import Path
 
 import board_sources
-from task_forge import tab_counts
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config
 from clock import leading
 from fragment import FONTS, TAB_CSS, href, tab_bar, theme
@@ -52,7 +51,7 @@ from module_graph import section as _graph
 from notify_service import atomic_write
 from settings import Graph, SettingsError, load as load_settings
 from tracker import decision_rows, issue_key, parse_tracker
-from workspace import ConfigError, daily_trackers, looked_before, pages_address, read_config, with_workspace_decision_deadlines
+from workspace import ConfigError, daily_trackers, pages_address, read_config
 
 NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 REQUIRED = ("headline", "ask", "options", "recommended", "why", "default")
@@ -421,7 +420,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     where += _graph(change, ctx and ctx.graph, ctx and ctx.pages, root)
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True, **(ctx.navigation if ctx else {}))}"
+            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}"
             f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{md(d['headline'])}</h1>\n    </div>\n"
             f'    <span class="chip{" answered" if answered else ""}">{chip}</span>\n  </header>\n\n'
@@ -449,31 +448,23 @@ def decision_context(root: Path, day: date, now: datetime | None = None) -> Cont
     cfg = read_config(root)
     now = now or datetime.now(cfg.zone).replace(second=0, microsecond=0)
     zone = cfg.zone
-    rows, log, earlier = [], [], []
+    rows, log = [], []
     for d, path in daily_trackers(root, cfg):
         text = path.read_text()
-        if d < day:
-            earlier.append((d, text))
         rows += [Row(d, leading(t, d, zone), item, words) for t, item, words in decision_rows(text)]
         log += [(when, line.strip()[2:]) for line in md_section(text, "## Log")
                 if line.strip().startswith("- ") and (when := leading(line.strip()[2:], d, zone))]
     tracker = root / cfg.tracker_path(day.isoformat())
-    tracker_text = tracker.read_text() if tracker.is_file() else ""
-    tasks = parse_tracker(tracker_text).tasks
+    tasks = parse_tracker(tracker.read_text()).tasks if tracker.is_file() else ()
     try:
         settings = load_settings(root, cfg.settings_path)
     except SettingsError:
         settings = None
     kanban = settings and settings.kanban
     pages = root / cfg.pages_dir if cfg.pages_dir else tracker.parent
-    ctx = Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks, board_sources.load(pages),
+    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks, board_sources.load(pages),
                    kanban.human_review_label if kanban else "", cfg.user, cfg.backlog,
                    settings and settings.graph, pages)
-    cfg = with_workspace_decision_deadlines(root, cfg, tracker_text, day)
-    navigation = tab_counts(tracker_text, cfg, now, settings.lanes if settings else {}, kanban, ctx.sources,
-                            held_refs(entries(pages, ctx), ctx), looked_before(pages), earlier,
-                            (settings.workers.max_concurrency or 1) if settings else 1, tracker_day=day)
-    return replace(ctx, navigation=navigation)
 
 
 def context(root: Path, day: str) -> Context | None:
@@ -587,7 +578,6 @@ class Context:
     forge: Backlog | GitHubBacklog | None = None
     graph: Graph | None = None    # the settings' [graph], which draws MODULE GRAPH into pages/.graphs
     pages: Path | None = None
-    navigation: dict = field(default_factory=dict)
 
     def when(self, at: datetime) -> str:
         at = at.astimezone(self.now.tzinfo)
@@ -784,7 +774,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
             + ("\n".join(done) or none) + "\n    </div>\n  </section>\n")
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', len(ready), **ctx.navigation)}"
+            f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', len(ready))}"
             f'  <header class="top">\n    <div>\n      <h1>Decisions · {escape(_day(day))}</h1>\n'
             f'      <span class="eyebrow">{" · ".join(meta)}</span>\n    </div>\n  </header>\n'
             + body + "</main>\n" + ANSWER_JS + "</body>\n</html>\n"), pending

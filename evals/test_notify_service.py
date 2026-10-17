@@ -45,23 +45,27 @@ class ServiceTest(WorkspaceTest):
         self.assertEqual(sync.call_count, 2)
         self.assertEqual(self.ws.queue.read_bytes(), original)
         self.ws.db.upsert_item(KEY, title="Upload size limit", stage="review", forge_state="open", human_review=True)
+        cfg = self.root / "CLAUDE.md"
+        cfg.write_text(cfg.read_text().replace("# Workspace", "# Changed workspace"))
         worker.tick(NOW + timedelta(seconds=65), 65)
         self.assertEqual(sync.call_count, 3)
         self.assertIn("Upload size limit", self.ws.queue.read_text())
         service.Service(self.root, reconcile=sync).tick(NOW, 70)
         self.assertEqual(sync.call_count, 4)
 
-    def test_store_change_and_settings_path_change(self):
+    def test_fallback_reads_store_and_settings_path_change(self):
         worker = service.Service(self.root)
         worker.tick(NOW, 0)
         self.ws.db.upsert_item(KEY, title="Extra hold", stage="review", forge_state="open", human_review=True)
-        worker.tick(NOW, 5)
+        worker.tick(NOW + timedelta(seconds=5), 5)
+        self.assertNotIn("Extra hold", self.ws.queue.read_text())
+        worker.tick(NOW + timedelta(seconds=60), 60)
         self.assertIn("Extra hold", self.ws.queue.read_text())
         other_queue = "notes/OTHER_NOTIFICATIONS.md"
         (self.root / "other.toml").write_text(f'[notify]\nadapter = "md-notify"\nqueue = "{other_queue}"\n')
         cfg = self.root / "CLAUDE.md"
         cfg.write_text(cfg.read_text().replace("chief-of-stuff.toml", "other.toml"))
-        worker.tick(NOW, 15)
+        worker.tick(NOW + timedelta(seconds=65), 65)
         self.assertIn("Extra hold", (self.root / other_queue).read_text())
 
     def test_failure_preserves_queue_retries_and_logs_only_changes(self):

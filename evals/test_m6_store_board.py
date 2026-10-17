@@ -84,6 +84,13 @@ class StoreGanttAndBoardTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root, self.db = make_store_workspace()
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW.astimezone(tz)
+        frozen = mock.patch.object(workers_page, "datetime", FrozenDatetime)
+        frozen.start()
+        self.addCleanup(frozen.stop)
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
         self.db.upsert_item(KEY2, workflow="build", stage="fix", forge_state="open", title="Cache warmup")
@@ -188,6 +195,13 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root, self.db = make_store_workspace()
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW.astimezone(tz)
+        frozen = mock.patch.object(workers_page, "datetime", FrozenDatetime)
+        frozen.start()
+        self.addCleanup(frozen.stop)
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
         self.db.upsert_item(KEY2, workflow="build", stage="implement", forge_state="open", title="Cache warmup")
@@ -265,6 +279,13 @@ class StorePagesAndRoutesTest(unittest.TestCase):
 
     def setUp(self) -> None:
         self.root, self.db = make_store_workspace()
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return NOW.astimezone(tz)
+        frozen = mock.patch.object(workers_page, "datetime", FrozenDatetime)
+        frozen.start()
+        self.addCleanup(frozen.stop)
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, workflow="build", stage="implement", forge_state="open", title="Upload size limit")
         t0 = NOW - timedelta(minutes=25)
@@ -335,10 +356,6 @@ class StorePagesAndRoutesTest(unittest.TestCase):
         self.assertIn("Edge case needs human input", w_body)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ReviewRegressionsTest(StorePagesAndRoutesTest):
     def request(self, method, route, data=None):
         server = pg.make_server(self.root / "pages", 0, root=self.root, refresh=lambda r, n: None, every=3600)
@@ -373,9 +390,9 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         import decision_actions
         transition = decision_actions.answer(dec, "Split", answered_at=NOW.isoformat())
         self.db.update_decision(transition.store_write)
-        transition = decision_actions.meet_action(self.db.decision(dec.id), None, blocked_reason="conflict")
-        # meet_action examines actions; use the persisted blocked write for this rendering regression.
-        self.db.update_decision(replace(transition.store_write, status="blocked", blocked_reason="conflict"))
+        import reconcile
+        transition = decision_actions.meet_action(self.db.decision(dec.id), reconcile.Wait(KEY, "conflict"))
+        self.db.update_decision(transition.store_write)
         row = next((status, row) for status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                    if row.href.endswith(KEY))
         self.assertEqual(row[0], "needs input")
@@ -424,6 +441,28 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         self.assertIn("write refused", self.db.decision(dec.id).blocked_reason)
         fg.write_stage.assert_called_once_with(12, "review", expected="implement", commit=True)
 
+    def test_board_command_uses_migrated_driver(self):
+        import contextlib
+        import io
+        with mock.patch.object(store_access, "migrated_store", wraps=store_access.migrated_store) as opened:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(pg.main(["--board", "--root", str(self.root)]), 0)
+        opened.assert_called_once_with(self.root)
+        board = next((self.root / "pages").glob("*-board.html")).read_text()
+        self.assertIn("Upload size limit", board)
+
+    def test_reroute_preview_does_not_close_decision(self):
+        dec = self.db.add_decision(KEY, "design", "Choose parser")
+        fg = mock.Mock()
+        fg.write_stage.return_value = SimpleNamespace(ok=True, done=False, error="")
+        with mock.patch.object(pg.forge, "for_workspace", return_value=fg):
+            status, _ = self.request("POST", "/", {"decision_id": dec.id, "action": "reroute",
+                                                     "target_stage": "review", "answer": "Review again"})
+        self.assertEqual(status, 409)
+        self.assertEqual(self.db.item(KEY).stage, "implement")
+        self.assertEqual(self.db.decision(dec.id).status, "blocked")
+        self.assertIn("not committed", self.db.decision(dec.id).blocked_reason)
+
     def test_store_decisions_have_only_board_post(self):
         dec = self.db.add_decision(KEY, "design", "Choose parser")
         status, _ = self.request("POST", "/decisions", {"decision_id": dec.id, "answer": "Split"})
@@ -431,3 +470,7 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         self.assertEqual(self.db.decision(dec.id).status, "open")
         body = self.request("GET", "/")[1]
         self.assertRegex(body, r'<form method="post" action="/" class="decision-form">')
+
+
+if __name__ == "__main__":
+    unittest.main()

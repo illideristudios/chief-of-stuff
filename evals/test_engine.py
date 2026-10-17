@@ -98,13 +98,13 @@ class EngineTest(unittest.TestCase):
         self.addCleanup(identity.stop)
 
     def test_pass_delivers_exception_pings_after_store_updates(self):
+        observed = []
         def ping(root, now):
-            self.assertEqual(root, self.root)
-            self.assertEqual(now, NOW)
-            self.assertEqual(len(self.db.segments(KEY)), 1)
+            observed.append((root, now, len(self.db.segments(KEY))))
         with mock.patch("notify.sync_workspace", side_effect=ping) as sync:
             self.run_pass()
         sync.assert_called_once_with(self.root, NOW)
+        self.assertEqual(observed, [(self.root, NOW, 1)])
 
     def test_ping_failure_does_not_abort_pass(self):
         with mock.patch("notify.sync_workspace", side_effect=RuntimeError("queue unavailable")) as sync:

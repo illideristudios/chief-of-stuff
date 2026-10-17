@@ -293,7 +293,9 @@ class LeadCountsTest(unittest.TestCase):
         cls.pages = served(2, 0, lead_counts=True)
 
     def test_counts_are_present_on_every_page_including_unbuilt_tabs(self):
-        for page, html in self.pages.items():
+        # M6 changes board/issue/source/workers; separate legacy decision pages are retiring.
+        for page in ("board", "task", "source", "workers"):
+            html = self.pages[page]
             with self.subTest(page=page):
                 got = tabs(html)
                 expected = {"Workers": ("1", "need"), "Dispatch": ("1", "ready"),

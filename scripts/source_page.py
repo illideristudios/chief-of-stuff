@@ -20,7 +20,7 @@ import backlog
 import board_sources
 import decision_page
 import module_graph
-import store
+from task_forge import PageData
 from decision_page import HEAD
 from fragment import href, tab_bar
 from issue_page import _paths, _shared, anchor, inputs, put
@@ -260,21 +260,15 @@ LAYOUT = ('  <div class="seg" role="group" aria-label="Diff layout">'
 def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            graph: Graph | None = None, pages: Path | None = None, root: Path | None = None,
            notes: list[Note] | None = None, notes_error: str = "", pending: int = 0,
-           navigation: dict | None = None) -> str | None:
+           navigation: dict | None = None, db: PageData | None = None) -> str | None:
     """The page, or None when no task in `trackers` or the store names issue `number`. `notes` are the change's review threads."""
     ref = f"#{number}"
     mine = [t for _, text in trackers for t in parse_tracker(text).tasks
             if (m := TRAILING_NUMBER.search(t.issue)) and int(m[1]) == number]
     store_item = None
-    if not mine and root is not None and (root / "store.db").is_file():
-        db = store.Store(root / "store.db")
-        try:
-            store_item = next(
-                (i for i in db.all_items() if (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == number),
-                None,
-            )
-        finally:
-            db.engine.dispose()
+    if not mine and db is not None:
+        store_item = next((i for i in db.items()
+                           if (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == number), None)
     if not mine and store_item is None:
         return None
     issue = sources.issues.get(ref) or (sources.issues.get(store_item.issue_key) if store_item else None)
@@ -341,7 +335,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             f"      <h1>{title}</h1>\n    </div>\n{cmp}  </header>\n{body}</main>\n</body>\n</html>\n")
 
 
-def write(root: Path, pages_dir: Path, number: int) -> Path | None:
+def write(root: Path, pages_dir: Path, number: int, *, db: PageData | None = None, navigation: dict | None = None) -> Path | None:
     """Render `issue-<number>-source.html`; with no page, remove the file and return None."""
     cfg, now, trackers, settings = inputs(root)
     sources = board_sources.load(pages_dir)
@@ -350,5 +344,5 @@ def write(root: Path, pages_dir: Path, number: int) -> Path | None:
     found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")
     ctx = decision_page.context(root, now.date().isoformat())
     page = render(number, trackers, sources, now, settings.graph, pages_dir, root, found, error,
-                  decision_page.pending_count(pages_dir, ctx), ctx.navigation if ctx else None)
+                  decision_page.pending_count(pages_dir, ctx), navigation, db=db)
     return put(pages_dir / f"issue-{number}-source.html", page)

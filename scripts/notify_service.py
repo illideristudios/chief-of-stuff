@@ -33,7 +33,7 @@ def instance_lock(root: Path, name: str = "notify-service.lock"):
 def fingerprints(root: Path, now: datetime) -> tuple:
     cfg, _ = configuration(root)
     day = now.astimezone(cfg.zone).date()
-    paths = {root / "CLAUDE.md", root / cfg.tracker_path(day.isoformat()), root / "store.db", root / "store.db-wal"}
+    paths = {root / "CLAUDE.md", root / cfg.tracker_path(day.isoformat())}
     if cfg.settings_path:
         paths.add(root / cfg.settings_path)
     paths.update(path for tracker_day, path in daily_trackers(root, cfg) if tracker_day <= day)

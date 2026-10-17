@@ -33,7 +33,7 @@ from decision_page import write_if_changed  # noqa: E402
 from fragment import FONTS, TAB_CSS, tab_bar, theme  # noqa: E402
 import flow_chart  # noqa: E402
 import panels  # noqa: E402
-import store  # noqa: E402
+from task_forge import PageData  # noqa: E402
 import tracker_log  # noqa: E402
 
 LONG_ITEM = 80
@@ -267,7 +267,7 @@ def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: i
             panels.Tile("ORPHANED", orphaned, "flow", "orphaned"), panels.Tile("DRIFT", drift, "flow", "drift")]
 
 
-def _render_store_decisions(decisions: list[store.Decision]) -> str:
+def _render_store_decisions(decisions: list) -> str:
     if not decisions:
         return ""
     items: list[str] = []
@@ -280,7 +280,7 @@ def _render_store_decisions(decisions: list[store.Decision]) -> str:
             badge = f'<span class="decision-badge {_esc(st_name)}">{_esc(st_name.upper())}</span>'
         ans = f' <span class="decision-answer">({_esc(d.answer)})</span>' if d.answer else ""
         form = (
-            f'<form method="post" action="/decisions" class="decision-form">'
+            f'<form method="post" action="/" class="decision-form">'
             f'<input type="hidden" name="decision_id" value="{d.id}">'
             f'<input type="text" name="answer" value="{_esc(d.answer or "")}">'
             f'<input type="text" name="target_stage" value="{_esc(d.rerouted_to or "")}">'
@@ -297,12 +297,12 @@ def _render_store_decisions(decisions: list[store.Decision]) -> str:
     return '<div class="board-decisions">\n' + "\n".join(items) + "\n</div>\n"
 
 
-def _tasks_from_store(db: store.Store, cfg: Config, lanes: dict | None, kanban: Kanban | None,
-                      today: date) -> tuple[list[Task], dict[Task, str], set[Task], list[store.Decision]]:
+def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kanban | None,
+                      today: date) -> tuple[list[Task], dict[Task, str], set[Task], list]:
     store_items = db.items()
     store_segments = db.segments()
     store_decisions = db.decisions()
-    segs_by_key: dict[str, list[store.Segment]] = {}
+    segs_by_key: dict[str, list] = {}
     for seg in store_segments:
         segs_by_key.setdefault(seg.issue_key, []).append(seg)
     tasks: list[Task] = []
@@ -339,7 +339,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
            look_log: list[tuple[date, str]] | None = None,
            loop_log: list[tuple[date, str]] | None = None,
-           db: store.Store | None = None) -> str:
+           db: PageData | None = None) -> str:
     """The board page: header, tiles, BUILD (the stage columns), and the Flow charts.
     `stage_log` is (day, tracker text) for the earlier days the Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
@@ -352,7 +352,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     tasks = [task for task in tracker.tasks if not task.standing]
     store_held: dict[Task, str] = {}
     store_loops: set[Task] = set()
-    store_decisions: list[store.Decision] = []
+    store_decisions: list = []
     if db is not None:
         s_tasks, store_held, store_loops, store_decisions = _tasks_from_store(db, cfg, lanes, kanban, today)
         if not tasks:
@@ -483,7 +483,7 @@ figure{{margin:0;padding:0;background:none;border:0}}
 # --- cli -----------------------------------------------------------------------------------------
 
 
-def write(root: Path, day: str | None = None, *, now: datetime | None = None) -> tuple[Path, Config, datetime, str, dict]:
+def write(root: Path, day: str | None = None, *, now: datetime | None = None, db: PageData | None = None) -> tuple[Path, Config, datetime, str, dict]:
     """Write `<day>-board.html` and `decisions.html` into the pages dir. The page server calls this in
     process; a missing CLAUDE.md, tracker or setting raises ConfigError."""
     if not (root / "CLAUDE.md").is_file():
@@ -497,8 +497,7 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None) ->
     except ValueError:
         raise ConfigError(f"invalid date {day!r}; use YYYY-MM-DD") from None
     tracker = root / cfg.tracker_path(day)
-    has_store = (root / "store.db").is_file()
-    if not tracker.is_file() and not has_store:
+    if not tracker.is_file() and db is None:
         raise ConfigError(f"tracker not found at {tracker}")
     tracker_text = tracker.read_text() if tracker.is_file() else ""
     cfg = with_workspace_decision_deadlines(root, cfg, tracker_text, tracker_day)
@@ -536,29 +535,24 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None) ->
             logs.append((d, text))
     stage_log = sorted((d, text) for d, text in logs if reach <= d)
     look_log = sorted((d, text) for d, text in logs if since_day <= d < reach)
-    db = store.Store(root / "store.db", clock=lambda: now) if has_store else None
-    try:
-        page = render(tracker_text, cfg, now, lanes=settings.lanes,
-                      tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
-                      sources=sources,
-                      tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone) if tracker.is_file() else now,
-                      stage_log=stage_log,
-                      slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
-                      looked=looked, look_log=look_log, loop_log=sorted(loop_log), db=db)
-    finally:
-        if db is not None:
-            db.engine.dispose()
+    page = render(tracker_text, cfg, now, lanes=settings.lanes,
+                  tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
+                  sources=sources,
+                  tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone) if tracker.is_file() else now,
+                  stage_log=stage_log,
+                  slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
+                  looked=looked, look_log=look_log, loop_log=sorted(loop_log), db=db)
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 
 
-def main(argv: list[str] | None = None) -> Path:
+def main(argv: list[str] | None = None, *, writer=write) -> Path:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--date", help="YYYY-MM-DD; default: today in the workspace timezone")
     ap.add_argument("--root", default=".", help="workspace root holding CLAUDE.md")
     args = ap.parse_args(argv)
     try:
-        out, cfg, now, tracker_text, req_texts = write(Path(args.root), args.date)
+        out, cfg, now, tracker_text, req_texts = writer(Path(args.root), args.date)
     except ConfigError as e:
         sys.exit(f"render_board: {e}")
     parsed = parse_tracker(tracker_text)
