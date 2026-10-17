@@ -26,7 +26,6 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import probe_health as ph  # noqa: E402
-import workspace  # noqa: E402
 import install_model_guidance as guidance  # noqa: E402
 import runtimes  # noqa: E402
 import test_shell_setup  # noqa: E402
@@ -244,26 +243,42 @@ class WorkspaceFilesTest(unittest.TestCase):
         for make in (path.mkdir, lambda: path.symlink_to(self.root / "gone"), lambda: os.mkfifo(path)):
             with self.subTest(make=make):
                 make()
-                code, lines = self.health()
-                found = [line for line in lines if guidance.NAME in line]
-                self.assertEqual(len(found), 1, lines)
-                self.assertIn("not a file (advice)", found[0])
-                self.assertIn("move it aside, then chief-of-stuff models --root", found[0])
-                self.assertEqual(code, 0)
-                shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
+                try:
+                    code, lines = self.health()
+                    found = [line for line in lines if guidance.NAME in line]
+                    self.assertEqual(len(found), 1, lines)
+                    self.assertIn("not a file (advice)", found[0])
+                    self.assertIn("move it aside, then chief-of-stuff models --root", found[0])
+                    self.assertEqual(code, 0)
+                finally:
+                    shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink(missing_ok=True)
 
     def test_an_unreadable_inventory_path_is_reported_not_dropped(self):
-        is_file = Path.is_file
+        locked = self.root / "locked"
+        locked.mkdir()
+        (locked / guidance.NAME).write_text("hi")
+        (self.root / guidance.NAME).symlink_to(locked / guidance.NAME)
+        self.config.write_text("## Coordinator\n- Settings: `locked/custom.toml`\n")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        code, lines = self.health()
+        advice = [line for line in lines if line.startswith("workspace file ")]
+        self.assertEqual(
+            advice,
+            [
+                "workspace file locked/custom.toml unreadable (advice); Permission denied",
+                f"workspace file {guidance.NAME} unreadable (advice); Permission denied",
+            ],
+            lines,
+        )
+        self.assertEqual(code, 1)
 
-        def denied(path):
-            if path.name == guidance.NAME:
-                raise PermissionError(13, "Permission denied")
-            return is_file(path)
-
-        with mock.patch.object(Path, "is_file", denied):
-            code, lines = self.health()
-        self.assertTrue(any(guidance.NAME in line and "Permission denied" in line for line in lines), lines)
-        self.assertEqual(code, 0)
+    def test_a_settings_name_with_a_nul_gets_no_duplicate_workspace_file_advice(self):
+        guidance.install(self.root)
+        self.config.write_text("## Coordinator\n- Settings: `a\x00chief-of-stuff.toml`\n")
+        code, lines = self.health()
+        self.assertEqual([line for line in lines if line.startswith("workspace file ")], [], lines)
+        self.assertEqual(code, 1)
 
     def test_the_advised_root_is_absolute(self):
         old = os.getcwd()
