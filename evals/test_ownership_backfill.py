@@ -59,6 +59,16 @@ class DerivationTest(unittest.TestCase):
         self.assertIn(('scripts/widget.py', 'write'), scopes)
         self.assertFalse(why)
 
+    def test_explicit_do_not_edit_paths_cannot_be_granted_write_access(self):
+        scopes, why = ownership.derive_scopes('Fix widget.py', 'Do not edit `docs/design.md` or `scripts/widget.py`.', SOURCES)
+        self.assertEqual(dict(scopes), {'docs/design.md': 'read', 'scripts/widget.py': 'read'})
+        self.assertFalse(why)
+
+    def test_read_only_checkbox_is_a_task_intent(self):
+        scopes, why = ownership.derive_scopes('Audit', '- [ ] Read-only: inspect `widget.py`.', SOURCES)
+        self.assertEqual(scopes, [('scripts/widget.py', 'read')])
+        self.assertFalse(why)
+
     def test_read_instructions_keep_reference_documents_read_only(self):
         scopes, why = ownership.derive_scopes('Repair widget.py', 'Read `docs/design.md` first.', SOURCES)
         self.assertIn(('docs/design.md', 'read'), scopes)
