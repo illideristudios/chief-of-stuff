@@ -615,7 +615,7 @@ class Forge:
                 code, out, err = self.gh(
                     ["pr", "list", "-R", self.home.repo, "--state", "merged",
                      "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json",
-                     "number,body,closingIssuesReferences,baseRefName,mergeCommit"])
+                     "number,body,closingIssuesReferences,baseRefName,headRefOid,mergeCommit"])
                 if code:
                     raise ForgeError(f"merged requests: {err.strip() or code}")
                 rows = json.loads(out)
@@ -652,7 +652,7 @@ class Forge:
 
     def landings(self, pipeline: Pipeline, keys: list[str], *,
                  errors: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
-        """Prove each merged result is in current main and its suite passed, including squash merges.
+        """Prove the newest closing request's head landed in current main with a passing suite.
 
         Uses forge ancestry, so a stale local checkout or an original PR head is no landing proof.
         Missing bounded history or unreadable comparisons remain unknown.
@@ -661,10 +661,25 @@ class Forge:
         found = {key: (None, None) for key in keys}
         if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
             return found
-        verified = set()
-        for row in self._merged_requests():
+        merged = self._merged_requests()
+        newest = {}
+        for row in merged:
+            identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
+            for ref in self._closed_refs(row):
+                key = self.key(int(ref[1:]))
+                if key in found and (key not in newest or identity[0] > newest[key][0]):
+                    newest[key] = identity
+        for request in self.requests():
+            for ref in request.closes:
+                if not _LOCAL_CLOSE.fullmatch(ref):
+                    continue
+                key = self.key(int(ref[1:]))
+                if key in found and (key not in newest or request.number >= newest[key][0]):
+                    newest[key] = (request.number, request.head)
+        for row in merged:
+            identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
             mine = [self.key(int(ref[1:])) for ref in self._closed_refs(row)]
-            mine = [key for key in mine if key in found and key not in verified]
+            mine = [key for key in mine if newest.get(key) == identity and identity[1]]
             if not mine:
                 continue
             try:
@@ -695,14 +710,7 @@ class Forge:
                 if errors is not None:
                     errors.update((key, f"landing comparison: {exc}") for key in mine)
             for key in mine:
-                previous = found[key]
-                if result == (True, True):
-                    found[key] = result
-                    verified.add(key)
-                elif result[0] is True and previous[0] is not True:
-                    found[key] = result
-                elif previous == (None, None):
-                    found[key] = result
+                found[key] = result
         return found
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:

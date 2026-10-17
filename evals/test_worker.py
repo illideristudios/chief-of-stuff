@@ -609,11 +609,13 @@ class WorkerTest(unittest.TestCase):
     def test_failed_close_stays_open_logs_once_and_other_collection_and_planning_continue(self):
         forge = self.suite_run()
         forge.kanban = SimpleNamespace(stage_map={}, hold_stages=())
-        forge.add_human_hold = mock.Mock(return_value="label unavailable")
+        forge.add_human_hold = mock.Mock(side_effect=lambda number: "label unavailable" if number == 1 else "")
         other = KEY.rpartition("#")[0] + "#2"
         fresh = KEY.rpartition("#")[0] + "#3"
         forge.rows.extend([{"issue_key": other, "stage": "implement", "forge_state": "open"},
                            {"issue_key": fresh, "stage": "implement", "forge_state": "open"}])
+        for number, row in enumerate(forge.rows):
+            row["body"] = f"## File ownership\n- write: `src/{number}.py`"
         self.db.upsert_item(other, stage="implement")
         self.db.record_segment(other, "implement", 1, NOW.isoformat())
         launch = mock.Mock(return_value=("example", ""))

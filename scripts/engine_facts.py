@@ -249,12 +249,12 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     for key in remembered:
         on_main.append((key, True))
         suite_on_main.append((key, True))
-    # Read after liveness, in insertion order, limited to the latest segment's stage and attempt.
+    # Read after liveness, using the same recorded-session selector as worker.collect.
     suites = []
     for item in store.items():
         segment = latest.get(item.issue_key)
-        rows = [row for row in sorted(store.reports(item.issue_key), key=lambda row: row.id)
-                if segment is None or (row.stage, row.attempt) == (segment.stage, segment.attempt)]
+        rows = (store.segment_reports(item.issue_key, segment.stage, segment.attempt) if segment else
+                sorted(store.reports(item.issue_key), key=lambda row: row.id))
         reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt) for row in rows)
         if rows and rows[-1].outcome == "done":
             raw = rows[-1].suite if isinstance(rows[-1].suite, dict) else {}

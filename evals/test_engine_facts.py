@@ -73,6 +73,7 @@ class GatherTest(unittest.TestCase):
         self.db.record_segment(KEY, "implement", 2, started_at=NOW.isoformat(), ended_at=NOW.isoformat(), outcome="done")
         self.db.record_segment(KEY, "review", 1, started_at=NOW.isoformat())
         self.db.add_report(KEY, "implement", 2, "sess", "done", "ok", [])
+        self.db.set_resume(KEY, {"runs": {"review-1": {"session_id": "sess"}}})
         self.db.add_report(KEY, "review", 1, "sess", "blocked", "stuck", [])
         self.assertEqual([(r.stage, r.attempt) for r in self.gather().reports][-1], ("review", 1))
 
@@ -242,6 +243,7 @@ class GatherTest(unittest.TestCase):
     def test_late_reports_from_an_older_run_do_not_replace_the_latest_stop(self):
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
         self.db.record_segment(KEY, "review", 1, started_at=NOW.isoformat())
+        self.db.set_resume(KEY, {"runs": {"review-1": {"session_id": "new-session"}}})
         self.db.add_report(KEY, "review", 1, "new-session", "blocked", "stuck", [])
         self.db.add_report(KEY, "implement", 1, "sess", "done", "late", [])
         self.assertEqual([(r.stage, r.attempt) for r in self.gather().reports], [("review", 1)])

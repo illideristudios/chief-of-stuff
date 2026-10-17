@@ -313,8 +313,9 @@ def completion_verdict(key: str, segment: Segment, facts: Facts, workflow: Workf
         tree_claims=claims, landing_required=not workflow.next(segment.stage))
     if verdict is None or verdict.human_review or report != "done":
         return verdict
-    found = dict(facts.suites).get((key, segment.stage, segment.attempt))
-    if found is None or not suite_holds(found[0], require_green=facts.require_green):
+    found = dict(facts.suites).get((key, segment.stage, segment.attempt),
+                                  (dict.fromkeys(("passed", "failed", "skipped", "xfailed")), ""))
+    if not suite_holds(found[0], require_green=facts.require_green):
         return verdict
     return completion.Verdict("human_review", suite_reason(found[0], found[1]), True, True)
 

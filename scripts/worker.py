@@ -343,8 +343,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = "failed", reply.message
             else:
                 # A clean exit is not completion: the worker's own report for this session decides.
-                reports = store.reports(key, stage=segment.stage, attempt=segment.attempt,
-                                        session_id=record["session_id"])
+                reports = store.segment_reports(key, segment.stage, segment.attempt)
                 if not reports:
                     reason = "worker stopped without reporting an outcome"
                 elif reports[-1].outcome == "done":
@@ -365,7 +364,12 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
         if finish is not None:
-            finish(segment, outcome, reason, now)
+            try:
+                finish(segment, outcome, reason, now)
+            except Exception as exc:
+                message = f"worker {segment.stage} attempt {segment.attempt} close failed: {exc}"
+                if not any(row.message == message for row in store.log(key)):
+                    store.add_log(key, message, now.isoformat())
             continue
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),

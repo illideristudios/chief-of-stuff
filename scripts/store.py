@@ -365,6 +365,16 @@ class Store:
                 stmt = stmt.where(getattr(Report, key) == value)
         return self._all(stmt.order_by(Report.attempt, Report.id))
 
+    def segment_reports(self, issue_key: str, stage: str, attempt: int) -> list[Report]:
+        """Reports for this segment's recorded worker session, in insertion order."""
+        data = self.resume(issue_key)
+        runs = data.get("runs") if isinstance(data, dict) else None
+        record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+        session = record.get("session_id") if isinstance(record, dict) else None
+        if not isinstance(session, str) or not session:
+            return []
+        return self.reports(issue_key, stage=stage, attempt=attempt, session_id=session)
+
     def add_ask(self, issue_key: str, stage: str, attempt: int, session_id: str,
                 question: str, options: list[str], context: str) -> int:
         with self.session() as s:

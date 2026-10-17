@@ -348,7 +348,7 @@ class LandingTest(unittest.TestCase):
         self.addCleanup(requests.stop)
 
     def test_squash_landing_uses_the_merge_commit_and_current_main_pipeline(self):
-        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "squashed"}}
         gh = FakeGh(merged=[merged])
         adapter = forge.Forge(GH, gh=gh)
         key = adapter.key(3)
@@ -368,7 +368,7 @@ class LandingTest(unittest.TestCase):
     def test_gitlab_uses_the_squash_sha_and_merge_base(self):
         adapter = forge.Forge(GL)
         row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
-               "merge_commit_sha": "merge", "squash_commit_sha": "squash"}
+               "merge_commit_sha": "merge", "squash_commit_sha": "squash", "sha": "head"}
         with mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
              mock.patch.object(forge.Forge, "_pipeline_read", return_value={"id": "squash"}) as read:
             key = adapter.key(3)
@@ -389,11 +389,11 @@ class LandingTest(unittest.TestCase):
 
     def test_only_the_newest_closing_request_can_prove_a_landing(self):
         body = "Closes #3"
-        release = {"number": 9, "body": body, "baseRefName": "release", "mergeCommit": {"oid": "side"},
+        release = {"number": 9, "body": body, "baseRefName": "release", "headRefOid": "head", "mergeCommit": {"oid": "side"},
                    "updatedAt": "2026-03-03"}
-        missed = {"number": 22, "body": body, "baseRefName": "main", "mergeCommit": {"oid": "other"},
+        missed = {"number": 22, "body": body, "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "other"},
                   "updatedAt": "2026-03-02"}
-        landed = {"number": 21, "body": body, "baseRefName": "main", "mergeCommit": {"oid": "squashed"},
+        landed = {"number": 21, "body": body, "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "squashed"},
                   "updatedAt": "2026-03-01"}
         adapter = forge.Forge(GH, gh=FakeGh(merged=[release, landed]))
         key = adapter.key(3)
@@ -415,7 +415,7 @@ class LandingTest(unittest.TestCase):
         with mock.patch.object(forge.Forge, "_pipeline_read", side_effect=read):
             self.assertEqual(adapter.landings(pipeline, [key])[key], (False, False))
         self.assertEqual(len(read.paths), 1)
-        later = {"number": 23, "body": body, "baseRefName": "main", "mergeCommit": {"oid": "other"},
+        later = {"number": 23, "body": body, "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "other"},
                  "updatedAt": "2026-03-01"}
         landed["updatedAt"] = "2026-03-05"
         adapter = forge.Forge(GH, gh=FakeGh(merged=[landed, later]))
@@ -439,7 +439,7 @@ class LandingTest(unittest.TestCase):
                                           [key])[key], (True, True))
 
     def test_landing_comparison_errors_are_attached_to_the_affected_issue(self):
-        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "mergeCommit": {"oid": "merge"}}
+        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "merge"}}
         adapter = forge.Forge(GH, gh=FakeGh(merged=[merged]))
         for response in (forge.ForgeError("compare: permission denied"), {"unexpected": "shape"}):
             errors = {}
