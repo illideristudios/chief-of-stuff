@@ -101,20 +101,29 @@ class Panel(unittest.TestCase):
 
 class Css(unittest.TestCase):
     def test_one_rule_per_kind_from_the_palette(self) -> None:
-        css = panels.css({"merge": "var(--stage-review)", "hot": "#c9533a"})
+        css = panels.css({"merge": "var(--stage-review)", "hot": "#c9533a"}, {})
         self.assertIn('[data-kind="merge"]{--k:var(--stage-review)}', css)
         self.assertIn('[data-kind="hot"]{--k:#c9533a}', css)
 
     def test_a_value_cannot_escape_its_declaration(self) -> None:
         with self.assertRaises(ValueError):
-            panels.css({"x": "red;}body{display:none"})
+            panels.css({"x": "red;}body{display:none"}, {})
 
-    def test_the_default_palette_covers_the_six_tiles_and_three_panels(self) -> None:
-        self.assertLessEqual({"blocked", "decisions", "approved", "running", "drift", "orphaned", "merge", "workers"},
-                             set(panels.PALETTE))
+    def test_colours_and_tokens_must_both_come_from_the_host(self) -> None:
+        for kwargs in ({}, {"colors": {}}, {"tokens": {}}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(TypeError):
+                panels.css(**kwargs)
+
+    def test_tokens_come_from_the_host(self) -> None:
+        css = panels.css({}, {"ink": "var(--fg)", "card": "#123456"})
+        self.assertIn("--panels-ink:var(--fg);--panels-card:#123456", css)
+
+    def test_a_token_value_cannot_escape_its_declaration(self) -> None:
+        with self.assertRaises(ValueError):
+            panels.css({}, {"ink": "red;}body{display:none"})
 
     def test_the_layout_wraps_on_a_phone(self) -> None:
-        css = panels.css()
+        css = panels.css({}, {})
         self.assertRegex(css, r"\.panels-tiles\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(")
         self.assertRegex(css, r"\.panels\{[^}]*grid-template-columns:repeat\(auto-fit,minmax\(")
         self.assertRegex(css, r"\.panels-head\{[^}]*flex-wrap:wrap")
