@@ -13,5 +13,12 @@
     "daily-log",
     "planning",
     "dispatch"
+  ],
+  "dependencies": [
+    {
+      "name": "datetime-inject",
+      "marketplace": "ai-additions",
+      "version": "^1.0"
+    }
   ]
 }

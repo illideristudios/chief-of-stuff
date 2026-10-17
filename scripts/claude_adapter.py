@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -32,7 +33,32 @@ def command(request: Request, claude_as_profile: str = "") -> list[str]:
     if not binary:
         why = f"; claude_as_profile {claude_as_profile!r} needs it" if claude_as_profile else ""
         raise ShellError(f"`{program}` is not on the login shell's PATH{why}")
+    if request.worker:
+        _check_clock(binary, lead, request.cwd)
     return login_argv(argv(request, binary, lead))
+
+
+def _check_clock(binary: str, lead: list[str], cwd: str | None) -> None:
+    """Unbilled preflight in the worker's account. Workers load user settings only, never project plugins."""
+    try:
+        done = subprocess.run(login_argv([binary, *lead, "--setting-sources", "user", "plugin", "list", "--json"]),
+                              env=clean_env(), cwd=cwd, stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=15)
+        if done.returncode:
+            raise ValueError(f"plugin list exited {done.returncode}")
+        plugins = json.loads(done.stdout)
+        if not isinstance(plugins, list) or any(not isinstance(p, dict) for p in plugins):
+            raise ValueError("plugin list must be an array of objects")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ShellError(f"worker clock preflight failed: {exc}") from None
+    clock = next((p for p in plugins if p.get("id") == "datetime-inject@ai-additions"
+                  and p.get("scope") == "user" and p.get("enabled") is True), None)
+    if clock is None:
+        raise ShellError("worker requires datetime-inject@ai-additions installed and enabled at user scope "
+                         "in its Claude account; install/enable it there before retrying")
+    # The owner-approved ^1.0 range: stable 1.x.y, with optional semver build metadata.
+    if not re.fullmatch(r"1\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\+[0-9A-Za-z.-]+)?", str(clock.get("version", ""))):
+        raise ShellError("worker requires datetime-inject@ai-additions version ^1.0; update it in its Claude account")
 
 
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",

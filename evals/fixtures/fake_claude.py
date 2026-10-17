@@ -14,6 +14,12 @@ import uuid
 from pathlib import Path
 
 
+if sys.argv[-3:] == ["plugin", "list", "--json"]:
+    print(json.dumps([{"id": "datetime-inject@ai-additions", "version": "1.0.0",
+                       "scope": "user", "enabled": True}]))
+    sys.exit(0)
+
+
 def one_answer(args):
     """`claude -p --output-format json ... -- <prompt>`, as the M0 spike measured it. A `claude-as run <profile>` lead is
     skipped. Sessions live in `.fake-claude-sessions/` in cwd. The prompt picks the outcome: QUOTA is a 429 quota stop on

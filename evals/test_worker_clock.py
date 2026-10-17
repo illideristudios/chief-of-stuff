@@ -109,8 +109,6 @@ class LiveClockTest(unittest.TestCase):
             db = store.Store(binding.store_path)
             try:
                 db.upsert_item(binding.issue_key, title="Clock delivery probe", stage="implement")
-                # This probe's completed setup satisfies Stop; the model only reads its hook context.
-                db.add_report(binding.issue_key, binding.stage, 1, session, "done", "Clock probe setup", [])
                 request = Request(
                     prompt="Read the UserPromptSubmit hook output attached to THIS prompt. Return every bracketed "
                            "clock timestamp line from that output, verbatim, in the lines array. Preserve duplicates. "
@@ -120,10 +118,17 @@ class LiveClockTest(unittest.TestCase):
                     schema={"type": "object", "properties": {"lines": {"type": "array", "items": {"type": "string"}}},
                             "required": ["lines"], "additionalProperties": False})
                 previous = None
-                with mock.patch.dict(os.environ, guard_binding.guard_env(binding)):
-                    for resume in (False, True):
+                for _ in range(2):
+                    # Production workers start a fresh session for each assignment. Keep this proof
+                    # independent of session persistence (which may be unwritable in a sandbox).
+                    session = str(uuid.uuid4())
+                    binding = guard_binding.Binding(binding.issue_key, binding.stage, 1, session, root, now)
+                    request = replace(request, session_id=session)
+                    # The probe's setup satisfies Stop; the model only reads its hook context.
+                    db.add_report(binding.issue_key, binding.stage, 1, session, "done", "Clock probe setup", [])
+                    with mock.patch.dict(os.environ, guard_binding.guard_env(binding)):
                         before = datetime.now(timezone.utc)
-                        reply = claude_adapter.call(replace(request, resume=resume),
+                        reply = claude_adapter.call(request,
                                                     claude_as_profile=os.environ.get("CHIEF_CLOCK_PROFILE", ""))
                         after = datetime.now(timezone.utc)
                         self.assertIsInstance(reply, Reply, reply)
@@ -136,7 +141,7 @@ class LiveClockTest(unittest.TestCase):
                         self.assertGreaterEqual(stamp.timestamp(), before.timestamp() - 1)
                         self.assertLessEqual(stamp.timestamp(), after.timestamp())
                         if previous is not None:
-                            self.assertGreater(stamp, previous, "resume must get a new timestamp")
+                            self.assertGreater(stamp, previous, "each worker prompt must get a new timestamp")
                         previous = stamp
             finally:
                 db.engine.dispose()
