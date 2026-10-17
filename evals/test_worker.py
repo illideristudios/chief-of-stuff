@@ -606,6 +606,41 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
         self.assertTrue(any("uncommitted" in row.message for row in self.db.log(KEY)))
 
+    def test_an_adopted_completed_start_finishes_on_the_same_pass(self):
+        forge = self.suite_run()
+        data = self.db.resume(KEY)
+        run = Path(data["runs"]["implement-1"]["run_dir"])
+        self.report(run, suite={"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0})
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        worker._runners.pop(str(run), None)
+        with mock.patch.object(engine.engine_facts, "gather", wraps=engine.engine_facts.gather) as gather:
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        gather.assert_called_once()
+        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["starting_head"], "head")
+
+    def test_an_exit_published_during_gather_waits_until_the_next_pass(self):
+        run = self.launched()
+        self.report(run)
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run / "stderr").write_text("")
+        facts = reconcile.Facts()
+
+        def gather():
+            (run / "exit.json").write_text('{"exit_code": 0}')
+            return facts
+
+        finish = mock.Mock()
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.assertIs(worker.collect(self.db, self.root, lambda: NOW, gather=gather, finish=finish), facts)
+        finish.assert_not_called()
+        worker.collect(self.db, self.root, lambda: NOW, gather=lambda: facts, finish=finish)
+        finish.assert_called_once()
+
     def test_failed_close_stays_open_logs_once_and_other_collection_and_planning_continue(self):
         forge = self.suite_run()
         forge.kanban = SimpleNamespace(stage_map={}, hold_stages=())

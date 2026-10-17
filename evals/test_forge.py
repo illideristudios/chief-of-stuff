@@ -103,6 +103,9 @@ class FakeGh(tma.FakeGhGraphql):
                 rows = rows[:forge.forge_review.REQUEST_LIMIT]
             else:
                 rows = self.prs
+                if "--base" in args:
+                    rows = [row for row in rows if row.get("baseRefName") == args[args.index("--base") + 1]]
+                rows = rows[:int(args[args.index("--limit") + 1])]
             return 0, json.dumps([{k: v for k, v in row.items() if k in fields} for row in rows]), ""
         if args[:2] == ["project", "field-list"]:
             opts = [*self.project.options, *FLOW.terminal_stages]
@@ -461,6 +464,29 @@ class LandingTest(unittest.TestCase):
                         call.assert_called_once()
                         self.assertEqual(parse_qs(urlsplit(call.call_args.args[1]).query)["state"], ["opened"])
                         self.assertTrue(urlsplit(call.call_args.args[1]).path.endswith("/merge_requests"))
+
+    def test_open_closers_filter_the_base_and_use_the_paginated_github_limit(self):
+        merged = {"number": 21, "body": "Closes #3", "headRefOid": "head",
+                  "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+        release = [{"number": n, "headRefOid": "release-head", "baseRefName": "release"}
+                   for n in range(100, 201)]
+        for main_count in (0, 101, backlog.GH_LIMIT):
+            with self.subTest(main_count=main_count):
+                opened = release + [{"number": n, "headRefOid": "other-head", "baseRefName": "main"}
+                                    for n in range(300, 300 + main_count)]
+                gh = FakeGh(prs=opened, merged=[merged])
+                adapter = forge.Forge(GH, gh=gh)
+                key = adapter.key(3)
+                pipeline = forge.Pipeline(1, "main", "squashed", "passed", "")
+                if main_count == backlog.GH_LIMIT:
+                    with self.assertRaises(forge.ForgeError):
+                        adapter.landings(pipeline, [key])
+                else:
+                    self.assertEqual(adapter.landings(pipeline, [key])[key], (True, True))
+                args = next(args for args in gh.all_calls if args[:2] == ["pr", "list"]
+                            and args[args.index("--state") + 1] == "open")
+                self.assertEqual(args[args.index("--base") + 1], pipeline.ref)
+                self.assertEqual(args[args.index("--limit") + 1], str(backlog.GH_LIMIT))
 
     def test_a_newer_open_request_or_changed_head_cannot_use_an_old_landing(self):
         merged = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
