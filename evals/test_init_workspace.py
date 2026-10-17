@@ -19,7 +19,7 @@ import install_model_guidance as guidance  # noqa: E402
 import engine  # noqa: E402
 import issue_gate  # noqa: E402
 import forge  # noqa: E402
-from workspace import parse_coordinator  # noqa: E402
+from workspace import WORKSPACE_FILES, WorkspaceFile, parse_coordinator  # noqa: E402
 from settings import _models, load as load_settings, load_policy, workflow_stages  # noqa: E402
 
 
@@ -75,6 +75,16 @@ class InitWorkspaceTest(unittest.TestCase):
         settings = load_settings(self.root, "chief-of-stuff.toml")
         self.assertIsNotNone(settings.kanban)
         self.assertEqual(set(settings.kanban.stage_map), {"plan", "implement", "review", "fix", "merge"})
+
+    def test_config_and_settings_names_come_from_the_file_inventory(self):
+        with mock.patch.dict(WORKSPACE_FILES, {
+            "config": WorkspaceFile("workspace.md", "chief-of-stuff init --help"),
+            "settings": WorkspaceFile("engine.toml", "chief-of-stuff init --help"),
+        }):
+            self.assertEqual(self.run_init()[0], 0)
+            self.assertEqual({p.name for p in self.root.iterdir()}, {"workspace.md", "engine.toml", guidance.NAME})
+            config = parse_coordinator((self.root / "workspace.md").read_text(), date.today())
+            self.assertEqual(config.settings_path, "engine.toml")
 
     def test_fresh_repo_can_write_its_first_stage_after_init(self):
         labels, issue_labels = [], []

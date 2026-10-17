@@ -8,8 +8,12 @@ fake would skip all three. The parsing tests and the settings tests with no `Hea
 import contextlib
 import io
 import json
+import os
 import re
+import shlex
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -22,6 +26,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import probe_health as ph  # noqa: E402
+import install_model_guidance as guidance  # noqa: E402
 import runtimes  # noqa: E402
 import test_shell_setup  # noqa: E402
 from shell_setup import ShellError  # noqa: E402
@@ -174,6 +179,115 @@ class OutputTest(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
+class WorkspaceFilesTest(unittest.TestCase):
+    """#284: missing init files are advice naming the init command; model guidance is not advised."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="workspace with spaces ")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.config = self.root / "CLAUDE.md"
+        self.config.write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text("")
+
+    def health(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ph.main(["--config", str(self.config)])
+        self.assertEqual(err.getvalue(), "")
+        return code, out.getvalue().splitlines()
+
+    def test_missing_model_guidance_is_not_advised(self):
+        code, lines = self.health()
+        self.assertFalse(any(guidance.NAME in line or "models --root" in line for line in lines), lines)
+        self.assertEqual(code, 0, "missing init files do not add failed checks")
+        self.assertFalse((self.root / guidance.NAME).exists(), "health does not install guidance")
+
+    def test_missing_settings_is_advised_without_failing_and_guidance_is_not(self):
+        (self.root / "chief-of-stuff.toml").unlink()
+        code, lines = self.health()
+        advice = [line for line in lines if line.startswith("workspace file ")]
+        self.assertEqual(
+            advice,
+            ["workspace file chief-of-stuff.toml missing (advice); chief-of-stuff init --help"],
+            lines,
+        )
+        self.assertEqual(code, 0)
+
+    def test_health_reads_new_init_file_data_without_its_own_list(self):
+        extra = workspace.WorkspaceFile("new-release.md", "chief-of-stuff models --root {root}")
+        with mock.patch.dict(workspace.WORKSPACE_FILES, {"future": extra}):
+            code, lines = self.health()
+        self.assertEqual(code, 0)
+        self.assertEqual(len([line for line in lines if "new-release.md" in line]), 1, lines)
+
+    def test_custom_config_and_settings_paths_do_not_advise_default_names(self):
+        self.config.rename(self.root / "workspace.md")
+        self.config = self.root / "workspace.md"
+        self.config.write_text("## Coordinator\n- Settings: `custom.toml`\n")
+        (self.root / "chief-of-stuff.toml").rename(self.root / "custom.toml")
+        code, lines = self.health()
+        self.assertEqual(code, 0)
+        self.assertFalse(any(line.startswith("workspace file ") for line in lines), lines)
+
+    def test_a_non_file_at_an_inventory_path_is_advice_to_move_it_aside(self):
+        extra = workspace.WorkspaceFile("side.md", "chief-of-stuff init --help")
+        path = self.root / "side.md"
+        with mock.patch.dict(workspace.WORKSPACE_FILES, {"side": extra}):
+            for make in (path.mkdir, lambda: path.symlink_to(self.root / "gone"), lambda: os.mkfifo(path)):
+                with self.subTest(make=make):
+                    make()
+                    try:
+                        code, lines = self.health()
+                        found = [line for line in lines if "side.md" in line]
+                        self.assertEqual(len(found), 1, lines)
+                        self.assertIn("not a file (advice)", found[0])
+                        self.assertIn("move it aside, then chief-of-stuff init --help", found[0])
+                        self.assertFalse(any(guidance.NAME in line for line in lines), lines)
+                        self.assertEqual(code, 0)
+                    finally:
+                        shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink(missing_ok=True)
+
+    @unittest.skipIf(os.geteuid() == 0, "root ignores chmod(0)")
+    def test_an_unreadable_inventory_path_is_reported_not_dropped(self):
+        locked = self.root / "locked"
+        locked.mkdir()
+        self.config.write_text("## Coordinator\n- Settings: `locked/custom.toml`\n")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o700)
+        code, lines = self.health()
+        advice = [line for line in lines if line.startswith("workspace file ")]
+        self.assertEqual(
+            advice,
+            ["workspace file locked/custom.toml unreadable (advice); Permission denied"],
+            lines,
+        )
+        self.assertEqual(code, 1)
+
+    def test_a_settings_name_with_a_nul_gets_no_duplicate_workspace_file_advice(self):
+        self.config.write_text("## Coordinator\n- Settings: `a\x00chief-of-stuff.toml`\n")
+        code, lines = self.health()
+        self.assertEqual([line for line in lines if line.startswith("workspace file ")], [], lines)
+        self.assertEqual(code, 1)
+
+    def test_the_advised_root_is_absolute_and_model_guidance_is_not_named(self):
+        extra = workspace.WorkspaceFile("new-release.md", "chief-of-stuff models --root {root}")
+        old = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, old)
+        out = io.StringIO()
+        with mock.patch.dict(workspace.WORKSPACE_FILES, {"future": extra}), contextlib.redirect_stdout(out):
+            ph.main(["--config", "CLAUDE.md"])
+        text = out.getvalue()
+        self.assertIn(f"--root {shlex.quote(str(self.root.resolve()))}", text)
+        self.assertNotIn(guidance.NAME, text)
+
+    def test_health_does_not_load_the_init_and_forge_import_graph(self):
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        probe = f"import sys; sys.path.insert(0, {str(scripts)!r}); import probe_health; sys.exit('init_workspace' in sys.modules or 'forge' in sys.modules)"
+        self.assertEqual(subprocess.run([sys.executable, "-I", "-c", probe]).returncode, 0)
+
+
 TOML = "chief-of-stuff.toml"
 BAD_MODE = '[workers]\nmode = "sometimes"\n'
 GOOD = '[workers]\nmode = "one-shot"\n'
@@ -214,7 +328,7 @@ class SettingsCheckTest(unittest.TestCase):
     """
 
     def run_health(self, block: str, toml: str | bytes | None = None, *, text: str | None = None, setup=None) -> tuple[int, list[str], str]:
-        """Exit code, stdout lines and stderr of one `health` run over a workspace holding `block`.
+        """Exit code, stdout lines (minus `workspace file ` advice) and stderr of one `health` run over a workspace holding `block`.
 
         `text` replaces the whole CLAUDE.md; `setup(root)` runs once the files are written, before health does.
         What `setup` returns, if anything, is called once health is done, so the temp dir can be removed.
@@ -232,7 +346,9 @@ class SettingsCheckTest(unittest.TestCase):
             finally:
                 if undo:
                     undo()
-        return code, out.getvalue().splitlines(), err.getvalue()
+        # These tests compare settings, runtime and target output independently of init-file advice.
+        lines = [line for line in out.getvalue().splitlines() if not line.startswith("workspace file ")]
+        return code, lines, err.getvalue()
 
     def targets(self) -> str:
         """Two `Health:` lines, one target up and one answering 500."""
@@ -519,7 +635,7 @@ class RuntimeCheckTest(unittest.TestCase):
                                           SettingsCheckTest.settings_line)
 
     def health(self, block: str, toml: str | None, present=(), raises: Exception | None = None):
-        """Exit code, stdout lines, stderr, and the binaries `resolve` was asked for, in order."""
+        """Exit code, stdout lines (minus `workspace file ` advice), stderr, and the binaries `resolve` was asked for, in order."""
         def found(program=None, **_kw):
             if raises:
                 raise raises
