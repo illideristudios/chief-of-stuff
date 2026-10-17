@@ -994,13 +994,22 @@ class WorkerTest(unittest.TestCase):
                     self.launch_in(clone, attempt=3)
             self.assert_abort_work_preserved(clone, heads)
 
-    def test_abort_verifies_the_replacement_before_retiring_or_saving_it(self):
-        from evals import git_taint as taint
+    def test_abort_refuses_a_replacement_on_the_right_branch_at_the_wrong_head(self):
+        from evals import git_taint as taint, make_repo
         with taint.private_git_views(self.root / "private-views"):
             clone, heads = self.abort_fixture()
             before = self.db.resume(KEY)
-            with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=next(iter(heads)))):
-                with self.assertRaisesRegex(RuntimeError, "replacement"):
+
+            def wrong_head(root, repo, trees, name, branch, agent):
+                path = self.trees / name
+                make_repo.git(["worktree", "add", "-b", branch, str(path), next(iter(heads.values()))], repo)
+                self.assertEqual(make_repo.git(["symbolic-ref", "--short", "HEAD"], path), branch)
+                self.assertNotEqual(make_repo.git(["rev-parse", "HEAD"], path),
+                                    make_repo.git(["rev-parse", worker.git_trees.REF], repo))
+                return SimpleNamespace(path=path)
+
+            with mock.patch.object(worker.make_worktree, "build", side_effect=wrong_head):
+                with self.assertRaisesRegex(RuntimeError, "replacement does not match"):
                     self.launch_in(clone, attempt=3)
             self.assert_abort_work_preserved(clone, heads)
             self.assertEqual(self.db.resume(KEY), before)
@@ -1060,15 +1069,19 @@ class WorkerTest(unittest.TestCase):
             (run / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": "live"}))
             (run / "canceled").write_text("canceled\n")
             self.assertEqual(self.db.segments(), [])
+            before = self.db.resume(KEY)
             for identity in (lambda *a, **kw: "live", lambda *a, **kw: None if kw.get("host") else "live",
                              mock.Mock(side_effect=RuntimeError("ps unavailable"))):
                 with self.subTest(identity=identity), \
                      mock.patch.object(worker.process_status, "identity", side_effect=identity), \
+                     mock.patch.object(worker.make_worktree, "build") as build, \
                      mock.patch.object(worker.claude_adapter, "start") as start:
                     with self.assertRaisesRegex(RuntimeError, "live|unverified"):
                         worker.launch(KEY, "implement", 3, None, store=self.db, root=self.root,
                                       trees=self.trees, policies=self.p, forge=self.forge, clone=clone, clock=lambda: NOW)
                     start.assert_not_called()
+                    build.assert_not_called()
+                    self.assertEqual(self.db.resume(KEY), before)
                     self.assert_abort_work_preserved(clone, heads)
             # Once both identities are gone, the archived marker must not prevent an intentional abort.
             with mock.patch.object(worker.process_status, "identity", return_value=None):
@@ -1078,6 +1091,87 @@ class WorkerTest(unittest.TestCase):
             self.assertNotIn(fresh, heads)
             self.assertTrue(fresh.is_dir())
             self.assertTrue(all(not tree.exists() for tree in heads))
+
+    def test_abort_preserves_a_live_login_shell_when_its_runner_has_died(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            run = worker._run_dir(self.root, KEY, "implement", 1)
+            run.mkdir(parents=True)
+            (run / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": "shell"}))
+            before = self.db.resume(KEY)
+
+            def identity(pid, session, *, host=False):
+                return "live shell" if pid == 77 and not host else None
+
+            with mock.patch.object(worker.process_status, "identity", side_effect=identity), \
+                 mock.patch.object(worker.make_worktree, "build") as build, \
+                 mock.patch.object(worker.claude_adapter, "start") as start:
+                with self.assertRaisesRegex(RuntimeError, "worker is still live"):
+                    worker.launch(KEY, "implement", 3, None, store=self.db, root=self.root,
+                                  trees=self.trees, policies=self.p, forge=self.forge, clone=clone, clock=lambda: NOW)
+            build.assert_not_called()
+            start.assert_not_called()
+            self.assertEqual(self.db.resume(KEY), before)
+            self.assert_abort_work_preserved(clone, heads)
+
+    def test_resumed_abort_preserves_trees_and_refs_changed_since_the_snapshot(self):
+        from evals import git_taint as taint, make_repo
+        for change in ("commit", "untracked", "ignored", "dirty edit", "index", "branch", "remote", "new remote"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
+                # Each case needs its own persisted transition and both conflicting trees.
+                self.db.engine.dispose()
+                self.setUp()
+                with taint.private_git_views(Path(tmp) / "private-views"):
+                    clone, heads = self.abort_fixture()
+                    old = list(heads)[-1]  # A changed later candidate must protect the earlier one too.
+                    branch = f"work/{old.name}"
+                    remote = f"refs/remotes/origin/{branch}"
+                    if change == "remote":
+                        make_repo.git(["update-ref", remote, heads[old]], clone)
+                    with mock.patch.object(worker, "_retire_orphans", side_effect=KeyboardInterrupt):
+                        with self.assertRaises(KeyboardInterrupt):
+                            self.launch_in(clone, attempt=3)
+                    before = self.db.resume(KEY)
+                    if change == "commit":
+                        make_repo.git(["add", "scratch.txt"], old)
+                        make_repo.git(["commit", "-m", "later work"], old)
+                    elif change == "untracked":
+                        (old / "later.txt").write_text("later work\n")
+                    elif change == "ignored":
+                        common = worker.git_view.locate(clone).common
+                        (common / "info" / "exclude").write_text("later.txt\n")
+                        (old / "later.txt").write_text("later ignored work\n")
+                    elif change == "dirty edit":
+                        (old / "scratch.txt").write_text("later edit of already dirty file\n")
+                    elif change == "index":
+                        (old / "README.md").write_text("only the index will keep this version\n")
+                        make_repo.git(["add", "README.md"], old)
+                        (old / "README.md").write_text("base\n")
+                    elif change == "branch":
+                        make_repo.git(["update-ref", f"refs/heads/{branch}", "main"], clone)
+                    else:
+                        make_repo.git(["update-ref", remote, "main"], clone)
+                    expected_heads = {tree: make_repo.git(["rev-parse", "HEAD"], tree) for tree in heads}
+                    files = {p: p.read_bytes() for tree in heads for p in tree.iterdir() if p.name != ".git"}
+                    index = make_repo.git(["show", ":README.md"], old)
+                    expected_remote = make_repo.git(["for-each-ref", "--format=%(objectname)", remote], clone)
+                    with mock.patch.object(worker.make_worktree, "build") as build, \
+                         mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+                         mock.patch.object(worker.process_status, "identity", return_value="start"):
+                        with self.assertRaisesRegex(RuntimeError, "changed since.*snapshot"):
+                            worker.launch(KEY, "implement", 4, None, store=self.db, root=self.root,
+                                          trees=self.trees, policies=self.p, forge=self.forge, clone=clone, clock=lambda: NOW)
+                    build.assert_not_called()
+                    start.assert_not_called()
+                    self.assertEqual(self.db.resume(KEY), before)
+                    for tree, head in expected_heads.items():
+                        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], tree), head)
+                    for path, body in files.items():
+                        self.assertEqual(path.read_bytes(), body)
+                    self.assertEqual(make_repo.git(["show", ":README.md"], old), index)
+                    self.assertEqual(make_repo.git(["for-each-ref", "--format=%(objectname)", remote], clone),
+                                     expected_remote)
 
     def test_abort_starts_fresh_on_the_next_engine_pass(self):
         from evals import git_taint as taint
