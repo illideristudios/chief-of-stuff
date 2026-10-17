@@ -980,6 +980,104 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(self.db.resume(KEY), before)
             self.assertTrue(Path(self.launch_in(clone, attempt=3).cwd).is_dir())
 
+    def test_abort_refuses_unreadable_candidates_before_building_or_saving_a_replacement(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.diverged()
+            old = sorted(self.trees.glob("issue-1-*"))[0]
+            head = make_repo.git(["rev-parse", "HEAD"], old)
+            make_repo.git(["checkout", "--detach"], old)
+            (old / "scratch.txt").write_text("keep detached work\n")
+            with self.assertRaisesRegex(RuntimeError, "detached or unreadable"):
+                self.launch_in(clone, attempt=3)
+            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="abort")
+            before = self.db.resume(KEY)
+            with mock.patch.object(worker.make_worktree, "build", wraps=worker.make_worktree.build) as build:
+                with self.assertRaisesRegex(RuntimeError, "preserving work"):
+                    self.launch_in(clone, attempt=3)
+            build.assert_not_called()
+            self.assertEqual(self.db.resume(KEY), before)
+            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], old), head)
+            self.assertEqual((old / "scratch.txt").read_text(), "keep detached work\n")
+
+    def test_abort_keeps_refs_checked_out_in_the_clone_or_an_external_worktree(self):
+        from evals import git_taint as taint, make_repo
+        for checkout in ("clone", "external"):
+            with self.subTest(checkout=checkout):
+                self.db.engine.dispose()
+                self.setUp()
+                with taint.private_git_views(self.root / "private-views"):
+                    clone, heads = self.abort_fixture()
+                    old, head = next(iter(heads.items()))
+                    branch = f"work/{old.name}"
+                    with mock.patch.object(worker, "_retire_orphans", side_effect=KeyboardInterrupt):
+                        with self.assertRaises(KeyboardInterrupt):
+                            self.launch_in(clone, attempt=3)
+                    if checkout == "clone":
+                        outside = clone
+                        make_repo.git(["checkout", "--ignore-other-worktrees", branch], clone)
+                    else:
+                        outside = self.root / "manual-inspection"
+                        make_repo.git(["worktree", "add", "--force", str(outside), branch], clone)
+                    (outside / "manual.txt").write_text("manual work\n")
+                    before = self.db.resume(KEY)
+                    with mock.patch.object(worker.make_worktree, "build") as build, \
+                         mock.patch.object(worker.claude_adapter, "start") as start:
+                        with self.assertRaisesRegex(RuntimeError, "retire.*ref"):
+                            self.launch_in(clone, attempt=4)
+                    build.assert_not_called()
+                    start.assert_not_called()
+                    self.assertEqual(self.db.resume(KEY), before)
+                    self.assertEqual(make_repo.git(["rev-parse", f"refs/heads/{branch}"], clone), head)
+                    self.assertEqual(make_repo.git(["rev-parse", "HEAD"], outside), head)
+                    self.assertEqual((outside / "manual.txt").read_text(), "manual work\n")
+
+    def test_abort_snapshots_with_discovery_and_rechecks_with_retirement_under_the_clone_lock(self):
+        from contextlib import contextmanager
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, _ = self.abort_fixture()
+            lock = worker.make_worktree.clone_lock
+            active, events = [], []
+
+            @contextmanager
+            def tracked_lock(repo):
+                with lock(repo) as common:
+                    active.append(object())
+                    try:
+                        yield common
+                    finally:
+                        active.pop()
+
+            def observe(name, function):
+                def called(*args, **kwargs):
+                    self.assertTrue(active, name)
+                    events.append((name, active[-1]))
+                    return function(*args, **kwargs)
+                return called
+
+            trusted = worker.make_worktree.git_trusted
+
+            def writes(args, cwd):
+                if args[:2] == ["worktree", "remove"]:
+                    events.append(("remove", active[-1]))
+                return trusted(args, cwd)
+
+            with mock.patch.object(worker.make_worktree, "clone_lock", side_effect=tracked_lock), \
+                 mock.patch.object(worker, "_read_orphans", side_effect=observe("discover", worker._read_orphans)), \
+                 mock.patch.object(worker, "_read_tree", side_effect=observe("read", worker._read_tree)), \
+                 mock.patch.object(worker, "_tree_contents", side_effect=observe("contents", worker._tree_contents)), \
+                 mock.patch.object(worker.make_worktree, "git_trusted", side_effect=writes):
+                self.launch_in(clone, attempt=3)
+            discovery = next(hold for name, hold in events if name == "discover")
+            contents = [hold for name, hold in events if name == "contents"]
+            self.assertIs(contents[0], discovery)
+            self.assertIs(contents[1], discovery)
+            retirement = next(hold for name, hold in events if name == "remove")
+            self.assertTrue(all(hold is retirement for hold in contents[2:]))
+            self.assertTrue(any(name == "read" and hold is retirement for name, hold in events))
+            self.assertTrue(all(hold is retirement for name, hold in events if name == "remove"))
+
     def test_abort_add_failure_preserves_the_old_work_and_refs(self):
         from evals import git_taint as taint
         with taint.private_git_views(self.root / "private-views"):
@@ -1046,7 +1144,7 @@ class WorkerTest(unittest.TestCase):
             trusted = worker.make_worktree.git_trusted
 
             def fail_delete(args, cwd):
-                return (1, "ref locked") if args[:2] == ["update-ref", "-d"] else trusted(args, cwd)
+                return (1, "ref locked") if args[:2] in (["branch", "-D"], ["update-ref", "-d"]) else trusted(args, cwd)
 
             branch = f"work/{next(iter(heads)).name}"
             make_repo.git(["update-ref", f"refs/remotes/origin/{branch}", next(iter(heads.values()))], clone)

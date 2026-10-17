@@ -2,10 +2,12 @@
 
 import sys
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from completion import Conflict, OrphanTree, Recovery, recovery
+import completion
 
 
 def tree(path, head="a", branch="work/issue-1-implement-1", **kw):
@@ -13,6 +15,18 @@ def tree(path, head="a", branch="work/issue-1-implement-1", **kw):
 
 
 class RecoveryTest(unittest.TestCase):
+    def test_retirement_requires_matching_readable_nonempty_snapshots(self):
+        saved = completion.RetirementSnapshot("work/issue-1-implement-1", "a", "digest")
+        self.assertTrue(completion.may_retire(saved, saved))
+        for changed in (replace(saved, branch="work/other"), replace(saved, head="b"),
+                        replace(saved, contents="different"), replace(saved, unreadable=True),
+                        replace(saved, branch=""), replace(saved, head=""), replace(saved, contents="")):
+            with self.subTest(changed=changed):
+                self.assertFalse(completion.may_retire(saved, changed))
+                self.assertFalse(completion.may_retire(changed, saved))
+                if changed.unreadable or not changed.branch or not changed.head or not changed.contents:
+                    self.assertFalse(completion.may_retire(changed, changed))
+
     def test_no_candidates_recovers_nothing(self):
         self.assertIsNone(recovery([]))
 
