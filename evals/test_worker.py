@@ -906,17 +906,32 @@ class WorkerTest(unittest.TestCase):
                 self.launch()
         cancel.assert_called_once()
 
-    def test_a_launch_exception_does_not_archive_until_the_host_is_confirmed_stopped(self):
+    def test_a_launch_exception_holds_cancellation_until_the_login_shell_stops(self):
+        def identity(pid, session, *, host=False):
+            if host:
+                raise RuntimeError("original launch failure")
+            return "live shell" if pid == 77 else None
+
         with self.interrupted(self.start) as cancel, \
-             mock.patch.object(worker.process_status, "identity", side_effect=RuntimeError("ps unavailable")):
-            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                        max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+             mock.patch.object(worker.process_status, "identity", side_effect=identity), \
+             mock.patch.object(worker.time, "sleep"), \
+             mock.patch.object(worker.time, "monotonic", side_effect=range(100)):
+            with self.assertRaisesRegex(RuntimeError, "original launch failure"):
+                slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                            max_concurrency=1, clock=lambda: NOW, launch=self.launch)
         cancel.assert_called_once()
         run = worker._run_dir(self.root, KEY, "implement", 1)
-        self.assertTrue((run / "started.json").is_file())
-        self.assertEqual(list(run.parent.glob(f"{run.name}-canceled-*")), [])
+        self.assertTrue((run / "canceled").is_file())
+        self.assertNotIn("implement-1", self.db.resume(KEY).get("runs", {}))
+        with mock.patch.object(worker.process_status, "identity", side_effect=identity):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
         self.assertEqual(len(self.db.segments()), 1)
         self.assertIsNone(self.db.segments()[0].ended_at)
+        self.assertTrue(run.is_dir())
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.segments(), [])
+        self.assertFalse(run.exists())
 
     def test_adoption_honors_a_cancel_mark(self):
         run = self.launched()
@@ -1100,6 +1115,43 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual((kept / "scratch.txt").read_text(), "uncommitted work\n")
                 self.assertIn(head, refs_sha)
                 self.assertIn(f"heads/work/{tree.name}", refs)
+                self.assertEqual(make_repo.git(["rev-parse", "HEAD"], kept), head)
+
+    def test_quarantine_keeps_refs_checked_out_in_the_clone_or_an_outside_tree(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([])
+            for outside in (clone, self.root / "outside"):
+                branch = f"work/issue-1-{outside.name}"
+                if outside == clone:
+                    make_repo.git(["checkout", "-b", branch], clone)
+                else:
+                    make_repo.git(["worktree", "add", "-b", branch, str(outside)], clone)
+                head = make_repo.git(["rev-parse", "HEAD"], outside)
+                plan = {"stamp": outside.name, "paths": [], "refs": [f"refs/heads/{branch}"]}
+                with worker.make_worktree.clone_lock(clone) as common:
+                    worker._apply_quarantine(clone, self.trees, 1, plan, common)
+                self.assertEqual(make_repo.git(["rev-parse", "HEAD"], outside), head)
+                self.assertEqual(make_repo.git(["rev-parse", f"refs/heads/{branch}"], clone), head)
+
+    def test_resuming_quarantine_preserves_both_tips_after_a_source_ref_moves(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([])
+            old = make_repo.git(["rev-parse", "HEAD"], clone)
+            make_repo.git(["commit", "--allow-empty", "-m", "new tip"], clone)
+            new = make_repo.git(["rev-parse", "HEAD"], clone)
+            ref = "refs/heads/work/issue-1-orphan"
+            dest = worker._quarantine_ref("1", "interrupted", ref)
+            make_repo.git(["update-ref", dest, old], clone)
+            make_repo.git(["update-ref", ref, new], clone)
+            plan = {"stamp": "interrupted", "paths": [], "refs": [ref]}
+            with worker.make_worktree.clone_lock(clone) as common:
+                worker._apply_quarantine(clone, self.trees, 1, plan, common)
+                worker._apply_quarantine(clone, self.trees, 1, plan, common)
+            self.assertEqual(make_repo.git(["rev-parse", dest], clone), old)
+            kept = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], clone)
+            self.assertIn(new, kept.splitlines())
 
     def test_abort_add_failure_keeps_the_old_work_in_quarantine(self):
         from evals import git_taint as taint
