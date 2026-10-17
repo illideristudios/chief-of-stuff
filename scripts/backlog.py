@@ -8,6 +8,7 @@ count rather than zero. Credentials come from the configured environment variabl
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -201,10 +202,10 @@ def _call(method: str, url: str, private_token: str, timeout: float,
             got = {k.lower(): v for k, v in response.headers.items()}
     except urllib.error.HTTPError as exc:
         return None, {}, TransportError(f"HTTP {exc.code} from GitLab", status=exc.code,
-                                        rate_limited=exc.code == 403 and bool(exc.headers.get("Retry-After")))
+                                        rate_limited=exc.code == 403 and bool((exc.headers or {}).get("Retry-After")))
     except Exception as exc:  # timeout, refused, DNS, TLS
         return None, {}, TransportError(f"{type(exc).__name__}: {exc}",
-                                        transport=isinstance(exc, (urllib.error.URLError, OSError)))
+                                        transport=isinstance(exc, (urllib.error.URLError, OSError, http.client.HTTPException, EOFError)))
     try:
         return json.loads(raw.decode("utf-8", "replace")), got, ""
     except ValueError:
