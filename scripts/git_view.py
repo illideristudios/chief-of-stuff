@@ -266,8 +266,32 @@ def _run(args: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
 
 
 def read_head(layout: Layout) -> tuple[bytes, str | None]:
-    """Read validated HEAD metadata; syntax failures are distinct from failed metadata reads."""
-    data = _read(layout.gitdir / "HEAD", 1024)
+    """Read validated HEAD metadata. Missing, linked or oversized HEAD is invalid; a failed read of a regular file retries."""
+    path = layout.gitdir / "HEAD"
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        raise InvalidHead("HEAD is missing") from None
+    except OSError:
+        try:
+            info = path.lstat()
+        except OSError:
+            raise Unviewable("HEAD read failed") from None
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
+            raise InvalidHead("HEAD is not a bounded regular file") from None
+        raise Unviewable("HEAD read failed") from None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 1024:
+            raise InvalidHead("HEAD is not a bounded regular file")
+        try:
+            data = os.read(fd, 1025)
+        except OSError:
+            raise Unviewable("HEAD read failed") from None
+    finally:
+        os.close(fd)
+    if len(data) > 1024:
+        raise InvalidHead("HEAD is not a bounded regular file")
     try:
         text = data.decode("utf-8").removesuffix("\n").removesuffix("\r")
     except UnicodeDecodeError:

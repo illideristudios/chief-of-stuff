@@ -8,6 +8,7 @@ parseability together, never `subtype` alone.
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import signal
@@ -23,6 +24,8 @@ from shell_setup import ShellError, clean_env, login_argv, resolve
 
 RUNTIME = runtimes.get("claude")
 LAUNCH_TIMEOUT = 5
+_BIRTH = "%a %b %d %H:%M:%S %Y"
+_BIRTH_SLOP = 2  # lstart is whole seconds; time.time() after Popen falls in this window
 
 
 def command(request: Request, claude_as_profile: str = "") -> list[str]:
@@ -41,9 +44,8 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
           env: dict[str, str] | None = None) -> subprocess.Popen:
     """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
     prepared = command(request, claude_as_profile)
-    (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
-                                                    "session_id": request.session_id,
-                                                    "env": env or {}, "start_deadline": time.time() + LAUNCH_TIMEOUT}))
+    _write(run_dir, "command.json", {"argv": prepared, "cwd": request.cwd, "session_id": request.session_id,
+                                     "env": env or {}, "start_deadline": time.time() + LAUNCH_TIMEOUT})
     process = None
     try:
         with (run_dir / "runner.stderr").open("w") as errors:
@@ -84,20 +86,33 @@ def cancel(process: subprocess.Popen) -> None:
     raise RuntimeError(f"runner {process.pid} survived SIGKILL; not cancelled")
 
 
-def group_alive(pgid: int) -> bool:
-    """Every member counts, even when the runner has exited. Zombies cannot touch the tree."""
+def _group_births(pgid: int) -> list[float]:
+    """Live members' birth times. Empty when the group is gone or belongs to someone else."""
     try:
         os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
+    except (ProcessLookupError, PermissionError):
+        return []
     try:
-        probe = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True, text=True, timeout=3)
+        probe = subprocess.run(["ps", "-axo", "pgid=,pid=,stat=,lstart="], capture_output=True, text=True, timeout=3)
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("cannot verify worker process group") from exc
     if probe.returncode:
         raise RuntimeError("cannot verify worker process group")
-    return any(fields[0] == str(pgid) and not fields[1].startswith("Z")
-               for line in probe.stdout.splitlines() if len(fields := line.split()) == 2)
+    births = []
+    for line in probe.stdout.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) != 4 or fields[0] != str(pgid) or fields[2].startswith("Z"):
+            continue
+        try:
+            births.append(datetime.datetime.strptime(fields[3].strip(), _BIRTH).timestamp())
+        except ValueError:
+            raise RuntimeError("cannot read worker start time") from None
+    return births
+
+
+def group_alive(pgid: int) -> bool:
+    """Every member counts, even when the runner has exited. Zombies cannot touch the tree."""
+    return bool(_group_births(pgid))
 
 
 def spawn_alive(run_dir: Path) -> bool:
@@ -112,12 +127,15 @@ def spawn_alive(run_dir: Path) -> bool:
                 or not isinstance(record.get("start_time"), (int, float)) or record["start_time"] <= 0):
             raise RuntimeError("invalid spawn identity")
         recorded = True
-        if group_alive(record["pgid"]):
+        if any(abs(birth - record["start_time"]) < _BIRTH_SLOP for birth in _group_births(record["pgid"])):
             return True
     if recorded:
         return False
     # Legacy/crashed parent: no durable pid yet. A live runner's argv still names this directory.
-    prepared = json.loads((run_dir / "command.json").read_text())
+    try:
+        prepared = json.loads((run_dir / "command.json").read_text())
+    except (OSError, ValueError):
+        return False
     session = prepared.get("session_id", "")
     try:
         probe = subprocess.run(["ps", "-axww", "-o", "stat=,command="], capture_output=True, text=True, timeout=3)
@@ -139,18 +157,39 @@ def _write(run_dir: Path, name: str, record: dict) -> None:
     temporary.replace(path)
 
 
+def _stop_host(process: subprocess.Popen) -> None:
+    """Kill one host and wait. Publishing exit.json first would free the slot while it can still write."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            process.send_signal(sig)
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=5)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    raise RuntimeError(f"host {process.pid} survived SIGKILL")
+
+
 def _worker(run_dir: Path) -> None:
     prepared = json.loads((run_dir / "command.json").read_text())
     with (run_dir / "stdout").open("w") as stdout, (run_dir / "stderr").open("w") as stderr:
         try:
             process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env={**clean_env(), **prepared.get("env", {})},
                                        stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+        except OSError as exc:
+            stderr.write(str(exc))
+            _write(run_dir, "exit.json", {"exit_code": 127})
+            return
+        try:
             _write(run_dir, "spawn.json", {"pid": process.pid, "pgid": os.getpgrp(), "start_time": time.time()})
             _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
                                              "session_id": prepared["session_id"]})
             code = process.wait()
         except OSError as exc:
             stderr.write(str(exc))
+            _stop_host(process)
             code = 127
     _write(run_dir, "exit.json", {"exit_code": code})
 

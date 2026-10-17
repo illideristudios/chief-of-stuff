@@ -465,7 +465,10 @@ def _quarantine_plan(found: list[completion.OrphanTree], tree_name: str) -> dict
 
 def _start_expired(run: Path) -> bool:
     path = run / "command.json"
-    prepared = json.loads(path.read_text())
+    try:
+        prepared = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return time.time() >= path.stat().st_mtime + claude_adapter.LAUNCH_TIMEOUT
     deadline = prepared.get("start_deadline", path.stat().st_mtime + claude_adapter.LAUNCH_TIMEOUT)
     return time.time() >= deadline
 
