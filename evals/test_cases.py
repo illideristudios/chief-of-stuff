@@ -167,7 +167,15 @@ class CaseLintTest(unittest.TestCase):
                 self.assertNotIn("subcommands", gs[0])
                 self.assertEqual(gs[0]["name"], "only allowlisted PATH git reads")
 
-    def _assert_local_remotes(self, root: Path) -> None:
+    def _assert_probe_remote_urls_are_local(self, root: Path) -> None:
+        """Check named-remote URLs visible to an isolated bare probe for each discovered config.
+
+        Discover config files directly inside .git or *.git directories under root. Resolve
+        remote.*.url/pushurl (including URL rewrites) relative to the fixture checkout and require
+        containment in root. Includes are evaluated in the probe's gitdir, not the fixture's.
+        It does not inspect branch.*.remote/pushRemote, remote.pushDefault, host/environment config,
+        or command-line URLs. It does not prove runtime confinement (#770).
+        """
         configs = [p for p in root.rglob("config") if p.parent.name == ".git" or p.parent.suffix == ".git"]
         if not configs:
             return
@@ -192,8 +200,8 @@ class CaseLintTest(unittest.TestCase):
                         destination = (base / url).resolve()
                         self.assertTrue(destination.is_relative_to(root), (config, url))
 
-    def test_every_fixture_remote_is_a_local_path(self) -> None:
-        """An absolute-path git can skip the PATH shim (#770); every fetch/push URL must stay in the fixture."""
+    def test_fixture_named_remote_urls_are_local_in_isolated_probe(self) -> None:
+        """Lint rendered and built configs through the probe, subject to its documented limits."""
         for case in CASES:
             with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
                 root = Path(d).resolve()
@@ -206,12 +214,12 @@ class CaseLintTest(unittest.TestCase):
                         path = Path(repo.get(key, default))
                         self.assertFalse(path.is_absolute() or ".." in path.parts, path)
                 run.render_tree(case / "fixture", root, context)
-                self._assert_local_remotes(root)
+                self._assert_probe_remote_urls_are_local(root)
                 if repo is not None:
                     run.make_repo.build(root, repo)
-                    self._assert_local_remotes(root)
+                    self._assert_probe_remote_urls_are_local(root)
 
-    def test_remote_confinement_rejects_external_fetch_and_push_destinations(self) -> None:
+    def test_probe_remote_urls_reject_external_fetch_and_push_destinations(self) -> None:
         for setting, url in (("url", "/outside.git"), ("pushurl", "https://example.test/repo.git"),
                              ("pushurl", "/outside.git"), ("url", "../../outside.git")):
             with self.subTest(setting=setting, url=url), tempfile.TemporaryDirectory() as d:
@@ -221,21 +229,21 @@ class CaseLintTest(unittest.TestCase):
                 config.parent.mkdir(parents=True)
                 config.write_text('[remote "origin"]\n    url = {{dotgit}}\n' + f'    {setting} = {url}\n')
                 with patch(__name__ + ".CASES", [case]), self.assertRaises(AssertionError):
-                    CaseLintTest().test_every_fixture_remote_is_a_local_path()
+                    CaseLintTest().test_fixture_named_remote_urls_are_local_in_isolated_probe()
 
-    def test_remote_confinement_accepts_local_paths_and_checks_git_url_rewrites(self) -> None:
+    def test_probe_remote_urls_accept_local_paths_and_check_git_url_rewrites(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             root = Path(d).resolve()
             config = root / "repo/.git/config"
             config.parent.mkdir(parents=True)
             local = '[remote "origin"]\n    url = ../origin.git\n    pushurl = "' + str(root / 'push target.git') + '"\n'
             config.write_text(local)
-            self._assert_local_remotes(root)
+            self._assert_probe_remote_urls_are_local(root)
             for rewrite in ('[url "https://example.test/"]\n    insteadOf = ../',
                             '[url "/outside/"]\n    pushInsteadOf = ../'):
                 config.write_text('[remote "origin"]\n    url = ../origin.git\n' + rewrite + '\n')
                 with self.subTest(rewrite=rewrite), self.assertRaises(AssertionError):
-                    self._assert_local_remotes(root)
+                    self._assert_probe_remote_urls_are_local(root)
 
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)
