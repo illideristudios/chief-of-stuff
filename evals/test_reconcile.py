@@ -706,6 +706,31 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(slots=slots, now=now), self.assertRaises(ValueError):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
 
+    def test_a_running_segment_whose_worker_is_gone_is_closed_instead_of_suppressed(self):
+        import readiness
+        other = "github:example/project#2"
+        open_seg = Segment("implement", ended_at=None, outcome=None)
+        gone = reconcile.Facts(alive=(((KEY, "implement", 1), False),))
+        self.assertEqual(self.plan(history=[open_seg], facts=gone),
+                         [reconcile.Close(KEY, "implement", 1, "failed", "worker gone")])
+        live = reconcile.Facts(alive=(((KEY, "implement", 1), True),))
+        self.assertEqual(self.plan(history=[open_seg], facts=live), [])
+        stalled = reconcile.Facts(alive=(((KEY, "implement", 1), True),),
+                                  progress=((KEY, NOW - timedelta(hours=2)),),
+                                  stall_after=timedelta(minutes=45))
+        self.assertEqual(self.plan(history=[replace(open_seg, started_at=NOW - timedelta(hours=2))], facts=stalled),
+                         [reconcile.Wait(KEY, "stalled")])
+        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(other, "src/a.py"))
+        conflict = reconcile.Facts(claims=claims, alive=(((other, "implement", 1), True),))
+        actions = reconcile.plan([Item(), replace(Item(), issue_key=other)],
+                                 {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=conflict)
+        self.assertEqual(actions, [reconcile.Wait(KEY, f"file ownership conflict with {other}")])
+
+    def test_a_finished_read_only_run_that_left_changes_waits(self):
+        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, True),))
+        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts),
+                         [reconcile.Wait(KEY, "read-only run left changes")])
+
 
 class SuiteHoldTest(unittest.TestCase):
     def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):
