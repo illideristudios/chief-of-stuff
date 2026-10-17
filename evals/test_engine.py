@@ -1,6 +1,7 @@
 """Engine passes with a fake forge and launch port, and a real issue-keyed store."""
 
 import contextlib
+from dataclasses import replace
 import io
 import sys
 import tempfile
@@ -498,6 +499,18 @@ class EngineTest(unittest.TestCase):
 
     def test_pending_release_is_dropped_for_a_blank_stage(self):
         self.assert_pending_wait("blank")
+
+    def test_permanent_release_refusal_escalates_instead_of_retrying_forever(self):
+        self.pending_release(held=False)
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="permanent refusal")) as write:
+            self.run_pass()
+            self.run_pass()
+            actions = self.run_pass()
+        self.assertEqual(write.call_count, 2)
+        self.assertIsInstance(actions[0], reconcile.Escalate)
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.launched, [])
 
     def test_slot_race_does_not_release_the_hold(self):
         self.pending_release()
