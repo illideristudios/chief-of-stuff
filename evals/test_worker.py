@@ -488,9 +488,70 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn("resets in 2 hours", quota["reset"])
                     self.assertEqual(quota["retry_at"], (NOW + timedelta(hours=2, minutes=1)).isoformat())
 
-    def report(self, run, outcome="done", stage="implement"):
+    def report(self, run, outcome="done", stage="implement", suite=None):
         session = json.loads((run / "started.json").read_text())["session_id"]
-        self.db.add_report(KEY, stage, 1, session, outcome, f"reported {outcome}", [])
+        kwargs = {"suite": suite} if suite is not None else {}
+        self.db.add_report(KEY, stage, 1, session, outcome, f"reported {outcome}", [], **kwargs)
+
+    def test_opted_in_assignment_names_the_suite_hold(self):
+        prompt = worker.dispatch_prompt.compose_issue(
+            self.db.items()[0], "title", "body", "implement", self.persona, root=self.root, require_green=True)
+        self.assertIn("require_green_tests", prompt)
+        self.assertIn("human review", prompt)
+        off = worker.dispatch_prompt.compose_issue(
+            self.db.items()[0], "title", "body", "implement", self.persona, root=self.root)
+        self.assertNotIn("require_green_tests", off)
+
+    def test_opted_in_collect_holds_done_unless_the_suite_is_green(self):
+        green = {"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0}
+        cases = (
+            (True, {**green, "failed": 1}, "human_review", True),
+            (True, {**green, "passed": 0}, "human_review", True),
+            (True, {**green, "skipped": 2}, "human_review", True),
+            (True, {**green, "xfailed": 1}, "human_review", True),
+            (True, {"passed": True, "failed": 0, "skipped": 0, "xfailed": 0}, "human_review", True),
+            (True, {}, "human_review", True),
+            (True, green, "done", False),
+            (False, {**green, "failed": 1}, "done", False),
+            (True, None, "human_review", True),
+        )
+        for enabled, suite, expected, held in cases:
+            with self.subTest(enabled=enabled, suite=suite):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+                (self.root / "chief-of-stuff.toml").write_text(
+                    f"[workers]\nrequire_green_tests = {str(enabled).lower()}\n")
+                run = self.launched()
+                self.report(run, suite=suite)
+                (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
+                (run / "stderr").write_text("")
+                (run / "exit.json").write_text('{"exit_code": 0}')
+                labeled = []
+                forge = SimpleNamespace(add_human_hold=lambda number: labeled.append(number) or "")
+                with mock.patch.object(worker.process_status, "identity", return_value=None):
+                    worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=forge)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, expected)
+                self.assertEqual(self.db.items()[0].human_review, held)
+                self.assertEqual(labeled, [1] if held else [])
+                if held:
+                    log = self.db.log(KEY)[-1].message
+                    self.assertIn("suite is not green", log)
+                    self.assertIn("reported done", log)
+
+    def test_a_non_done_report_is_not_suite_gated(self):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text("[workers]\nrequire_green_tests = true\n")
+        run = self.launched()
+        self.report(run, outcome="blocked", suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
+        (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "blocked")
+        self.assertFalse(self.db.items()[0].human_review)
 
     def test_successful_host_takes_the_segment_outcome_from_its_session_report(self):
         for outcome, expected in (("done", "done"), ("blocked", "blocked"), ("failed", "failed"), (None, "failed")):

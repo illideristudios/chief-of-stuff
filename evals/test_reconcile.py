@@ -692,5 +692,17 @@ class ReconcileTest(unittest.TestCase):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
 
 
+class SuiteHoldTest(unittest.TestCase):
+    def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):
+        green = {"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0}
+        self.assertFalse(reconcile.suite_holds(green, require_green=True))
+        self.assertFalse(reconcile.suite_holds({**green, "passed": 0}, require_green=False))
+        self.assertFalse(reconcile.suite_holds({}, require_green=False))
+        for counts in ({**green, "passed": 0}, {**green, "failed": 1}, {**green, "skipped": 2},
+                       {**green, "xfailed": 1}, {**green, "passed": None}, {}):
+            with self.subTest(counts=counts):
+                self.assertTrue(reconcile.suite_holds(counts, require_green=True))
+
+
 if __name__ == "__main__":
     unittest.main()
