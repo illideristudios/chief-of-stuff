@@ -341,6 +341,36 @@ class GitHubTest(unittest.TestCase):
                               ("github:example/app#4", "open", "doing", "")])
 
 
+class LandingTest(unittest.TestCase):
+    def test_squash_landing_uses_the_merge_commit_and_current_main_pipeline(self):
+        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+        gh = FakeGh(merged=[merged])
+        adapter = forge.Forge(GH, gh=gh)
+        key = adapter.key(3)
+        for sha, status, base, expected in (
+                ("squashed", "running", "squashed", (True, False)),
+                ("squashed", "passed", "squashed", (True, True)),
+                ("later", "passed", "squashed", (True, True)),
+                ("older", "passed", "older", (False, False))):
+            with self.subTest(sha=sha, status=status), \
+                 mock.patch.object(forge.Forge, "_pipeline_read", return_value={"merge_base_commit": {"sha": base}}):
+                result = adapter.landings(forge.Pipeline(1, "main", sha, status, ""), [key])
+                self.assertEqual(result[key], expected)
+        merged["baseRefName"] = "release"
+        gh.merged = [merged]
+        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""), [key])[key], (False, False))
+
+    def test_gitlab_uses_the_squash_sha_and_merge_base(self):
+        adapter = forge.Forge(GL)
+        row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
+               "merge_commit_sha": "merge", "squash_commit_sha": "squash"}
+        with mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
+             mock.patch.object(forge.Forge, "_pipeline_read", return_value={"id": "squash"}) as read:
+            key = adapter.key(3)
+            self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], (True, True))
+            self.assertIn("repository/merge_base?", read.call_args.args[0])
+
+
 class StageWriteBackTest(unittest.TestCase):
     def edits(self, gh):
         return [c for c in gh.all_calls if c[:2] == ["issue", "edit"]]

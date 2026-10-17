@@ -158,6 +158,24 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(self.launched), 2)
         self.cleanup.assert_called_with(self.root, self.trees, self.db, remove=True)
 
+    def test_standard_merge_waits_until_the_merged_commit_has_passing_main_ci(self):
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        self.run_pass()
+        self.forge.rows[0]["merge_state"] = "merged"
+        status = "running"
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status=status)
+        self.forge.landings = lambda pipeline, keys: {KEY: (True, pipeline.status == "passed")}
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "suite has not run on main")])
+        status = "failed"
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "suite has not run on main")])
+        status = "passed"
+        self.assertEqual(self.run_pass(), [])
+        self.assertEqual(len(self.forge.merges), 1)
+
     def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message):
         self.run_pass()
         self.finish("implement")
@@ -309,7 +327,7 @@ class EngineTest(unittest.TestCase):
         self.forge.rows[0].update(stage="review", body="## File ownership\n- read-only: `.`")
         self.run_pass()
         self.publish_exit(stage="review")
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("(detached)", 0, 2, None), False, NOW)), \
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("(detached)", 0, 2, 0), False, NOW)), \
              mock.patch.object(engine.engine_facts, "_changed", return_value=False):
             self.run_pass()
         self.assertFalse(self.db.items()[0].human_review)
