@@ -269,7 +269,8 @@ def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: M
 
     restore: retry a pending hold restoration. drop_hold: forget one that no longer applies.
     drop_release: forget a release the board has moved past. replace: a release without current
-    ownership returns to a normal human hold. keep: leave a verified release to planning.
+    ownership or a drifted failed handoff returns to a normal human hold.
+    keep: leave a verified release to planning.
     drop_owner: ownership the hold no longer backs. none: nothing saved applies.
     drop_stage: an ordinary pending stage write whose card a person has since moved to a third stage.
     """
@@ -285,6 +286,8 @@ def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: M
             return "replace"
         return "keep"
     if pending_stage and item.stage not in (pending_stage["expected"], pending_stage["stage"]):
+        if pending_stage.get("restore_hold") and item.forge_state == "open" and bool(item.stage):
+            return "replace"
         return "drop_stage"
     if owned and (not item.human_review or item.stage != owned.get("stage")):
         return "drop_owner"
