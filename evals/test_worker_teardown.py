@@ -105,10 +105,11 @@ class WorkerTeardownTest(unittest.TestCase):
         # Stop after collection so this test needs no forge/planner stand-ins.
         forge = mock.Mock()
         forge.snapshots.side_effect = RuntimeError("collection finished")
-        with mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 7, "", "failed")) as run:
+        with mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 7, "", "failed")) as run, \
+             mock.patch.object(engine, "_record_limits"):
             with self.assertRaisesRegex(RuntimeError, "collection finished"):
                 engine.run_pass(forge=forge, store=fx.db, policies=fx.p, root=fx.root,
-                                trees=fx.trees, launch=fx.launch, teardown_command="exit 7")
+                                trees=fx.trees, launch=fx.launch, workers=settings.Workers(), teardown_command="exit 7")
         segment = fx.db.segments()[0]
         self.assertEqual(segment.outcome, "done")
         run.assert_called_once()

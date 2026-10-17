@@ -822,7 +822,7 @@ class MainTest(unittest.TestCase):
 
     def test_once_opens_workspace_store_and_runs_one_pass_without_sleep(self):
         settings_path = self.root / "settings.toml"
-        settings_path.write_text(settings_path.read_text() + '\n[workers]\nteardown = "exit 7"\n')
+        settings_path.write_text(settings_path.read_text() + 'teardown = "exit 7"\n')
         fake = FakeForge()
         with mock.patch.object(engine.forge, "for_workspace", return_value=fake), \
              mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep") as sleep:
