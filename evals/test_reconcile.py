@@ -541,7 +541,15 @@ class ReconcileTest(unittest.TestCase):
     def test_retry_releases_an_extra_hold_only_for_the_current_failed_stage(self):
         for stage, action in (("implement", reconcile.Dispatch(KEY, "implement", "builder", 2)),
                               ("review", reconcile.Review(KEY, 2))):
-            for outcome in ("failed", "quota", "unknown"):
+            # The engine owns a hold only after a failed launch, which records `failed`; a quota or
+            # unknown exit never carries that ownership, so a person's hold after one is theirs.
+            for outcome in ("quota", "unknown"):
+                with self.subTest(stage=stage, outcome=outcome):
+                    item = replace(Item(), stage=stage, human_review=True)
+                    self.assertEqual(self.plan(item, [Segment(stage, outcome=outcome)],
+                                               launcher_holds={KEY: {"stage": stage, "attempt": 1}}),
+                                     [reconcile.Wait(KEY, "human review")])
+            for outcome in ("failed",):
                 with self.subTest(stage=stage, outcome=outcome):
                     item = replace(Item(), stage=stage, human_review=True)
                     history = [Segment(stage, outcome=outcome)]
@@ -569,6 +577,15 @@ class ReconcileTest(unittest.TestCase):
                          [reconcile.Escalate(KEY, "retry limit reached for review")])
         history = [Segment("review", attempt=n) for n in (1, 2)] + [Segment("review", attempt=3, outcome="failed")]
         self.assertEqual(self.plan(replace(item, human_review=False), history), [reconcile.Review(KEY, 4)])
+
+    def test_a_failed_review_followed_by_a_completed_one_does_not_spend_a_later_allowance(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        item = replace(Item(), stage="review")
+        history = [Segment("review", attempt=1, outcome="failed"), Segment("review", attempt=2),
+                   Segment("review", attempt=3, outcome="failed")]
+        self.assertEqual(self.plan(item, history), [reconcile.Review(KEY, 4)])
+        history.append(Segment("review", attempt=4, outcome="failed"))
+        self.assertEqual(self.plan(item, history), [reconcile.Escalate(KEY, "retry limit reached for review")])
 
     def test_extra_holds_remain_for_completion_human_outcomes_and_other_stages(self):
         item = replace(Item(), human_review=True)
