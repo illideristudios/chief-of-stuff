@@ -398,6 +398,13 @@ class EngineTest(unittest.TestCase):
         self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
         self.cleanup.assert_called()
 
+    def test_a_new_issue_with_an_unreadable_body_defaults_to_repository_ownership(self):
+        self.forge.rows[0]["body"] = None
+        with mock.patch.object(self.forge, "issue", side_effect=ForgeError("offline")):
+            self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [(".", "write")])
+        self.assertIn("ownership read failed: offline", self.db.log(KEY)[0].message)
+
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
         self.forge.holds = []
