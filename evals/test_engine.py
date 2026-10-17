@@ -133,6 +133,32 @@ class EngineTest(unittest.TestCase):
         self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}),
                                  "review_findings": {"attempt": attempt, "counts": counts or {}}})
 
+    def test_an_undeclared_persona_records_no_agent_type(self):
+        self.p.personas["builder"] = replace(self.p.personas["builder"], agent="specialist")
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- User: Robin\n- Agent: implementer task\n")
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
+        self.db.drop_segment(KEY, "implement", 1)
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.run_pass()
+        failed = self.db.segments(KEY)[0]
+        self.assertEqual(failed.outcome, "failed")
+        self.assertEqual(failed.agent_type, "")
+
+    def test_a_declared_agent_type_is_what_the_segment_records(self):
+        self.p.personas["builder"] = replace(self.p.personas["builder"], agent="specialist")
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- User: Robin\n- Agent: specialist task\n")
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "specialist")
+        self.finish("implement")
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Settings: `chief-of-stuff.toml`\n- Agent: reviewer task\n")
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[lanes.code]\nstages = ["review"]\n[stages.review]\nagent = "reviewer"\n')
+        self.run_pass()
+        review = next(s for s in self.db.segments(KEY) if s.stage == "review")
+        self.assertEqual(review.agent_type, "reviewer")
+
     def test_dispatch_review_merge_end_to_end(self):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
