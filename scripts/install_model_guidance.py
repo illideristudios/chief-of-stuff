@@ -17,7 +17,7 @@ NAME = WORKSPACE_FILES["models"].name
 def destination(root: Path) -> Path:
     if not root.is_dir():
         raise ValueError(f"workspace {root} is not a directory")
-    path = root / NAME
+    path = root / WORKSPACE_FILES["models"].name
     if path.exists() and not path.is_file():
         raise ValueError(f"{path} exists but is not a file")
     return path
@@ -43,7 +43,7 @@ def chosen(root: Path, name: str, after: str | None, not_family: str | None) -> 
         raise ValueError(f"cannot read the ## Coordinator block: {exc}") from None
     models = load(root, cfg.settings_path).models
     if not models:
-        raise ValueError(f"the Settings TOML has no [models]; choose from {NAME}")
+        raise ValueError(f"the Settings TOML has no [models]; choose from {WORKSPACE_FILES['models'].name}")
     if name not in models:
         raise ValueError(f"no [models.{name}] in the Settings TOML; classes: {', '.join(models)}")
     return str(pick(models[name], after, not_family))

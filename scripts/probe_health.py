@@ -23,9 +23,9 @@ A usage fault (no config at the path, a `Health:` line that is not a target) is 
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shlex
+import stat
 import sys
 import urllib.error
 import urllib.request
@@ -130,16 +130,23 @@ def missing_workspace_files(config: Path, settings: str | None) -> list[str]:
     lines = []
     for key, item in WORKSPACE_FILES.items():
         path = paths.get(key, root / item.name)
+        name = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
         try:
-            if path.is_file():
-                continue
-            exists = os.path.lexists(path)  # a dangling symlink exists; `install` refuses it too
+            try:
+                st = path.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                st = path.lstat()
         except ValueError:
             continue
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
         except OSError as exc:
-            lines.append(f"workspace file {item.name} unreadable (advice); {exc.strerror or exc}")
+            why = " ".join((exc.strerror or str(exc)).split())
+            lines.append(f"workspace file {name} unreadable (advice); {why}")
             continue
-        name = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+        if st is not None and stat.S_ISREG(st.st_mode):
+            continue
+        exists = st is not None
         command = item.command.format(root=shlex.quote(str(root.resolve())))
         fix = f"move it aside, then {command}" if exists else command
         lines.append(f"workspace file {name} {'not a file' if exists else 'missing'} (advice); {fix}")
