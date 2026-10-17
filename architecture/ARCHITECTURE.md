@@ -104,7 +104,12 @@ On the engine path, file ownership is declared on the issue, because the forge i
 - **Where it is declared.** An issue states the paths it owns and their mode (write, or read-only) in a section of its body.
 - **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
 - **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
-- **Workers declare nothing.** They report what they changed, and `completion.py` judges that report against the issue's declared scope. A read-only run that changed anything, or a write run that changed a path outside its declared write paths, is held for human review with the paths named. They never grant themselves a scope. The write-scope half follows from the ownership rule below: the engine runs issues side by side because their declared scopes do not overlap, so a run that writes outside its scope breaks that guarantee for every other run.
+- **Workers declare nothing.** They report what they changed, and `completion.py` judges that report against the issue's declared scope. A read-only run that changed anything is held for human review, with the paths named. They never grant themselves a scope.
+- **The engine absorbs a write outside the declared scope, with no human hold** (Zach, 2026-10-17). Real fixes often touch a test, a README or a shared helper nobody listed.
+  - **Widen.** When a write run changed paths outside its declared write paths, the engine widens the issue's scope to what the run actually changed. It writes the widened scope to the issue's `## File ownership` section and to the store, so later readiness checks use the truth.
+  - **No overlap.** If the widened scope overlaps no other in-flight issue's write scope, the run proceeds normally.
+  - **Overlap.** If it does overlap, the engine orders the two issues' merges, so the one that finishes first lands first. The other rebases onto it and is reviewed again on its new head, which the merge gate already requires (a review of the current head, then main's CI). A conflict the rebase cannot settle goes back to the fix stage like any other finding, and a person is involved only through the existing three-round ping.
+  - **No new dispatch.** While the overlap lasts, readiness counts the widened scope, so it dispatches no new issue into those paths.
 - **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (Zach, 2026-10-17).
 - **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
 
@@ -118,12 +123,16 @@ D(I) := I may be dispatched      R(I) := I conflicts with every running write in
 intake refuses ¬S       [issue_gate.py; the issue forms]
 ∴ the engine serializes a repository only for an issue that asked for the whole of it, and an undeclared issue waits instead of blocking everyone
 
-P(r) := run r is dispatched in parallel with others      O(r) := r changed only paths inside its declared write scope
-H(r) := r is held for human review, paths named
+O(r) := run r changed only paths inside its declared write scope
+Wd(r) := the engine widens r's issue scope to the paths r changed (issue section and store)
+X(r) := the widened scope overlaps another in-flight write scope
+Q(r) := the merges are ordered and r is re-reviewed on its rebased head
+H(r) := r is held for human review
 
-P(r) is sound only if ∀r: O(r)      [parallel runs rely on non-overlapping declared scopes]
-∀r: ¬O(r) → H(r)                    [completion.py; architect 2026-10-17, from the rule above]
-∴ a run that writes outside its scope is held, so no parallel run is overwritten unnoticed
+∀r: ¬O(r) → Wd(r) ∧ ¬H(r)     [Zach 2026-10-17: no hold; the orchestrator handles it]
+∀r: Wd(r) ∧ X(r) → Q(r)       [merge gate: review of the current head, then main's CI]
+∀r: Wd(r) → readiness uses the widened scope   [no new dispatch into those paths]
+∴ no parallel run is overwritten unnoticed, and nobody is asked unless a rebase conflict outlasts three fix rounds
 ```
 
 ## 9. Agent performance
