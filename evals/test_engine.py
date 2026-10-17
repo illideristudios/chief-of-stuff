@@ -509,7 +509,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual((row.answer, row.decided_by, row.record["unanimous"]), ("Split the parser", "trio", True))
         self.assertEqual([v["vote"] for v in row.record["verdicts"]], ["adopt", "adopt", "adopt"])
         self.assertNotIn("interrupt", self.db.resume(KEY))
-        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.3)
+        self.assertAlmostEqual(self.db.resume(KEY)["spend_usd"], 0.3)
         self.assertEqual(model.n, 3)
 
     def test_a_split_trio_escalates_once(self):

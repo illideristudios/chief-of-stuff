@@ -87,3 +87,12 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
                        record={"decision": described, "verdicts": verdicts,
                                "recommendation": recommendation, "unanimous": unanimous})
     return Outcome(recommendation, unanimous)
+
+
+def reopen(store: Any, issue_key: str, topic: str, question: str) -> None:
+    """Board reversal: reopen an adopted decision so the planner routes the work again."""
+    rows = [row for row in store.decisions(issue_key) if row.topic == topic and row.question == question]
+    if not rows or not (rows[-1].answer or "").strip():
+        raise ValueError("only an adopted decision can be reversed")
+    store.add_decision(issue_key, topic=topic, question=question, answer=None, decided_by="",
+                       record={"reversed": True, "recommendation": rows[-1].answer})

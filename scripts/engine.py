@@ -13,12 +13,14 @@ from pathlib import Path
 from typing import Any
 
 import cleanup
+import claude_adapter
 import clock as engine_clock
 import engine_merge
 import forge
 import issue_gate
 import limits_history
 import limits_probe
+import model_port
 import policy
 import reconcile
 import settings
@@ -26,6 +28,7 @@ import slots
 import startup
 import store_access
 import supervisor
+import trio_gate
 import worker
 from forge_port import ForgeError
 from workspace import worktrees_dir
@@ -52,7 +55,89 @@ def _planning_inputs(store: Any, items: list) -> dict:
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
                          if (quota := state.get("quota"))},
+        "usage": {key: nums for key, state in states.items() if (nums := _measured(state))},
+        "waived_gates": {key: tuple(state.get("waived_gates") or ())
+                         for key, state in states.items() if state.get("waived_gates")},
     }
+
+
+def _measured(state: dict) -> dict:
+    return {key: state[key] for key in ("spend_usd", "time_minutes", "quota_percent")
+            if type(state.get(key)) in (int, float)}
+
+
+def _interrupt(store: Any, key: str, kind: str, reason: str, at: str) -> None:
+    data = _resume(store, key)
+    record = {"kind": kind, "reason": reason}
+    if data.get("interrupt") != record:
+        store.add_log(key, f"{kind}: {reason}", at)
+        data["interrupt"] = record
+        store.set_resume(key, data)
+
+
+def _add_spend(store: Any, key: str, amount: float) -> None:
+    if type(amount) not in (int, float) or not amount:
+        return
+    data = _resume(store, key)
+    data["spend_usd"] = float(data.get("spend_usd") or 0) + float(amount)
+    store.set_resume(key, data)
+
+
+def _metered(store: Any, key: str, model: model_port.Model):
+    def call(request: model_port.Request):
+        got = model(request)
+        if isinstance(got, model_port.Reply):
+            _add_spend(store, key, got.cost_usd)
+        return got
+    return call
+
+
+def _resolved(policies: policy.Policies, store: Any, key: str, stage: str) -> policy.Policy:
+    room = _resume(store, key).get("room")
+    if room not in policies.rooms:
+        room = None
+    known = stage if stage in policies.stages else None
+    return policies.resolve(policies.stages[known].persona if known else None, known, room)
+
+
+def _settled(store: Any, key: str, topic: str, question: str) -> trio_gate.Outcome | None:
+    latest = next((row for row in reversed(store.decisions(key)) if row.topic == topic and row.question == question), None)
+    if latest is None:
+        return None
+    answer = latest.answer if isinstance(latest.answer, str) and latest.answer.strip() else None
+    return trio_gate.Outcome(answer, answer is not None)
+
+
+def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str, ...],
+            resolved: policy.Policy, personas, model, at: str) -> str | None:
+    """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
+    settled = _settled(store, key, topic, question)
+    if settled is None and model is not None:
+        try:
+            settled = trio_gate.consult(trio_gate.Decision(key, topic, question, options), resolved, personas,
+                                        _metered(store, key, model), store)
+        except (policy.PolicyError, ValueError) as exc:
+            _interrupt(store, key, "ambiguity", str(exc), at)
+            return None
+    if settled is not None and settled.unanimous:
+        return settled.recommendation
+    _interrupt(store, key, "ambiguity", question, at)
+    return None
+
+
+def _route_asks(store: Any, policies: policy.Policies, model, at: str) -> None:
+    if model is None:
+        return
+    for item in store.items():
+        pending = [ask for ask in store.asks(item.issue_key) if not ask.answer]
+        if not pending:
+            continue
+        resolved = _resolved(policies, store, item.issue_key, item.stage)
+        for ask in pending:
+            choice = _choice(store, item.issue_key, "ask", ask.question, tuple(ask.options),
+                             resolved, policies.personas, model, at)
+            if choice:
+                store.answer_ask(ask.id, choice)
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
@@ -85,7 +170,7 @@ def _record_limits(workers: settings.Workers) -> None:
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, model: model_port.Model | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -129,6 +214,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if not logged or logged[-1].message != message:  # retried every pass; log only a change
                     store.add_log(item.issue_key, message, at)
 
+    _route_asks(store, policies, model, at)
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
@@ -155,15 +241,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 elif engine_merge.execute(action, forge, store, at, policies=policies,
                                          inputs=_planning_inputs(store, [by_key[key]])):
                     stage = "merge"
-            elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
-                data = _resume(store, key)
-                record = {"kind": type(action).__name__, "reason": action.reason}
-                if isinstance(action, reconcile.Ask):
-                    record["gate"] = action.gate
-                if data.get("interrupt") != record:
-                    store.add_log(key, f"{record['kind'].lower()}: {action.reason}", at)
-                    data["interrupt"] = record  # M5/M6 delivers and resolves the interrupt.
+            elif isinstance(action, reconcile.Ask):
+                choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
+                                 _resolved(policies, store, key, stages[key]), policies.personas, model, at)
+                if choice == "approve":
+                    data = _resume(store, key)
+                    data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
                     store.set_resume(key, data)
+            elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
+                kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
+                _interrupt(store, key, kind, action.reason, at)
             elif isinstance(action, reconcile.Wait):
                 message = f"wait: {action.reason}"
                 last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)
@@ -216,12 +303,14 @@ def main(argv: list[str] | None = None) -> int:
             launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
                              clone=root / selected if selected else root,
                              claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules)
+            model = partial(claude_adapter.call, claude_as_profile=config.workers.claude_as_profile)
             try:
                 while True:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, workers=config.workers,
+                                 max_concurrency=config.workers.max_concurrency, model=model)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

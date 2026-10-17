@@ -6,6 +6,7 @@ import json
 import re
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ import supervisor
 from settings import load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
-from model_port import Failure, Request, retry_at
+from model_port import Failure, Reply, Request, retry_at
 
 _runners: dict[str, Any] = {}
 
@@ -27,6 +28,25 @@ _runners: dict[str, Any] = {}
 def _resume(store: Any, key: str) -> dict:
     data = store.resume(key)
     return dict(data) if isinstance(data, dict) else {}
+
+
+def _record_usage(store: Any, key: str, reply: Any, started: str, now: datetime) -> None:
+    spend = reply.cost_usd if isinstance(reply, Reply) else 0.0
+    minutes = 0.0
+    try:
+        begin = datetime.fromisoformat(started)
+        if begin.tzinfo is not None and now.tzinfo is not None:
+            minutes = max(0.0, (now - begin).total_seconds() / 60)
+    except (TypeError, ValueError):
+        minutes = 0.0
+    if not spend and not minutes:
+        return
+    data = _resume(store, key)
+    if spend:
+        data["spend_usd"] = float(data.get("spend_usd") or 0) + spend
+    if minutes:
+        data["time_minutes"] = float(data.get("time_minutes") or 0) + minutes
+    store.set_resume(key, data)
 
 
 def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
@@ -234,7 +254,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
         key = segment.issue_key
         data = _resume(store, key)
         now = clock()
-        outcome, reason = "failed", ""
+        outcome, reason, reply = "failed", "", None
         try:
             runs = data.get("runs", {})
             if not isinstance(runs, dict):
@@ -306,6 +326,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 store.set_resume(key, data)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
+        _record_usage(store, key, reply, segment.started_at, now)
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),
                       now.isoformat())
