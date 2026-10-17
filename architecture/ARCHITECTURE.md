@@ -48,7 +48,17 @@ The engine runs the review panel.
 
 A review is bound to the head it reviewed: the segment records the reviewed commit, and a merge happens only when that commit is the change's current head.
 
-What a reviewer does inside its own run is its persona's rules. The default reviewer persona runs the `extras:code-review` skill and does not fix. chief-of-stuff does not reimplement that skill's review. Findings come back in one review report shape (issue #563) and are kept as store records.
+The reviewer personas are the 22 personas of Zach's code-review skill (`extras` 1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (Zach, 2026-10-16).
+
+The panel for a change follows the skill's own selection rule, which ships as policy data in `assets/policy.toml`:
+- Every review gets Senior Architect (1) and Senior Staff Engineer (2).
+- Personas are added by the change's types, from the skill's table: shell, library, UI, concurrency, database, distributed state, migration under writes, network or security, observability, security-sensitive, public API, tests, performance, state machines and invariants.
+- Persona 11 is instantiated from the workspace's declared architecture style. For this repository that is "Uncle Bob", for Clean Architecture.
+- Persona 22 is used only when the full panel is asked for.
+
+Deciding which types a change has takes one model call through the port. The engine makes it and passes the types to the planner as a fact. Choosing the personas from the types and the table is pure, in `reconcile.py` and `policy.py`.
+
+Each reviewer reviews only within its lens and does not fix. Findings come back in one review report shape (issue #563) and are kept as store records.
 
 Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
 
