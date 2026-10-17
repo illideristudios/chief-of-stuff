@@ -834,7 +834,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
         self.assertEqual(passed.call_args.kwargs["teardown_command"], "exit 7")
-        self.assertEqual(passed.call_args.kwargs["launch"].keywords["teardown_command"], "exit 7")
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["config"].workers.teardown, "exit 7")
         sleep.assert_not_called()
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
@@ -883,7 +883,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         self.assertTrue(passed.call_args.kwargs["require_green"])
-        self.assertTrue(passed.call_args.kwargs["launch"].keywords["require_green"])
+        self.assertTrue(passed.call_args.kwargs["launch"].keywords["config"].workers.require_green_tests)
 
     def test_rules_that_exceed_a_stage_budget_refuse_before_the_engine_loop(self):
         from dataclasses import replace

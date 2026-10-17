@@ -190,7 +190,7 @@ class WorkerTeardownTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "could not verify worker start"):
                 worker.launch(engine_fixtures.KEY, "implement", 1, None, store=fx.db, root=fx.root,
                               trees=fx.trees, policies=fx.p, forge=fx.forge, clock=lambda: engine_fixtures.NOW,
-                              teardown_command="down")
+                              config=settings.Settings(workers=settings.Workers(teardown="down")))
         self.assertEqual(calls, [(fx.root, fx.tree, fx.tree.name, "down")])
 
     def test_adoption_cli_reconciles_existing_evidence_without_teardown(self):
