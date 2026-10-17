@@ -787,6 +787,9 @@ class ReconcileTest(unittest.TestCase):
                                             "reported done")),),
                                   require_green=True)
         self.assertTrue(self.plan(history=open_seg, facts=missing)[0].suite_hold)
+        absent = replace(missing, suites=())
+        self.assertTrue(self.plan(history=open_seg, facts=absent)[0].suite_hold)
+        self.assertFalse(self.plan(history=open_seg, facts=replace(absent, require_green=False))[0].suite_hold)
 
 
 class SuiteHoldTest(unittest.TestCase):

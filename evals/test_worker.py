@@ -606,6 +606,43 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
         self.assertTrue(any("uncommitted" in row.message for row in self.db.log(KEY)))
 
+    def test_failed_close_stays_open_logs_once_and_other_collection_and_planning_continue(self):
+        forge = self.suite_run()
+        forge.kanban = SimpleNamespace(stage_map={}, hold_stages=())
+        forge.add_human_hold = mock.Mock(return_value="label unavailable")
+        other = KEY.rpartition("#")[0] + "#2"
+        fresh = KEY.rpartition("#")[0] + "#3"
+        forge.rows.extend([{"issue_key": other, "stage": "implement", "forge_state": "open"},
+                           {"issue_key": fresh, "stage": "implement", "forge_state": "open"}])
+        self.db.upsert_item(other, stage="implement")
+        self.db.record_segment(other, "implement", 1, NOW.isoformat())
+        launch = mock.Mock(return_value=("example", ""))
+        for _ in range(2):
+            self.suite_pass(forge, launch)
+            self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertIsNotNone(self.db.segments(other)[0].ended_at)
+        self.assertIn(fresh, [call.args[0] for call in launch.call_args_list])
+        errors = [row.message for row in self.db.log(KEY) if "close failed" in row.message]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("label unavailable", errors[0])
+
+    def test_a_foreign_session_cannot_replace_the_current_red_suite(self):
+        for exitless in (False, True):
+            with self.subTest(exitless=exitless):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                forge = self.suite_run()
+                self.db.add_report(KEY, "implement", 1, "foreign", "done", "foreign green", [],
+                                   suite={"passed": 5, "failed": 0, "skipped": 0, "xfailed": 0})
+                if exitless:
+                    run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+                    (run / "exit.json").unlink()
+                with mock.patch.object(worker.process_status, "identity", return_value=None):
+                    self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                self.assertIn("suite_hold", self.db.resume(KEY))
+
     def test_a_dead_worker_without_an_exit_holds_a_red_suite(self):
         forge = self.suite_run()
         run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])

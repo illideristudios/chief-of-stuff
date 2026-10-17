@@ -342,6 +342,11 @@ class GitHubTest(unittest.TestCase):
 
 
 class LandingTest(unittest.TestCase):
+    def setUp(self):
+        requests = mock.patch.object(forge.Forge, "requests", return_value=[])
+        self.requests = requests.start()
+        self.addCleanup(requests.stop)
+
     def test_squash_landing_uses_the_merge_commit_and_current_main_pipeline(self):
         merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
         gh = FakeGh(merged=[merged])
@@ -382,7 +387,7 @@ class LandingTest(unittest.TestCase):
                 self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], expected)
                 self.assertIn("source-head", read.call_args.args[0])
 
-    def test_the_request_that_landed_on_main_wins_and_a_pass_is_not_replaced(self):
+    def test_only_the_newest_closing_request_can_prove_a_landing(self):
         body = "Closes #3"
         release = {"number": 9, "body": body, "baseRefName": "release", "mergeCommit": {"oid": "side"},
                    "updatedAt": "2026-03-03"}
@@ -408,7 +413,7 @@ class LandingTest(unittest.TestCase):
         adapter = forge.Forge(GH, gh=FakeGh(merged=[missed, landed]))
         read.paths = []
         with mock.patch.object(forge.Forge, "_pipeline_read", side_effect=read):
-            self.assertEqual(adapter.landings(pipeline, [key])[key], (True, True))
+            self.assertEqual(adapter.landings(pipeline, [key])[key], (False, False))
         self.assertEqual(len(read.paths), 1)
         later = {"number": 23, "body": body, "baseRefName": "main", "mergeCommit": {"oid": "other"},
                  "updatedAt": "2026-03-01"}
@@ -416,8 +421,22 @@ class LandingTest(unittest.TestCase):
         adapter = forge.Forge(GH, gh=FakeGh(merged=[landed, later]))
         read.paths = []
         with mock.patch.object(forge.Forge, "_pipeline_read", side_effect=read):
-            self.assertEqual(adapter.landings(pipeline, [key])[key], (True, True))
-        self.assertEqual(read.paths, [])
+            self.assertEqual(adapter.landings(pipeline, [key])[key], (False, False))
+        self.assertEqual(len(read.paths), 1)
+
+    def test_a_newer_open_request_or_changed_head_cannot_use_an_old_landing(self):
+        merged = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
+                  "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged]))
+        key = adapter.key(3)
+        for number in (21, 22):
+            with self.subTest(number=number):
+                self.requests.return_value = [SimpleNamespace(number=number, head="new-head", closes=("#3",))]
+                self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                                  [key])[key], (None, None))
+        self.requests.return_value = [SimpleNamespace(number=21, head="old-head", closes=("#3",))]
+        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                          [key])[key], (True, True))
 
     def test_landing_comparison_errors_are_attached_to_the_affected_issue(self):
         merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "mergeCommit": {"oid": "merge"}}

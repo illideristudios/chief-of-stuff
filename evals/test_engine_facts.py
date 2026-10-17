@@ -83,6 +83,16 @@ class GatherTest(unittest.TestCase):
         with mock.patch.object(engine_facts.process_status, "identity", side_effect=appear):
             self.assertEqual(self.gather().reports[-1].outcome, "done")
 
+    def test_reports_and_suite_counts_use_only_the_recorded_session(self):
+        red = {"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0}
+        self.db.add_report(KEY, "implement", 1, "sess", "done", "current red", [], suite=red)
+        self.db.add_report(KEY, "implement", 1, "foreign", "done", "foreign green", [],
+                           suite={**red, "passed": 5, "failed": 0})
+        self.db.add_report(KEY, "implement", 1, "foreign", "blocked", "foreign stop", [])
+        facts = self.gather()
+        self.assertEqual([r.outcome for r in facts.reports], ["blocked", "done"])
+        self.assertEqual(dict(facts.suites)[(KEY, "implement", 1)], (red, "current red"))
+
     def test_a_worker_with_an_exit_record_is_left_to_collect(self):
         run = self.root / "run"
         run.mkdir()
