@@ -1489,6 +1489,9 @@ class ForgeRetryabilityTest(unittest.TestCase):
         source = forge.Forge(backlog.GitHubBacklog("example/project"))
         for message, retryable in (("gh: Too Many Requests (HTTP 429)", True),
                                    ("gh: Server Error (HTTP 503)", True),
+                                   ("HTTP 503: Service Unavailable (https://api.github.com/graphql)", True),
+                                   ("HTTP 404: Not Found (https://api.github.com/repos/example/app/pulls/512)", False),
+                                   ("gh: You have exceeded a secondary rate limit (HTTP 403)", True),
                                    ('Get "https://api.github.com/graphql": read tcp: connection reset by peer', True),
                                    ('Post "https://api.github.com/graphql": context deadline exceeded', True),
                                    ("gh: API rate limit exceeded (HTTP 403)", True),
