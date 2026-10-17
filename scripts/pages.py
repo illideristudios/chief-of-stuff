@@ -396,94 +396,61 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _post_store_decision(self, form: dict[str, list[str]]):
         import decision_actions
         import forge
+        import sqlite3
         import store_access
+        from dataclasses import asdict
+        from settings import load_policy
+        from sqlalchemy.exc import OperationalError
+        from supervisor import ServiceError
 
         root = getattr(self.server, "root", None)
         dec_id = form.get("decision_id", [""])[0].strip()
         if root is None or not dec_id.isdigit():
             return self.send_error(404, "no such decision")
         action = form.get("action", ["answer"])[0].strip()
-        answer_val = form.get("answer", [""])[0].strip()
+        text = form.get("answer", [""])[0].strip()
         target_stage = form.get("target_stage", [""])[0].strip()
         now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
-        import sqlite3
-        from dataclasses import asdict
-        from sqlalchemy.exc import OperationalError
-        from supervisor import ServiceError
-        from settings import load_policy
 
         db = None
         try:
             db = store_access.migrated_store(root)
-            # Reserve before checking state: a competing POST or engine write cannot interleave.
-            def apply():
+
+            def record():
+                """Phase one: the decision, its intent and its queued comments, in one short write transaction."""
                 dec = db.decision(int(dec_id))
                 if dec is None:
-                    return (404, "no such decision")
+                    return None, (404, "no such decision")
                 item = db.item(dec.issue_key)
-                if action == "answer" and not answer_val:
-                    return (400, "an answer must contain text")
-                policies = load_policy()
-                history = db.segments(dec.issue_key)
-                stage = target_stage if action in ("reroute", "re-route") else (item.stage if item else dec.gate)
-                if action == "reverse":
-                    affected = next((s.stage for s in reversed(history) if s.stage not in {"review", "merge"}), None)
-                    stage = dec.gate if dec.gate in policies.stages and dec.gate != "merge" else affected or stage
-                    if stage == "merge":
-                        stage = policies.workflow_for(None).start
-                if action != "answer" and stage not in policies.stages:
-                    return (400, "unknown target stage")
-                persona = policies.stages[stage].persona or "" if stage in policies.stages else ""
-                attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
-                try:
-                    if action == "answer":
-                        tr = decision_actions.answer(dec, answer_val, decided_by="user", answered_at=now_iso)
-                    elif action == "reverse":
-                        tr = decision_actions.reverse(dec, answer_val, answered_at=now_iso,
-                                                      stage=stage, persona=persona, attempt=attempt)
-                    elif action in ("reroute", "re-route"):
-                        tr = decision_actions.reroute(dec, target_stage, answer_text=answer_val,
-                                                      answered_at=now_iso, current_stage=item.stage if item else "",
-                                                      persona=persona, attempt=attempt)
-                    else:
-                        return (400, "unknown decision action")
-                except ValueError as exc:
-                    return (409, str(exc))
-                fg = forge.for_workspace(root)
-                if fg is None:
-                    return (409, "no forge configured")
-                for fw in tr.actions:
-                    if isinstance(fw, decision_actions.ForgeStageWrite):
-                        number = int(fw.issue_key.rpartition("#")[2])
-                        try:
-                            result = fg.write_stage(number, fw.stage, expected=fw.previous_stage or None, commit=True)
-                        except Exception as exc:
-                            db.add_log(dec.issue_key, f"decision stage write failed: {exc}", now_iso)
-                            return (409, str(exc))
-                        if not result.ok or not result.done:
-                            error = result.error or "stage write was not committed"
-                            db.answer_decision(dec.id, tr.decision.answer, status="blocked", blocked_reason=error)
-                            return (409, error)
-                        db.upsert_item(fw.issue_key, stage=fw.stage)
                 data = db.resume(dec.issue_key) or {}
-                if tr.redispatch is not None:
-                    data["redispatch"] = asdict(tr.redispatch)
-                comments = list(data.get("decision_comments", []))
-                for fw in tr.actions:
-                    if isinstance(fw, decision_actions.ForgeComment):
-                        try:
-                            error = fg.comment(int(fw.issue_key.rpartition("#")[2]), fw.body, commit=True)
-                        except Exception as exc:
-                            error = str(exc)
-                        if error:
-                            comments.append(fw.body)
-                            db.add_log(dec.issue_key, f"decision comment failed: {error}", now_iso)
-                if comments:
-                    data["decision_comments"] = comments
-                db.set_resume(dec.issue_key, data)
+                try:
+                    tr = decision_actions.respond(
+                        dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
+                        history=db.segments(dec.issue_key), policies=load_policy(), issue_type=data.get("issue_type"),
+                        answered_at=now_iso)
+                except decision_actions.BadRequest as exc:
+                    return None, (400, str(exc))
+                except ValueError as exc:
+                    return None, (409, str(exc))
                 db.update_decision(tr.store_write)
+                bodies = [a.body for a in tr.actions if isinstance(a, decision_actions.ForgeComment)]
+                stage_write = next((a for a in tr.actions if isinstance(a, decision_actions.ForgeStageWrite)), None)
+
+                def intent(data: dict) -> None:
+                    if tr.redispatch is not None:
+                        data["redispatch"] = asdict(tr.redispatch)
+                    if stage_write is not None:  # the engine retries it until it lands
+                        data["pending_stage"] = {"stage": stage_write.stage, "expected": stage_write.previous_stage}
+                    if bodies:  # the engine delivers them, so no forge call waits on this request
+                        data["decision_comments"] = [*data.get("decision_comments", []), *bodies]
+
+                db.update_resume(dec.issue_key, intent)
+                return (tr, stage_write), None
+
             with db.transaction():
-                error = apply()
+                done, error = record()
+            if error is None and done[1] is not None:
+                error = self._write_reroute(db, forge, root, done[0], done[1], now_iso)
             if error is not None:
                 return self.send_error(*error)
         except (ServiceError, sqlite3.OperationalError, OperationalError) as exc:
@@ -498,6 +465,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Location", "/")
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    @staticmethod
+    def _write_reroute(db, forge, root, tr, write, now_iso):
+        """Phase two: the forge write, outside any store transaction; its result is recorded in a short one."""
+        import decision_actions
+
+        number = int(write.issue_key.rpartition("#")[2])
+        try:
+            fg = forge.for_workspace(root)
+            if fg is None:
+                raise RuntimeError("no forge configured")
+            result = fg.write_stage(number, write.stage, expected=write.previous_stage or None, commit=True)
+            error = "" if result.ok and result.done else result.error or "stage write was not committed"
+        except Exception as exc:
+            error = str(exc)
+        with db.transaction():
+            if error:
+                refused = decision_actions.refuse(tr.decision, error)
+                db.update_decision(refused.store_write)
+                db.add_log(write.issue_key, f"stage write refused: {error}", now_iso)
+                return 409, error
+            db.upsert_item(write.issue_key, stage=write.stage)
+            db.update_resume(write.issue_key, lambda data: data.pop("pending_stage", None))
 
     def do_POST(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a

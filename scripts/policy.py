@@ -158,6 +158,9 @@ def _trio(where: str, value, personas: set[str]) -> tuple[str, ...]:
     trio = _names(where, value)
     if len(trio) != 3 or len(set(trio)) != 3 or not set(trio) <= personas:
         raise PolicyError(f"{where} must be three distinct personas of {', '.join(sorted(personas))}")
+    if "architect" in trio:
+        # Section 6: the architect is a standing session the engine never starts, and a trio consult would start it.
+        raise PolicyError(f"{where} must not include the architect")
     return trio
 
 

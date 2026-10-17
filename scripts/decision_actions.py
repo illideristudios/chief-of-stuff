@@ -7,11 +7,18 @@ in and execute the returned store writes, forge writes, and re-dispatch actions.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from policy import Policies
+
 OPEN_STATES = frozenset({"open", "blocked"})
 CLOSED_STATES = frozenset({"answered", "reversed", "re-routed"})
+
+
+class BadRequest(ValueError):
+    """The request itself is wrong; any other ValueError is a decision whose state cannot take it."""
 
 
 @dataclass(frozen=True)
@@ -136,7 +143,7 @@ def answer(
 ) -> Transition:
     prev = state_of(record)
     cleaned = answer_text.strip()
-    if prev.status not in OPEN_STATES:
+    if prev.status not in OPEN_STATES or prev.rerouted_to:
         raise ValueError("decision is already closed")
     if not cleaned:
         raise ValueError("an answer must contain text")
@@ -179,7 +186,8 @@ def reverse(
     attempt: int = 1,
 ) -> Transition:
     prev = state_of(record)
-    if prev.status != "answered":
+    # An answered decision whose action is blocked is still answered; a refused re-route is not.
+    if prev.status not in {"answered", "blocked"} or prev.rerouted_to:
         raise ValueError("only an answered decision can be reversed")
     if not answer_text.strip():
         raise ValueError("a reversal must contain text")
@@ -250,6 +258,50 @@ def reroute(
     )
 
 
+def refuse(record: Any, reason: str) -> Transition:
+    """A write the decision needs was refused: it shows as blocked with the reason, keeping its re-route target."""
+    nxt = replace(state_of(record), status="blocked", blocked_reason=reason)
+    return Transition(decision=nxt, store_write=_write_for(nxt))
+
+
+def _reverse_target(dec: DecisionState, current_stage: str, history: Sequence[Any], policies: Policies,
+                    issue_type: str | None) -> str:
+    """The stage a reversal re-runs: the gate's own stage, else the last stage that did work; never merge."""
+    if dec.gate in policies.stages and dec.gate != "merge":
+        return dec.gate
+    affected = next((s.stage for s in reversed(history) if s.stage not in {"review", "merge"}), None)
+    stage = affected or current_stage or dec.gate
+    return policies.workflow_for(issue_type).start if stage == "merge" else stage
+
+
+def respond(record: Any, action: str, text: str, *, target_stage: str = "", current_stage: str = "",
+            history: Sequence[Any] = (), policies: Policies, issue_type: str | None = None,
+            answered_at: str | None = None) -> Transition:
+    """A person's answer, reversal or re-route from the board, with the stage, persona and attempt it re-runs."""
+    if action == "answer":
+        if not text.strip():
+            raise BadRequest("an answer must contain text")
+        return answer(record, text, answered_at=answered_at)
+    if action == "reverse":
+        stage = _reverse_target(state_of(record), current_stage, history, policies, issue_type)
+    elif action in ("reroute", "re-route"):
+        stage = target_stage.strip()
+    else:
+        raise BadRequest("unknown decision action")
+    if action == "reverse" and not text.strip():
+        raise BadRequest("a reversal must contain text")
+    if stage not in policies.stages:
+        raise BadRequest("unknown target stage")
+    persona = policies.stages[stage].persona
+    if not persona:
+        raise BadRequest(f"{stage} has no worker to re-run")
+    attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
+    if action == "reverse":
+        return reverse(record, text, answered_at=answered_at, stage=stage, persona=persona, attempt=attempt)
+    return reroute(record, stage, answer_text=text, answered_at=answered_at, current_stage=current_stage,
+                   persona=persona, attempt=attempt)
+
+
 def _action_block_reason(action: Any) -> str:
     if action is None:
         return ""
@@ -272,7 +324,7 @@ def meet_action(
     if reason:
         nxt = replace(prev, status="blocked", blocked_reason=reason)
         return Transition(decision=nxt, store_write=_write_for(nxt), actions=())
-    restored = "answered" if prev.status == "blocked" else prev.status
+    restored = ("re-routed" if prev.rerouted_to else "answered") if prev.status == "blocked" else prev.status
     nxt = replace(prev, status=restored, blocked_reason="")
     return Transition(decision=nxt, store_write=_write_for(nxt), actions=())
 

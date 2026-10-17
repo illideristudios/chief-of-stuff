@@ -282,7 +282,14 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         if pending and item.forge_state != "closed":
             if any(s.started_at and not s.ended_at for s in history):
                 continue
-            action = Dispatch(item.issue_key, pending["stage"], pending["persona"], pending["attempt"])
+            # A person asked for this stage again; it still obeys the hold, the retry limit, and the review launch.
+            if item.human_review:
+                action = Wait(item.issue_key, "needs input")
+            elif pending["stage"] not in policies.stages:
+                action = Wait(item.issue_key, "stage is outside the workflow")
+            else:
+                action = _work(item.issue_key, pending["stage"], policies.workflow_for(issue_types.get(item.issue_key)),
+                               history, policies, (rooms or {}).get(item.issue_key))
         else:
             action = _item(item, history, policies, issue_types.get(item.issue_key),
                            (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),

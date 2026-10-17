@@ -136,6 +136,19 @@ def _parse_stamp(raw: str | None, zone, fallback: datetime) -> datetime:
     return fallback
 
 
+def _recovered(message: str, issue_key: str, stamp: datetime, db, segments: list, zone, now: datetime) -> bool:
+    """Whether the thing a log line reports has since come right. Only the failed operation's own state says so."""
+    state = db.resume(issue_key)
+    state = state if isinstance(state, dict) else {}
+    lowered = message.casefold()
+    if lowered.startswith("stage write"):
+        return not state.get("pending_stage")
+    if "comment failed" in lowered:
+        return not state.get("decision_comments")
+    # Anything else stopped a worker run, which a later successful run of the issue recovers.
+    return any(s.outcome == "done" and _parse_stamp(s.ended_at or s.started_at, zone, now) > stamp for s in segments)
+
+
 def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
     """Build exception notification rows from the store: human_review stops, open decisions, unexpected failures."""
     db_path = root / "store.db"
@@ -220,11 +233,9 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
             if entry.issue_key not in opened or not any(word in lowered for word in ("failed", "refused", "escalate: retry limit")):
                 continue
             stamp = _parse_stamp(entry.at, cfg.zone, now)
-            if any(s.outcome == "done" and _parse_stamp(s.ended_at or s.started_at, cfg.zone, now) > stamp
-                   for s in segs_by_key.get(entry.issue_key, [])):
+            if _recovered(entry.message, entry.issue_key, stamp, db, segs_by_key.get(entry.issue_key, []), cfg.zone, now):
                 continue
             short = _short_key(entry.issue_key)
-            stamp = _parse_stamp(entry.at, cfg.zone, now)
             what = f"{short} {entry.message}"
             rows.append(
                 Row(

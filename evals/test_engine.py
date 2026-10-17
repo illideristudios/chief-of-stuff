@@ -313,7 +313,7 @@ class EngineTest(unittest.TestCase):
             with self.subTest(prior=prior):
                 forge = mock.Mock()
                 forge.write_stage.return_value = SimpleNamespace(ok=True, error="")
-                engine._write_stage(forge, mock.Mock(), KEY, "implement", prior)
+                engine._write_stage(forge, mock.MagicMock(), KEY, "implement", prior)
                 self.assertIs(forge.write_stage.call_args.kwargs["initialize"], initialize)
 
     def test_stage_write_failure_is_logged_and_retried_before_planning(self):

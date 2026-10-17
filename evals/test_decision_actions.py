@@ -205,7 +205,7 @@ class RespondTest(unittest.TestCase):
             "personas": {"builder": {"role": "builds", "model": "example"}, "writer": {"role": "writes", "model": "example"}},
             "stages": {"implement": {"persona": "builder"}, "draft": {"persona": "writer"}, "merge": {}},
             "workflows": {"standard": {"start": "implement", "edges": [{"from": "implement", "to": "merge"}]},
-                          "docs": {"start": "draft", "edges": [{"from": "draft", "to": "merge"}]}},
+                          "docs": {"issue_types": ["docs"], "start": "draft", "edges": [{"from": "draft", "to": "merge"}]}},
         })
         tr = self.respond("reverse", record=make_decision(status="answered", answer="Yes", gate="merge"),
                           stage="merge", issue_type="docs", policies=custom)

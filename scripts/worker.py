@@ -93,10 +93,11 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
 
 
 def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> None:
-    data = _resume(store, key)
-    data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
-    data.pop("quota", None)
-    store.set_resume(key, data)
+    def save(data: dict) -> None:
+        data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
+        data.pop("quota", None)
+
+    store.update_resume(key, save)
 
 
 def _declared_agent(text: str, agent: str) -> str:
@@ -104,6 +105,15 @@ def _declared_agent(text: str, agent: str) -> str:
     if not agent:
         return ""
     return agent if agent in make_worktree.agent_types(text) else ""
+
+
+def agent_for(text: str, actor: Any, defaults: Any) -> str:
+    """The agent type a launch passes: the persona's, else the stage default's, when the workspace declares it."""
+    return _declared_agent(text, getattr(actor, "agent", "") or (defaults.agent if defaults else "") or "")
+
+
+def stage_defaults(root: Path, text: str, stage: str) -> Any:
+    return load_settings(root, settings_path(text)).stages.get(stage)
 
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
@@ -122,8 +132,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    defaults = load_settings(root, settings_path(text)).stages.get(stage)
-    agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
+    defaults = stage_defaults(root, text, stage)
+    agent = agent_for(text, actor, defaults)
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
@@ -167,12 +177,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         store.set_ownership(issue_key, str(tree))
         if stage != "review":
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
-            data.update(worktree=str(tree), work_branch=branch)
-            store.set_resume(issue_key, data)
+            store.update_resume(issue_key, lambda d: d.update(worktree=str(tree), work_branch=branch))
         else:
-            data["review_trees"] = {**data.get("review_trees", {}), str(attempt): {
-                "tree": str(tree), "branch": branch, "head": request_head.head}}
-            store.set_resume(issue_key, data)
+            prepared = {"tree": str(tree), "branch": branch, "head": request_head.head}
+            store.update_resume(issue_key, lambda d: d.update(
+                review_trees={**d.get("review_trees", {}), str(attempt): prepared}))
             code, actual_head = make_worktree.git(["rev-parse", "HEAD"], tree)
             if code or actual_head != request_head.head:
                 raise RuntimeError("prepared review tree does not match the request head")
@@ -284,8 +293,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome = reply.kind
                     reason = reply.message
                     stops = sum(s.outcome == outcome for s in store.segments(key)) + 1
-                    data["quota"] = {"reset": reason, "retry_at": retry_at(reason, now, stops).isoformat()}
-                    store.set_resume(key, data)
+                    quota = {"reset": reason, "retry_at": retry_at(reason, now, stops).isoformat()}
+                    store.update_resume(key, lambda d: d.update(quota=quota))
                 else:
                     outcome, reason = "failed", reply.message
             else:
@@ -300,9 +309,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = reports[-1].outcome, reports[-1].summary
             if segment.stage == "review":
                 # This attempt's collected result always names the SHA pinned at launch.
-                record["result"] = {"reviewed_head": record.get("reviewed_head"),
-                                    "outcome": outcome, "ended_at": now.isoformat()}
-                store.set_resume(key, data)
+                result = {"reviewed_head": record.get("reviewed_head"), "outcome": outcome, "ended_at": now.isoformat()}
+                store.update_resume(key, lambda d: d["runs"][f"{segment.stage}-{segment.attempt}"].update(result=result))
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)

@@ -12,7 +12,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing, contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 from alembic import command
 from alembic.config import Config
@@ -304,16 +304,16 @@ class Store:
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
         if runner is not None:
-            data = self.resume(issue_key)
-            state = dict(data) if isinstance(data, dict) else {}
-            runs_raw = state.get("runs")
-            runs = dict(runs_raw) if isinstance(runs_raw, dict) else {}
-            entry_raw = runs.get(f"{stage}-{attempt}")
-            run_entry = dict(entry_raw) if isinstance(entry_raw, dict) else {}
-            run_entry["runner"] = runner
-            runs[f"{stage}-{attempt}"] = run_entry
-            state["runs"] = runs
-            self.set_resume(issue_key, state)
+            def note(state: dict) -> None:
+                runs_raw = state.get("runs")
+                runs = dict(runs_raw) if isinstance(runs_raw, dict) else {}
+                entry_raw = runs.get(f"{stage}-{attempt}")
+                run_entry = dict(entry_raw) if isinstance(entry_raw, dict) else {}
+                run_entry["runner"] = runner
+                runs[f"{stage}-{attempt}"] = run_entry
+                state["runs"] = runs
+
+            self.update_resume(issue_key, note)
 
     def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
         """Complete only an existing open segment, without altering its start or actor."""
@@ -443,6 +443,17 @@ class Store:
         with self.session(write=False) as s:
             row = s.get(Resume, issue_key)
             return row.data if row else None
+
+    def update_resume(self, issue_key: str, mutate: Callable[[dict], None]) -> None:
+        """Change some keys of the resume blob from its current value, in one write transaction.
+
+        Callers hold a copy across slow work (a forge call, a model call) and so must not write the whole blob back:
+        the board POST and the worker add keys meanwhile."""
+        with self.transaction():
+            data = self.resume(issue_key)
+            data = dict(data) if isinstance(data, dict) else {}
+            mutate(data)
+            self.set_resume(issue_key, data)
 
     # Worker reports are append-only, including late reports from older attempts.
     def add_report(self, issue_key: str, stage: str, attempt: int, session_id: str,
