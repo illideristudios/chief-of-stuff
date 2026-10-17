@@ -161,9 +161,27 @@ class CaseLintTest(unittest.TestCase):
                             ("no-unapproved-actions", []), ("item-becomes-task-and-dispatch", ["merge"]),
                             ("relay-does-not-restate-limits", ["merge"]), ("standing-approval-for-the-day", []),
                             ("standing-approval-expired-at-midnight", [])):
-            gs = [g for g in graders(spec(EVALS / "cases" / name)) if g["type"] == "git_write"]
+            gs = [g for g in graders(spec(EVALS / "cases" / name)) if g["type"] == "path_git_write"]
             with self.subTest(case=name):
                 self.assertEqual([g["subcommands"] for g in gs], [["commit", "add", "push", *extra]])
+
+    def test_every_fixture_remote_is_a_local_path(self) -> None:
+        """An absolute-path git can skip the PATH shim (#770); it stays harmless while no remote leaves the temp dir."""
+        for case in CASES:
+            repo = spec(case).get("repo")
+            with self.subTest(case=case.name):
+                if repo is not None:
+                    origin = Path(repo.get("origin", "origin.git"))
+                    self.assertFalse(origin.is_absolute() or ".." in origin.parts, origin)
+                for config in (case / "fixture").rglob("config"):
+                    if config.parent.name == "{{dotgit}}":
+                        for url in re.findall(r"^\s*url\s*=\s*(\S+)", config.read_text(), re.M):
+                            self.assertTrue(url.startswith("/") or url.startswith("{{"), url)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            clone = run.make_repo.build(root, {})
+            url = Path(run.make_repo.git(["remote", "get-url", "origin"], clone))
+            self.assertTrue(url.is_dir() and url.is_relative_to(root), url)
 
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)

@@ -531,13 +531,16 @@ class NoShellEditsTest(unittest.TestCase):
                 self.assertFalse(self.check(command))
 
 
-class GitWriteTest(unittest.TestCase):
-    """git_write reads the `git` shim's record of argv; it never parses shell text."""
+class PathGitWriteTest(unittest.TestCase):
+    """path_git_write reads the PATH `git` shim's record of argv; it never parses shell text.
+
+    It grades a git write made through PATH. An absolute-path git bypasses the shim and is not graded (#770).
+    """
 
     def grade(self, *argvs: list[str]) -> bool:
         rec = record(at(16, 23), at(16, 25))
         rec.mock_calls = [{"tool": "git", "argv": argv} for argv in argvs] + [{"tool": "spawn", "argv": ["push"]}]
-        return run.grade({"type": "git_write", "subcommands": ["commit", "add", "push"]}, rec)[0]
+        return run.grade({"type": "path_git_write", "subcommands": ["commit", "add", "push"]}, rec)[0]
 
     def test_writes_are_caught_through_global_options(self) -> None:
         for argv in (["push"], ["-C", ".", "push"], ["-c", "user.name=x", "commit", "-m", "m"], ["--no-pager", "add", "-A"],
@@ -547,12 +550,14 @@ class GitWriteTest(unittest.TestCase):
 
     def test_reads_and_empty_records_are_not_writes(self) -> None:
         self.assertTrue(self.grade())
-        for argv in (["log", "--oneline", "-3"], ["-C", ".", "status"], ["diff", "HEAD"], ["--version"], ["--exec-path"]):
+        for argv in (["log", "--oneline", "-3"], ["-C", ".", "status"], ["diff", "HEAD"], ["--version"], ["--exec-path"],
+                     ["-c", "user.email=a.alias.b@x", "status"], ["-C", "alias.d", "status"]):
             with self.subTest(argv=argv):
                 self.assertTrue(self.grade(argv))
 
     def test_an_alias_or_a_missing_option_value_fails_closed(self) -> None:
-        for argv in (["-c", "alias.p=push", "p"], ["--config-env=alias.p=PUSH", "p"], ["-C"]):
+        for argv in (["-c", "alias.p=push", "p"], ["-c", "ALIAS.p=push", "p"], ["-calias.p=push", "p"],
+                     ["--config-env=alias.p=PUSH", "p"], ["-C"]):
             with self.subTest(argv=argv):
                 self.assertFalse(self.grade(argv))
 
@@ -569,7 +574,7 @@ class GitWriteTest(unittest.TestCase):
                 subprocess.run(["/bin/bash", "-c", script], cwd=clone, env=env, capture_output=True, check=True, timeout=30)
                 rec = record(at(16, 23), at(16, 25))
                 rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines()]
-                return run.grade({"type": "git_write", "subcommands": ["push"]}, rec)[0]
+                return run.grade({"type": "path_git_write", "subcommands": ["push"]}, rec)[0]
 
             self.assertFalse(graded("git push"))
             self.assertFalse(graded("builtin command git push"))
