@@ -234,6 +234,9 @@ ISSUE_JOBS = {"implement": "Implement the issue and verify it with tests.",
               "plan": "Plan the issue's implementation, tests and risks.",
               "fix": "Fix the findings on the existing work branch and verify the changes.",
               "review": "Review the request head; report findings and evidence without changing the code."}
+RECOVERY = ("Recovery: Keep this worktree, its branch and its inherited commits; inspect `git status` and `git log`, "
+            "preserve valid uncommitted and committed work, run the tests, push the branch and open or update the "
+            "pull/merge request without asking. Stop and ask only on a genuine conflict.")
 
 
 # A read-only task is told so in place of its delivery rule; the launcher only checks afterwards that it left no commit or changed file (#57).
@@ -252,7 +255,7 @@ def skills_line(skills: tuple[str, ...]) -> str:
 
 
 def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
-                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = ()) -> str:
+                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = (), recover: bool = False) -> str:
     """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or a header over BODY_CAP raises RefusedError (E3)."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
@@ -261,6 +264,7 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
     if stage == "fix":
         delivery = ("Commits: Commit the fixes and verify them with tests, then push the existing request branch "
                     "before reporting done; do not open a new request. Report its URL and head sha.\n")
+    recovery = f"{RECOVERY}\n" if recover and stage in ("implement", "fix") else ""
     review = f"{CODE_REVIEW}\n{REVIEW_RULE}\n" if stage == "review" else ""
     architecture = ""
     if root is not None and stage in ("implement", "fix"):
@@ -271,6 +275,7 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
             f"Job: {ISSUE_JOBS.get(stage, persona.role)}\nPersona: {persona.role}\n"
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
+            + recovery
             + review
             + (skills_line(skills) + "\n" if skills else "")
             + architecture)

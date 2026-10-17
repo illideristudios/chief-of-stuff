@@ -64,7 +64,7 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
                              runtime=runtime, model=model, effort=effort, agent_type=agent_type)
     try:
         used = launch()
-    except BaseException:
+    except Exception:
         store.drop_segment(issue_key, stage, attempt)
         raise
     if used is not None:

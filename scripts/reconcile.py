@@ -140,14 +140,18 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
+def _decision_pending(decisions: Sequence[Decision]) -> bool:
+    # Decision rows are append-only, oldest first: the latest row for a question is its state.
+    latest = {(d.topic, d.question): d for d in decisions}
+    return any(not d.answer or not d.answer.strip() for d in latest.values())
+
+
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
            room: str | None, now: datetime, counts: Mapping[str, int] | None, edges: Sequence[Edge],
            decisions: Sequence[Decision]) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
-    # Decision rows are append-only, oldest first: the latest row for a question is its state.
-    latest = {(d.topic, d.question): d for d in decisions}
-    if any(not d.answer or not d.answer.strip() for d in latest.values()):
+    if _decision_pending(decisions):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
@@ -200,6 +204,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
         return None
     if item.human_review:
         return Wait(key, "human review")
+    if _decision_pending(decisions):
+        return Wait(key, "decision pending")
     workflow = policies.workflow_for(issue_type)
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}
