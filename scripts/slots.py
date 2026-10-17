@@ -48,7 +48,9 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
           max_concurrency: int | None, launch: Callable[[], tuple[str, str] | None],
           clock: clock.Clock = clock.system,
           runtime: str | None = None, model: str | None = None,
-          effort: str | None = None, agent_type: str | None = None) -> None:
+          effort: str | None = None, agent_type: str | None = None,
+          persona: str | None = None, review_round: int | None = None,
+          finding_key: str | None = None) -> None:
     """Claim one worker slot: reserve it under the lock, launch outside it, then stamp the real start — or refuse.
 
     The reservation is an open segment, so concurrent claims count it; a failed launch drops it. Launch may
@@ -61,7 +63,8 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
         if any(s.stage == stage and s.attempt == attempt for s in store.segments(issue_key)):
             raise ValueError(f"segment {issue_key} {stage} attempt {attempt} already exists")
         store.record_segment(issue_key, stage, attempt, started_at=clock().isoformat(),
-                             runtime=runtime, model=model, effort=effort, agent_type=agent_type)
+                             runtime=runtime, model=model, effort=effort, agent_type=agent_type,
+                             persona=persona, review_round=review_round, finding_key=finding_key)
     try:
         used = launch()
     except BaseException:

@@ -57,6 +57,10 @@ class Segment(Base):
     model: Mapped[str] = mapped_column(String, default="", server_default="")
     effort: Mapped[str] = mapped_column(String, default="", server_default="")
     agent_type: Mapped[str] = mapped_column(String, default="", server_default="")
+    persona: Mapped[str] = mapped_column(String, default="", server_default="")
+    reviewed_head: Mapped[str] = mapped_column(String, default="", server_default="")
+    review_round: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+    finding_key: Mapped[str] = mapped_column(String, default="", server_default="")
 
 
 class Decision(Base):
@@ -201,10 +205,14 @@ class Store:
     def record_segment(self, issue_key: str, stage: str, attempt: int, started_at: str,
                        ended_at: str | None = None, outcome: str | None = None,
                        runtime: str | None = None, model: str | None = None,
-                       effort: str | None = None, agent_type: str | None = None) -> None:
+                       effort: str | None = None, agent_type: str | None = None,
+                       persona: str | None = None, reviewed_head: str | None = None,
+                       review_round: int | None = None, finding_key: str | None = None) -> None:
         # Omitted fields stay as stored, so a retried start never clears completion or who ran it.
         done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome), ("runtime", runtime),
-                                  ("model", model), ("effort", effort), ("agent_type", agent_type))
+                                  ("model", model), ("effort", effort), ("agent_type", agent_type),
+                                  ("persona", persona), ("reviewed_head", reviewed_head),
+                                  ("review_round", review_round), ("finding_key", finding_key))
                 if v is not None}
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})

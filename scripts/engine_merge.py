@@ -12,7 +12,7 @@ from policy import Policies, PolicyError
 def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies, inputs: dict) -> bool:
     """Re-plan with shared store inputs and current policies, then log one attempt without retrying.
 
-    Resume data holds issue_type, room and attempt-keyed review_findings; absent findings remain unknown.
+    Structured reports hold findings; absent findings remain unknown.
     `inputs` is the same issue context `engine._planning_inputs` builds for the pass.
     """
     try:
@@ -36,6 +36,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
             item.human_review = snap["human_review"]
         item.merge_state = request.verdict
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
+        inputs = {**inputs, "heads": {**inputs.get("heads", {}), action.issue_key: request.head}}
         planned = reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(),  # not `at`: a gate may expire mid-pass
                                  **inputs)
         if not planned or not isinstance(planned[0], reconcile.Merge):

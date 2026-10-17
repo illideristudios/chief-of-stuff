@@ -15,6 +15,7 @@ import dispatch_prompt
 import guard_binding
 import make_worktree
 import process_status
+import reconcile
 import supervisor
 from settings import load as load_settings
 from workspace import settings_path
@@ -97,6 +98,10 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
     data.pop("quota", None)
     store.set_resume(key, data)
+    segment = next((s for s in store.segments(key) if s.stage == stage and s.attempt == attempt), None)
+    if segment is not None:
+        store.record_segment(key, stage, attempt, segment.started_at,
+                             reviewed_head=record.get("reviewed_head"))
 
 
 def _declared_agent(text: str, agent: str) -> str:
@@ -128,8 +133,23 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
-    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
+    segment = next((s for s in store.segments(issue_key) if s.stage == stage and s.attempt == attempt), None)
+    assignment_stage = "fix" if segment is not None and segment.finding_key else stage
+    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, assignment_stage, actor, root=root,
                                                skills=defaults.skills if defaults else ())
+    if stage == "architect" or (segment is not None and segment.finding_key):
+        history = store.segments(issue_key)
+        sessions = {s.attempt: data.get("runs", {}).get(f"review-{s.attempt}", {}).get("session_id")
+                    for s in history if s.stage == "review"}
+        findings = reconcile.review_findings(store.reports(issue_key), history, sessions=sessions)
+        if stage == "architect":
+            assignment += ("\nConsult on these review findings and report your judgement without changing code:\n"
+                           + json.dumps(findings) + "\n")
+        else:
+            finding = next((f for f in findings or () if f["finding_key"] == segment.finding_key), None)
+            if finding is None:
+                raise RuntimeError("assigned finding is no longer available")
+            assignment += "\nFix this review finding, then report the result:\n" + json.dumps(finding) + "\n"
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -217,6 +237,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
+        if segment is not None:
+            store.record_segment(issue_key, stage, attempt, segment.started_at, agent_type=agent)
     except Exception:
         claude_adapter.cancel(runner)
         raise
@@ -300,6 +322,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = reports[-1].outcome, reports[-1].summary
             if segment.stage == "review":
                 # This attempt's collected result always names the SHA pinned at launch.
+                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                     reviewed_head=record.get("reviewed_head"))
                 record["result"] = {"reviewed_head": record.get("reviewed_head"),
                                     "outcome": outcome, "ended_at": now.isoformat()}
                 store.set_resume(key, data)

@@ -36,6 +36,8 @@ class Policy:
     zach_gates: tuple[str, ...] = ()  # gates only Zach's own word passes; none by default (decision 6)
     blocking_severity: str = "minor"  # a finding at or above it blocks merge; minor is "burn down to no open findings"
     architect: bool = False  # the architect is consulted where this holds
+    reviewers: tuple[str, ...] = ()  # empty uses the stage's persona
+    architect_persona: str | None = None
     retry_limit: int = 3  # fix rounds before an unrecoverable-failure ping (Zach, 2026-10-11)
     launch: str = "adapter"  # a worker runs through the model adapter, or as a full Claude Code session
     trio: tuple[str, ...] = ()  # the decision trio when no topic tag maps to one (decision 5a)
@@ -174,6 +176,14 @@ def _policy(where: str, value, personas: set[str], gates: set[str]) -> dict:
             v = _limit(at, v)
         elif key == "zach_gates":
             v = _names(at, v)
+        elif key == "reviewers":
+            v = _names(at, v)
+            if len(set(v)) != len(v) or not set(v) <= personas:
+                raise PolicyError(f"{at} must name distinct known personas")
+        elif key == "architect_persona":
+            v = _text(at, v)
+            if v not in personas:
+                raise PolicyError(f"{at} must name a known persona")
         elif key == "trio":
             v = _trio(at, v, personas)
         elif key == "trios":

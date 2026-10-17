@@ -265,6 +265,25 @@ class MigrationTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_review_migration_preserves_preexisting_segments(self) -> None:
+        from alembic import command
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            command.upgrade(store._config(path), "0003")
+            with sqlite3.connect(path) as conn:
+                conn.execute("INSERT INTO work_item VALUES ('example#1', '', 'review', 'open', '', '', 0, '')")
+                conn.execute("INSERT INTO segment (issue_key, stage, attempt, started_at) "
+                             "VALUES ('example#1', 'review', 1, '2000-01-01T00:00:00+00:00')")
+            store.migrate(path)
+            db = store.Store(path)
+            try:
+                segment, = db.segments("example#1")
+                self.assertEqual((segment.stage, segment.attempt), ("review", 1))
+                self.assertEqual((segment.reviewed_head, segment.persona, segment.review_round, segment.finding_key),
+                                 ("", "", 0, ""))
+            finally:
+                db.engine.dispose()
+
     def test_migrations_build_exactly_the_schema_the_models_declare(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.db"

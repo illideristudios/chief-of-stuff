@@ -28,6 +28,7 @@ model = "opus"
 [personas.reviewer]
 role = "PLACEHOLDER: reviews the change"
 model = "opus"
+rules = ["Run extras:code-review. Report structured findings through the engine report tool. Do not fix findings."]
 
 [personas.architect]
 role = "PLACEHOLDER: holds the change to the architecture"
@@ -44,7 +45,11 @@ persona = "implementer"
 persona = "reviewer"
 
 [stages.review.policy]
+# Distinct persona names, launched independently; every member must review the current head.
+# Persona defaults apply before stage and room overrides, including severity and architect consultation.
+reviewers = ["reviewer"]
 architect = true  # decision 5: burn down to no open findings, consult the architect
+architect_persona = "architect"
 
 [stages.fix]
 persona = "implementer"

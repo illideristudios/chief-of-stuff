@@ -25,6 +25,10 @@ class Segment(Protocol):
     started_at: datetime | str
     ended_at: datetime | str | None
     outcome: str | None
+    persona: str
+    reviewed_head: str
+    review_round: int
+    finding_key: str
 
 
 class Decision(Protocol):
@@ -33,20 +37,44 @@ class Decision(Protocol):
     answer: str | None
 
 
-def review_findings(state: Mapping[str, object], history: Sequence[Segment]) -> dict[str, int] | None:
-    """Severity counts from the latest completed review, or None when unknown or stale."""
-    latest = max((s for s in history if s.stage == "review" and s.ended_at),
-                 key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
-    record = state.get("review_findings")
-    # TODO #639: replace this attempt-keyed resume bridge with structured findings from the latest review.
-    # Forge approval and threads have no severity counts; neither means a worker reported zero findings.
-    if latest is None or latest.outcome != "done" or not isinstance(record, dict):
+def _panel_history(history: Sequence[Segment]) -> list[Segment]:
+    reviews = [s for s in history if s.stage == "review"]
+    round = max((getattr(s, "review_round", 0) for s in reviews), default=0)
+    if round:
+        reviews = [s for s in reviews if getattr(s, "review_round", 0) == round]
+    else:
+        reviews = sorted(reviews, key=lambda s: s.attempt)[-1:]
+    # A retry supersedes only that persona's earlier attempt, never another panel member.
+    latest = {}
+    for segment in sorted(reviews, key=lambda s: s.attempt):
+        latest[getattr(segment, "persona", "")] = segment
+    return list(latest.values())
+
+
+def review_findings(reports: Sequence[object], history: Sequence[Segment], *,
+                    sessions: Mapping[int, str] | None = None) -> list[dict] | None:
+    """Open findings from each panel member's latest structured report; absent/failed is unknown.
+
+    Engine callers bind reports to the launched sessions. Finding keys bind fixes to
+    one panel round and report position; a later review must confirm the fixes.
+    """
+    reviews = _panel_history(history)
+    if not reviews:
         return None
-    counts = record.get("counts")
-    if (record.get("attempt") != latest.attempt or not isinstance(counts, dict)
-            or any(k not in SEVERITIES or type(v) is not int or v < 0 for k, v in counts.items())):
-        return None
-    return counts
+    findings = []
+    for segment in reviews:
+        if not segment.ended_at or segment.outcome != "done":
+            return None
+        matching = [r for r in reports if getattr(r, "stage", None) == "review" and r.attempt == segment.attempt
+                    and (sessions is None or sessions.get(r.attempt) == r.session_id)]
+        if not matching or matching[-1].outcome != "done":
+            return None
+        for index, finding in enumerate(matching[-1].findings):
+            if not isinstance(finding, dict) or finding.get("severity") not in SEVERITIES:
+                return None
+            round = getattr(segment, "review_round", 0) or segment.attempt
+            findings.append({**finding, "finding_key": f"{round}/{segment.attempt}/{index}"})
+    return findings
 
 
 @dataclass(frozen=True)
@@ -55,12 +83,16 @@ class Dispatch:
     stage: str
     persona: str | None
     attempt: int
+    finding_key: str = ""
+    finding: dict | None = None
 
 
 @dataclass(frozen=True)
 class Review:
     issue_key: str
     attempt: int
+    persona: str | None = None
+    review_round: int = 0
 
 
 @dataclass(frozen=True)
@@ -116,7 +148,9 @@ def _gate(key: str, edge: Edge, policies: Policies, room: str | None, now: datet
     return None
 
 
-def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
+def _blocking(counts: Mapping[str, int] | Sequence[dict], resolved: Policy) -> bool:
+    if isinstance(counts, (list, tuple)):
+        return bool(counts)  # already filtered by each reporting persona's effective policy
     blocking = SEVERITIES[:SEVERITIES.index(resolved.blocking_severity) + 1]
     return any(counts.get(severity, 0) > 0 for severity in blocking)
 
@@ -141,8 +175,8 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
 
 
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
-           room: str | None, now: datetime, counts: Mapping[str, int] | None, edges: Sequence[Edge],
-           decisions: Sequence[Decision]) -> Action:
+           room: str | None, now: datetime, counts: Mapping[str, int] | Sequence[dict] | None, edges: Sequence[Edge],
+           decisions: Sequence[Decision], head: str | None) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
     # Decision rows are append-only, oldest first: the latest row for a question is its state.
@@ -161,6 +195,14 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         if review is None or any(s.stage not in unreviewed
                                  and _time(s.ended_at) > _time(review.started_at) for s in completed):
             return _work(key, "review", workflow, history, policies, room)
+        if not head:
+            return Wait(key, "change head is unknown")
+        required = _reviewers(policies, room)
+        reviewed = {getattr(s, "persona", ""): s for s in _panel_history(history)}
+        if any(name not in reviewed or reviewed[name].outcome != "done"
+               or not reviewed[name].ended_at or getattr(reviewed[name], "reviewed_head", "") != head
+               for name in required):
+            return _work(key, "review", workflow, history, policies, room)
     elif item.review_state != "approved":
         return Wait(key, "review has not run")
     if counts is None:
@@ -170,12 +212,16 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
     if _blocking(counts, resolved):
         return Wait(key, "blocking review findings")
     work_stages = {review_stage} | {s.stage for s in completed if s.stage in policies.stages}
-    if any(_policy(policies, stage, room).architect for stage in work_stages):
+    consult_policies = [_policy(policies, stage, room) for stage in sorted(work_stages)]
+    if "review" in stages:
+        consult_policies += [policies.resolve(name, "review", room) for name in _reviewers(policies, room)]
+    consult = next((p for p in consult_policies if p.architect), None)
+    if consult is not None:
         architect = max((s for s in completed if s.stage == "architect" and s.outcome == "done"),
                         key=lambda s: _time(s.started_at), default=None)
         if architect is None or any(s.stage not in ("review", "merge", "architect")
                                     and _time(s.ended_at) > _time(architect.started_at) for s in completed):
-            return Wait(key, "architect consultation is required")
+            return _consult(key, history, policies, room, consult)
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
     if workflow.start == "merge" and not any(e.target == "merge" for e in workflow.edges):
@@ -193,8 +239,8 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
 
 
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
-          room: str | None, now: datetime, counts: Mapping[str, int] | None,
-          decisions: Sequence[Decision]) -> Action | None:
+          room: str | None, now: datetime, counts: Mapping[str, int] | Sequence[dict] | None,
+          decisions: Sequence[Decision], head: str | None) -> Action | None:
     key = item.issue_key
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
@@ -224,7 +270,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if stage == "merge":
         incoming = ((return_edge,) if return_edge else
                     tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage))
-        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions)
+        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, head)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, workflow, history, policies, room)
@@ -239,22 +285,115 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if edge is None:
         return Wait(key, "no unique workflow edge")
     if edge.target == "merge":
-        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions)
+        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, head)
     action = _work(key, edge.target, workflow, history, policies, room)
     if isinstance(action, Escalate):
         return action
     return _gate(key, edge, policies, room, now) or action
 
 
+def _reviewers(policies: Policies, room: str | None) -> tuple[str, ...]:
+    resolved = _policy(policies, "review", room)
+    return resolved.reviewers or (policies.stages["review"].persona,)
+
+
+def _consult(key: str, history: Sequence[Segment], policies: Policies, room: str | None,
+             resolved: Policy) -> Action:
+    persona = resolved.architect_persona
+    if persona is None and "architect" in policies.stages:
+        persona = policies.stages["architect"].persona
+    if persona is None:
+        return Wait(key, "architect consultation is required: no architect persona configured")
+    attempt = max((s.attempt for s in history if s.stage == "architect"), default=0) + 1
+    failures = sum(s.stage == "architect" and s.outcome not in RETRYABLE for s in history)
+    if failures > resolved.retry_limit:
+        return Escalate(key, "retry limit reached for architect")
+    return Dispatch(key, "architect", persona, attempt)
+
+
+def _panel(key: str, history: Sequence[Segment], policies: Policies, room: str | None,
+           head: str | None, *, fresh: bool = False) -> list[Action]:
+    if not head:
+        return [Wait(key, "change head is unknown")]
+    reviews = _panel_history(history)
+    round = max((getattr(s, "review_round", 0) for s in history), default=0)
+    if fresh or not round or any(getattr(s, "reviewed_head", "") != head for s in reviews):
+        round += 1
+        reviews = []
+    attempt = max((s.attempt for s in history if s.stage == "review"), default=0)
+    actions = []
+    for persona in _reviewers(policies, room):
+        previous = next((s for s in reviews if getattr(s, "persona", "") == persona), None)
+        if previous and (not previous.ended_at or previous.outcome == "done"):
+            continue
+        failures = sum(s.stage == "review" and getattr(s, "review_round", 0) == round
+                       and getattr(s, "persona", "") == persona and s.outcome not in RETRYABLE
+                       for s in history)
+        if failures > policies.resolve(persona, "review", room).retry_limit:
+            return [Escalate(key, f"retry limit reached for review ({persona})")]
+        attempt += 1
+        actions.append(Review(key, attempt, persona, round))
+    return actions
+
+
+def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[dict],
+               policies: Policies, room: str | None, head: str | None, workflow: Workflow, now: datetime) -> list[Action] | None:
+    """Serialize fixes in the writable checkout; reviewers use independent detached trees."""
+    reviews = _panel_history(history)
+    if (not reviews or "review" not in policies.stages or not workflow.next("review")
+            or any(s.started_at and not s.ended_at for s in history)):
+        return None
+    resolved = _policy(policies, "review", room)
+    if any(name not in {getattr(s, "persona", "") for s in reviews} for name in _reviewers(policies, room)):
+        return None
+    open_findings = findings
+    if not open_findings:
+        return None
+    edge = _next(workflow, "review", True)
+    if edge is None:
+        return [Wait(item.issue_key, "no unique workflow edge")]
+    if item.stage not in ("review", edge.target):
+        return None
+    gate = _gate(item.issue_key, edge, policies, room, now)
+    if gate is not None:
+        return [gate]
+    keys = {f["finding_key"] for f in open_findings}
+    fixes = [s for s in history if getattr(s, "finding_key", "") in keys]
+    pending = [f for f in open_findings
+               if not any(s.finding_key == f["finding_key"] and s.outcome == "done" for s in fixes)]
+    if not pending:
+        return _panel(item.issue_key, history, policies, room, head, fresh=True)
+    prior_rounds = {s.finding_key.split("/")[0] for s in history
+                    if getattr(s, "finding_key", "") and s.finding_key not in keys and s.outcome not in RETRYABLE}
+    if len(prior_rounds) >= resolved.retry_limit:
+        return [Escalate(item.issue_key, "retry limit reached for review fix rounds")]
+    consult = next((p for name in _reviewers(policies, room)
+                    if (p := policies.resolve(name, "review", room)).architect), None)
+    if consult is not None:
+        start = min(_time(s.started_at) for s in reviews)
+        if not any(s.stage == "architect" and s.outcome == "done" and s.ended_at
+                   and _time(s.started_at) >= start for s in history):
+            return [_consult(item.issue_key, history, policies, room, consult)]
+    finding = pending[0]
+    tries = [s for s in fixes if s.finding_key == finding["finding_key"] and s.outcome not in RETRYABLE]
+    if len(tries) > _policy(policies, edge.target, room).retry_limit:
+        return [Escalate(item.issue_key, "retry limit reached for finding " + finding["finding_key"])]
+    attempt = max((s.attempt for s in history if s.stage == edge.target), default=0) + 1
+    return [Dispatch(item.issue_key, edge.target, policies.stages[edge.target].persona, attempt,
+                     finding["finding_key"], dict(finding))]
+
+
 def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], policies: Policies,
          issue_types: Mapping[str, str | None], free_slots: int, now: datetime,
-         open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
+         open_findings: Mapping[str, Sequence[dict] | Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
-         quota_resets: Mapping[str, datetime] | None = None) -> list[Action]:
-    """One action per eligible issue, oldest first; dispatch and review each take one slot.
+         quota_resets: Mapping[str, datetime] | None = None,
+         heads: Mapping[str, str | None] | None = None) -> list[Action]:
+    """Actions oldest issue first; each panel reviewer and each fix consumes one slot.
 
-    Findings are complete severity counts from the latest review; an absent item is unknown.
+    Findings are structured records from the latest panel (or severity counts for count-only callers);
+    an absent item is unknown.
     Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
     Merge requires answered decisions and, where policy requires it, a done architect segment for the current work.
     Without creation times, issue numbers order work within each forge namespace.
@@ -268,14 +407,47 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         if reset is not None and _time(reset) > now and item.forge_state != "closed":
             actions.append(Wait(item.issue_key, "quota reset pending"))
             continue
-        action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
-                       (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
-                       (decisions or {}).get(item.issue_key, ()))
-        if isinstance(action, (Dispatch, Review)):
-            if free_slots:
-                free_slots -= 1
+        key = item.issue_key
+        history = segments.get(key, ())
+        room = (rooms or {}).get(key)
+        head = (heads or {}).get(key)
+        findings = open_findings.get(key)
+        counts = findings
+        planned = None
+        if isinstance(findings, (list, tuple)):
+            actors = {s.attempt: s.persona for s in history if s.stage == "review"}
+            required = _reviewers(policies, room) if "review" in policies.stages else ()
+            counts = []
+            for finding in findings:
+                persona = actors.get(int(finding["finding_key"].split("/")[1]))
+                if persona not in required:
+                    continue
+                threshold = policies.resolve(persona, "review", room).blocking_severity
+                if SEVERITIES.index(finding["severity"]) <= SEVERITIES.index(threshold):
+                    counts.append(finding)
+            if not item.human_review and item.forge_state != "closed":
+                workflow = policies.workflow_for(issue_types.get(key))
+                planned = _burn_down(item, history, counts, policies, room, head, workflow, now)
+        # A partly launched panel must keep filling available slots while its peers run.
+        panel = _panel_history(history)
+        if (planned is None and panel and item.stage == "review" and not item.human_review
+                and item.forge_state != "closed" and getattr(panel[0], "review_round", 0)
+                and any(name not in {getattr(s, "persona", "") for s in panel}
+                        for name in _reviewers(policies, room))):
+            planned = _panel(key, history, policies, room, head)
+        if planned is None:
+            action = _item(item, history, policies, issue_types.get(key), room, now, counts,
+                           (decisions or {}).get(key, ()), head)
+            if isinstance(action, Review):
+                complete = panel and all(s.ended_at and s.outcome == "done" for s in panel)
+                planned = _panel(key, history, policies, room, head, fresh=bool(complete))
             else:
-                action = Wait(item.issue_key, "no free worker slots")
-        if action is not None:
+                planned = [action] if action is not None else []
+        for action in planned:
+            if isinstance(action, (Dispatch, Review)):
+                if free_slots:
+                    free_slots -= 1
+                else:
+                    action = Wait(key, "no free worker slots")
             actions.append(action)
     return actions

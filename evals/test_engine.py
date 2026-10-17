@@ -107,6 +107,9 @@ class EngineTest(unittest.TestCase):
             "tree": str(self.trees / "fake"),
         }}
         self.db.set_resume(key, data)
+        if stage == "review":
+            segment = next(s for s in self.db.segments(key) if s.stage == stage and s.attempt == attempt)
+            self.db.record_segment(key, stage, attempt, segment.started_at, reviewed_head=tf.tma.HEAD)
         return "used-model", "high"
 
     def run_pass(self, **kwargs):
@@ -121,15 +124,23 @@ class EngineTest(unittest.TestCase):
         self.now += timedelta(minutes=1)
 
     def findings(self, attempt=1, counts=None):
-        self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}),
-                                 "review_findings": {"attempt": attempt, "counts": counts or {}}})
+        segment = next(s for s in self.db.segments(KEY) if s.stage == "review" and s.attempt == attempt)
+        self.db.record_segment(KEY, "review", attempt, segment.started_at, persona="critic",
+                               reviewed_head=tf.tma.HEAD, review_round=attempt)
+        data = self.db.resume(KEY) or {}
+        runs = data.setdefault("runs", {})
+        record = runs.setdefault(f"review-{attempt}", {"session_id": "fake-session"})
+        self.db.set_resume(KEY, data)
+        findings = [dict(severity=k, title=f"Finding {i}", evidence="Observed failure", suggestion="Fix it")
+                    for k, n in (counts or {}).items() for i in range(n)]
+        self.db.add_report(KEY, "review", attempt, record["session_id"], "done", "Reviewed", findings)
 
     def test_dispatch_review_merge_end_to_end(self):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
         self.assertEqual(self.db.segments(KEY)[0].model, "used-model")
         self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertEqual(self.launched[-1], (KEY, "review", 1, "critic"))
         self.finish("review")
         self.findings()
@@ -290,7 +301,9 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.finish("review")
         self.findings(counts={"minor": 1})
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        actions = self.run_pass()
+        self.assertEqual([(a.stage, a.persona, a.attempt) for a in actions], [("implement", "builder", 2)])
+        self.assertEqual(actions[0].finding["severity"], "minor")
         self.assertEqual(self.forge.writes[-1], (1, "implement", "review", True))
 
     def test_the_engine_initializes_only_when_the_store_has_no_prior_stage(self):
@@ -346,7 +359,7 @@ class EngineTest(unittest.TestCase):
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.run_pass()
         self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
         self.finish("review")
         self.findings()
@@ -357,7 +370,9 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertEqual(len(self.launched), 2)
         gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        actions = self.run_pass()
+        self.assertEqual([(a.stage, a.persona, a.attempt) for a in actions], [("implement", "builder", 2)])
+        self.assertEqual(actions[0].finding["severity"], "minor")
         self.assertFalse(self.db.items()[0].human_review)
 
     def test_merge_hold_is_written_before_merging_and_waits_for_release(self):
@@ -385,7 +400,8 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
 
     def test_shared_label_preserves_implement_when_it_reads_back_as_plan(self):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Shared stages", ["stage: doing"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Shared stages", ["stage: doing"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human",
                        {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -406,7 +422,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.items()[0].stage, "implement")
         self.assertEqual(self.forge.snapshots()[0]["stage"], "plan")
         self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertEqual([call[1] for call in self.launched], ["plan", "implement", "review"])
 
     def test_retried_merge_hold_write_cannot_merge_on_the_retry_pass(self):
@@ -431,12 +447,13 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("pending_stage", self.db.resume(KEY))
 
     def test_manual_move_to_a_different_label_overrides_the_stored_stage(self):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Moved by hand", ["stage: review"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Moved by hand", ["stage: review"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human",
                        {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.upsert_item(KEY, stage="implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertEqual(self.db.items()[0].stage, "review")
 
     def test_unresolved_stage_write_cannot_dispatch_work_from_the_old_stage(self):
@@ -459,13 +476,48 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(engine.reconcile, "plan", return_value=[]) as planned:
             self.run_pass()
         self.assertEqual(planned.call_args.kwargs["now"], self.now)
-        self.assertEqual(planned.call_args.kwargs["open_findings"], {KEY: {}})
+        self.assertEqual(planned.call_args.kwargs["open_findings"], {KEY: []})
 
     def test_cleanup_failure_is_a_failed_pass_after_actions_run(self):
         self.cleanup.return_value = 1
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
+
+    def test_engine_launches_both_reviewers_with_distinct_attempts(self):
+        self.p.personas["security"] = policy.Persona("security", "reviews", "example")
+        self.p.stages["review"].policy["reviewers"] = ("critic", "security")
+        self.forge.rows[0]["stage"] = "review"
+        actions = self.run_pass()
+        self.assertEqual([a.persona for a in actions], ["critic", "security"])
+        self.assertEqual([r[3] for r in self.launched], ["critic", "security"])
+        self.assertEqual([s.persona for s in self.db.segments(KEY)], ["critic", "security"])
+
+    def test_entering_a_panel_writes_the_stage_only_once(self):
+        self.p.personas["security"] = policy.Persona("security", "reviews", "example")
+        self.p.stages["review"].policy["reviewers"] = ("critic", "security")
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.assertEqual(len([w for w in self.forge.writes if w[1] == "review"]), 1)
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.assertEqual([s.persona for s in self.db.segments(KEY) if s.stage == "review"], ["critic", "security"])
+
+
+    def test_out_of_band_architect_consult_keeps_the_review_label_then_merges(self):
+        self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
+        self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "architect", "architect", 1)])
+        self.assertEqual(self.db.items()[0].stage, "review")
+        self.assertFalse(any(w[1] == "architect" for w in self.forge.writes))
+        self.finish("architect")
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
 
 
 class MainTest(unittest.TestCase):

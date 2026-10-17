@@ -36,16 +36,30 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _planning_inputs(store: Any, items: list) -> dict:
+def _planning_inputs(store: Any, items: list, forge: Any = None) -> dict:
     """Read the same issue context for the engine pass and merge recheck."""
     segments = {item.issue_key: store.segments(item.issue_key) for item in items}
     states = {item.issue_key: _resume(store, item.issue_key) for item in items}
+    findings = {}
+    heads = {}
+    for item in items:
+        key = item.issue_key
+        runs = states[key].get("runs", {})
+        sessions = {s.attempt: runs.get(f"review-{s.attempt}", {}).get("session_id")
+                    for s in segments[key] if s.stage == "review"}
+        findings[key] = reconcile.review_findings(store.reports(key), segments[key], sessions=sessions)
+        if forge is not None and item.forge_state != "closed":
+            try:
+                request = forge.closing_request(key)
+                heads[key] = request.head if request else None
+            except ForgeError:
+                heads[key] = None
     return {
         "segments": segments,
         "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
                         or getattr(item, "issue_type", None) for item in items},
-        "open_findings": {key: counts for key, history in segments.items()
-                          if (counts := reconcile.review_findings(states[key], history)) is not None},
+        "open_findings": {key: value for key, value in findings.items() if value is not None},
+        "heads": heads,
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
@@ -117,7 +131,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             **_planning_inputs(store, items))
+                             **_planning_inputs(store, items, forge))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
@@ -126,13 +140,19 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             stage = None
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"
-                persona = action.persona if isinstance(action, reconcile.Dispatch) else policies.stages[stage].persona
-                if policies.resolve(persona=persona, stage=stage).launch == "session":
+                persona = action.persona or policies.stages[stage].persona
+                if policies.resolve(persona=persona, stage=stage if stage in policies.stages else None,
+                                    room=_resume(store, key).get("room")).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
                 slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                             max_concurrency=max_concurrency, clock=clock,
-                            launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
+                            launch=lambda: launch(key, stage, action.attempt, persona), runtime="claude",
+                            persona=persona, review_round=getattr(action, "review_round", None),
+                            finding_key=getattr(action, "finding_key", None))
+                if stage == "architect" and stage not in {e.target for e in policies.workflow_for(
+                        _resume(store, key).get("issue_type")).edges}:
+                    stage = None  # an out-of-band consult does not move the workflow label
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
@@ -159,6 +179,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 data["pending_stage"] = {"stage": stage, "expected": stages[key]}
                 store.set_resume(key, data)
                 _write_stage(forge, store, key, stage, stages[key])
+                stages[key] = stage
         except Exception as exc:
             store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):

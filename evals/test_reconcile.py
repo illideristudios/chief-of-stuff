@@ -32,6 +32,10 @@ class Segment:
     started_at: datetime = NOW - timedelta(hours=2)
     ended_at: datetime | None = NOW - timedelta(hours=1)
     outcome: str | None = "done"
+    persona: str = "critic"
+    reviewed_head: str = "head"
+    review_round: int = 0
+    finding_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -62,21 +66,21 @@ class ReconcileTest(unittest.TestCase):
 
     def plan(self, item=Item(), history=(), findings=None, slots=4, **kwargs):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
-                              {} if findings is None else {item.issue_key: findings}, **kwargs)
+                              {} if findings is None else {item.issue_key: findings}, heads={item.issue_key: "head"}, **kwargs)
 
     def test_closed_items_and_any_running_segment_get_no_actions(self):
         self.assertEqual(self.plan(replace(Item(), forge_state="closed")), [])
         self.assertEqual(self.plan(history=[Segment("review", ended_at=None)]), [])
 
     def test_completed_stage_follows_its_edge_and_launches_review(self):
-        self.assertEqual(self.plan(history=[Segment("implement")]), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(history=[Segment("implement")]), [reconcile.Review(KEY, 1, "critic", 1)])
 
     def test_gated_edge_asks_only_when_its_resolved_policy_requires_zach(self):
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
         self.assertEqual(self.plan(history=[Segment("implement")]),
                          [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
         self.p.stages["implement"] = policy.Place("implement", "builder")
-        self.assertEqual(self.plan(history=[Segment("implement")]), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(history=[Segment("implement")]), [reconcile.Review(KEY, 1, "critic", 1)])
 
     def test_approval_must_match_gate_and_expire_strictly_after_now(self):
         for gate, expires, allowed in (("plan", NOW + timedelta(seconds=1), True),
@@ -111,7 +115,7 @@ class ReconcileTest(unittest.TestCase):
                 start = NOW - timedelta(minutes=10 - 2 * round)
                 history.append(Segment("implement", attempt, started_at=start, ended_at=start + timedelta(seconds=30)))
                 self.assertEqual(self.plan(replace(item, stage="implement"), history, {"minor": 1}),
-                                 [reconcile.Review(KEY, round + 1)])
+                                 [reconcile.Review(KEY, round + 1, "critic", 1)])
                 start += timedelta(minutes=1)
                 history.append(Segment("review", round + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
             self.assertEqual(self.plan(item, history, {"minor": 1}),
@@ -174,7 +178,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, [Segment("review")], {"minor": 1}),
                          [reconcile.Dispatch(KEY, "fix", "builder", 1)])
         self.assertEqual(self.plan(replace(item, stage="fix"), [Segment("review"),
-                                   Segment("fix", started_at=NOW)], {"minor": 1}), [reconcile.Review(KEY, 2)])
+                                   Segment("fix", started_at=NOW)], {"minor": 1}), [reconcile.Review(KEY, 2, "critic", 1)])
         self.assertEqual(self.plan(item, [Segment("review", started_at=NOW - timedelta(hours=4),
                                            ended_at=NOW - timedelta(hours=3)),
                                    Segment("fix", 3), Segment("review", 3, started_at=NOW)],
@@ -184,7 +188,7 @@ class ReconcileTest(unittest.TestCase):
         path = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"
         self.p = policy.parse(tomllib.loads(path.read_text()))
         item = replace(Item(), stage="review", review_state="none", merge_state="ready")
-        history = [Segment(stage, started_at=NOW - timedelta(hours=6 - i))
+        history = [Segment(stage, persona="reviewer", started_at=NOW - timedelta(hours=6 - i))
                    for i, stage in enumerate(("plan", "implement", "review"))]
         for attempt in range(1, 4):
             with self.subTest(attempt=attempt):
@@ -193,9 +197,9 @@ class ReconcileTest(unittest.TestCase):
                 start = NOW - timedelta(minutes=10 - 2 * attempt)
                 history.append(Segment("fix", attempt, started_at=start, ended_at=start + timedelta(seconds=30)))
                 self.assertEqual(self.plan(replace(item, stage="fix"), history, {"minor": 1}),
-                                 [reconcile.Review(KEY, attempt + 1)])
+                                 [reconcile.Review(KEY, attempt + 1, "reviewer", 1)])
                 start += timedelta(minutes=1)
-                history.append(Segment("review", attempt + 1, started_at=start, ended_at=start + timedelta(seconds=30)))
+                history.append(Segment("review", attempt + 1, persona="reviewer", started_at=start, ended_at=start + timedelta(seconds=30)))
         self.assertEqual(self.plan(item, history, {"minor": 1}),
                          [reconcile.Escalate(KEY, "retry limit reached for fix")])
         history.append(Segment("architect", started_at=history[-1].started_at, ended_at=NOW))
@@ -221,7 +225,7 @@ class ReconcileTest(unittest.TestCase):
                                     Segment("repair", 3, outcome="failed")]),
                          [reconcile.Escalate(KEY, "retry limit reached for repair")])
         self.assertEqual(self.plan(replace(Item(), stage="repair"), [Segment("repair", 3)]),
-                         [reconcile.Review(KEY, 1)])
+                         [reconcile.Review(KEY, 1, "critic", 1)])
 
     def test_fix_without_a_review_edge_gets_an_initial_attempt(self):
         self.p.stages["fix"] = policy.Place("fix", "builder", {"retry_limit": 0})
@@ -233,7 +237,7 @@ class ReconcileTest(unittest.TestCase):
 
     def test_retry_limit_escalates_before_a_fifth_attempt_but_allows_its_review(self):
         for stage, expected in (("review", reconcile.Escalate(KEY, "retry limit reached for implement")),
-                                ("implement", reconcile.Review(KEY, 5))):
+                                ("implement", reconcile.Review(KEY, 5, "critic", 1))):
             with self.subTest(stage=stage):
                 history = [Segment("implement", started_at=NOW - timedelta(hours=6),
                                    ended_at=NOW - timedelta(hours=5)),
@@ -310,7 +314,7 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(self.plan(item, [review], {}), [reconcile.Merge(KEY)])
                 history = [Segment("implement"), review]
                 self.assertEqual(self.plan(item, history, {}),
-                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                                 [reconcile.Wait(KEY, "architect consultation is required: no architect persona configured")])
                 self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
                                  [reconcile.Merge(KEY)])
 
@@ -323,7 +327,7 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(self.plan(item, [review], {}), [reconcile.Merge(KEY)])
                 history = [Segment("implement"), review]
                 self.assertEqual(self.plan(item, history, {}),
-                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                                 [reconcile.Wait(KEY, "architect consultation is required: no architect persona configured")])
                 self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
                                  [reconcile.Merge(KEY)])
 
@@ -353,21 +357,21 @@ class ReconcileTest(unittest.TestCase):
         history = [Segment("implement", started_at=NOW - timedelta(hours=6), ended_at=NOW - timedelta(hours=5)),
                    Segment("review", started_at=NOW - timedelta(hours=4), ended_at=NOW - timedelta(hours=3)),
                    Segment("architect")]
-        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2, "critic", 1)])
 
     def test_review_architect_merge_reaches_merge_after_the_post_architect_review(self):
         self.p.stages["architect"] = policy.Place("architect", "builder")
         self.p.workflows["standard"] = policy.Workflow("standard", "review", (
             policy.Edge("review", "architect"), policy.Edge("architect", "merge", "merge")))
         item = replace(Item(), stage="review", review_state="none", merge_state="ready")
-        self.assertEqual(self.plan(item), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(item), [reconcile.Review(KEY, 1, "critic", 1)])
         history = [Segment("review", started_at=NOW - timedelta(hours=4),
                            ended_at=NOW - timedelta(hours=3))]
         self.assertEqual(self.plan(item, history, {"minor": 1}),
                          [reconcile.Dispatch(KEY, "architect", "builder", 1)])
         item = replace(item, stage="architect")
         history.append(Segment("architect"))
-        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2, "critic", 1)])
         item = replace(item, stage="review")  # The engine records the dispatched review's stage.
         history.append(Segment("review", 2, started_at=NOW - timedelta(minutes=30), ended_at=NOW))
         for stage in ("review", "merge"):
@@ -390,7 +394,7 @@ class ReconcileTest(unittest.TestCase):
         item = replace(Item(), stage="review", review_state="approved", merge_state="ready")
         history = [Segment("implement", started_at=NOW - timedelta(hours=3), ended_at=NOW - timedelta(minutes=30)),
                    Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW - timedelta(minutes=10))]
-        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2)])
+        self.assertEqual(self.plan(item, history, {}), [reconcile.Review(KEY, 2, "critic", 1)])
         history[0] = replace(history[0], ended_at=history[1].started_at)
         self.assertEqual(self.plan(item, history, {}), [reconcile.Merge(KEY)])
 
@@ -408,7 +412,7 @@ class ReconcileTest(unittest.TestCase):
             history = [Segment("review"), Segment(stage, started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
             for order in (history, history[::-1]):
                 with self.subTest(stage=stage, history=order):
-                    self.assertEqual(self.plan(item, order, {}), [reconcile.Review(KEY, 2)])
+                    self.assertEqual(self.plan(item, order, {}), [reconcile.Review(KEY, 2, "critic", 1)])
 
     def test_forge_changes_requested_waits_even_after_a_clean_review(self):
         for stage in ("review", "merge"):
@@ -419,7 +423,7 @@ class ReconcileTest(unittest.TestCase):
 
     def test_a_failed_review_is_not_review_evidence(self):
         item = replace(Item(), stage="merge", merge_state="ready")
-        self.assertEqual(self.plan(item, [Segment("review", outcome="failed")], {}), [reconcile.Review(KEY, 2)])
+        self.assertEqual(self.plan(item, [Segment("review", outcome="failed")], {}), [reconcile.Review(KEY, 2, "critic", 1)])
 
     def test_review_evidence_requires_a_done_outcome(self):
         for outcome in (None, "", "human_review", "findings", "unknown"):
@@ -427,7 +431,7 @@ class ReconcileTest(unittest.TestCase):
                 with self.subTest(outcome=outcome, stage=stage):
                     item = replace(Item(), stage=stage, review_state="approved", merge_state="ready")
                     self.assertEqual(self.plan(item, [Segment("review", outcome=outcome)], {}),
-                                     [reconcile.Review(KEY, 2)])
+                                     [reconcile.Review(KEY, 2, "critic", 1)])
 
     def test_merge_requires_ready_state_completed_review_and_known_findings(self):
         item = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
@@ -435,7 +439,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(replace(item, merge_state="blocked"), history, {}),
                          [reconcile.Wait(KEY, "merge is not ready")])
         self.assertEqual(self.plan(item, history), [reconcile.Wait(KEY, "review findings are unknown")])
-        self.assertEqual(self.plan(item, findings={}), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(item, findings={}), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertEqual(self.plan(item, history, {"critical": 1}), [reconcile.Wait(KEY, "blocking review findings")])
 
     def test_merge_gate_is_rechecked_for_items_already_at_merge(self):
@@ -543,10 +547,10 @@ class ReconcileTest(unittest.TestCase):
                  for n, stage in ((1, "review"), (2, "review"), (3, "implement"))]
         for slots in (0, 1, 2, 3):
             with self.subTest(slots=slots):
-                actions = reconcile.plan(items, {}, self.p, {}, slots, NOW, {})
+                actions = reconcile.plan(items, {}, self.p, {}, slots, NOW, {}, heads={i.issue_key: "head" for i in items})
                 self.assertEqual(sum(isinstance(a, (reconcile.Dispatch, reconcile.Review)) for a in actions), slots)
-        actions = reconcile.plan(items, {}, self.p, {}, 2, NOW, {})
-        self.assertEqual(actions[:2], [reconcile.Review(items[0].issue_key, 1), reconcile.Review(items[1].issue_key, 1)])
+        actions = reconcile.plan(items, {}, self.p, {}, 2, NOW, {}, heads={i.issue_key: "head" for i in items})
+        self.assertEqual(actions[:2], [reconcile.Review(items[0].issue_key, 1, "critic", 1), reconcile.Review(items[1].issue_key, 1, "critic", 1)])
 
     def test_deterministic_order_uses_creation_time_then_issue_key(self):
         items = [replace(Item(), issue_key=f"github:example/project#{n}") for n in (10, 2, 1)]
@@ -559,8 +563,8 @@ class ReconcileTest(unittest.TestCase):
 
     def test_issue_type_selects_workflow_and_empty_stage_uses_its_start(self):
         self.p.workflows["short"] = policy.Workflow("short", "review", (policy.Edge("review", "merge", "merge"),), ("bug",))
-        self.assertEqual(reconcile.plan([replace(Item(), stage="")], {}, self.p, {KEY: "bug"}, 1, NOW, {}),
-                         [reconcile.Review(KEY, 1)])
+        self.assertEqual(reconcile.plan([replace(Item(), stage="")], {}, self.p, {KEY: "bug"}, 1, NOW, {}, heads={KEY: "head"}),
+                         [reconcile.Review(KEY, 1, "critic", 1)])
 
     def test_old_stage_segment_does_not_skip_a_new_fix_round(self):
         history = [Segment("implement"), Segment("review", started_at=NOW - timedelta(minutes=30))]

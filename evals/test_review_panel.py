@@ -4,14 +4,12 @@ import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import engine
 import policy
 import reconcile
 import store
-from evals.test_engine import EngineTest, KEY, NOW
+from evals.test_engine import KEY, NOW
 
 
 def finding(title="Fix boundary"):
@@ -107,20 +105,60 @@ class ReviewPanelTest(unittest.TestCase):
             else:
                 self.assertIsInstance(action, reconcile.Escalate)
 
+    def test_partial_panel_with_findings_launches_the_missing_peer_before_fixing(self):
+        self.review(1, "critic", [finding()])
+        action, = self.plan()
+        self.assertIsInstance(action, reconcile.Review)
+        self.assertEqual(action.persona, "security")
+
+    def test_a_running_reviewer_does_not_block_launching_its_missing_peer(self):
+        self.db.record_segment(KEY, "review", 1, NOW.isoformat(), persona="critic",
+                               reviewed_head="head", review_round=1)
+        action, = self.plan()
+        self.assertEqual((action.persona, action.attempt, action.review_round), ("security", 2, 1))
+
+    def test_a_failed_peer_retries_without_repeating_the_clean_review(self):
+        self.review(1, "critic")
+        self.review(2, "security")
+        self.db.record_segment(KEY, "review", 2, NOW.isoformat(), outcome="failed")
+        action, = self.plan()
+        self.assertEqual((action.persona, action.attempt, action.review_round), ("security", 3, 1))
+
+    def test_each_reviewer_uses_its_own_open_finding_threshold(self):
+        self.p.personas["critic"].policy["blocking_severity"] = "important"
+        self.p.personas["security"].policy["blocking_severity"] = "minor"
+        self.review(1, "critic", [finding("Ignored minor")])
+        self.review(2, "security", [finding("Security minor")])
+        action, = self.plan()
+        self.assertEqual(action.finding["title"], "Security minor")
+
+    def test_each_reviewers_architect_policy_can_route_a_consult(self):
+        self.p.personas["security"].policy.update(architect=True, architect_persona="architect")
+        self.review(1, "critic", [finding()])
+        self.review(2, "security")
+        action, = self.plan()
+        self.assertEqual((action.stage, action.persona), ("architect", "architect"))
+
+    def test_room_overrides_the_panel_and_architect_requirement(self):
+        self.p.rooms["lab"] = policy.Place("lab", policy={"reviewers": ("security",), "architect": False})
+        self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
+        self.review(1, "security")
+        actions = reconcile.plan(self.db.items(), {KEY: self.db.segments(KEY)}, self.p, {}, 2, NOW,
+                                 {KEY: []}, heads={KEY: "head"}, rooms={KEY: "lab"})
+        self.assertEqual(actions, [reconcile.Merge(KEY)])
+
+    def test_wrong_session_report_cannot_replace_a_review(self):
+        self.review(1, "critic", [finding()])
+        self.review(2, "security")
+        self.db.add_report(KEY, "review", 1, "unrelated-session", "done", "No findings", [])
+        findings = reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY),
+                                              sessions={1: "session-1", 2: "session-2"})
+        self.assertEqual(len(findings), 1)
+        self.assertIsNone(reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY), sessions={}))
+
     def test_store_upgrade_preserves_review_identity_on_completion(self):
         self.review(1, "critic")
         store.migrate(self.db.engine.url.database)
         self.db.end_segment(KEY, "review", 1, NOW.isoformat(), "done")
         segment, = self.db.segments(KEY)
         self.assertEqual((segment.persona, segment.reviewed_head, segment.review_round), ("critic", "head", 1))
-
-
-class PanelExecutionTest(EngineTest):
-    def test_engine_launches_both_reviewers_with_distinct_attempts(self):
-        self.p.personas["security"] = policy.Persona("security", "reviews", "example")
-        self.p.stages["review"].policy["reviewers"] = ("critic", "security")
-        self.forge.rows[0]["stage"] = "review"
-        actions = self.run_pass()
-        self.assertEqual([a.persona for a in actions], ["critic", "security"])
-        self.assertEqual([r[3] for r in self.launched], ["critic", "security"])
-        self.assertEqual([s.persona for s in self.db.segments(KEY)], ["critic", "security"])

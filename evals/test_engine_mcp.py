@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -136,7 +137,10 @@ class ChannelMigrationTest(unittest.TestCase):
             db = store.Store(path)
             try:
                 db.upsert_item(KEY, title="Before upgrade", stage="review")
-                db.record_segment(KEY, "review", 1, "before", runtime="claude")
+                # Seed revision 0002's schema, rather than writing it through today's Segment model.
+                with sqlite3.connect(path) as conn:
+                    conn.execute("INSERT INTO segment (issue_key, stage, attempt, started_at, runtime) "
+                                 "VALUES (?, 'review', 1, 'before', 'claude')", (KEY,))
                 store.migrate(path)
                 self.assertEqual(db.items()[0].title, "Before upgrade")
                 self.assertEqual(db.segments(KEY)[0].runtime, "claude")
