@@ -985,25 +985,35 @@ class MainTest(unittest.TestCase):
         self.assertIs(configs[0], configs[1])
         self.assertIn("settings reload failed", errors.getvalue())
 
-    def test_reload_that_exceeds_a_stage_budget_keeps_the_snapshot(self):
+    def test_reload_that_exceeds_a_stage_budget_keeps_the_last_good_snapshot(self):
         configs = []
-        validated = []
+        loaded = []
+        real = engine.settings.load
+
+        def load(*args):
+            config = real(*args)
+            # Startup keeps the real object; each reload is a distinct snapshot the validator can tell apart.
+            loaded.append(config if not loaded else replace(config))
+            return loaded[-1]
 
         def validate(root, config, policies):
-            validated.append(config)
-            if len(validated) > 1:
+            if len(loaded) > 2 and config is loaded[2]:
                 raise engine.dispatch_prompt.RefusedError("[workers] rules do not fit the implement assignment")
 
         errors = io.StringIO()
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.settings, "load", side_effect=load), \
              mock.patch.object(engine.dispatch_prompt, "validate_worker_rules", side_effect=validate), \
              mock.patch.object(engine, "run_pass", side_effect=lambda **kw: configs.append(kw["launch"].keywords["config"])), \
-             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, None, KeyboardInterrupt]), \
              contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
-        self.assertEqual(len(configs), 2)
-        self.assertIs(configs[0], configs[1])
-        self.assertIn("settings reload failed", errors.getvalue())
+        self.assertEqual(len(loaded), 4)
+        self.assertEqual(len(configs), 3)
+        self.assertIs(configs[0], loaded[1])
+        self.assertIs(configs[1], loaded[1])
+        self.assertIs(configs[2], loaded[3])
+        self.assertEqual(errors.getvalue().count("settings reload failed"), 1)
         self.assertIn("do not fit", errors.getvalue())
 
     def test_once_bad_reload_runs_on_the_valid_startup_snapshot(self):
