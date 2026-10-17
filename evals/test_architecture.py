@@ -135,9 +135,9 @@ READER_BANS = ({"one_shot", "backlog"}, frozenset({*HTTP, "urllib", "http"}))
 ADAPTER = ("scripts/claude_adapter.py", "scripts/runtimes.py")
 # The modules that named a host executable before the adapter. The list may only shrink; each entry must still name one.
 # session_exec execs the worker CLI for spawn_session, and process_status matches the executable to check liveness.
-# probe_health finds each rotation's executable for the health line.
+# evals/run.py remains exempt only for its non-Claude backends until 1.1.
 LEGACY_LAUNCHERS = ("scripts/one_shot.py", "scripts/spawn_session.py", "start_coordinator.py", "evals/run.py",
-                    "scripts/session_exec.py", "scripts/process_status.py", "scripts/probe_health.py")
+                    "scripts/session_exec.py", "scripts/process_status.py")
 HOST_EXECUTABLES = frozenset({"claude", "claude-as", "codex", "agent", "agy"})
 
 
