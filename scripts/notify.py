@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
-"""The coordinator's notifications, written where the configured notifier reads them.
+"""The coordinator's exception notifications, written where the configured notifier reads them (M6, #714, #92).
 
 The md-notify adapter is optional and writes only when explicitly selected in workspace settings.
 
-    python3 notify.py --root . sync                                   # deadline warnings, day open and close
-    python3 notify.py --root . add --kind awaiting --what "PR 0.23.0" [--message M] [--when now|YYYY-MM-DD HH:MM]
+    python3 notify.py --root . sync
+    python3 notify.py --root . add --kind awaiting --what "PR 0.23.0" [--message M] [--issue KEY] [--when now|YYYY-MM-DD HH:MM]
 
-md-notify reads a markdown table every minute (MNCore `NotificationSchedule.parse`). What that parser does
-decides what this writer does:
-
-- A line containing `---` is a separator and one containing `When (CT)` is a header, wherever they occur,
-  so no cell may carry either, and a `|` splits a cell. `clean()` removes all three.
-- A one-shot row fires once its time is reached and then **resurfaces every 15 minutes until it is tapped**.
-  A past row is never written, except `--when now`: a stale warning would nag for nothing.
-- Snooze rewrites a row's `When`, and Complete and Ignore move it under `## Completed` / `## Ignored`. The
-  Title is the only thing that survives all three, so a Title found anywhere in the file is never added
-  again. Titles are therefore built here, from a kind and a clock read, never typed free.
-- `When` is local time on the Mac; this writes the workspace timezone. They are the same here.
-- All writes hold a shared sibling flock across reading and atomic replacement. md-notify must use
-  the same transaction lock for acknowledgment writes; an older app can still race this writer.
+Only exception causes emit pings:
+- a `human_review` stop (needs input)
+- an open decision / gate timeout
+- an unexpected failure (crashed/failed/timed_out worker or refused board/stage write)
+Each store-backed ping links to its board item in the `Open` cell.
 """
 
 from __future__ import annotations
@@ -38,27 +30,24 @@ from typing import Protocol
 from zoneinfo import ZoneInfoNotFoundError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from workspace import ConfigError, read_config, with_workspace_decision_deadlines  # noqa: E402
+try:
+    import store_access  # noqa: E402
+except ModuleNotFoundError:
+    store_access = None  # type: ignore[assignment]
 from settings import Settings, SettingsError, load  # noqa: E402
+from workspace import ConfigError, read_config  # noqa: E402
 
 WHEN = "%Y-%m-%d %H:%M"
 KINDS = {"awaiting": "🙋 Awaiting you", "stopped": "🛑 Session stopped", "gone": "👻 Session gone"}
-WARNING = "⏰ "
-OPEN_DAY, CLOSE_DAY = "☀️ Open the day", "🌙 Close the day"
 TEMPLATE = """# chief-of-stuff notifications
 
 Written by chief-of-stuff's `notify.py` for md-notify. Tap Complete or Ignore on a banner to park its row. Keep other notification tools from rewriting this queue.
 
 | When (CT) | Title | Message | Open |
 |---|---|---|---|
-
-## Recurring
-
-| Every | Title | Message | Open |
-|---|---|---|---|
 """
-RECURRING_TABLE = ["", "## Recurring", "", "| Every | Title | Message | Open |", "|---|---|---|---|"]
 PARKED = ("completed", "ignored")
+_BOARD_URL_RE = re.compile(r"^\s*-\s*Board:.*?(https?://[^\s)]+)", re.MULTILINE)
 
 
 def clean(text: str) -> str:
@@ -77,51 +66,17 @@ class Row:
     when: str
     title: str
     message: str = ""
+    open_url: str = ""
     legacy_title: str = ""
 
     def line(self) -> str:
-        # Open stays empty: md-notify opens it, and a notification must never open a page (Zach, 2026-09-25).
-        return f"| {self.when} | {clean(self.title)} | {clean(self.message)} |  |"
+        open_cell = f" {clean(self.open_url)} " if self.open_url else "  "
+        return f"| {self.when} | {clean(self.title)} | {clean(self.message)} |{open_cell}|"
 
 
 @dataclass
 class Changes:
     lines: list[str] = field(default_factory=list)
-
-
-def warnings(cfg, notify, now: datetime) -> list[Row]:
-    """One row per future warning. The full due date distinguishes deadlines a week apart."""
-    rows = []
-    for d in cfg.deadlines:
-        at = d.at.astimezone(cfg.zone)
-        for label, delta in notify.warnings:
-            when = at - delta
-            if when > now:
-                head = f"{WARNING}{d.name} in {label}"
-                rows.append(Row(when.strftime(WHEN), f"{head} ({at:%a %Y-%m-%d %H:%M})",
-                                f"Due {at:%Y-%m-%d %H:%M}",
-                                legacy_title=f"{head} ({at:%a %H:%M})"))
-    return sorted(rows, key=lambda r: r.when)
-
-
-def day_rows(notify) -> list[Row]:
-    return [Row(f"daily {notify.day_open}", OPEN_DAY, "Open the day with the coordinator."),
-            Row(f"daily {notify.day_close}", CLOSE_DAY, "Close the day: log, tracker, what carries over.")]
-
-
-def _owned(title: str) -> bool:
-    return title.startswith((WARNING, *KINDS.values())) or title in (OPEN_DAY, CLOSE_DAY)
-
-
-def clear_open(lines: list[str]) -> list[str]:
-    """Empty the Open cell of every row this script owns, in place. Earlier releases wrote the board URL there."""
-    said = []
-    for i, line in enumerate(lines):
-        cells = _cells(line) if _is_data(line) else []
-        if len(cells) > 3 and cells[3] and _owned(cells[1]):
-            lines[i] = Row(cells[0], cells[1], cells[2]).line()
-            said.append(f"notify: cleared Open on {cells[1]}")
-    return said
 
 
 def _cells(line: str) -> list[str]:
@@ -146,6 +101,130 @@ def _regions(lines: list[str]) -> list[str]:
             current = "parked" if name in PARKED else "recurring" if name == "recurring" else "active"
         out.append(current)
     return out
+
+
+def board_base_url(root: Path, settings: Settings) -> str:
+    claude_md = root / "CLAUDE.md"
+    if claude_md.is_file():
+        m = _BOARD_URL_RE.search(claude_md.read_text(encoding="utf-8"))
+        if m:
+            return m.group(1).rstrip("/")
+    port = getattr(getattr(settings, "pages", None), "port", 7700) or 7700
+    return f"http://127.0.0.1:{port}"
+
+
+def board_item_url(root: Path, settings: Settings, issue_key: str) -> str:
+    if not issue_key:
+        return ""
+    return f"{board_base_url(root, settings)}/issues/{issue_key}"
+
+
+def _short_key(issue_key: str) -> str:
+    return f"#{issue_key.rpartition('#')[2]}" if "#" in issue_key else issue_key
+
+
+def _parse_stamp(raw: str | None, zone, fallback: datetime) -> datetime:
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=zone)
+            return dt.astimezone(zone)
+        except ValueError:
+            pass
+    return fallback
+
+
+def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
+    """Build exception notification rows from the store: human_review stops, open decisions, unexpected failures."""
+    db_path = root / "store.db"
+    if not db_path.is_file():
+        return []
+    access = store_access
+    if access is None:
+        import store_access as access  # noqa: E402
+    db = access.migrated_store(root)
+    try:
+        rows: list[Row] = []
+        items = db.items()
+        segments = db.segments()
+        decisions = db.decisions()
+        logs = db.log()
+        segs_by_key: dict[str, list] = {}
+        for seg in segments:
+            segs_by_key.setdefault(seg.issue_key, []).append(seg)
+
+        for item in items:
+            if item.forge_state == "closed":
+                continue
+            item_segs = segs_by_key.get(item.issue_key, [])
+            hr_segs = [s for s in item_segs if s.outcome == "human_review"]
+            if item.human_review or hr_segs:
+                stamp_raw = (hr_segs[-1].ended_at or hr_segs[-1].started_at) if hr_segs else item.updated_at
+                stamp = _parse_stamp(stamp_raw, cfg.zone, now)
+                short = _short_key(item.issue_key)
+                what = f"{short} {item.title}".strip()
+                rows.append(
+                    Row(
+                        now.strftime(WHEN),
+                        event_title("awaiting", what, stamp),
+                        f"Needs input on {what}",
+                        open_url=board_item_url(root, settings, item.issue_key),
+                    )
+                )
+
+        for dec in decisions:
+            if dec.status != "open":
+                continue
+            stamp = _parse_stamp(dec.created_at, cfg.zone, now)
+            short = _short_key(dec.issue_key)
+            what = f"{short} {dec.question}".strip()
+            rows.append(
+                Row(
+                    now.strftime(WHEN),
+                    event_title("awaiting", what, stamp),
+                    f"Decision needed ({dec.topic}): {dec.question}",
+                    open_url=board_item_url(root, settings, dec.issue_key),
+                )
+            )
+
+        for seg in segments:
+            if seg.outcome not in ("failed", "crashed", "timed_out"):
+                continue
+            short = _short_key(seg.issue_key)
+            resume = db.resume(seg.issue_key)
+            runner = ""
+            if isinstance(resume, dict):
+                runner = str((resume.get("runs") or {}).get(f"{seg.stage}-{seg.attempt}", {}).get("runner") or "")
+            stamp = _parse_stamp(seg.ended_at or seg.started_at, cfg.zone, now)
+            what = f"{runner or short} ({seg.outcome})"
+            rows.append(
+                Row(
+                    now.strftime(WHEN),
+                    event_title("stopped", what, stamp),
+                    f"{short} {seg.stage} attempt {seg.attempt} {seg.outcome}",
+                    open_url=board_item_url(root, settings, seg.issue_key),
+                )
+            )
+
+        for entry in logs:
+            lowered = entry.message.casefold()
+            if not any(word in lowered for word in ("failed", "refused")):
+                continue
+            short = _short_key(entry.issue_key)
+            stamp = _parse_stamp(entry.at, cfg.zone, now)
+            what = f"{short} {entry.message}"
+            rows.append(
+                Row(
+                    now.strftime(WHEN),
+                    event_title("stopped", what, stamp),
+                    entry.message,
+                    open_url=board_item_url(root, settings, entry.issue_key),
+                )
+            )
+        return rows
+    finally:
+        db.engine.dispose()
 
 
 class Notifier(Protocol):
@@ -224,11 +303,7 @@ class MdNotifyQueue:
 
     def _insert(self, lines: list[str], row: Row, region: str) -> None:
         at = self._table_end(lines, region)
-        if at is None and region == "recurring":
-            tail = len(lines) - 1 if lines and lines[-1] == "" else len(lines)
-            lines[tail:tail] = RECURRING_TABLE
-            at = self._table_end(lines, region)
-        elif at is None:
+        if at is None:
             first_heading = next((i for i, x in enumerate(lines) if x.startswith("## ")), len(lines))
             lines[first_heading:first_heading] = ["| When (CT) | Title | Message | Open |", "|---|---|---|---|", ""]
             at = first_heading + 2
@@ -240,70 +315,24 @@ class MdNotifyQueue:
 
     def _add(self, row: Row) -> Changes:
         lines = self._read()
-        said = clear_open(lines)
         if clean(row.title) in self._titles(lines):
-            if said:
-                self._write(lines)
-            return Changes([*said, f"notify: already there {clean(row.title)}"])
+            return Changes([f"notify: already there {clean(row.title)}"])
         self._insert(lines, row, "active")
         self._write(lines)
-        return Changes([*said, f"notify: added {clean(row.title)}"])
+        return Changes([f"notify: added {clean(row.title)}"])
 
-    def sync(self, one_shot: list[Row], recurring: list[Row], now: datetime) -> Changes:
+    def sync(self, one_shot: list[Row], recurring: list[Row] | None = None, now: datetime | None = None) -> Changes:
         with self.lock():
-            return self._sync(one_shot, recurring, now)
+            return self._sync(one_shot)
 
-    def _sync(self, one_shot: list[Row], recurring: list[Row], now: datetime) -> Changes:
-        """Reconcile only what this script owns: `⏰ ` rows in the active table, and the two day rows.
-        A future owned row that is no longer wanted goes; a past one stays for its owner to tap; a snoozed
-        one keeps its new time, because it is still wanted by title."""
+    def _sync(self, one_shot: list[Row]) -> Changes:
         lines = self._read()
-        said = clear_open(lines)
+        said: list[str] = []
         created = not self.path.is_file()
-        wanted = {clean(r.title) for r in one_shot}
-        # Existing queues used weekday and time in the title. Match the full due instant in Message
-        # before renaming: a parked warning from a previous week must not suppress this week's one.
-        legacy = {(clean(r.legacy_title), clean(r.message)): clean(r.title)
-                  for r in one_shot if r.legacy_title}
-        for i, line in enumerate(lines):
-            if not _is_data(line):
-                continue
-            cells = _cells(line)
-            if len(cells) < 3:
-                continue
-            replacement = legacy.get((cells[1], cells[2]))
-            if replacement and replacement != cells[1]:
-                parts = line.split("|")
-                parts[2] = parts[2].replace(cells[1], replacement, 1)
-                lines[i] = "|".join(parts)
-                said.append(f"notify: updated {replacement}")
-        regions, keep = _regions(lines), []
-        for line, region in zip(lines, regions):
-            if region == "active" and _is_data(line):
-                when, title = _cells(line)[:2]
-                try:
-                    at = datetime.strptime(when, WHEN).replace(tzinfo=now.tzinfo)
-                except ValueError:
-                    at = None
-                if title.startswith(WARNING) and title not in wanted and at is not None and at > now:
-                    said.append(f"notify: removed {title}")
-                    continue
-            keep.append(line)
-        lines = keep
         for row in one_shot:
             if clean(row.title) not in self._titles(lines):
                 self._insert(lines, row, "active")
                 said.append(f"notify: added {clean(row.title)}")
-        for row in recurring:
-            regions = _regions(lines)
-            hit = next((i for i, x in enumerate(lines) if regions[i] == "recurring" and _is_data(x)
-                        and _cells(x)[1] == clean(row.title)), None)
-            if hit is None:
-                self._insert(lines, row, "recurring")
-                said.append(f"notify: added {clean(row.title)}")
-            elif _cells(lines[hit])[0] != row.when:
-                lines[hit] = row.line()
-                said.append(f"notify: retimed {clean(row.title)} to {row.when}")
         if said or created:
             self._write(lines)
         return Changes(said)
@@ -329,10 +358,8 @@ def sync_workspace(root: Path, now: datetime | None = None) -> Changes:
     if settings.notify.adapter == "off":
         return Changes(["notify: off"])
     now = (now or datetime.now(cfg.zone)).astimezone(cfg.zone).replace(second=0, microsecond=0)
-    tracker = root / cfg.tracker_path(now.date().isoformat())
-    text = tracker.read_text() if tracker.is_file() else ""
-    cfg = with_workspace_decision_deadlines(root, cfg, text, now.date())
-    return adapter_for(settings, root).sync(warnings(cfg, settings.notify, now), day_rows(settings.notify), now)
+    rows = store_rows(root, cfg, settings, now)
+    return adapter_for(settings, root).sync(rows, [], now)
 
 
 def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
@@ -343,8 +370,9 @@ def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
     add.add_argument("--kind", choices=sorted(KINDS), required=True)
     add.add_argument("--what", required=True, help="what it is about; goes in the title")
     add.add_argument("--message", default="", help="the banner's body; defaults to --what")
+    add.add_argument("--issue", default="", help="optional issue key to link in the Open cell")
     add.add_argument("--when", default="now", help="now, or YYYY-MM-DD HH:MM in the workspace timezone")
-    sub.add_parser("sync", help="deadline warnings and the day open and close rows")
+    sub.add_parser("sync", help="exception notifications from the store")
     args = ap.parse_args(argv)
     root = Path(args.root).resolve()
     if args.cmd == "sync":
@@ -377,7 +405,9 @@ def main(argv: list[str] | None = None, now: datetime | None = None) -> int:
                 print(f"notify: --when {args.when} has passed; a past row resurfaces until tapped, so use --when now",
                       file=sys.stderr)
                 return 2
-        got = queue.add(Row(when.strftime(WHEN), event_title(args.kind, args.what, now), args.message or args.what))
+        open_url = board_item_url(root, settings, args.issue) if args.issue else ""
+        got = queue.add(Row(when.strftime(WHEN), event_title(args.kind, args.what, now),
+                            args.message or args.what, open_url=open_url))
     except OSError as e:
         print(f"notify: {e}", file=sys.stderr)
         return 2

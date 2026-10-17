@@ -59,6 +59,10 @@ class Persona:
     uses: tuple[str, ...] = ()
     policy: dict = field(default_factory=dict)
 
+    @property
+    def agent_type(self) -> str | None:
+        return self.agent
+
 
 @dataclass(frozen=True)
 class Place:
@@ -191,11 +195,12 @@ def _policy(where: str, value, personas: set[str], gates: set[str]) -> dict:
 
 def _persona(name: str, value, personas: set[str], gates: set[str]) -> Persona:
     where = f"[personas.{name}]"
-    t = _table(where, value, {"role", "model", "effort", "rules", "agent", "uses", "policy"})
+    t = _table(where, value, {"role", "model", "effort", "rules", "agent", "agent_type", "uses", "policy"})
     effort = t.get("effort")
     if effort is not None and effort not in EFFORTS:
         raise PolicyError(f"{where} effort must be one of {', '.join(EFFORTS)}")
-    agent, uses = _text(f"{where} agent", t.get("agent"), required=False), _names(f"{where} uses", t.get("uses", []))
+    raw_agent = t.get("agent") if t.get("agent") is not None else t.get("agent_type")
+    agent, uses = _text(f"{where} agent", raw_agent, required=False), _names(f"{where} uses", t.get("uses", []))
     if uses and not agent:
         raise PolicyError(f"{where} uses: only an agent uses personas")
     if unknown := sorted(set(uses) - (personas - {name})):

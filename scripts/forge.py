@@ -720,7 +720,7 @@ class Forge:
             if not got.issue.is_open:
                 raise ForgeError(f"{issue_key} is no longer open on the forge")
             if self.kanban and self.kanban.human_review_label in got.issue.labels:
-                raise ForgeError(f"{issue_key} is held for human review on the forge")
+                raise ForgeError(f"{issue_key} needs input on the forge")
             if stage_mark is not None and self.kanban:
                 try:  # same decode as snapshot: Project Status when configured, else labels
                     statuses = None
@@ -748,6 +748,16 @@ class Forge:
             raise ForgeError(f"{mark} not merged at {one.head}: {result or f'merge exited {code}'}")
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
+
+    def comment(self, number: int, body: str, commit: bool = False) -> str:
+        """Post or preview a comment on an issue."""
+        if not commit:
+            return f"would comment on #{number}: {body}"
+        _, repo = home_of(self.home)
+        if self.github:
+            code, _, stderr = self.gh(["issue", "comment", str(number), "-R", repo, "--body", body])
+            return stderr.strip() or f"gh exited {code}" if code else ""
+        return ""
 
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:

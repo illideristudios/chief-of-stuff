@@ -17,24 +17,26 @@ from pathlib import Path
 
 import board_sources
 import flow_chart
+import store
 import tracker_log
 from decision_page import HEAD, _md, _section, context, entries, held_refs, span, write_if_changed
 from fragment import href, tab_bar
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
-from tracker import TRAILING_NUMBER, issue_number, parse_tracker, resolve_due as _resolve_due
+from tracker import TRAILING_NUMBER, Task, issue_number, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, daily_trackers, read_config
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
 # A worker's outcome by its last launcher move's stage (tracker_log.moves: completed → pr, HUMAN REVIEW → review).
-ENDED = {"pr": "completed", "review": "human review"}
+ENDED = {"pr": "completed", "review": "needs input"}
 # The Flow chart's colours on HEAD's tokens in the dark scheme, as the board sets them (render_board.render).
 CSS = """<style>
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}}
 :root[data-theme="dark"] :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}
 .meta{color:var(--muted);font-size:12px}
 header .chip.running{color:var(--surface);background:var(--stage-implement);border-color:var(--stage-implement)}
+header .chip.needs-input{color:var(--dl);border-color:var(--dl)}
 .chk,.wk{display:grid;grid-template-columns:96px 74px minmax(0,1fr);gap:0 10px;align-items:baseline;padding:6px 0;font-size:13px}
 .wk{grid-template-columns:minmax(0,1fr) 64px auto;padding:5px 0}
 .chk+.chk,.wk+.wk{border-top:1px dotted var(--line)}
@@ -187,35 +189,59 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
 def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
-           pending_refs: Container[str] = frozenset()) -> str | None:
-    """The page, or None when no task in `trackers` names issue `number`. `cfg` resolves a task's due (the board's
-    deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
+           pending_refs: Container[str] = frozenset(), navigation: dict | None = None) -> str | None:
+    """The page, or None when no task in `trackers` or the store names issue `number`. `cfg` resolves a task's due (the
+    board's deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
     ref = f"#{number}"
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
     mine = [t for t in known if issue_number(t.issue) == number]
+    store_rows = None
+    if not mine and root is not None and (root / "store.db").is_file():
+        db = store.Store(root / "store.db")
+        try:
+            item = next((i for i in db.all_items() if issue_number(i.issue_key) == number), None)
+            if item is not None:
+                title = item.title or (sources.issues[ref].title if ref in sources.issues else ref)
+                task = Task(item=title, owner="",
+                            state="waiting" if item.human_review else "open",
+                            since=now.date().isoformat(), due="", checklist="",
+                            name=title, lane=item.workflow or "build",
+                            stage=item.stage, issue=item.issue_key)
+                known = [task]
+                mine = [task]
+                store_rows = [(s, r) for s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
+                              if issue_number(r.ref) == number]
+        finally:
+            db.engine.dispose()
     if not mine:
         return None
     keys = set().union(*map(names, mine))
     log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
-    ends = {t.item: end for t in parse_tracker(trackers[-1][1]).tasks
+    today_tasks = parse_tracker(trackers[-1][1]).tasks if trackers else known
+    ends = {t.item: end for t in today_tasks
             if t.kind != "done" and (end := _resolve_due(t.due, cfg, now.date()))}
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
-    today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
-    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
-    rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                                ended=forge_ends(known, sources, now.tzinfo))
-            if issue_number(r.ref) == number]
+    today = [t for t in today_tasks if not t.standing]
+    holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
+    held = held_names(holds)
+    rows = store_rows if store_rows is not None else [
+        (s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
+                                            ended=forge_ends(known, sources, now.tzinfo))
+        if issue_number(r.ref) == number
+    ]
     log = [m for m in log if m.name.strip().casefold() in keys]
-    issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
-    status = rows[0][0] if rows else mine[-1].kind
-    name = rows[0][1].name if rows else mine[0].label
+    issue_keys = {ref, *(t.issue for t in mine if t.issue)}
+    issue = next((sources.issues[k] for k in (ref, *issue_keys) if k in sources.issues), None)
+    latest = {k: t for t in known for k in names(t)}  # later trackers win
+    status = "needs input" if any(t in holds for t in mine) else (rows[0][0] if rows else mine[-1].kind)
+    name = rows[0][1].name if rows else (issue.title if issue else mine[0].label)
 
     order = {"open": 0, "merged": 1}
-    changes = sorted((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2))
+    changes = sorted((c for c in sources.changes.values() if issue_keys & set(c.issues)), key=lambda c: order.get(c.state, 2))
     every = list(sources.changes.values())
     cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {ref} yet.</p></div>')
     change = changes[0] if changes else None
@@ -283,9 +309,9 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>{ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
-            f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True)}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
+            f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
-            f'    <span class="chip {escape(status)}">{escape(status.upper())}</span>\n  </header>\n\n'
+            f'    <span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>\n  </header>\n\n'
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'
             + _section("How it got here", f'    <div class="card timeline">\n{steps}\n    </div>' if steps else '    <div class="card"><p>No Log lines yet.</p></div>')
@@ -325,5 +351,6 @@ def write(root: Path, pages_dir: Path, number: int) -> Path | None:
     ctx = context(root, now.date().isoformat())
     pending = entries(pages_dir, ctx) if ctx else []
     page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
-                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx))
+                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx),
+                  ctx.navigation if ctx else None)
     return put(pages_dir / f"issue-{number}.html", page)

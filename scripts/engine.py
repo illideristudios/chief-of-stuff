@@ -14,9 +14,11 @@ from typing import Any
 
 import cleanup
 import clock as engine_clock
+import decision_actions
 import engine_merge
 import forge
 import issue_gate
+import make_worktree
 import policy
 import reconcile
 import settings
@@ -24,6 +26,7 @@ import slots
 import startup
 import store_access
 import supervisor
+import trio_gate
 import worker
 from forge_port import ForgeError
 from workspace import worktrees_dir
@@ -69,9 +72,26 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
     store.set_resume(key, data)
 
 
+def _sync_decisions_with_action(store: Any, key: str, action: reconcile.Action) -> None:
+    for dec in store.decisions(key):
+        if dec.status == "open" and not dec.answer:
+            continue
+        tr = decision_actions.meet_action(dec, action)
+        if tr.store_write is not None:
+            store.update_decision(tr.store_write)
+            data = _resume(store, key)
+            decisions_map = dict(data.get("decisions") or {})
+            decisions_map[str(dec.id)] = {
+                "status": tr.decision.status,
+                "blocked_reason": tr.decision.blocked_reason,
+            }
+            data["decisions"] = decisions_map
+            store.set_resume(key, data)
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, trio_port: Any = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -120,9 +140,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                              **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
+    claude_text = (root / "CLAUDE.md").read_text(encoding="utf-8") if (root / "CLAUDE.md").is_file() else ""
+    declared_agents = make_worktree.agent_types(claude_text)
     for action in actions:
         key = action.issue_key
         try:
+            _sync_decisions_with_action(store, key, action)
             stage = None
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"
@@ -130,21 +153,39 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
+                persona_cfg = policies.personas.get(persona) if persona else None
+                agent_name = getattr(persona_cfg, "agent", None) or ""
+                if agent_name and agent_name not in declared_agents:
+                    raise ValueError(f"undeclared agent_type {agent_name!r} for persona {persona!r}")
                 slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                             max_concurrency=max_concurrency, clock=clock,
-                            launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
+                            launch=lambda: launch(key, stage, action.attempt, persona),
+                            agent_type=agent_name or persona, runtime="claude")
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
                 elif engine_merge.execute(action, forge, store, at, policies=policies,
-                                         inputs=_planning_inputs(store, [by_key[key]])):
+                                          inputs=_planning_inputs(store, [by_key[key]])):
                     stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
                 record = {"kind": type(action).__name__, "reason": action.reason}
                 if isinstance(action, reconcile.Ask):
                     record["gate"] = action.gate
+                    existing_dec = next(
+                        (d for d in reversed(store.decisions(key)) if d.topic == action.gate and d.question == action.reason),
+                        None,
+                    )
+                    if existing_dec is None:
+                        existing_dec = store.add_decision(key, action.gate, action.reason)
+                    if trio_port is not None and existing_dec.status == "open":
+                        trio_dec = trio_gate.Decision(key, action.gate, action.reason, ("adopt", "escalate"))
+                        eff_policy = policies.resolve(stage=stages.get(key) if stages.get(key) in policies.stages else None)
+                        outcome = trio_gate.consult(trio_dec, eff_policy, policies.personas, trio_port, store)
+                        tr = decision_actions.from_trio(existing_dec, outcome, answered_at=at)
+                        if tr.store_write is not None:
+                            store.update_decision(tr.store_write)
                 if data.get("interrupt") != record:
                     store.add_log(key, f"{record['kind'].lower()}: {action.reason}", at)
                     data["interrupt"] = record  # M5/M6 delivers and resolves the interrupt.

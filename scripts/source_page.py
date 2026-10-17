@@ -20,6 +20,7 @@ import backlog
 import board_sources
 import decision_page
 import module_graph
+import store
 from decision_page import HEAD
 from fragment import href, tab_bar
 from issue_page import _paths, _shared, anchor, inputs, put
@@ -258,15 +259,26 @@ LAYOUT = ('  <div class="seg" role="group" aria-label="Diff layout">'
 
 def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            graph: Graph | None = None, pages: Path | None = None, root: Path | None = None,
-           notes: list[Note] | None = None, notes_error: str = "", pending: int = 0) -> str | None:
-    """The page, or None when no task in `trackers` names issue `number`. `notes` are the change's review threads."""
+           notes: list[Note] | None = None, notes_error: str = "", pending: int = 0,
+           navigation: dict | None = None) -> str | None:
+    """The page, or None when no task in `trackers` or the store names issue `number`. `notes` are the change's review threads."""
     ref = f"#{number}"
     mine = [t for _, text in trackers for t in parse_tracker(text).tasks
             if (m := TRAILING_NUMBER.search(t.issue)) and int(m[1]) == number]
-    if not mine:
+    store_item = None
+    if not mine and root is not None and (root / "store.db").is_file():
+        db = store.Store(root / "store.db")
+        try:
+            store_item = next(
+                (i for i in db.all_items() if (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == number),
+                None,
+            )
+        finally:
+            db.engine.dispose()
+    if not mine and store_item is None:
         return None
-    issue = sources.issues.get(ref)
-    name = issue.title if issue else mine[0].label
+    issue = sources.issues.get(ref) or (sources.issues.get(store_item.issue_key) if store_item else None)
+    name = issue.title if issue else (mine[0].label if mine else (store_item.title or ref))
     change = _change(ref, sources)
     crumb = f"Source · {escape(change.ref) + ' · ' if change else ''}{ref} {escape(name)}"
     title = f"{escape(change.ref)} · {escape(change.title)}" if change else escape(name)
@@ -312,6 +324,8 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
         tables.insert(0, f'    <p class="card">Review notes unavailable: {escape(notes_error)}</p>')
     if not change:
         body = f'  <p class="card">Nothing to diff: no change names {ref} yet.</p>\n'
+        if issue and issue.body:
+            body += f'  <div class="card"><pre>{escape(issue.body)}</pre></div>\n'
     else:
         total = f"{len(files)} · +{sum(f.add for f in files)} −{sum(f.dele for f in files)}"
         body = (LAYOUT if tables else "") + (f'  <div class="src">\n    <div class="card"><div class="cap">files · {total}</div>\n'
@@ -322,7 +336,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>Source {escape(change.ref) if change else ref}</title>\n{HEAD}{CSS}</head>\n"
-            f'<body>\n<main class="source">\n{tab_bar("Board", pending, True)}  <header class="top">\n    <div>\n      <span class="eyebrow">{crumb} · '
+            f'<body>\n<main class="source">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{crumb} · '
             f'<a href="/issues/{number}">task</a> · <a href="/">board</a></span>\n'
             f"      <h1>{title}</h1>\n    </div>\n{cmp}  </header>\n{body}</main>\n</body>\n</html>\n")
 
@@ -334,6 +348,7 @@ def write(root: Path, pages_dir: Path, number: int) -> Path | None:
     change = _change(f"#{number}", sources)
     # ponytail: one small forge query per render (about once a minute while the page is open); cache by head if it bites.
     found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")
+    ctx = decision_page.context(root, now.date().isoformat())
     page = render(number, trackers, sources, now, settings.graph, pages_dir, root, found, error,
-                  decision_page.pending_count(pages_dir, decision_page.context(root, now.date().isoformat())))
+                  decision_page.pending_count(pages_dir, ctx), ctx.navigation if ctx else None)
     return put(pages_dir / f"issue-{number}-source.html", page)

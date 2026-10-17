@@ -41,6 +41,10 @@ class WorkItem(Base):
     human_review: Mapped[bool] = mapped_column(Boolean, default=False)
     updated_at: Mapped[str] = mapped_column(String, default="")
 
+    @property
+    def workflow(self) -> str:
+        return ""
+
 
 class Segment(Base):
     """A stretch of work on the issue's one gantt line. Rework is another attempt, never another item."""
@@ -58,6 +62,10 @@ class Segment(Base):
     effort: Mapped[str] = mapped_column(String, default="", server_default="")
     agent_type: Mapped[str] = mapped_column(String, default="", server_default="")
 
+    @property
+    def runner(self) -> str:
+        return getattr(self, "_runner", "")
+
 
 class Decision(Base):
     __tablename__ = "decision"
@@ -69,6 +77,51 @@ class Decision(Base):
     decided_by: Mapped[str] = mapped_column(String, default="")  # "trio", "user" or ""
     record: Mapped[Any] = mapped_column(JSON, nullable=True)  # the trio's votes and reasoning
     created_at: Mapped[str] = mapped_column(String, default="")
+
+    @property
+    def gate(self) -> str:
+        return self.topic
+
+    @property
+    def prompt(self) -> str:
+        return self.question
+
+    @property
+    def asked_at(self) -> str:
+        return self.created_at
+
+    @property
+    def status(self) -> str:
+        meta = getattr(self, "_resume_meta", None) or {}
+        if isinstance(meta, dict) and meta.get("status"):
+            return str(meta["status"])
+        if isinstance(self.record, dict) and self.record.get("status"):
+            return str(self.record["status"])
+        return "answered" if self.answer else "open"
+
+    @property
+    def answered_at(self) -> str | None:
+        if isinstance(self.record, dict) and "answered_at" in self.record:
+            return self.record["answered_at"]
+        return self.created_at if self.answer else None
+
+    @property
+    def blocked_reason(self) -> str:
+        meta = getattr(self, "_resume_meta", None) or {}
+        if isinstance(meta, dict) and meta.get("blocked_reason"):
+            return str(meta.get("blocked_reason", "") or "")
+        if isinstance(self.record, dict) and self.record.get("blocked_reason"):
+            return str(self.record.get("blocked_reason", "") or "")
+        return ""
+
+    @property
+    def rerouted_to(self) -> str:
+        meta = getattr(self, "_resume_meta", None) or {}
+        if isinstance(meta, dict) and meta.get("rerouted_to"):
+            return str(meta.get("rerouted_to", "") or "")
+        if isinstance(self.record, dict) and self.record.get("rerouted_to"):
+            return str(self.record.get("rerouted_to", "") or "")
+        return ""
 
 
 class Ownership(Base):
@@ -109,6 +162,18 @@ class Report(WorkerRecord, Base):
     outcome: Mapped[str] = mapped_column(String)
     summary: Mapped[str] = mapped_column(String)
     findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+
+    @property
+    def status(self) -> str:
+        return self.outcome
+
+    @property
+    def reason(self) -> str:
+        return self.summary
+
+    @property
+    def recorded_at(self) -> str:
+        return self.created_at
 
 
 class Ask(WorkerRecord, Base):
@@ -177,7 +242,15 @@ class Store:
 
     # work items
     def upsert_item(self, issue_key: str, **fields: Any) -> None:
-        self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **fields, "updated_at": self._stamp()})
+        allowed = {k: v for k, v in fields.items() if k in FORGE_COLUMNS}
+        self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **allowed, "updated_at": self._stamp()})
+
+    def item(self, issue_key: str) -> WorkItem | None:
+        with self.session() as s:
+            row = s.get(WorkItem, issue_key)
+            if row is not None:
+                s.expunge(row)
+            return row
 
     def set_human_review(self, issue_key: str, flag: bool) -> None:
         """Flag an existing item; a kanban snapshot can subsequently refresh it from forge labels."""
@@ -192,6 +265,9 @@ class Store:
             s.expunge_all()
             return list(rows)
 
+    def all_items(self) -> list[WorkItem]:
+        return self.items()
+
     def sync_from_forge(self, snapshots: list[dict[str, Any]]) -> None:
         """Upsert the forge-owned columns of each snapshot. Engine-owned data is never written, so a sync cannot lose it."""
         for snap in snapshots:
@@ -201,13 +277,25 @@ class Store:
     def record_segment(self, issue_key: str, stage: str, attempt: int, started_at: str,
                        ended_at: str | None = None, outcome: str | None = None,
                        runtime: str | None = None, model: str | None = None,
-                       effort: str | None = None, agent_type: str | None = None) -> None:
+                       effort: str | None = None, agent_type: str | None = None,
+                       runner: str | None = None) -> None:
         # Omitted fields stay as stored, so a retried start never clears completion or who ran it.
         done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome), ("runtime", runtime),
                                   ("model", model), ("effort", effort), ("agent_type", agent_type))
                 if v is not None}
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
+        if runner is not None:
+            data = self.resume(issue_key)
+            state = dict(data) if isinstance(data, dict) else {}
+            runs_raw = state.get("runs")
+            runs = dict(runs_raw) if isinstance(runs_raw, dict) else {}
+            entry_raw = runs.get(f"{stage}-{attempt}")
+            run_entry = dict(entry_raw) if isinstance(entry_raw, dict) else {}
+            run_entry["runner"] = runner
+            runs[f"{stage}-{attempt}"] = run_entry
+            state["runs"] = runs
+            self.set_resume(issue_key, state)
 
     def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
         """Complete only an existing open segment, without altering its start or actor."""
@@ -226,7 +314,18 @@ class Store:
         stmt = select(Segment).order_by(Segment.id)
         if issue_key is not None:
             stmt = stmt.where(Segment.issue_key == issue_key)
-        return self._all(stmt)
+        rows = self._all(stmt)
+        resumes: dict[str, Any] = {}
+        for row in rows:
+            if row.issue_key not in resumes:
+                resumes[row.issue_key] = self.resume(row.issue_key)
+            res = resumes[row.issue_key]
+            if isinstance(res, dict):
+                runs_raw = res.get("runs")
+                run_meta = runs_raw.get(f"{row.stage}-{row.attempt}", {}) if isinstance(runs_raw, dict) else {}
+                if isinstance(run_meta, dict) and run_meta.get("runner"):
+                    row._runner = str(run_meta["runner"])
+        return rows
 
     # ownership
     def set_ownership(self, issue_key: str, path: str, mode: str = "write") -> None:
@@ -235,22 +334,89 @@ class Store:
     def ownership(self, issue_key: str) -> list[Ownership]:
         return self._all(select(Ownership).where(Ownership.issue_key == issue_key).order_by(Ownership.path))
 
-    # decisions and log (append-only)
+    # decisions and log
     def add_decision(self, issue_key: str, topic: str, question: str, answer: str | None = None,
-                     decided_by: str = "", record: Any = None) -> None:
+                     decided_by: str = "", record: Any = None, *,
+                     asked_at: str | None = None, created_at: str | None = None) -> Decision:
+        stamp = asked_at or created_at or self._stamp()
         with self.session() as s:
-            s.add(Decision(issue_key=issue_key, topic=topic, question=question, answer=answer,
-                           decided_by=decided_by, record=record, created_at=self._stamp()))
+            row = Decision(issue_key=issue_key, topic=topic, question=question, answer=answer,
+                           decided_by=decided_by, record=record, created_at=stamp)
+            s.add(row)
+            s.flush()
+            s.expunge(row)
+            return row
 
-    def decisions(self, issue_key: str) -> list[Decision]:
-        return self._all(select(Decision).where(Decision.issue_key == issue_key).order_by(Decision.id))
+    def decision(self, decision_id: int) -> Decision | None:
+        with self.session() as s:
+            row = s.get(Decision, decision_id)
+            if row is not None:
+                res = s.get(Resume, row.issue_key)
+                s.expunge(row)
+                if res and isinstance(res.data, dict):
+                    decs_raw = res.data.get("decisions")
+                    row._resume_meta = decs_raw.get(str(row.id), {}) if isinstance(decs_raw, dict) else {}
+            return row
+
+    def answer_decision(self, decision_id: int, answer: str, *, decided_by: str = "user",
+                        answered_at: str | None = None, status: str = "answered",
+                        blocked_reason: str = "", rerouted_to: str = "") -> Decision | None:
+        stamp = answered_at or self._stamp()
+        with self.session() as s:
+            row = s.get(Decision, decision_id)
+            if row is None:
+                return None
+            rec = dict(row.record) if isinstance(row.record, dict) else ({"prior": row.record} if row.record is not None else {})
+            rec["status"] = status
+            rec["answered_at"] = stamp
+            if blocked_reason:
+                rec["blocked_reason"] = blocked_reason
+            else:
+                rec.pop("blocked_reason", None)
+            if rerouted_to:
+                rec["rerouted_to"] = rerouted_to
+            row.answer = answer
+            row.decided_by = decided_by
+            row.record = rec
+            s.flush()
+            s.expunge(row)
+            return row
+
+    def update_decision(self, write: Any) -> Decision | None:
+        return self.answer_decision(
+            int(write.decision_id),
+            str(write.answer or ""),
+            decided_by=str(write.decided_by or ""),
+            answered_at=write.answered_at,
+            status=str(write.status or "answered"),
+            blocked_reason=str(getattr(write, "blocked_reason", "") or ""),
+            rerouted_to=str(getattr(write, "rerouted_to", "") or ""),
+        )
+
+    def decisions(self, issue_key: str | None = None) -> list[Decision]:
+        stmt = select(Decision).order_by(Decision.id)
+        if issue_key is not None:
+            stmt = stmt.where(Decision.issue_key == issue_key)
+        rows = self._all(stmt)
+        for row in rows:
+            res = self.resume(row.issue_key)
+            if isinstance(res, dict):
+                decs_raw = res.get("decisions")
+                row._resume_meta = decs_raw.get(str(row.id), {}) if isinstance(decs_raw, dict) else {}
+        return rows
 
     def add_log(self, issue_key: str, message: str, at: str) -> None:
         with self.session() as s:
             s.add(LogEntry(issue_key=issue_key, at=at, message=message))
 
-    def log(self, issue_key: str) -> list[LogEntry]:
-        return self._all(select(LogEntry).where(LogEntry.issue_key == issue_key).order_by(LogEntry.id))
+    def log_event(self, issue_key: str, message: str, at: str | None = None) -> None:
+        self.add_log(issue_key, message, at or self._stamp())
+
+    def log(self, issue_key: str | None = None) -> list[LogEntry]:
+        stmt = select(LogEntry).order_by(LogEntry.id)
+        if issue_key is not None:
+            stmt = stmt.where(LogEntry.issue_key == issue_key)
+        return self._all(stmt)
 
     # resume
     def set_resume(self, issue_key: str, data: Any) -> None:
@@ -263,17 +429,34 @@ class Store:
 
     # Worker reports are append-only, including late reports from older attempts.
     def add_report(self, issue_key: str, stage: str, attempt: int, session_id: str,
-                   outcome: str, summary: str, findings: list[dict[str, Any]]) -> int:
+                   outcome: str, summary: str, findings: list[dict[str, Any]],
+                   *, created_at: str | None = None) -> int:
         with self.session() as s:
             row = Report(issue_key=issue_key, stage=stage, attempt=attempt, session_id=session_id,
-                         outcome=outcome, summary=summary, findings=findings, created_at=self._stamp())
+                         outcome=outcome, summary=summary, findings=findings,
+                         created_at=created_at or self._stamp())
             s.add(row)
             s.flush()
             return row.id
 
-    def reports(self, issue_key: str, *, stage: str | None = None, attempt: int | None = None,
+    def record_report(self, issue_key: str, stage: str, attempt: int, *,
+                      status: str = "done", outcome: str | None = None,
+                      summary: str = "", reason: str = "", changes: str = "",
+                      session_id: str = "", findings: list[dict[str, Any]] | None = None,
+                      recorded_at: str | None = None) -> int:
+        items = list(findings or [])
+        if changes and not items:
+            items = [{"path": c.strip()} for c in changes.split(",") if c.strip()]
+        return self.add_report(
+            issue_key, stage, attempt, session_id or f"{stage}-{attempt}",
+            outcome or status, summary or reason, items, created_at=recorded_at,
+        )
+
+    def reports(self, issue_key: str | None = None, *, stage: str | None = None, attempt: int | None = None,
                 session_id: str | None = None) -> list[Report]:
-        stmt = select(Report).where(Report.issue_key == issue_key)
+        stmt = select(Report)
+        if issue_key is not None:
+            stmt = stmt.where(Report.issue_key == issue_key)
         for key, value in (("stage", stage), ("attempt", attempt), ("session_id", session_id)):
             if value is not None:
                 stmt = stmt.where(getattr(Report, key) == value)
@@ -288,8 +471,11 @@ class Store:
             s.flush()
             return row.id
 
-    def asks(self, issue_key: str) -> list[Ask]:
-        return self._all(select(Ask).where(Ask.issue_key == issue_key).order_by(Ask.id))
+    def asks(self, issue_key: str | None = None) -> list[Ask]:
+        stmt = select(Ask).order_by(Ask.id)
+        if issue_key is not None:
+            stmt = stmt.where(Ask.issue_key == issue_key)
+        return self._all(stmt)
 
     def _all(self, stmt: Any) -> list[Any]:
         with self.session() as s:
