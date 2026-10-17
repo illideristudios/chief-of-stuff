@@ -22,6 +22,8 @@ Each script under `scripts/`, the two launchers and each hook file belong to one
 
 The owner decisions in the 1.0 ledger (`docs/specs/2026-10-09-chief-of-stuff-1.0-ledger.md`, section "Owner decisions", Zach, 2026-10-10) amend this document. Where a section here disagrees with one of them, the owner decision stands and the section is rewritten to match. A module the ledger retires, such as the file mailbox, the tracker parser and its command lines, the flow tick, the notify service, the terminal launchers or the non-Claude watcher, keeps its circle in this table until it is deleted. A gap against a retiring module closes when the module is deleted.
 
+New work goes on the engine path: the store, the forge adapter, the model port, the reconcile pass and the pages built on them. The goal is 1.0, then 1.1, with as much legacy dropped as possible (Zach, 2026-10-16), so getting the engine to run the workspace comes first. A retiring module takes only the fixes today's loop needs to keep running until that cutover. A new behaviour lands on the engine path. It also lands on a retiring module only when the loop needs it before the cutover, and then the engine side is in the same change or filed as its own issue. A change that adds behaviour only to a retiring module is a gap against this section.
+
 | Circle | Modules |
 |---|---|
 | Entities | `tracker.py`, `md.py`, `clock.py`, `runtimes.py`, `policy.py`, `findings.py`, `ownership.py`, `orphans.py`, `estimate.py`, `tracker_log.py`, `tree_state.py`, the finding types of `audit_tasks.py`, the message format of `inbox.py`, `guard_commands.py` (the worker guard's pure shell-command judgements), `limits.py` (runtime limit readings and their judgements, section 10) |
