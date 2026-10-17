@@ -545,13 +545,30 @@ class ReconcileTest(unittest.TestCase):
                 with self.subTest(stage=stage, outcome=outcome):
                     item = replace(Item(), stage=stage, human_review=True)
                     history = [Segment(stage, outcome=outcome)]
-                    self.assertEqual(self.plan(item, history), [action])
-                    self.assertEqual(self.plan(item, history, hold_stages=(stage,)),
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}), [action])
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, hold_stages=(stage,)),
                                      [reconcile.Wait(KEY, "human review")])
-                    self.assertEqual(self.plan(item, history, slots=0),
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, slots=0),
                                      [reconcile.Wait(KEY, "no free worker slots")])
-                    self.assertEqual(self.plan(item, history, quota_resets={KEY: NOW + timedelta(hours=1)}),
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, quota_resets={KEY: NOW + timedelta(hours=1)}),
                                      [reconcile.Wait(KEY, "quota reset pending")])
+
+    def test_unowned_blank_and_stale_holds_wait_for_a_human(self):
+        history = [Segment("implement", outcome="quota")]
+        for stage, holds in (("implement", {}), ("", {KEY: {"stage": "implement", "attempt": 1}}),
+                             ("implement", {KEY: {"stage": "implement", "attempt": 0}})):
+            with self.subTest(stage=stage, holds=holds):
+                self.assertEqual(self.plan(replace(Item(), stage=stage, human_review=True), history,
+                                           launcher_holds=holds), [reconcile.Wait(KEY, "human review")])
+
+    def test_failed_reviews_obey_retry_limit_but_completed_rounds_do_not_spend_it(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        item = replace(Item(), stage="review", human_review=True)
+        history = [Segment("review", attempt=n, outcome="failed") for n in (1, 2)]
+        self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": "review", "attempt": 2}}),
+                         [reconcile.Escalate(KEY, "retry limit reached for review")])
+        history = [Segment("review", attempt=n) for n in (1, 2)] + [Segment("review", attempt=3, outcome="failed")]
+        self.assertEqual(self.plan(replace(item, human_review=False), history), [reconcile.Review(KEY, 4)])
 
     def test_extra_holds_remain_for_completion_human_outcomes_and_other_stages(self):
         item = replace(Item(), human_review=True)

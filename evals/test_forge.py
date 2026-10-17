@@ -354,14 +354,25 @@ class StageWriteBackTest(unittest.TestCase):
                                              ({"needs human"} if required else set()))
 
     def test_release_hold_refuses_missing_prior_and_stage_drift(self):
-        gh = FakeGh(issues=[gh_issue(4, "Retry", ["stage: review", "needs human"])])
-        f = forge.Forge(GH, kanban=FLOW, gh=gh)
-        for kwargs in ({}, {"expected": "doing"}, {"expected": "review"},
-                       {"expected": "doing", "initialize": True}):
-            with self.subTest(kwargs=kwargs):
-                got = f.write_stage(4, "doing", release_hold=True, commit=True, **kwargs)
-                self.assertFalse(got.ok)
-                self.assertEqual(self.edits(gh), [])
+        for host in ("github", "gitlab"):
+            for kwargs in ({}, {"expected": "doing"}, {"expected": "review"},
+                           {"expected": "doing", "initialize": True}):
+                with self.subTest(host=host, kwargs=kwargs):
+                    labels = ["stage: review", "needs human"]
+                    if host == "github":
+                        gh = FakeGh(issues=[gh_issue(4, "Retry", labels)])
+                        f = forge.Forge(GH, kanban=FLOW, gh=gh)
+                        read_labels = lambda: [x["name"] for x in gh.issues[4]["labels"]]
+                        patch = contextlib.nullcontext()
+                    else:
+                        issues = {4: gl_issue(4, "Retry", labels)}
+                        f = forge.Forge(GL, kanban=FLOW, token="t")
+                        read_labels = lambda: issues[4]["labels"]
+                        patch = mock.patch.object(backlog, "_call", gitlab_call(issues, {}))
+                    with patch:
+                        got = f.write_stage(4, "doing", release_hold=True, commit=True, **kwargs)
+                    self.assertFalse(got.ok)
+                    self.assertEqual(read_labels(), labels)
 
     def test_a_stage_write_previews_by_default(self):
         gh = github()
