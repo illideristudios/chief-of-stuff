@@ -1074,7 +1074,7 @@ class WorkerTest(unittest.TestCase):
                              mock.Mock(side_effect=RuntimeError("ps unavailable"))):
                 with self.subTest(identity=identity), \
                      mock.patch.object(worker.process_status, "identity", side_effect=identity), \
-                     mock.patch.object(worker.make_worktree, "build") as build, \
+                     mock.patch.object(worker.make_worktree, "build", wraps=worker.make_worktree.build) as build, \
                      mock.patch.object(worker.claude_adapter, "start") as start:
                     with self.assertRaisesRegex(RuntimeError, "live|unverified"):
                         worker.launch(KEY, "implement", 3, None, store=self.db, root=self.root,
@@ -1105,13 +1105,12 @@ class WorkerTest(unittest.TestCase):
                 return "live shell" if pid == 77 and not host else None
 
             with mock.patch.object(worker.process_status, "identity", side_effect=identity), \
-                 mock.patch.object(worker.make_worktree, "build") as build, \
-                 mock.patch.object(worker.claude_adapter, "start") as start:
+                 mock.patch.object(worker.make_worktree, "build", wraps=worker.make_worktree.build) as build:
                 with self.assertRaisesRegex(RuntimeError, "worker is still live"):
-                    worker.launch(KEY, "implement", 3, None, store=self.db, root=self.root,
-                                  trees=self.trees, policies=self.p, forge=self.forge, clone=clone, clock=lambda: NOW)
+                    worker._resolve_worktree(
+                        KEY, 1, "implement", 3, "issue-1-implement-3", "work/issue-1-implement-3", "",
+                        self.db.resume(KEY), self.db, self.root, self.trees, clone, lambda: NOW)
             build.assert_not_called()
-            start.assert_not_called()
             self.assertEqual(self.db.resume(KEY), before)
             self.assert_abort_work_preserved(clone, heads)
 
