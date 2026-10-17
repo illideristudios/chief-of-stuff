@@ -117,7 +117,7 @@ class PlanTest(unittest.TestCase):
 
     def test_legacy_fallback_parser_is_refused(self):
         with self.assertRaisesRegex(ValueError, '#820'):
-            mb.ownership_plan('example/repo', [issue()], SOURCES, lambda bodies: [ownership.issue_scopes(b) for b in bodies])
+            mb.ownership_plan('example/repo', [issue()], SOURCES, lambda bodies: [[('.', 'write')] for _ in bodies])
 
     def test_parser_rejection_never_becomes_a_proposal(self):
         plan = mb.ownership_plan('example/repo', [issue()], SOURCES, lambda bodies: [None] * len(bodies))
