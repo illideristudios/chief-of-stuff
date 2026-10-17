@@ -1099,7 +1099,6 @@ class WorkerTest(unittest.TestCase):
                     self.assert_abort_work_preserved(clone, heads)  # the refusal comes before any tree is removed
 
     def test_abort_snapshots_with_discovery_and_rechecks_with_retirement_under_the_clone_lock(self):
-        from contextlib import contextmanager
         from evals import git_taint as taint
         with taint.private_git_views(self.root / "private-views"):
             clone, _ = self.abort_fixture()

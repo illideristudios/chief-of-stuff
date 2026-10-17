@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -79,8 +80,8 @@ def _inferred_exit_code(run_dir: Path, store: Any = None, key: str = "",
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                   trees: Path, clock: engine_clock.Clock, *, store: Any = None, key: str = "") -> dict | None:
     """Recover a detached start before changing its tree or moving its exit evidence."""
-    if not run_dir.exists():
-        return None
+    if not run_dir.exists() or (run_dir / "canceled").is_file():
+        return None  # a canceled start is never adopted: launch archives it as refused
     record = data.get("runs", {}).get(f"{stage}-{attempt}")
     if record is None:
         started = run_dir / "started.json"
@@ -468,26 +469,30 @@ def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
                 raise RuntimeError(f"could not retire orphaned ref {ref}: {detail}")
 
 
+def _assert_stopped(run: Path) -> None:
+    """Raise unless the host and runner recorded in run/started.json are both gone."""
+    started = json.loads((run / "started.json").read_text())
+    session = started["session_id"]
+    if not isinstance(session, str) or not session:
+        raise ValueError("missing session identity")
+    for field in ("pid", "runner_pid"):
+        pid = started[field]
+        if type(pid) is not int or pid <= 0:
+            raise ValueError("missing process identity")
+        # A login shell can still exec the host after its runner dies. It owns the tree too.
+        if process_status.identity(pid, session, host=False) is not None:
+            raise RuntimeError("worker is still live")
+
+
 def _abort_workers_gone(root: Path, number: int) -> None:
     """A released slot or a cancellation marker is not proof that its worker stopped.
     Include archived starts: collect may have moved the evidence before cancellation succeeded (#774)."""
     for run in (supervisor.state_dir(root) / "runs").glob(f"{number}-*"):
         try:
-            if not (run / "started.json").is_file():
-                if (run / "command.json").is_file() and not (run / "exit.json").is_file():
-                    raise RuntimeError("worker start is unverified")
-                continue
-            started = json.loads((run / "started.json").read_text())
-            session = started["session_id"]
-            if not isinstance(session, str) or not session:
-                raise ValueError("missing session identity")
-            for field in ("pid", "runner_pid"):
-                pid = started[field]
-                if type(pid) is not int or pid <= 0:
-                    raise ValueError("missing process identity")
-                # A login shell can still exec the host after its runner dies. It owns the tree too.
-                if process_status.identity(pid, session, host=False) is not None:
-                    raise RuntimeError("worker is still live")
+            if (run / "started.json").is_file():
+                _assert_stopped(run)
+            elif (run / "command.json").is_file() and not (run / "exit.json").is_file():
+                raise RuntimeError("worker start is unverified")
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             raise RuntimeError(f"cannot retire orphaned work with live or unverified worker {run.name}: {exc}") from exc
 
@@ -716,12 +721,17 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
     except BaseException:  # an interrupt too: a start that was never verified must not leave a runner behind
-        if run_dir.is_dir():
-            (run_dir / "canceled").write_text("canceled\n")
+        # Cancel first: a mark written before a cancel that fails would tell collect the worker is gone. Once cancel
+        # returns, the start can no longer produce anything, so archive it now and forget its record; slots.claim
+        # drops the segment on an ordinary exception, and nothing would collect the mark.
         claude_adapter.cancel(runner)
-        if not (run_dir / "started.json").exists():
-            # cancel waits on the runner process: this command can no longer produce a start.
+        with contextlib.suppress(OSError):
+            (run_dir / "canceled").write_text("canceled\n")
+        with contextlib.suppress(OSError):
             run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
+        saved = _resume(store, issue_key)
+        if saved.get("runs", {}).pop(f"{stage}-{attempt}", None) is not None:
+            store.set_resume(issue_key, saved)
         raise
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
@@ -745,6 +755,12 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             run_dir = _run_dir(root, key, segment.stage, segment.attempt)
             if (run_dir / "canceled").is_file():
                 # Only a start the cancel path marked. A dead host with no mark is a failed attempt.
+                if (run_dir / "started.json").is_file():
+                    try:
+                        _assert_stopped(run_dir)
+                    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                        store.add_log(key, f"canceled worker not verified stopped: {exc}", now.isoformat())
+                        continue
                 run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
                 store.drop_segment(key, segment.stage, segment.attempt)
                 if (data.get("pending_stage") or {}).get("stage") == segment.stage:
