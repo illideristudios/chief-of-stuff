@@ -488,6 +488,29 @@ class WorkerTeardownTest(unittest.TestCase):
         with one_shot.slot(self.tree.parent, self.tree, "Another task", None):
             pass
 
+    def test_unreadable_tracker_cannot_discard_an_interrupted_runs_marker(self):
+        fake = self.fx._fake(None, write_partial=False)
+        real_popen, real_read = subprocess.Popen, Path.read_text
+        interrupted = False
+        def popen(argv, *args, **kwargs):
+            if argv[0] == "git":
+                return real_popen(argv, *args, **kwargs)
+            raise OSError("cannot spawn")
+        def teardown(*args):
+            nonlocal interrupted
+            interrupted = True
+            raise KeyboardInterrupt
+        def read(path, *args, **kwargs):
+            if interrupted and path == self.fx.tracker:
+                raise PermissionError("tracker unavailable")
+            return real_read(path, *args, **kwargs)
+        with mock.patch.object(one_shot.subprocess, "Popen", side_effect=popen), \
+             mock.patch.object(shell_setup, "teardown", side_effect=teardown), \
+             mock.patch.object(Path, "read_text", read):
+            with self.assertRaises(KeyboardInterrupt):
+                self.fx._run(fake)
+        self.assertTrue((self.tree / one_shot.PIDFILE).exists())
+
     def test_nested_cwd_uses_the_configured_worktrees_lock_for_pid_updates(self):
         nested = self.tree / "nested"
         nested.mkdir()
