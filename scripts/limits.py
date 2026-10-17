@@ -41,7 +41,11 @@ def burn_rate(readings: list[Reading]) -> float | None:
 
 
 def near_cap(readings: list[Reading], now: datetime, warn_at: float) -> bool:
-    """Any limit can trigger the warning, but runtime and account must stay isolated."""
+    """Warn when any used share or burn-rate projection at reset reaches warn_at.
+
+    Runtime and account must stay isolated. Unknown readings, future observations and
+    absent/expired resets cannot warn. Without a rate, only the observed share can warn.
+    """
     if not readings or len({(r.runtime, r.account) for r in readings}) != 1:
         return False
     groups: dict[str, list[Reading]] = {}

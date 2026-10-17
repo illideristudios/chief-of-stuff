@@ -706,6 +706,91 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(slots=slots, now=now), self.assertRaises(ValueError):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
 
+    def test_an_item_that_waits_for_a_slot_claims_nothing_for_the_next(self):
+        import readiness
+        keys = [f"github:example/project#{n}" for n in (1, 2, 3)]
+        items = [replace(Item(), issue_key=key) for key in keys]
+        claims = (readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
+        got = reconcile.plan(items, {}, self.p, {}, 1, NOW, {}, facts=reconcile.Facts(claims=claims, blockers=()))
+        self.assertEqual([type(a).__name__ for a in got], ["Dispatch", "Wait", "Wait"])
+        self.assertEqual([a.reason for a in got[1:]], ["no free worker slots"] * 2)
+
+    def test_unknown_blockers_wait_with_their_reason(self):
+        facts = reconcile.Facts(blockers=None, blockers_error="auth required")
+        self.assertEqual(self.plan(facts=facts),
+                         [reconcile.Wait(KEY, "dependency blockers unknown: auth required")])
+
+    def test_a_running_segment_whose_worker_is_gone_is_closed_instead_of_suppressed(self):
+        import readiness
+        other = "github:example/project#2"
+        open_seg = Segment("implement", ended_at=None, outcome=None)
+        gone = reconcile.Facts(alive=(((KEY, "implement", 1), False),))
+        self.assertEqual(self.plan(history=[open_seg], facts=gone),
+                         [reconcile.Close(KEY, "implement", 1, "failed", "worker gone")])
+        live = reconcile.Facts(alive=(((KEY, "implement", 1), True),))
+        self.assertEqual(self.plan(history=[open_seg], facts=live), [])
+        stalled = reconcile.Facts(alive=(((KEY, "implement", 1), True),),
+                                  progress=((KEY, NOW - timedelta(hours=2)),),
+                                  stall_after=timedelta(minutes=45))
+        self.assertEqual(self.plan(history=[replace(open_seg, started_at=NOW - timedelta(hours=2))], facts=stalled),
+                         [reconcile.Wait(KEY, "stalled")])
+        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(other, "src/a.py"))
+        conflict = reconcile.Facts(claims=claims, blockers=(), alive=(((other, "implement", 1), True),))
+        actions = reconcile.plan([Item(), replace(Item(), issue_key=other)],
+                                 {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=conflict)
+        self.assertEqual(actions, [reconcile.Wait(KEY, f"file ownership conflict with {other}")])
+
+    def test_released_read_only_hold_is_not_reinstated_from_a_retained_tree(self):
+        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, True),), blockers=())
+        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(item=replace(Item(), human_review=True), history=[Segment("implement")], facts=facts),
+                         [reconcile.Wait(KEY, "human review")])
+
+    def test_unknown_finished_tree_does_not_reinstate_a_released_read_only_hold(self):
+        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, None),), blockers=())
+        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
+
+    def test_workflow_terminal_worker_requires_landing_when_it_disappears(self):
+        import readiness
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement")
+        facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),),
+                                reports=(readiness.Report(KEY, "done", "implement", 1),),
+                                on_main=((KEY, False),), changed=((KEY, False),))
+        action = self.plan(history=[Segment("implement", ended_at=None)], facts=facts)[0]
+        self.assertEqual(action, reconcile.Close(KEY, "implement", 1, "done", "not on main", True))
+
+    def test_a_red_suite_holds_only_when_completion_did_not(self):
+        import readiness
+        from tree_state import TreeState
+        red = {"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0}
+        suite = (((KEY, "implement", 1), (red, "reported done")),)
+        report = (readiness.Report(KEY, "done", "implement", 1),)
+        open_seg = [Segment("implement", ended_at=None)]
+        held = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
+                               trees=((KEY, TreeState("work", 3, 0, 0)),), changed=((KEY, True),),
+                               suites=suite, require_green=True)
+        action = self.plan(history=open_seg, facts=held)[0]
+        self.assertEqual(action.outcome, "done")
+        self.assertTrue(action.human_review)
+        self.assertFalse(action.suite_hold)
+        self.assertIn("uncommitted", action.reason)
+        clean = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
+                                changed=((KEY, False),), suites=suite, require_green=True)
+        action = self.plan(history=open_seg, facts=clean)[0]
+        self.assertEqual(action, reconcile.Close(
+            KEY, "implement", 1, "human_review",
+            "suite is not green; Suite: passed=0, failed=1, skipped=0, xfailed=0; worker said: reported done",
+            True, True))
+        missing = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report, changed=((KEY, False),),
+                                  suites=(((KEY, "implement", 1),
+                                           ({"passed": None, "failed": None, "skipped": None, "xfailed": None},
+                                            "reported done")),),
+                                  require_green=True)
+        self.assertTrue(self.plan(history=open_seg, facts=missing)[0].suite_hold)
+        absent = replace(missing, suites=())
+        self.assertTrue(self.plan(history=open_seg, facts=absent)[0].suite_hold)
+        self.assertFalse(self.plan(history=open_seg, facts=replace(absent, require_green=False))[0].suite_hold)
+
 
 class SuiteHoldTest(unittest.TestCase):
     def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):

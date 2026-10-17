@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 import claude_adapter
 import clock as engine_clock
@@ -64,6 +65,8 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                       started_at=clock().isoformat())
     else:
         record = dict(record)
+    if "starting_head" not in record and (run_dir / "starting_head").is_file():
+        record["starting_head"] = (run_dir / "starting_head").read_text().strip()
     if stage == "review":
         record.setdefault("reviewed_head", data.get("review_trees", {}).get(str(attempt), {}).get("head"))
     if (any(type(record.get(field)) is not int or record[field] <= 0 for field in ("pid", "runner_pid"))
@@ -101,6 +104,22 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     store.set_resume(key, data)
 
 
+def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, command: str, at: str) -> None:
+    """Run workspace teardown once for a segment, when that segment closes."""
+    data = _resume(store, key)
+    runs = data.get("runs")
+    record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+    if not isinstance(record, dict) or record.get("torn_down"):
+        return
+    tree = record.get("tree")
+    if isinstance(tree, str) and tree:
+        for error in teardown(root, Path(tree), Path(tree).name, command):
+            store.add_log(key, f"worker teardown failed: {error}", at)
+    record["torn_down"] = True
+    data["runs"] = {**runs, f"{stage}-{attempt}": record}
+    store.set_resume(key, data)
+
+
 def _declared_agent(text: str, agent: str) -> str:
     """Pass the agent type only when the workspace's Agent: lines declare it (§9)."""
     if not agent:
@@ -121,7 +140,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
     if existing is not None:
-        store.set_ownership(issue_key, existing["tree"])
+        store.set_ownership(issue_key, existing["tree"], "tree")
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
@@ -150,7 +169,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             raise RuntimeError("prepared review tree is unreadable")
         if request_head.branch != branch:
             raise RuntimeError("request branch changed since the refused start")
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
         if prepared_review.get("head") != request_head.head or head[1] != request_head.head:
             # Retain the obsolete tree under cleanup ownership; build the new head in a fresh checkout.
             tree_name = f"{tree_name}-{uuid.uuid4()}"
@@ -160,7 +179,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
         if code or actual != branch or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
     elif not prepared_review:
         started = any(name.startswith(f"{stage}-") for name in data.get("runs", {}))
         # A failed start before any worker (such as an unreadable issue) left no tree to lose.
@@ -171,7 +190,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         made = make_worktree.build(root, clone or root, str(trees), tree_name, branch,
                                    agent, from_branch=from_branch)
         tree = made.path
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
         if stage != "review":
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
             data.update(worktree=str(tree), work_branch=branch)
@@ -185,12 +204,16 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 raise RuntimeError("prepared review tree does not match the request head")
     if run_dir.resolve().is_relative_to(tree.resolve()):
         raise RuntimeError("engine run directory must be outside the worker tree")
+    code, starting_head = make_worktree.git(["rev-parse", "HEAD"], tree)
+    if code or not starting_head:
+        raise RuntimeError("cannot read the worker's starting HEAD")
     # Read before touching evidence: an unreadable forge refuses the start, never launches with defaults only.
     protected = tuple(dict.fromkeys((*guard_binding.DEFAULT_PROTECTED_BRANCHES, *forge.protected_branches())))
     # A failed start may be retried at the same attempt. Preserve its evidence under a unique sibling.
     if run_dir.exists():
         run_dir.rename(run_dir.with_name(f"{run_dir.name}-refused-{uuid.uuid4()}"))
     run_dir.mkdir(parents=True)
+    (run_dir / "starting_head").write_text(starting_head)
     session_id = str(uuid.uuid4())
     plugin = guard_binding.guard_plugin_dir()
     if plugin is None:
@@ -221,26 +244,36 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             time.sleep(0.01)
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
-                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
+                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
+                  "starting_head": starting_head}
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
-    except Exception:
-        claude_adapter.cancel(runner)
-        # The process is already up. collect() never sees a segment slots.claim drops on this failure.
-        for error in teardown(root, tree, tree.name, teardown_command):
+    except Exception as start_error:
+        try:
+            claude_adapter.cancel(runner)
+        except Exception as cancel_error:
             try:
-                store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                store.add_log(issue_key, f"worker cancel failed: {cancel_error}", clock().isoformat())
             except Exception:
                 pass
-        raise
+        finally:
+            # The process is already up. collect() never sees a segment slots.claim drops on this failure.
+            for error in teardown(root, tree, tree.name, teardown_command):
+                try:
+                    store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                except Exception:
+                    pass
+        raise start_error
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False) -> None:
+            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
+            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
+    completed = []
     for segment in store.segments():
         if segment.ended_at is not None:
             continue
@@ -274,6 +307,11 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             run_dir = _run_dir(root, key, segment.stage, segment.attempt)
             if Path(record["run_dir"]).resolve() != run_dir or run_dir.is_relative_to(Path(record["tree"]).resolve()):
                 raise ValueError("run record is outside the engine evidence directory")
+            if not record.get("starting_head") and (run_dir / "starting_head").is_file():
+                record["starting_head"] = (run_dir / "starting_head").read_text().strip()
+                _save_run(store, key, segment.stage, segment.attempt, record)
+                data = _resume(store, key)
+                record = data["runs"][f"{segment.stage}-{segment.attempt}"]
             runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))
@@ -290,10 +328,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
-            for error in teardown(root, Path(record["tree"]), Path(record["tree"]).name, teardown_command):
-                store.add_log(key, f"worker teardown failed: {error}", now.isoformat())
             if not (run_dir / "exit.json").exists():
-                raise ValueError("missing adapter exit record")
+                # The planner closes it from tree, report and orphan evidence.
+                continue
+            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
             code = _exit_code(run_dir)
             reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
             if isinstance(reply, Failure):
@@ -307,19 +345,16 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = "failed", reply.message
             else:
                 # A clean exit is not completion: the worker's own report for this session decides.
-                reports = store.reports(key, stage=segment.stage, attempt=segment.attempt,
-                                        session_id=record["session_id"])
+                reports = store.segment_reports(key, segment.stage, segment.attempt)
                 if not reports:
                     reason = "worker stopped without reporting an outcome"
                 elif reports[-1].outcome == "done":
                     raw = reports[-1].suite if isinstance(reports[-1].suite, dict) else {}
                     counts = dispatch_prompt.suite_counts(raw)
-                    if reconcile.suite_holds(counts, require_green=require_green):
+                    # With a finish callback the shared verdict sees the raw done report and arms the suite hold.
+                    if finish is None and reconcile.suite_holds(counts, require_green=require_green):
                         outcome = "human_review"
-                        shown = ", ".join(
-                            f"{name}={counts[name] if counts[name] is not None else 'missing or invalid'}"
-                            for name in dispatch_prompt.SUITE_KEYS)
-                        reason = f"suite is not green; Suite: {shown}; worker said: {reports[-1].summary}"
+                        reason = reconcile.suite_reason(counts, reports[-1].summary)
                         store.set_human_review(key, True)
                         data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
                                               "published": False}
@@ -330,6 +365,20 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = reports[-1].outcome, reports[-1].summary
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
+        completed.append((segment, outcome, reason, now))
+    # Adopt and backfill every run before the shared snapshot; later exits wait for the next pass.
+    facts = gather() if gather is not None else None
+    for segment, outcome, reason, now in completed:
+        key = segment.issue_key
+        if finish is not None:
+            try:
+                finish(segment, outcome, reason, now, facts=facts)
+            except Exception as exc:
+                message = f"worker {segment.stage} attempt {segment.attempt} close failed: {exc}"
+                if not any(row.message == message for row in store.log(key)):
+                    store.add_log(key, message, now.isoformat())
+            continue
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),
                       now.isoformat())
+    return facts

@@ -15,11 +15,13 @@ from typing import Any
 import cleanup
 import clock as engine_clock
 import dispatch_prompt
+import engine_facts
 import engine_merge
 import forge
 import issue_gate
 import limits_history
 import limits_probe
+import ownership
 import policy
 import reconcile
 import settings
@@ -37,6 +39,29 @@ Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 def _resume(store: Any, key: str) -> dict:
     data = store.resume(key)
     return dict(data) if isinstance(data, dict) else {}
+
+
+def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
+    """A closed merge proved on main with green CI is not re-read on later gathers."""
+    on_main = dict(facts.on_main)
+    suite = dict(facts.suite_on_main)
+    for item in store.items():
+        key = item.issue_key
+        if item.forge_state != "closed" or item.merge_state != "merged":
+            continue
+        if on_main.get(key) is not True or suite.get(key) is not True:
+            continue
+        data = _resume(store, key)
+        if data.get("verified_landing") is True:
+            continue
+        data["verified_landing"] = True
+        store.set_resume(key, data)
+
+
+def _arm_suite_hold(store: Any, key: str, stage: str, attempt: int) -> None:
+    data = _resume(store, key)
+    data["suite_hold"] = {"stage": stage, "attempt": attempt, "published": False}
+    store.set_resume(key, data)
 
 
 def _planning_inputs(store: Any, items: list) -> dict:
@@ -188,6 +213,37 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
                 store.add_log(key, message, at)
 
 
+def _close_segment(forge: Any, store: Any, key: str, stage: str, attempt: int,
+                   outcome: str, reason: str, human_review: bool, now: datetime) -> None:
+    """Both closure paths persist a forge hold before ending the segment."""
+    if human_review:
+        if getattr(forge, "kanban", None) is not None:
+            error = forge.add_human_hold(int(key.rpartition("#")[2]))
+            if error:
+                raise ForgeError(error)
+        store.upsert_item(key, human_review=True)
+    store.end_segment(key, stage, attempt, now.isoformat(), outcome)
+    store.add_log(key, f"worker {stage} attempt {attempt}: {outcome}" +
+                  (f": {reason}" if reason else ""), now.isoformat())
+
+
+def _finish_worker(forge: Any, store: Any, segment: Any,
+                   outcome: str, reason: str, now: datetime, *, policies: policy.Policies,
+                   facts: reconcile.Facts) -> None:
+    """Close the exited run; the planner and cleanup gate merged-item completion on main CI."""
+    key = segment.issue_key
+    item = next((item for item in store.items() if item.issue_key == key), None)
+    workflow = policies.workflow_for(_resume(store, key).get("issue_type") or getattr(item, "issue_type", None))
+    verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
+    held = verdict.human_review or reason.startswith("unreadable worker run:")
+    if verdict.human_review:
+        outcome = verdict.outcome
+        reason = "; ".join(part for part in (reason, verdict.reason) if part)
+    if verdict.suite_hold:
+        _arm_suite_hold(store, key, segment.stage, segment.attempt)
+    _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "") -> list[reconcile.Action]:
@@ -197,7 +253,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     _record_limits(workers)
-    worker.collect(store, root, clock, trees, require_green=require_green, teardown_command=teardown_command)
+
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -210,10 +266,35 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     and board.stage_map[observed] == board.stage_map[stored]):
                 row["stage"] = stored
     store.sync_from_forge(snapshots)
+    scopes = {}
+    for row in snapshots:
+        key = row["issue_key"]
+        body = row.get("body")
+        if not isinstance(body, str):
+            try:
+                got = forge.issue(int(key.rpartition("#")[2]))
+                if not got.ok or got.issue is None:
+                    raise ForgeError(got.error or "issue not found")
+                body = got.issue.body if isinstance(got.issue.body, str) else ""
+            except (ForgeError, OSError, ValueError, TypeError) as exc:
+                store.add_log(key, f"ownership read failed: {exc}", clock().isoformat())
+                # A failed per-issue fallback preserves prior claims; a new issue owns the repository.
+                if not any(row.mode != "tree" for row in store.ownership(key)):
+                    scopes[key] = [(".", "write")]
+                continue
+        scopes[key] = ownership.issue_scopes(body)
+    for key, declared in scopes.items():
+        store.replace_file_ownership(key, declared)
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
+
+    facts = worker.collect(store, root, clock, trees,
+                   gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
+                                  now=clock(), require_green=require_green),
+                   finish=partial(_finish_worker, forge, store, policies=policies),
+                   require_green=require_green, teardown_command=teardown_command)
 
     now = clock()
     at = now.isoformat()
@@ -275,10 +356,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
+    _remember_verified(store, facts)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
-                             **_planning_inputs(store, items))
+                             facts=facts, **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
@@ -341,6 +423,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                          inputs=_planning_inputs(store, [by_key[key]]),
                                          hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
+            elif isinstance(action, reconcile.Close):
+                worker.teardown_once(store, root, key, action.stage, action.attempt, teardown_command, at)
+                if action.suite_hold:
+                    _arm_suite_hold(store, key, action.stage, action.attempt)
+                _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
+                               action.reason, action.human_review, now)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
                 record = {"kind": type(action).__name__, "reason": action.reason}
@@ -367,7 +455,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         except Exception as exc:
             if not isinstance(exc, HoldReleaseFailed):
                 store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
-    if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
+    completed = {item.issue_key for item in store.items()
+                 if item.forge_state == "closed" and item.merge_state == "merged"
+                 and reconcile.completion_wait(item.issue_key, facts) is None
+                 and not any(segment.ended_at is None for segment in store.segments(item.issue_key))}
+    if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True,
+                       completed=completed):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions
 

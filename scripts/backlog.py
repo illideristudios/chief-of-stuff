@@ -34,7 +34,7 @@ OPEN, CLOSED = "opened", "closed"
 
 # A full result may be truncated; reject it rather than treating it as complete.
 GH_LIMIT = PER_PAGE * MAX_PAGES
-GH_FIELDS = "number,title,state,labels,url,updatedAt,closedAt"
+GH_FIELDS = "number,title,state,labels,url,updatedAt,closedAt,body"
 GH_STATE = {OPEN: "open", CLOSED: "closed", "all": "all"}
 
 
@@ -196,6 +196,7 @@ def _issue(row: dict) -> Issue:
         web_url=str(row.get("web_url", "")),
         updated_at=str(row.get("updated_at", "")),
         closed_at=str(row.get("closed_at", "")),
+        body=str(row.get("description") or ""),
     )
 
 
@@ -230,6 +231,7 @@ def _gh_issue(row: dict) -> Issue:
         web_url=str(row.get("url", "")),
         updated_at=str(row.get("updatedAt", "")),
         closed_at=str(row.get("closedAt") or ""),
+        body=str(row.get("body") or ""),
     )
 
 
@@ -281,9 +283,9 @@ def issue_states(cfg: Backlog | GitHubBacklog, gh=None) -> dict[int, Issue]:
 
 def read_one(cfg: Backlog | GitHubBacklog, iid: int, token: str | None = None,
              timeout: float = TIMEOUT, gh=None) -> Read:
-    """One issue with its body (#63), the shapes the list omits. A failed read says why; it never raises."""
+    """One issue with its body (#63). A failed read says why; it never raises."""
     if isinstance(cfg, GitHubBacklog):
-        rc, out, err = (gh or run_gh)(["issue", "view", str(iid), "-R", cfg.repo, "--json", f"{GH_FIELDS},body"])
+        rc, out, err = (gh or run_gh)(["issue", "view", str(iid), "-R", cfg.repo, "--json", GH_FIELDS])
         if rc != 0:
             return Read(error=f"gh: {(err.strip().splitlines() or [f'exit {rc}'])[-1]}")
         try:

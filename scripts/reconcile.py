@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Mapping, Protocol, Sequence
 
+import completion
+import readiness
+import worker_health
 from model_port import RETRYABLE
+from orphans import Claim
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
+from tree_state import TreeState
 
 
 class WorkItem(Protocol):
@@ -41,6 +46,13 @@ def suite_holds(counts: Mapping[str, int | None], *, require_green: bool) -> boo
     if any(counts.get(key) is None for key in keys):
         return True
     return counts["passed"] == 0 or any(counts[key] for key in keys[1:])
+
+
+def suite_reason(counts: Mapping[str, int | None], summary: str) -> str:
+    shown = ", ".join(
+        f"{name}={counts[name] if counts[name] is not None else 'missing or invalid'}"
+        for name in ("passed", "failed", "skipped", "xfailed"))
+    return f"suite is not green; Suite: {shown}; worker said: {summary}"
 
 
 def suite_hold_action(item: WorkItem, hold: object, history: Sequence[Segment], *,
@@ -118,7 +130,45 @@ class Wait:
     reason: str
 
 
-Action = Dispatch | Review | Merge | Ask | Escalate | Wait
+@dataclass(frozen=True)
+class Close:
+    """End an open segment whose worker is gone. The next pass plans from the closed segment."""
+
+    issue_key: str
+    stage: str
+    attempt: int
+    outcome: str
+    reason: str
+    human_review: bool = False
+    suite_hold: bool = False
+
+
+Action = Dispatch | Review | Merge | Ask | Escalate | Wait | Close
+
+
+@dataclass(frozen=True)
+class Facts:
+    """One pass's readiness, completion and stall facts. Empty means the caller did not gather them."""
+
+    claims: tuple[readiness.Claim, ...] = ()
+    blockers: tuple[tuple[str, tuple[str, ...] | None], ...] | None = None  # None: the relationship read failed
+    asks: tuple[readiness.Ask, ...] = ()
+    reports: tuple[readiness.Report, ...] = ()
+    alive: tuple[tuple[tuple[str, str, int], bool], ...] = ()  # (issue, stage, attempt) → worker alive
+    read_only: tuple[str, ...] = ()
+    changed: tuple[tuple[str, bool | None], ...] = ()  # dirty; read-only also checks the launch HEAD
+    unreadable: tuple[str, ...] = ()  # git tree/status could not be read; independent of baseline evidence
+    on_main: tuple[tuple[str, bool | None], ...] = ()
+    suite_on_main: tuple[tuple[str, bool | None], ...] = ()
+    trees: tuple[tuple[str, TreeState], ...] = ()
+    tree_names: tuple[tuple[str, str], ...] = ()
+    tree_claims: tuple[tuple[str, tuple], ...] = ()
+    progress: tuple[tuple[str, datetime | None], ...] = ()  # present None: no usable progress evidence; absent: not gathered
+    landing_errors: tuple[tuple[str, str], ...] = ()  # per-issue forge landing failures
+    blockers_error: str = ""  # why `blockers` is None
+    stall_after: timedelta = timedelta(minutes=45)
+    suites: tuple[tuple[tuple[str, str, int], tuple], ...] = ()  # (issue, stage, attempt) → (counts, summary)
+    require_green: bool = False
 
 
 def _time(value: datetime | str) -> datetime:
@@ -228,13 +278,84 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
     return edges[0] if len(edges) == 1 else None
 
 
+def _report_outcome(facts: Facts, key: str, segment: Segment) -> str | None:
+    mine = [row for row in facts.reports
+            if row.issue_key == key and (not row.stage or (row.stage == segment.stage and row.attempt == segment.attempt))]
+    return mine[-1].outcome if mine else None
+
+
+def _running_segment(history: Sequence[Segment]) -> Segment | None:
+    return next((segment for segment in history if segment.started_at and not segment.ended_at), None)
+
+
+def completion_wait(key: str, facts: Facts) -> Wait | None:
+    """Forge closure alone cannot complete a merged item or release its tree."""
+    gate = completion.done_on_main(dict(facts.on_main).get(key), dict(facts.suite_on_main).get(key))
+    if gate:
+        error = dict(facts.landing_errors).get(key)
+        reason = f"merged, awaiting main CI: {gate}" + (f": {error}" if error else "")
+        return Wait(key, reason)
+    return None
+
+
+def completion_verdict(key: str, segment: Segment, facts: Facts, workflow: Workflow, *,
+                       report: str | None, worker_alive: bool | None) -> completion.Verdict | None:
+    """One completion input mapping for collected exits and abandoned workers."""
+    claims = dict(facts.tree_claims).get(key, ())
+    if worker_alive is False:
+        claims = tuple(Claim(claim.owner, False, "has no process", claim.ref) if claim.owner == key else claim for claim in claims)
+    verdict = completion.abandoned(
+        worker_alive, report=report,
+        read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
+        on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
+        tree_unreadable=key in facts.unreadable,
+        tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
+        tree_claims=claims, landing_required=not workflow.next(segment.stage))
+    if verdict is None or verdict.human_review or report != "done":
+        return verdict
+    found = dict(facts.suites).get((key, segment.stage, segment.attempt),
+                                  (dict.fromkeys(("passed", "failed", "skipped", "xfailed")), ""))
+    if not suite_holds(found[0], require_green=facts.require_green):
+        return verdict
+    return completion.Verdict("human_review", suite_reason(found[0], found[1]), True, True)
+
+
+def _abandoned(item: WorkItem, segment: Segment, facts: Facts, workflow: Workflow) -> Close | None:
+    verdict = completion_verdict(item.issue_key, segment, facts, workflow,
+        report=_report_outcome(facts, item.issue_key, segment),
+        worker_alive=dict(facts.alive).get((item.issue_key, segment.stage, segment.attempt)))
+    if verdict is None:
+        return None
+    return Close(item.issue_key, segment.stage, segment.attempt, verdict.outcome, verdict.reason,
+                 verdict.human_review, verdict.suite_hold)
+
+
+def _stalled(item: WorkItem, segment: Segment, facts: Facts, now: datetime) -> Wait | None:
+    alive = dict(facts.alive).get((item.issue_key, segment.stage, segment.attempt))
+    progress = dict(facts.progress)
+    if alive is not True or item.issue_key not in progress:
+        return None
+    if worker_health.silence(_time(segment.started_at), progress[item.issue_key], now, facts.stall_after) == "act":
+        return Wait(item.issue_key, "stalled")
+    return None
+
+
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
-          decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object]) -> Action | None:
+          decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object], facts: Facts | None = None) -> Action | None:
     key = item.issue_key
-    if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
-        return None
     workflow = policies.workflow_for(issue_type)
+    if item.forge_state == "closed" and item.merge_state == "merged" and facts is not None:
+        waiting = completion_wait(key, facts)
+        if waiting:
+            return waiting
+    running = _running_segment(history)
+    if running is not None:
+        if facts is None:
+            return None
+        return _abandoned(item, running, facts, workflow) or _stalled(item, running, facts, now)
+    if item.forge_state == "closed":
+        return None
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
@@ -325,6 +446,32 @@ def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: M
     return "none"
 
 
+def _running_keys(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], facts: Facts | None) -> list[str]:
+    alive = dict(facts.alive) if facts is not None else {}
+    found = []
+    for item in items:
+        segment = _running_segment(segments.get(item.issue_key, ()))
+        if segment is None:
+            continue
+        if alive.get((item.issue_key, segment.stage, segment.attempt)) is False:
+            continue
+        found.append(item.issue_key)
+    return found
+
+
+def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment], facts: Facts,
+                running: Sequence[str]) -> Action | None:
+    # Completion writes a forge hold before closure. A human's release must survive retained tree evidence.
+    if not isinstance(action, (Dispatch, Review)):
+        return action
+    blockers = None if facts.blockers is None else dict(facts.blockers).get(item.issue_key, ())
+    reason = readiness.why_not(item.issue_key, claims=facts.claims, running=running, blockers=blockers,
+                               asks=facts.asks, reports=facts.reports)
+    if reason == "dependency blockers unknown" and facts.blockers_error:
+        reason = f"{reason}: {facts.blockers_error}"
+    return Wait(item.issue_key, reason) if reason else action
+
+
 def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], policies: Policies,
          issue_types: Mapping[str, str | None], free_slots: int, now: datetime,
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
@@ -332,7 +479,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          decisions: Mapping[str, Sequence[Decision]] | None = None,
          quota_resets: Mapping[str, datetime] | None = None,
          hold_stages: Sequence[str] = (),
-         launcher_holds: Mapping[str, Mapping[str, object]] | None = None) -> list[Action]:
+         launcher_holds: Mapping[str, Mapping[str, object]] | None = None,
+         facts: Facts | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
@@ -340,23 +488,31 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     Merge requires answered decisions and, where policy requires it, a done architect segment for the current work.
     Without creation times, issue numbers order work within each forge namespace.
     Attempt-owned extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
+    `facts` are this pass's ownership, blockers, stops, tree and stall readings. Without them a running segment
+    still suppresses actions.
     """
     _time(now)
     if type(free_slots) is not int or free_slots < 0:
         raise ValueError("free_slots must be a non-negative integer")
     actions = []
+    running = _running_keys(items, segments, facts)
+    accepted: list[str] = []
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
         reset = (quota_resets or {}).get(item.issue_key)
         if reset is not None and _time(reset) > now and item.forge_state != "closed":
             actions.append(Wait(item.issue_key, "quota reset pending"))
             continue
-        action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
+        history = segments.get(item.issue_key, ())
+        action = _item(item, history, policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
                        (decisions or {}).get(item.issue_key, ()), hold_stages,
-                       (launcher_holds or {}).get(item.issue_key, {}))
+                       (launcher_holds or {}).get(item.issue_key, {}), facts)
+        if facts is not None and action is not None:
+            action = _with_facts(action, item, history, facts, (*running, *accepted))
         if isinstance(action, (Dispatch, Review)):
             if free_slots:
                 free_slots -= 1
+                accepted.append(item.issue_key)
             else:
                 action = Wait(item.issue_key, "no free worker slots")
         if action is not None:

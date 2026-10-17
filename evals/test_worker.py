@@ -242,6 +242,30 @@ class WorkerTest(unittest.TestCase):
             self.launch("review")
         self.assertEqual(build.call_args.kwargs["from_branch"], "feature/existing")
 
+    def test_starting_head_is_saved_before_the_worker_can_change_the_tree_and_survives_adoption(self):
+        def start(request, run_dir, **kwargs):
+            self.assertEqual((run_dir / "starting_head").read_text(), "head")
+            return self.start(request, run_dir, **kwargs)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=start), \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.launch()
+            data = self.db.resume(KEY)
+            record = data["runs"]["implement-1"]
+            self.assertEqual(record.get("starting_head"), "head")
+            data["runs"] = {}
+            self.db.set_resume(KEY, data)
+            self.launch()
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["starting_head"], "head")
+
+    def test_collect_recovers_starting_head_for_an_existing_run_record(self):
+        run = self.launched()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"].pop("starting_head")
+        self.db.set_resume(KEY, data)
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"].get("starting_head"), "head")
+
     def test_reviewed_head_round_trips_through_run_and_collected_result(self):
         run = self.launched("review")
         record = self.db.resume(KEY)["runs"]["review-1"]
@@ -250,6 +274,7 @@ class WorkerTest(unittest.TestCase):
         self.forge.closing_request = mock.Mock(return_value=SimpleNamespace(branch="feature/existing", head="new-head"))
         data = self.db.resume(KEY)
         data["review_trees"]["1"]["head"] = "new-head"
+        data["runs"]["review-1"].pop("starting_head")  # Recover the durable launch baseline during collect.
         self.db.set_resume(KEY, data)
         (run / "stdout").write_text('{"is_error": false, "result": "reviewed"}')
         (run / "stderr").write_text("")
@@ -429,7 +454,7 @@ class WorkerTest(unittest.TestCase):
         fresh = self.trees / "fresh-review"
         fresh.mkdir()
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=fresh)) as build, \
-             mock.patch.object(worker.make_worktree, "git", side_effect=[(0, "head"), (0, "new-head")]), \
+             mock.patch.object(worker.make_worktree, "git", side_effect=[(0, "head"), (0, "new-head"), (0, "new-head")]), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             self.launch("review")
@@ -563,17 +588,118 @@ class WorkerTest(unittest.TestCase):
         forge.rows[0].update(stage=stage, human_review=False)
         return forge
 
-    def suite_pass(self, forge, launch):
-        with mock.patch.object(engine.cleanup, "execute", return_value=0), mock.patch.object(engine, "_record_limits"):
+    def suite_pass(self, forge, launch, tree=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+        with mock.patch.object(engine.cleanup, "execute", return_value=0), mock.patch.object(engine, "_record_limits"), \
+             mock.patch.object(engine.engine_facts, "_tree_facts", return_value=tree):
             return engine.run_pass(store=self.db, root=self.root, trees=self.trees,
                                    forge=forge, policies=self.p, launch=launch,
                                    workers=engine.settings.Workers(),
                                    clock=lambda: NOW + timedelta(minutes=1), require_green=True)
 
+    def test_a_red_suite_does_not_replace_a_completion_hold(self):
+        forge = self.suite_run()
+        forge.add_human_hold = mock.Mock(return_value="")
+        self.suite_pass(forge, mock.Mock(return_value=("example", "")),
+                        tree=(reconcile.TreeState("head", 3, 0, 0), False, NOW))
+        self.assertNotIn("suite_hold", self.db.resume(KEY) or {})
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertTrue(any("uncommitted" in row.message for row in self.db.log(KEY)))
+
+    def test_an_adopted_completed_start_finishes_on_the_same_pass(self):
+        forge = self.suite_run()
+        data = self.db.resume(KEY)
+        run = Path(data["runs"]["implement-1"]["run_dir"])
+        self.report(run, suite={"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0})
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        worker._runners.pop(str(run), None)
+        with mock.patch.object(engine.engine_facts, "gather", wraps=engine.engine_facts.gather) as gather:
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        gather.assert_called_once()
+        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["starting_head"], "head")
+
+    def test_an_exit_published_during_gather_waits_until_the_next_pass(self):
+        run = self.launched()
+        self.report(run)
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run / "stderr").write_text("")
+        facts = reconcile.Facts()
+
+        def gather():
+            (run / "exit.json").write_text('{"exit_code": 0}')
+            return facts
+
+        finish = mock.Mock()
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.assertIs(worker.collect(self.db, self.root, lambda: NOW, gather=gather, finish=finish), facts)
+        finish.assert_not_called()
+        worker.collect(self.db, self.root, lambda: NOW, gather=lambda: facts, finish=finish)
+        finish.assert_called_once()
+
+    def test_failed_close_stays_open_logs_once_and_other_collection_and_planning_continue(self):
+        forge = self.suite_run()
+        forge.kanban = SimpleNamespace(stage_map={}, hold_stages=())
+        forge.add_human_hold = mock.Mock(side_effect=lambda number: "label unavailable" if number == 1 else "")
+        other = KEY.rpartition("#")[0] + "#2"
+        fresh = KEY.rpartition("#")[0] + "#3"
+        forge.rows.extend([{"issue_key": other, "stage": "implement", "forge_state": "open"},
+                           {"issue_key": fresh, "stage": "implement", "forge_state": "open"}])
+        for number, row in enumerate(forge.rows):
+            row["body"] = f"## File ownership\n- write: `src/{number}.py`"
+        self.db.upsert_item(other, stage="implement")
+        self.db.record_segment(other, "implement", 1, NOW.isoformat())
+        launch = mock.Mock(return_value=("example", ""))
+        for _ in range(2):
+            self.suite_pass(forge, launch)
+            self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertIsNotNone(self.db.segments(other)[0].ended_at)
+        self.assertIn(fresh, [call.args[0] for call in launch.call_args_list])
+        errors = [row.message for row in self.db.log(KEY) if "close failed" in row.message]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("label unavailable", errors[0])
+
+    def test_a_foreign_session_cannot_replace_the_current_red_suite(self):
+        for exitless in (False, True):
+            with self.subTest(exitless=exitless):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                forge = self.suite_run()
+                self.db.add_report(KEY, "implement", 1, "foreign", "done", "foreign green", [],
+                                   suite={"passed": 5, "failed": 0, "skipped": 0, "xfailed": 0})
+                if exitless:
+                    run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+                    (run / "exit.json").unlink()
+                with mock.patch.object(worker.process_status, "identity", return_value=None):
+                    self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                self.assertIn("suite_hold", self.db.resume(KEY))
+
+    def test_a_dead_worker_without_an_exit_holds_a_red_suite(self):
+        forge = self.suite_run()
+        run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run_dir / "exit.json").unlink()
+        forge.add_human_hold = mock.Mock(return_value="")
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(engine.engine_facts.process_status, "identity", return_value=None):
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+        self.assertEqual(self.db.resume(KEY)["suite_hold"]["stage"], "implement")
+        launch = mock.Mock(return_value=("example", ""))
+        self.suite_pass(forge, launch)
+        launch.assert_not_called()
+
     def test_a_non_done_report_is_not_suite_gated(self):
         forge = self.suite_run(outcome="blocked")
         forge.add_human_hold = mock.Mock(return_value="")
-        self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        with mock.patch.object(engine.engine_facts, "_tree_facts",
+                               return_value=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
         self.assertEqual(self.db.segments(KEY)[0].outcome, "blocked")
         self.assertFalse(self.db.items()[0].human_review)
         self.assertNotIn("suite_hold", self.db.resume(KEY))
@@ -769,6 +895,12 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([s.outcome for s in self.db.segments()], ["failed", "failed"])
         self.assertEqual(len(self.db.log(KEY)), 2)
 
+    def test_a_gone_worker_with_no_exit_record_stays_open_for_the_planner(self):
+        self.launched()
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW)
+        self.assertIsNone(self.db.segments()[0].ended_at)
+
     def test_malformed_run_records_and_result_end_failed(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         self.db.set_resume(KEY, {"runs": ["invalid"]})
@@ -807,15 +939,15 @@ class WorkerTest(unittest.TestCase):
                                  NOW + timedelta(hours=3), {}, quota_resets={KEY: NOW + timedelta(hours=2)})
         self.assertEqual(planned, [reconcile.Dispatch(KEY, "implement", "builder", 6)])
 
-    def test_engine_collects_before_reading_forge(self):
+    def test_engine_syncs_forge_before_collecting_so_completion_uses_declared_ownership(self):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
-        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect")), \
+        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect") or kw["gather"]()), \
              mock.patch.object(engine, "_record_limits"), \
              mock.patch.object(engine.cleanup, "execute", return_value=0):
             engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
                             trees=self.trees, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: NOW)
-        self.assertEqual(order[:2], ["collect", "forge"])
+        self.assertEqual(order[:2], ["forge", "collect"])
 
     def test_failed_review_start_can_reuse_its_prepared_tree(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \

@@ -46,6 +46,47 @@ def cell(text: str, keys: set[str]) -> str | None:
     return next((row.paths for row in parse("\n".join(_section(text, HEADING))) if row.context in keys), None)
 
 
+def issue_scopes(body: str) -> list[tuple[str, str]]:
+    """Issue `## File ownership`: `| Mode | Paths |` or `- write: paths` / `- read-only: paths`.
+
+    Reuse the tracker row reader. Missing, empty or malformed declarations conservatively own the repository.
+    Paths are literal repository-relative paths, just as for the tracker's overlap rule.
+    """
+    scopes: dict[str, str] = {}
+    lines = _section(body, HEADING)
+    for line in lines:
+        if not line.strip():
+            continue
+        if line.strip().startswith("|"):
+            cells = _cells(line)
+            if len(cells) != 2:
+                return [(".", "write")]
+            if _is_separator(cells) or [c.lower() for c in cells] in (["mode", "paths"], ["context", "paths"]):
+                continue
+        if not parse(line):
+            return [(".", "write")]
+    for row in parse("\n".join(lines)):
+        mode = row.context.strip().lower()
+        if mode == "mode" and row.paths.lower() == "paths":
+            continue
+        if mode not in ("write", "read", "read-only"):
+            return [(".", "write")]
+        if "`" in row.paths and not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", row.paths):
+            return [(".", "write")]
+        if any(token != token.strip() for token in re.findall(r"`([^`]+)`", row.paths)):
+            return [(".", "write")]
+        paths = _paths(row.paths)
+        if not paths:
+            return [(".", "write")]
+        for path in paths:
+            if (path.startswith("/") or (path != "." and any(part in ("", ".", "..") for part in path.split("/")))
+                    or any(c in path for c in "*?[]`") or _paths(path) != [path]):
+                return [(".", "write")]
+            # A duplicate write cannot be narrowed by a later read row.
+            scopes[path] = "write" if mode == "write" or scopes.get(path) == "write" else "read"
+    return list(scopes.items()) or [(".", "write")]
+
+
 def read_only(paths: str) -> bool:
     """A cell that starts with the word `none`, not the start of a path, owns nothing, so it changes nothing (#57)."""
     return bool(_NONE.match(paths.strip()))

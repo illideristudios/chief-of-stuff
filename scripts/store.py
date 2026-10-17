@@ -1,7 +1,7 @@
 """The issue-keyed store: one row per forge issue, written by upsert only.
 
 The forge is the source of truth. The forge-owned columns of a `WorkItem` (title, stage, forge/review/merge state, and the
-human-review flag when kanban is configured) are a cache `sync_from_forge` can rebuild; segments, decisions, ownership, log,
+human-review flag when kanban is configured) and declared file ownership are rebuildable; segments, decisions, tree ownership, log,
 and resume are the engine's own and are never touched by a sync. Omitted snapshot fields keep their stored values.
 The schema lives in `migrations/`, not in `create_all`: `migrate` is the one place
 it changes, and a test holds these models to what the migrations build.
@@ -79,7 +79,7 @@ class Ownership(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"))
     path: Mapped[str] = mapped_column(String)
-    mode: Mapped[str] = mapped_column(String, default="write")  # "write" or "read"
+    mode: Mapped[str] = mapped_column(String, default="write")  # "write", "read", or engine-owned "tree"
 
 
 class LogEntry(Base):
@@ -123,7 +123,7 @@ class Ask(WorkerRecord, Base):
 
 
 def _run_result(data: dict, stage: str, attempt: int, outcome: str, ended_at: str) -> None:
-    """The shared collected-result layout, used by completion and suite acceptance."""
+    """Record the review stage's collected result. Other stages leave runs unchanged."""
     runs = data.get("runs")
     record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
     if isinstance(record, dict) and stage == "review":
@@ -136,6 +136,7 @@ def migration_config(path: Path | str, metadata, versions: Path | None = None) -
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
     cfg.set_main_option("path_separator", "os")
+    # ConfigParser interpolates percent signs; escape literal URL characters.
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}".replace("%", "%%"))
     if versions is not None:
         cfg.set_main_option("version_locations", str(versions))
@@ -232,7 +233,10 @@ class Store:
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
 
     def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
-        """Atomically complete an open segment and its collected result, preserving start and actor."""
+        """Atomically complete an open segment, preserving start and actor.
+
+        A review also records its collected result. Other stages do not.
+        """
         with self.session() as s:
             changed = s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
                                                      Segment.attempt == attempt, Segment.ended_at.is_(None))
@@ -279,6 +283,21 @@ class Store:
     def ownership(self, issue_key: str) -> list[Ownership]:
         return self._all(select(Ownership).where(Ownership.issue_key == issue_key).order_by(Ownership.path))
 
+    def replace_file_ownership(self, issue_key: str, scopes: list[tuple[str, str]]) -> None:
+        """Replace the forge's declaration atomically, retaining engine worktree registrations.
+
+        Older workers registered absolute tree paths as write rows; adopt those as tree rows too.
+        Declared file paths are always repository-relative.
+        """
+        with self.session() as s:
+            for row in s.scalars(select(Ownership).where(Ownership.issue_key == issue_key)).all():
+                if row.mode == "tree" or Path(row.path).is_absolute():
+                    row.mode = "tree"
+                else:
+                    s.delete(row)
+            s.flush()
+            s.add_all(Ownership(issue_key=issue_key, path=path, mode=mode) for path, mode in scopes)
+
     # decisions and log (append-only)
     def add_decision(self, issue_key: str, topic: str, question: str, answer: str | None = None,
                      decided_by: str = "", record: Any = None) -> None:
@@ -306,10 +325,11 @@ class Store:
             return row.data if row else None
 
     def finish_suite_hold(self, issue_key: str, *, accept: bool) -> None:
-        """Atomically retire the hold, optionally accepting its segment and collected run result.
+        """Atomically retire the hold, optionally accepting its segment.
 
-        The Use Case decides when this transition is allowed. Keep the historical review marker
-        and actor/timing fields when accepting; callers never edit the worker result layout.
+        Accepting a review records that collected result as done. Other stages only change the
+        segment outcome. The Use Case decides when this transition is allowed. Keep the historical
+        review marker and actor/timing fields when accepting; callers never edit the worker result layout.
         """
         with self.session() as s:
             resume = s.get(Resume, issue_key)
@@ -345,6 +365,16 @@ class Store:
                 stmt = stmt.where(getattr(Report, key) == value)
         return self._all(stmt.order_by(Report.attempt, Report.id))
 
+    def segment_reports(self, issue_key: str, stage: str, attempt: int) -> list[Report]:
+        """Reports for this segment's recorded worker session, in insertion order."""
+        data = self.resume(issue_key)
+        runs = data.get("runs") if isinstance(data, dict) else None
+        record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+        session = record.get("session_id") if isinstance(record, dict) else None
+        if not isinstance(session, str) or not session:
+            return []
+        return self.reports(issue_key, stage=stage, attempt=attempt, session_id=session)
+
     def add_ask(self, issue_key: str, stage: str, attempt: int, session_id: str,
                 question: str, options: list[str], context: str) -> int:
         with self.session() as s:
@@ -356,6 +386,15 @@ class Store:
 
     def asks(self, issue_key: str) -> list[Ask]:
         return self._all(select(Ask).where(Ask.issue_key == issue_key).order_by(Ask.id))
+
+    def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
+        """An operator's answer is bound to the named issue; worker tools never expose this write."""
+        if not answer.strip():
+            raise ValueError("an ask answer must not be empty")
+        with self.session() as s:
+            if not s.execute(update(Ask).where(Ask.issue_key == issue_key, Ask.id == ask_id)
+                             .values(answer=answer)).rowcount:
+                raise KeyError(f"ask {ask_id} does not belong to {issue_key}")
 
     def _all(self, stmt: Any) -> list[Any]:
         with self.session() as s:

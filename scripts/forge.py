@@ -29,6 +29,96 @@ from settings import Kanban
 _LOCAL_CLOSE = re.compile(r"#\d+")  # a closing ref for this repository; anything else is qualified or foreign
 
 
+def _blocked_numbers(raw: Any) -> tuple[int, ...] | None:
+    """Open blocker numbers. () when the field names none. None when it is not a complete answer."""
+    if raw is None:
+        return ()
+    if isinstance(raw, dict):
+        nodes = raw.get("nodes")
+        total = raw.get("totalCount")
+        if not isinstance(nodes, list) or (isinstance(total, int) and total != len(nodes)):
+            return None
+    elif isinstance(raw, list):
+        nodes = raw
+    else:
+        return None
+    numbers = []
+    for node in nodes:
+        if not isinstance(node, dict) or type(node.get("number")) is not int:
+            return None
+        state = str(node.get("state", "OPEN")).upper()
+        if state == "CLOSED":
+            continue
+        if state not in ("OPEN", "OPENED"):
+            return None
+        numbers.append(node["number"])
+    return tuple(numbers)
+
+
+def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
+    row, error = _gh_json(forge.gh, ["issue", "list", "-R", forge.home.repo, "--state", "open",
+                                     "--json", "number,blockedBy", "--limit", str(backlog.GH_LIMIT)])
+    if error:
+        raise ForgeError(error)
+    if not isinstance(row, list) or len(row) >= backlog.GH_LIMIT:
+        raise ForgeError("issue list is not a complete list")
+    out: dict[str, tuple[str, ...]] = {}
+    for item in row:
+        if not isinstance(item, dict) or type(item.get("number")) is not int:
+            raise ForgeError("issue row has no number")
+        numbers = _blocked_numbers(item.get("blockedBy"))
+        if numbers is None:
+            raise ForgeError(f"blockers of #{item['number']} are incomplete")
+        if numbers:
+            raw = item["blockedBy"]
+            nodes = raw["nodes"] if isinstance(raw, dict) else raw
+            keys = []
+            for node in nodes:
+                if str(node.get("state", "OPEN")).upper() == "CLOSED":
+                    continue
+                repo = node.get("repository", {}).get("nameWithOwner")
+                url = node.get("url")
+                if url:
+                    ref = backlog.issue_ref(url, forge.home)
+                    if ref is None:
+                        raise ForgeError("a blocker has an unreadable issue URL")
+                    keys.append(f"github:{ref.repo}#{ref.number}")
+                else:
+                    keys.append(f"github:{repo}#{node['number']}" if repo else forge.key(node["number"]))
+            out[forge.key(item["number"])] = tuple(keys)
+    return out
+
+
+def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
+    # shortcut: one links read per open issue; page the list when a workspace exceeds one issues() page
+    got = forge.issues()
+    if not got.ok:
+        raise ForgeError(got.error)
+    secret = forge._token()
+    if not secret:
+        raise ForgeError(forge.home.missing_token)
+    out: dict[str, tuple[str, ...]] = {}
+    for issue in got.issues:
+        body, headers, error = backlog._get(f"{forge.home.issues_url}/{issue.iid}/links", secret, backlog.TIMEOUT)
+        if error or not isinstance(body, list):
+            raise ForgeError(error or f"links of #{issue.iid} are not a list")
+        if (headers.get("x-next-page") or "").strip():
+            raise ForgeError(f"links of #{issue.iid} span more than one page")
+        keys = []
+        for link in body:
+            if not isinstance(link, dict) or link.get("link_type") != "is_blocked_by" or link.get("state") != "opened":
+                continue
+            if type(link.get("iid")) is not int:
+                raise ForgeError(f"a link of #{issue.iid} has no iid")
+            ref = backlog.issue_ref(link.get("web_url", ""), forge.home)
+            if ref is None:
+                raise ForgeError(f"a blocker of #{issue.iid} has no readable project URL")
+            keys.append(f"gitlab:{ref.host}/{ref.repo}#{ref.number}")
+        if keys:
+            out[forge.key(issue.iid)] = tuple(keys)
+    return out
+
+
 def _gh_json(gh, args: list[str]):
     code, stdout, stderr = gh(args)
     if code:
@@ -518,14 +608,35 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}") from exc
 
-    def _merged_closes(self) -> set[int]:
-        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+    def _open_closers(self, base: str) -> list[dict]:
+        """One bounded list of open closing identities, without CI, reviews or discussions."""
+        try:
+            limit = backlog.GH_LIMIT if self.github else forge_review.REQUEST_LIMIT
+            if self.github:
+                rows, error = _gh_json(self.gh, [
+                    "pr", "list", "-R", self.home.repo, "--state", "open", "--base", base,
+                    "--limit", str(limit), "--json",
+                    "number,headRefOid,baseRefName,closingIssuesReferences"])
+                if error:
+                    raise ForgeError(error)
+            else:
+                rows = self._pipeline_read("merge_requests?" + urlencode({
+                    "state": "opened", "target_branch": base, "per_page": limit}))
+            if (not isinstance(rows, list) or len(rows) >= limit
+                    or any(not isinstance(row, dict) for row in rows)):
+                raise ValueError("expected a complete list of open closing identities")
+            return rows
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"open closers: {exc}") from exc
+
+    def _merged_requests(self) -> list[dict]:
+        """Recently merged requests (bounded by REQUEST_LIMIT), including landing evidence."""
         try:
             if self.github:
                 code, out, err = self.gh(
                     ["pr", "list", "-R", self.home.repo, "--state", "merged",
                      "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json",
-                     "number,body,closingIssuesReferences"])
+                     "number,body,closingIssuesReferences,baseRefName,headRefOid,mergeCommit"])
                 if code:
                     raise ForgeError(f"merged requests: {err.strip() or code}")
                 rows = json.loads(out)
@@ -542,16 +653,80 @@ class Forge:
             # shortcut: only the REQUEST_LIMIT most recently updated merged requests annotate closed issues (merging
             # updates a request; later edits can shift the window). Other closed issues keep their terminal stage mark
             # and read merge_state "". Page the list if a rebuild needs every merge.
-            if not isinstance(rows, list):
-                raise TypeError(f"expected a list, got {type(rows).__name__}")
-            closed: set[int] = set()
-            for row in rows:  # inside the guard: a malformed row is a forge read error, not a crash
-                refs = (forge_review.github_closes(row, self.home.repo) if self.github else
-                        forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
-                closed.update(int(ref[1:]) for ref in refs if _LOCAL_CLOSE.fullmatch(ref))
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise TypeError("expected a list of merged request objects")
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
-        return closed
+        return rows
+
+    def _closed_refs(self, row: dict) -> list[str]:
+        refs = (forge_review.github_closes(row, self.home.repo) if self.github else
+                forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
+        return [ref for ref in refs if _LOCAL_CLOSE.fullmatch(ref)]
+
+    def _merged_closes(self) -> set[int]:
+        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+        try:
+            return {int(ref[1:]) for row in self._merged_requests() for ref in self._closed_refs(row)}
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"merged requests: {exc}") from exc
+
+    def landings(self, pipeline: Pipeline, keys: list[str], *,
+                 errors: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
+        """Prove the newest closing request's head landed in current main with a passing suite.
+
+        Uses forge ancestry, so a stale local checkout or an original PR head is no landing proof.
+        Missing bounded history or unreadable comparisons remain unknown.
+        When provided, errors receives per-issue failure details for the planner's wait log.
+        """
+        found = {key: (None, None) for key in keys}
+        if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
+            return found
+        merged = self._merged_requests()
+        newest = {}
+        for row in [*merged, *self._open_closers(pipeline.ref)]:
+            if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
+                continue
+            identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
+            for ref in self._closed_refs(row):
+                key = self.key(int(ref[1:]))
+                if key in found and (key not in newest or identity[0] >= newest[key][0]):
+                    newest[key] = identity
+        for row in merged:
+            if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
+                continue
+            identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
+            mine = [self.key(int(ref[1:])) for ref in self._closed_refs(row)]
+            mine = [key for key in mine if newest.get(key) == identity and identity[1]]
+            if not mine:
+                continue
+            try:
+                commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
+                          row.get("squash_commit_sha") or row.get("merge_commit_sha") or row.get("sha"))
+                landed = None
+                if isinstance(commit, str) and commit:
+                    if commit == pipeline.sha:
+                        landed = True
+                    elif self.github:
+                        compared = self._pipeline_read(f"compare/{quote(commit, safe='')}...{quote(pipeline.sha, safe='')}")
+                        base = compared.get("merge_base_commit", {}).get("sha")
+                        if not isinstance(base, str) or not base:
+                            raise ValueError("landing comparison returned no merge base")
+                        landed = base == commit
+                    else:
+                        query = urlencode({"refs[]": [commit, pipeline.sha]}, doseq=True)
+                        base = self._pipeline_read(f"repository/merge_base?{query}").get("id")
+                        if not isinstance(base, str) or not base:
+                            raise ValueError("landing comparison returned no merge base")
+                        landed = base == commit
+                result = landed, pipeline.status == "passed" if landed is True else landed
+            except (ForgeError, RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                result = None, None
+                if errors is not None:
+                    errors.update((key, f"landing comparison: {exc}") for key in mine)
+            for key in mine:
+                found[key] = result
+        return found
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
         """The newest open request closing only the assigned issue; extra or cross-repo closing refs are unsafe to merge."""
@@ -573,6 +748,17 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"review threads: {exc}") from exc
 
+    def blocked_by(self) -> dict[str, tuple[str, ...]]:
+        """Open issues blocking each open issue, keyed by issue key. Raises ForgeError, saying why, when the read fails or is partial."""
+        try:
+            if self.github:
+                return _github_blocked(self)
+            return _gitlab_blocked(self)
+        except ForgeError:
+            raise
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ForgeError(f"blockers: {exc}") from exc
+
     def snapshot(self, issue_key: str, *, issue: Any | None = None,
                  request: merge_ready.Request | None = None) -> dict[str, Any]:
         """One issue's forge row (as `snapshots` builds), plus the observed stage label merge can verify.
@@ -591,7 +777,7 @@ class Forge:
                 for ref in r.closes:
                     latest[int(ref[1:])] = r
             request = latest.get(issue.iid)
-        snap: dict[str, Any] = {"issue_key": issue_key, "title": issue.title,
+        snap: dict[str, Any] = {"issue_key": issue_key, "title": issue.title, "body": issue.body,
                                 "forge_state": "open" if issue.state == backlog.OPEN else "closed",
                                 "stage_mark": None}
         if self.kanban is not None:
@@ -635,7 +821,7 @@ class Forge:
         out = []
         for one in sorted((*got.issues, *closed.issues), key=lambda i: i.iid):
             r = latest.get(one.iid)
-            snap = {"issue_key": self.key(one.iid), "title": one.title,
+            snap = {"issue_key": self.key(one.iid), "title": one.title, "body": one.body,
                     "forge_state": "open" if one.state == backlog.OPEN else "closed"}
             if self.kanban is not None:
                 snap["stage"] = self._stage(one, statuses if self.kanban.github_project and self.github else None)

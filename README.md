@@ -143,6 +143,22 @@ A decision's page is `<pages dir>/decision-<slug>.json`, served as `http://127.0
 
 The board and `notify.py sync` also read precise deadlines from tracker `## Decisions` rows: put `deadline: <name> YYYY-MM-DD HH:MM` in the `item` column, or `deadline: <name> HH:MM` for a time on that tracker's date. A later decision for the same name updates its marker, task horizon, and future notification warnings. A decision without an exact time supplies no instant. Run notification sync after a precise deadline decision changes.
 
+## Engine issue ownership
+
+The engine reads file scopes from each issue body on every pass and when `chief-of-stuff work` starts an issue. Declare them in a `## File ownership` section:
+
+```markdown
+## File ownership
+| Mode | Paths |
+| --- | --- |
+| write | `src/parser/`, `tests/parser/` |
+| read-only | `docs/` |
+```
+
+Bullets such as `- write: src/parser/, tests/parser/` use the same reader. Paths are literal repository-relative paths; `.` means the whole repository. Missing, empty or invalid declarations own the whole repository for writing. Overlapping writes in the same repository wait; read-only scopes do not conflict. Workers report results and cannot declare their own scopes. Worktree registrations are kept separately from file scopes in the ownership rows.
+
+An operator can answer a stored worker ask with `chief-of-stuff work "Issue title" --root . --issue 12 --answer-ask 7 --answer "Proceed" --commit`. The ask must belong to that issue; omitting `--commit` previews the answer. Workers have no answer-writing tool.
+
 ## Verification
 
 ```sh
