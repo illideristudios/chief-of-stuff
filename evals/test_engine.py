@@ -909,6 +909,17 @@ class EngineTest(unittest.TestCase):
         self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=self.now.isoformat()))
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
 
+    def test_a_consulting_work_stage_reads_the_architects_reply(self):
+        self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
+        self.p.stages["implement"].policy.update(architect=True, architect_persona="architect")
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=self.now.isoformat()))
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
     def test_latest_equal_time_reply_wins_and_request_survives_lost_resume(self):
         self.forge.rows[0]["stage"] = "review"
         self.db.sync_from_forge(self.forge.rows)

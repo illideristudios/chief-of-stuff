@@ -25,6 +25,7 @@ import slots
 import store
 import supervisor
 import worker
+from forge_port import ForgeError
 from evals.test_engine import KEY, NOW, FakeForge, policies
 
 
@@ -297,6 +298,22 @@ class WorkerTest(unittest.TestCase):
         self.forge.closing_request = lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="forge-sha")
         worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=self.forge)
         self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "forge-sha")
+
+    def test_an_unreadable_forge_head_leaves_a_done_finding_fix_open_for_the_next_pass(self):
+        run = self.launched()
+        seg = self.db.segments(KEY)[0]
+        self.db.record_segment(KEY, "implement", 1, seg.started_at, finding_key="1/1/key")
+        self.report(run)
+        (run / "stdout").write_text('{"is_error":false,"result":"done"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code":0}')
+        self.forge.closing_request = mock.Mock(side_effect=ForgeError("rate limited"))
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=self.forge)
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "")
+        self.forge.closing_request = lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="forge-sha")
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=2), forge=self.forge)
+        self.assertEqual((self.db.segments(KEY)[0].outcome, self.db.segments(KEY)[0].reviewed_head), ("done", "forge-sha"))
 
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \

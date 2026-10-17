@@ -63,6 +63,13 @@ class CommandTest(unittest.TestCase):
                 self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
         self.assertIsNone(denial_reason('gh pr comment 12 --body "reviewed the boundary"', ("main", "develop")))
 
+    def test_a_comment_body_from_a_file_or_editor_is_denied_because_it_cannot_be_read(self):
+        for command in ('gh pr comment 12 --body-file note.md', 'gh pr comment 12 -F note.md', 'gh pr comment 12 -F -',
+                        'gh issue comment 12 --body-file=note.md', 'gh pr comment 12 --editor', 'gh pr comment 12 -e',
+                        'gh pr review 12 --comment --body-file note.md', 'gh pr review 12 -c -F note.md'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+
     def test_comment_mutation_flags_are_denied(self):
         for group in ('issue', 'pr'):
             for flags in ('--delete-last --yes', '--edit-last --body replacement',
@@ -87,7 +94,7 @@ class CommandTest(unittest.TestCase):
 
     def test_additive_comments_remain_allowed(self):
         for group in ('issue', 'pr'):
-            for flags in ('--body feedback', '-b feedback', '--body-file feedback.txt', '-F feedback.txt', '--editor'):
+            for flags in ('--body feedback', '-b feedback'):
                 command = f'gh {group} comment 12 {flags}'
                 with self.subTest(command=command):
                     self.assertIsNone(denial_reason(command, ("main", "develop")))

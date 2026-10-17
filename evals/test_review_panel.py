@@ -199,6 +199,10 @@ class ReviewPanelTest(unittest.TestCase):
         action, = self.plan()
         self.assertEqual((action.persona, action.review_round), ("security", 1))
 
+    def keys(self):
+        """The panel's findings, as the request for them lists."""
+        return reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))
+
     def consulted(self, *dispositions):
         self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
         self.review(1, "critic", [finding(title) for title, _ in dispositions])
@@ -224,7 +228,30 @@ class ReviewPanelTest(unittest.TestCase):
     def test_a_reply_that_leaves_a_finding_undisposed_waits(self):
         self.consulted(("Fix me", "fix"))
         self.replies[KEY] = reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(), {})
+        self.requests = {KEY: [reconcile.request_token("head", self.keys())]}
         self.assertIsInstance(self.plan()[0], reconcile.Wait)
+
+    def test_a_fresh_round_at_the_same_head_asks_again_for_its_new_findings(self):
+        self.consulted(("One", "fix"))
+        asked = reconcile.request_token("head", self.keys())
+        action, = self.plan()
+        self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="head")
+        # The fix pushed nothing, so the next panel reviews the same head and finds something new.
+        self.review(3, "critic", [finding("Two")], round=2)
+        self.review(4, "security", round=2)
+        self.requests = {KEY: [asked]}
+        action = self.plan()[0]
+        self.assertIsInstance(action, reconcile.Consult)
+        self.assertEqual((action.head, [f["title"] for f in action.findings]), ("head", ["Two"]))
+        self.requests = {KEY: [asked, reconcile.request_token("head", self.keys())]}
+        self.assertIsInstance(self.plan()[0], reconcile.Wait)
+
+    def test_a_rework_stage_whose_head_moved_keeps_its_dispatch(self):
+        self.review(1, "critic", [finding()], head="old")
+        self.review(2, "security", head="old")
+        self.db.upsert_item(KEY, stage="implement")
+        actions = self.plan(head="new")
+        self.assertFalse(any(isinstance(a, reconcile.Review) for a in actions), actions)
 
     def test_reviewer_dispositions_cannot_suppress_or_authorize_findings(self):
         for disposition in ("file", "keep", "discard", "fix"):
@@ -240,18 +267,20 @@ class ReviewPanelTest(unittest.TestCase):
         self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
         self.review(1, "critic", [finding()])
         self.review(2, "security")
-        self.requests = {KEY: ["head"]}
+        self.requests = {KEY: [reconcile.request_token("head", self.keys())]}
         self.assertIsInstance(self.plan(slots=0)[0], reconcile.Wait)
         self.assertFalse(any(s.stage == "architect" for s in self.db.segments(KEY)))
 
-    def test_a_reply_before_a_new_panel_member_cannot_dispose_its_findings(self):
+    def test_a_late_panel_member_gets_its_own_findings_disposed(self):
         self.consulted(("One", "fix"))
-        self.db.record_segment(KEY, "review", 2, (NOW + timedelta(seconds=1)).isoformat(),
-                               (NOW + timedelta(seconds=2)).isoformat())
-        # Production already posted the request. The reply still disposes "One"; a later panel end does not erase it.
-        self.requests = {KEY: ["head"]}
+        asked = reconcile.request_token("head", self.keys())
+        # The clean run of "security" is superseded by a retry that reports a finding the reply never saw.
+        self.db.record_segment(KEY, "review", 2, (NOW - timedelta(minutes=2)).isoformat(), outcome="failed")
+        self.review(3, "security", [finding("Two")])
+        self.requests = {KEY: [asked]}
         action = self.plan()[0]
-        self.assertEqual((action.stage, action.finding["title"]), ("fix", "One"))
+        self.assertIsInstance(action, reconcile.Consult)
+        self.assertEqual([f["title"] for f in action.findings], ["Two"])
 
     def test_failed_or_quota_fix_does_not_explain_an_external_push(self):
         self.review(1, "critic", [finding("One"), finding("Two")])
@@ -282,19 +311,19 @@ class ReviewPanelTest(unittest.TestCase):
         action, = self.plan()
         self.assertEqual(action.finding["title"], "Fix me")
         self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="produced")
-        self.requests = {KEY: ["head"]}
+        self.requests = {KEY: [reconcile.request_token("head", [])]}
         nxt = self.plan(head="produced")[0]
         self.assertIsInstance(nxt, reconcile.Consult)
         self.assertEqual((nxt.head, list(nxt.findings)), ("produced", []))
         self.replies[KEY] = reconcile.ArchitectReply("produced", "CHANGES", NOW.isoformat(), self.replies[KEY].dispositions)
-        self.requests = {KEY: ["head", "produced"]}
+        self.requests = {KEY: [reconcile.request_token("head", []), reconcile.request_token("produced", [])]}
         nxt = self.plan(head="produced")[0]
         self.assertEqual((nxt.stage, nxt.finding["title"]), ("fix", "Also"))
 
     def test_approval_of_an_older_head_requests_only_the_new_head(self):
         self.consulted(("Keep me", "keep"))
         self.replies[KEY] = reconcile.ArchitectReply("old", "APPROVED", NOW.isoformat(), self.replies[KEY].dispositions)
-        self.requests = {KEY: ["old"]}
+        self.requests = {KEY: [reconcile.request_token("old", [])]}
         action = self.plan()[0]
         self.assertIsInstance(action, reconcile.Consult)
         self.assertEqual((action.head, list(action.findings)), ("head", []))
@@ -369,6 +398,14 @@ class ArchitectCommentsTest(unittest.TestCase):
             SimpleNamespace(body='Architect: APPROVED old', time=(NOW - timedelta(seconds=1)).isoformat()),
             SimpleNamespace(body='Architect: APPROVED forged', time='')])
         self.assertEqual(reply.reviewed_head, 'new')
+
+    def test_dispositions_fold_oldest_first_whatever_the_list_order(self):
+        import engine_facts
+        body = 'Architect: CHANGES head\n```json\n{"dispositions":{"1/1/a":"%s"}}\n```'
+        reply, _ = engine_facts.architect_comments([
+            SimpleNamespace(body=body % "keep", time=NOW.isoformat()),
+            SimpleNamespace(body=body % "fix", time=(NOW - timedelta(seconds=5)).isoformat())], head="head")
+        self.assertEqual(dict(reply.dispositions), {"1/1/a": "keep"})
 
     def test_a_later_reply_for_another_head_does_not_hide_this_head(self):
         import engine_facts
