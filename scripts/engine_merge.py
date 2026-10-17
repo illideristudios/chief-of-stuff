@@ -11,7 +11,7 @@ from policy import Policies, PolicyError
 
 
 def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies, inputs: dict,
-            hold_stages: Sequence[str] = ()) -> bool:
+            hold_stages: Sequence[str]) -> bool:
     """Re-plan with shared store inputs and current policies, then log one attempt without retrying.
 
     Resume data holds issue_type, room and attempt-keyed review_findings; absent findings remain unknown.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, Sequence
+from typing import Literal, Mapping, Protocol, Sequence
 
 from model_port import RETRYABLE
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
@@ -259,14 +259,19 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     return _gate(key, edge, policies, room, now) or action
 
 
+HoldRecovery = Literal["restore", "drop_hold", "drop_release", "replace", "keep", "drop_owner", "drop_stage", "none"]
+
+
 def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: Mapping[str, object] | None,
-                  pending_release: Mapping[str, object] | None, owned: Mapping[str, object] | None) -> str:
+                  pending_release: Mapping[str, object] | None, owned: Mapping[str, object] | None,
+                  pending_stage: Mapping[str, object] | None = None) -> HoldRecovery:
     """What to do with an issue's saved hold records before planning.
 
     restore: retry a pending hold restoration. drop_hold: forget one that no longer applies.
     drop_release: forget a release the board has moved past. replace: a release without current
     ownership returns to a normal human hold. keep: leave a verified release to planning.
     drop_owner: ownership the hold no longer backs. none: nothing saved applies.
+    drop_stage: an ordinary pending stage write whose card a person has since moved to a third stage.
     """
     if pending_hold:
         return "restore" if item.forge_state == "open" and item.stage == pending_hold["stage"] else "drop_hold"
@@ -279,6 +284,8 @@ def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: M
             # Older engines saved no provenance, and a kill inside a release can leave an older attempt.
             return "replace"
         return "keep"
+    if pending_stage and item.stage not in (pending_stage["expected"], pending_stage["stage"]):
+        return "drop_stage"
     if owned and (not item.human_review or item.stage != owned.get("stage")):
         return "drop_owner"
     return "none"

@@ -139,7 +139,7 @@ def _fail_start(forge: Any, store: Any, key: str, stage: str, current: str, atte
     store.set_resume(key, data)
     try:
         if stage != current:
-            data["pending_stage"] = {"stage": stage, "expected": current}
+            data["pending_stage"] = {"stage": stage, "expected": current, "restore_hold": has_board}
             store.set_resume(key, data)
             _write_stage(forge, store, key, stage, current)
         if has_board:
@@ -191,7 +191,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         pending = data.get("pending_stage")
         release = pending if pending and pending.get("release_hold") else None
         action = reconcile.hold_recovery(item, store.segments(key), pending_hold=data.get("pending_hold"),
-                                         pending_release=release, owned=data.get("launcher_hold"))
+                                         pending_release=release, owned=data.get("launcher_hold"),
+                                         pending_stage=None if release else pending)
         if action == "restore":
             _retry_restore(forge, store, key, at)
             continue
@@ -216,6 +217,15 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 # The mutation may have succeeded before verification failed. Keep the local gate
                 # through every sync, while planning still checks quota, slots and retry budgets.
                 store.set_human_review(key, True)
+            continue
+        if action == "drop_stage":
+            # A person moved the card while the forge was failing; the write can never apply.
+            data.pop("pending_stage")
+            if pending.get("restore_hold"):
+                data["pending_hold"] = {"stage": item.stage, "attempt": 0, "retry": False}
+            store.set_resume(key, data)
+            if "pending_hold" in data:
+                _retry_restore(forge, store, key, at)
             continue
         if action == "drop_owner":
             data.pop("launcher_hold")
