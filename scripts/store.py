@@ -297,7 +297,7 @@ class Store:
             row = s.get(Resume, issue_key)
             return row.data if row else None
 
-    def finish_suite_hold(self, issue_key: str, *, accept: bool) -> None:
+    def finish_suite_hold(self, issue_key: str, *, accept: bool, hold_key: str | None = None) -> None:
         """Atomically retire the hold, optionally accepting its segment and collected run result.
 
         The Use Case decides when this transition is allowed. Keep the historical review marker
@@ -306,7 +306,12 @@ class Store:
         with self.session() as s:
             resume = s.get(Resume, issue_key)
             data = deepcopy(resume.data)
-            hold = data.pop("suite_hold")
+            if hold_key is None:  # a hold saved before the per-attempt map
+                hold = data.pop("suite_hold")
+            else:
+                hold = data["suite_hold"].pop(hold_key)
+                if not data["suite_hold"]:
+                    data.pop("suite_hold")
             if accept:
                 segment = s.scalar(select(Segment).where(Segment.issue_key == issue_key,
                                    Segment.stage == hold["stage"], Segment.attempt == hold["attempt"]))

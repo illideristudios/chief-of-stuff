@@ -151,20 +151,29 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
         if "suite_hold" not in data:
             continue
         try:
-            action = reconcile.suite_hold_action(item, data["suite_hold"], store.segments(key),
-                                                  observed=observed.get(key))
-            if action in ("retire", "accept"):
-                store.finish_suite_hold(key, accept=action == "accept")
-                if action == "accept":
-                    store.add_log(key, "suite hold released: accepted completion", at)
-                continue
-            store.set_human_review(key, True)
-            if action == "publish":
-                error = forge.add_human_hold(int(key.rpartition("#")[2]))
-                if error:
-                    raise ForgeError(error)
-                data["suite_hold"]["published"] = True
-                store.set_resume(key, data)
+            holds = data["suite_hold"]
+            if not isinstance(holds, dict) or not holds:
+                raise ValueError("invalid suite hold record")
+            # Existing single holds remain releasable; new holds are keyed by stage and attempt.
+            records = {None: holds} if "stage" in holds or "published" in holds else holds
+            actions = [(token, reconcile.suite_hold_action(item, hold, store.segments(key),
+                                                          observed=observed.get(key)))
+                       for token, hold in records.items()]
+            for token, action in actions:
+                if action in ("retire", "accept"):
+                    store.finish_suite_hold(key, accept=action == "accept", hold_key=token)
+                    if action == "accept":
+                        store.add_log(key, "suite hold released: accepted completion", at)
+                    continue
+                store.set_human_review(key, True)
+                if action == "publish":
+                    error = forge.add_human_hold(int(key.rpartition("#")[2]))
+                    if error:
+                        raise ForgeError(error)
+                    data = _resume(store, key)
+                    hold = data["suite_hold"] if token is None else data["suite_hold"][token]
+                    hold["published"] = True
+                    store.set_resume(key, data)
         except Exception as exc:
             # A corrupt record or one unavailable forge operation must not halt unrelated work.
             store.set_human_review(key, True)
@@ -271,6 +280,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for action in actions:
         key = action.issue_key
         try:
+            if (pending := _resume(store, key).get("pending_stage")) and not pending.get("release_hold"):
+                continue
             stage = None
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"
@@ -314,14 +325,14 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
-                                agent_type=persona, runtime="claude", persona=persona,
+                                agent_type=policies.personas[persona].agent or "", runtime="claude", persona=persona,
                                 review_round=getattr(action, "review_round", None),
                                 finding_key=getattr(action, "finding_key", None))
                 except Exception:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
-                                             runtime="claude", agent_type=persona, persona=persona,
+                                             runtime="claude", agent_type=policies.personas[persona].agent or "", persona=persona,
                                              review_round=getattr(action, "review_round", None),
                                              finding_key=getattr(action, "finding_key", None))
                     raise
@@ -339,17 +350,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if request.head != action.head:
                     raise ForgeError("change head moved before architect request")
                 data = _resume(store, key)
-                _, posted = engine_facts.architect_comments(forge.change_comments(request.number))
-                known = list(dict.fromkeys([*posted, *data.get("architect_requests", [])]))
+                known = reconcile.request_records(data.get("architect_requests", {}))
                 token = reconcile.request_token(action.head, action.findings)
                 if token not in known:
-                    body = (f"Architect review requested: {token}\n\n"
+                    body = (f"Architect review requested: {action.head}\nRequest: {token}\n\n"
                             "Dispose of each finding and reply with `Architect: APPROVED <sha>` or "
                             "`Architect: CHANGES <sha>`. Include a JSON block with a `dispositions` object "
                             "mapping each finding_key to fix, file, keep or discard.\n\n"
                             + "```json\n" + json.dumps({"findings": list(action.findings)}, indent=2) + "\n```")
                     forge.comment_change(request.number, body)
-                    known.append(token)
+                    known[token] = list(action.findings)
                 data["architect_requests"] = known
                 store.set_resume(key, data)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):

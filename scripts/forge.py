@@ -29,6 +29,14 @@ from settings import Kanban
 _LOCAL_CLOSE = re.compile(r"#\d+")  # a closing ref for this repository; anything else is qualified or foreign
 
 
+def _retryable(error: object) -> bool:
+    """Translate the transports' error strings at the adapter boundary, never in a caller."""
+    message = str(error).lower()
+    return bool(re.search(r"\b(?:429|5\d\d)\b|rate.?limit|timed? ?out|timeout|connection|network|"
+                          r"temporary|temporarily|urlerror|remote end closed|no such host|name resolution|"
+                          r"tls|eof", message))
+
+
 def _gh_json(gh, args: list[str]):
     code, stdout, stderr = gh(args)
     if code:
@@ -424,7 +432,7 @@ class Forge:
                 raise ForgeError(self.home.missing_token)
             row, _, error = backlog._call("GET", f"{self.home.api()}/{path}", token, backlog.TIMEOUT)
         if error:
-            raise ForgeError(error)
+            raise ForgeError(error, retryable=_retryable(error))
         return row
 
     def _pipeline(self, row: dict) -> Pipeline:
@@ -454,7 +462,7 @@ class Forge:
         except ForgeError:
             raise
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"pipeline: {exc}") from exc
+            raise ForgeError(f"pipeline: {exc}", retryable=_retryable(exc)) from exc
 
     def branch_head(self, ref: str) -> Pipeline:
         """Return head CI (all GitHub workflows), or status='none'; unreadable heads raise ForgeError."""
@@ -508,7 +516,7 @@ class Forge:
         except ForgeError:
             raise
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"branch head: {exc}") from exc
+            raise ForgeError(f"branch head: {exc}", retryable=_retryable(exc)) from exc
 
     def requests(self) -> list[merge_ready.Request]:
         """Open pull or merge requests with their merge verdict (#419) and the approver's approval."""
@@ -516,7 +524,7 @@ class Forge:
             return (merge_ready.github_ready(self.home.repo, self.gh, self.approver) if self.github else
                     merge_ready.gitlab_ready(self.home, self.home.project, self._token(), backlog._call, self.approver))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"requests: {exc}") from exc
+            raise ForgeError(f"requests: {exc}", retryable=_retryable(exc)) from exc
 
     def _merged_closes(self) -> set[int]:
         """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
@@ -527,7 +535,7 @@ class Forge:
                      "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json",
                      "number,body,closingIssuesReferences"])
                 if code:
-                    raise ForgeError(f"merged requests: {err.strip() or code}")
+                    raise ForgeError(f"merged requests: {err.strip() or code}", retryable=_retryable(err))
                 rows = json.loads(out)
             else:
                 listed, _, err = backlog._call(
@@ -537,7 +545,7 @@ class Forge:
                                  "per_page": forge_review.REQUEST_LIMIT}),
                     self._token(), backlog.TIMEOUT)
                 if err:
-                    raise ForgeError(f"merged requests: {err}")
+                    raise ForgeError(f"merged requests: {err}", retryable=_retryable(err))
                 rows = listed
             # shortcut: only the REQUEST_LIMIT most recently updated merged requests annotate closed issues (merging
             # updates a request; later edits can shift the window). Other closed issues keep their terminal stage mark
@@ -550,7 +558,7 @@ class Forge:
                         forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
                 closed.update(int(ref[1:]) for ref in refs if _LOCAL_CLOSE.fullmatch(ref))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"merged requests: {exc}") from exc
+            raise ForgeError(f"merged requests: {exc}", retryable=_retryable(exc)) from exc
         return closed
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
@@ -562,12 +570,28 @@ class Forge:
             raise ForgeError(f"no open request closes {issue_key}")
         return max(closing, key=lambda r: r.number)
 
+    def login(self) -> str:
+        """The authenticated engine identity, which may differ from the configured approver."""
+        if self.github:
+            row, error = _gh_json(self.gh, ["api", "user"])
+        else:
+            token = self._token()
+            if not token:
+                raise ForgeError(self.home.missing_token)
+            row, _, error = backlog._call("GET", f"{self.home.host.rstrip('/')}/api/v4/user", token, backlog.TIMEOUT)
+        if error:
+            raise ForgeError(error, retryable=_retryable(error))
+        login = row.get("login" if self.github else "username") if isinstance(row, dict) else None
+        if not isinstance(login, str) or not login:
+            raise ForgeError("authenticated forge login is unreadable")
+        return login
+
     def change_comments(self, number: int) -> list[backlog.Note]:
         """All human comments on a pull/merge request, oldest first; a failed read raises."""
         if self.github:
             notes = backlog.comments(self.home, number, gh=self.gh)
             if not notes.ok:
-                raise ForgeError(notes.error)
+                raise ForgeError(notes.error, retryable=_retryable(notes.error))
             return list(notes.notes)
         token = self._token()
         if not token:
@@ -578,7 +602,7 @@ class Forge:
             rows, headers, error = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}/notes?{query}",
                                                 token, backlog.TIMEOUT)
             if error or not isinstance(rows, list):
-                raise ForgeError(error or "merge request notes are unreadable")
+                raise ForgeError(error or "merge request notes are unreadable", retryable=_retryable(error))
             notes.extend(backlog.Note(str((r.get("author") or {}).get("username", "")),
                                       str(r.get("created_at", "")), str(r.get("body", "")))
                          for r in rows if isinstance(r, dict) and not r.get("system"))
@@ -592,7 +616,7 @@ class Forge:
         if self.github:
             code, _, error = self.gh(["pr", "comment", str(number), "-R", self.home.repo, "--body-file", "-"], body)
             if code:
-                raise ForgeError(error.strip() or f"gh exited {code}")
+                raise ForgeError(error.strip() or f"gh exited {code}", retryable=_retryable(error))
         else:
             token = self._token()
             if not token:
@@ -600,7 +624,7 @@ class Forge:
             _, _, error = backlog._call("POST", f"{self.home.api()}/merge_requests/{number}/notes",
                                         token, backlog.TIMEOUT, {"body": body})
             if error:
-                raise ForgeError(error)
+                raise ForgeError(error, retryable=_retryable(error))
 
     def threads(self) -> list[review_threads.Thread]:
         """The user's unresolved review threads: fix work for the finding burn-down."""
@@ -611,7 +635,7 @@ class Forge:
                 return review_threads.github_threads(self.home.repo, self.approver, self.gh)
             return review_threads.gitlab_threads(self.home, self.home.project, self.approver, self._token(), backlog._call)
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"review threads: {exc}") from exc
+            raise ForgeError(f"review threads: {exc}", retryable=_retryable(exc)) from exc
 
     def snapshot(self, issue_key: str, *, issue: Any | None = None,
                  request: merge_ready.Request | None = None) -> dict[str, Any]:
@@ -622,7 +646,7 @@ class Forge:
         if issue is None:
             got = self.issue(int(issue_key.rsplit("#", 1)[1]))
             if not got.ok or got.issue is None:
-                raise ForgeError(f"issue: {got.error or 'not found'}")
+                raise ForgeError(f"issue: {got.error or 'not found'}", retryable=_retryable(got.error))
             issue = got.issue
         if request is None:
             latest: dict[int, merge_ready.Request] = {}
@@ -639,7 +663,7 @@ class Forge:
             if self.kanban.github_project is not None and self.github:
                 statuses, error = project_items(self.gh, self.kanban.github_project)
                 if error:
-                    raise ForgeError(f"project status: {error}")
+                    raise ForgeError(f"project status: {error}", retryable=_retryable(error))
             snap["stage"] = self._stage(issue, statuses)
             snap["human_review"] = self.kanban.human_review_label in kanban._canonical(self.kanban, issue.labels)
             snap["stage_mark"] = self.mark_for_stage(snap["stage"])
@@ -654,12 +678,12 @@ class Forge:
         work is included so a dropped store can rebuild it (#627)."""
         got = self.issues()
         if not got.ok:
-            raise ForgeError(f"issues: {got.error}")
+            raise ForgeError(f"issues: {got.error}", retryable=_retryable(got.error))
         # shortcut: only the REQUEST_LIMIT most recently updated closed issues join the open operational set,
         # matching _merged_closes's bounded window. Page closed history if a rebuild needs every completed issue.
         closed = self.issues(state=backlog.CLOSED, limit=forge_review.REQUEST_LIMIT)
         if not closed.ok:
-            raise ForgeError(f"closed issues: {closed.error}")
+            raise ForgeError(f"closed issues: {closed.error}", retryable=_retryable(closed.error))
         latest: dict[int, merge_ready.Request] = {}
         # shortcut: several requests closing one issue (rework) report the newest; key by (issue, attempt) when M3 segments need each
         for r in sorted(self.requests(), key=lambda r: r.number):
@@ -671,7 +695,7 @@ class Forge:
         if self.kanban is not None and self.kanban.github_project is not None and self.github:
             statuses, error = project_items(self.gh, self.kanban.github_project)
             if error:
-                raise ForgeError(f"project status: {error}")
+                raise ForgeError(f"project status: {error}", retryable=_retryable(error))
         out = []
         for one in sorted((*got.issues, *closed.issues), key=lambda i: i.iid):
             r = latest.get(one.iid)
@@ -703,7 +727,7 @@ class Forge:
                 # Existing workspaces recorded their stages as labels before Project Status was honored.
             return self.kanban.stage_for_label(one.labels)
         except ValueError as exc:
-            raise ForgeError(f"stage: {exc}") from exc
+            raise ForgeError(f"stage: {exc}", retryable=_retryable(exc)) from exc
 
     def protected_branches(self) -> tuple[str, ...]:
         """The repository's default branch, then its protected branches, for the worker guard. Unreadable raises."""
@@ -730,7 +754,7 @@ class Forge:
                     raise RuntimeError(err)
                 names += [row["name"] for row in rows]
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"protected branches: {exc}") from exc
+            raise ForgeError(f"protected branches: {exc}", retryable=_retryable(exc)) from exc
         found = tuple(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
         if not found or not names[0].strip():
             raise ForgeError("protected branches: the forge reported no default branch")
@@ -761,7 +785,7 @@ class Forge:
         if issue_key is not None:  # a close or stage move during the policy check is a forge-side hold
             got = self.issue(int(issue_key.rsplit("#", 1)[1]))
             if not got.ok or got.issue is None:
-                raise ForgeError(f"issue: {got.error or 'not found'}")
+                raise ForgeError(f"issue: {got.error or 'not found'}", retryable=_retryable(got.error))
             if not got.issue.is_open:
                 raise ForgeError(f"{issue_key} is no longer open on the forge")
             if self.kanban and self.kanban.human_review_label in got.issue.labels:
@@ -772,10 +796,10 @@ class Forge:
                     if self.kanban.github_project is not None and self.github:
                         statuses, error = project_items(self.gh, self.kanban.github_project)
                         if error:
-                            raise ForgeError(f"project status: {error}")
+                            raise ForgeError(f"project status: {error}", retryable=_retryable(error))
                     observed = self._stage(got.issue, statuses)
                 except ValueError as exc:
-                    raise ForgeError(f"{issue_key} left its stage since the policy check: {exc}") from exc
+                    raise ForgeError(f"{issue_key} left its stage since the policy check: {exc}", retryable=_retryable(exc)) from exc
                 if stage_mark == "" and observed:
                     raise ForgeError(f"{issue_key} left its stage since the policy check: a mapped stage label appeared")
                 if stage_mark and (self.mark_for_stage(observed) or "").casefold() != stage_mark.casefold():
@@ -788,7 +812,7 @@ class Forge:
             code, result = merge_approved.merge_head(one, self.home, self.github, repo, gh=self.gh,
                                                     call=backlog._call, token=None if self.github else self._token())
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
-            raise ForgeError(f"{mark} not merged at {one.head}: {exc}") from exc
+            raise ForgeError(f"{mark} not merged at {one.head}: {exc}", retryable=_retryable(exc)) from exc
         if code:
             raise ForgeError(f"{mark} not merged at {one.head}: {result or f'merge exited {code}'}")
         outcome, _, error = result.partition(": ")

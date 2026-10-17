@@ -97,8 +97,14 @@ class ExecutorTest(unittest.TestCase):
     def test_required_architect_and_answered_decision_allow_merge(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         self.db.add_decision(self.key, "design", "Split the parser?", answer="yes", decided_by="trio")
-        note = backlog.Note("architect", self.at, f"Architect: APPROVED {tma.HEAD}")
-        with mock.patch.object(forge.Forge, "change_comments", return_value=[note]):
+        token = reconcile.request_token(tma.HEAD, [])
+        data = self.db.resume(self.key)
+        data["architect_requests"] = {token: []}
+        self.db.set_resume(self.key, data)
+        posted = backlog.Note("engine", self.at, f"Architect review requested: {tma.HEAD}\nRequest: {token}")
+        note = backlog.Note("architect", self.at, f"Architect: APPROVED {tma.HEAD[:7]}")
+        with mock.patch.object(forge.Forge, "change_comments", return_value=[posted, note]), \
+             mock.patch.object(forge.Forge, "login", return_value="engine"):
             self.planned()
             self.assertTrue(self.execute(forge_facts=True))
         self.assertEqual(len(self.gh.merges), 1)

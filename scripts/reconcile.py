@@ -119,6 +119,7 @@ class ArchitectReply:
     status: str
     created_at: str
     dispositions: Mapping[str, str]
+    request_token: str = ""
 
 
 @dataclass(frozen=True)
@@ -243,7 +244,7 @@ def consults_architect(policies: Policies, history: Sequence[Segment], issue_typ
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
            room: str | None, now: datetime, counts: Sequence[dict] | None, edges: Sequence[Edge],
            decisions: Sequence[Decision], head: str | None, reply: ArchitectReply | None,
-           requested: Sequence[str]) -> Action:
+           requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
     # Decision rows are append-only, oldest first: the latest row for a question is its state.
@@ -277,10 +278,8 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
     if counts:  # already filtered by each reporting persona's effective policy
         return Wait(key, "blocking review findings")
     if wants_architect(policies, stages, completed, room):
-        if reply is None:
+        if reply is None or reply.status != "APPROVED" or reply.reviewed_head != head:
             return _consult(key, head, (), requested)
-        if reply.status != "APPROVED":
-            return Wait(key, "architect requested changes")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
     if workflow.start == "merge" and not any(e.target == "merge" for e in workflow.edges):
@@ -300,7 +299,7 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Sequence[dict] | None,
           decisions: Sequence[Decision], head: str | None, reply: ArchitectReply | None,
-          requested: Sequence[str], hold_stages: Sequence[str], launcher_hold: Mapping[str, object]) -> Action | None:
+          requested: Mapping[str, Sequence[dict]] | Sequence[str], hold_stages: Sequence[str], launcher_hold: Mapping[str, object]) -> Action | None:
     key = item.issue_key
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
@@ -367,14 +366,30 @@ def _reviewers(policies: Policies, room: str | None) -> tuple[str, ...]:
 
 def request_token(head: str, findings: Sequence[dict]) -> str:
     """Names one architect request: the forge head plus the findings it asks about, so no clock is compared."""
-    keys = "\n".join(sorted(f["finding_key"] for f in findings))
-    return f"{head}@{hashlib.sha1(keys.encode()).hexdigest()[:8]}"
+    keys = "\n".join(sorted({f["finding_key"] for f in findings}))
+    return f"{head}@{hashlib.sha256(keys.encode()).hexdigest()}"
 
 
-def _consult(key: str, head: str | None, findings: Sequence[dict], requested: Sequence[str]) -> Action:
+def request_records(requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> dict[str, list[dict]]:
+    """Persisted requests keep their original findings; older token-only records keep deduplicating."""
+    return {token: list(findings) for token, findings in requested.items()} if isinstance(requested, Mapping) else {
+        token: [] for token in requested}
+
+
+def _requested(head: str, findings: Sequence[dict], requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> bool:
+    if request_token(head, findings) in requested:
+        return True
+    keys = {f["finding_key"] for f in findings}
+    covered = {f["finding_key"] for token, asked in request_records(requested).items()
+               if token.split("@", 1)[0] == head for f in asked}
+    return bool(keys) and keys <= covered
+
+
+def _consult(key: str, head: str | None, findings: Sequence[dict],
+             requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> Action:
     if not head:
         return Wait(key, "change head is unknown")
-    if request_token(head, findings) in requested:
+    if _requested(head, findings, requested):
         return Wait(key, "waiting for the architect")
     return Consult(key, head, list(findings))
 
@@ -408,7 +423,7 @@ def _panel(key: str, history: Sequence[Segment], policies: Policies, room: str |
 
 def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[dict],
                policies: Policies, room: str | None, head: str | None, workflow: Workflow, now: datetime,
-               reply: ArchitectReply | None, requested: Sequence[str]) -> list[Action] | None:
+               reply: ArchitectReply | None, requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> list[Action] | None:
     """Serialize fixes in the writable checkout; reviewers use independent detached trees."""
     reviews = _panel_history(history)
     if (not reviews or "review" not in policies.stages or not workflow.next("review")
@@ -442,10 +457,13 @@ def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[di
     consult = next((p for name in _reviewers(policies, room)
                     if (p := policies.resolve(name, "review", room)).architect), None)
     if consult is not None:
-        # One request per head and set of undisposed findings. Findings a later panel adds are new keys, so they
-        # earn a new request even at the same head; an unchanged set waits for the reply to it.
+        # Ask about new findings once. A reply dispatches every fix or undisposed finding;
+        # later dispositions never rename the request that already asked about them.
         undisposed = [f for f in findings if "disposition" not in f]
-        if reply is None or undisposed:
+        answered = request_records(requested).get(reply.request_token, []) if reply else []
+        reply_covers = bool(reply) and (not reply.request_token or {
+            f["finding_key"] for f in undisposed} <= {f["finding_key"] for f in answered})
+        if reply is None or (undisposed and not reply_covers):
             return [_consult(item.issue_key, head, undisposed, requested)]
     finding = pending[0]
     tries = [s for s in fixes if s.finding_key == finding["finding_key"] and s.outcome not in RETRYABLE]
@@ -512,13 +530,13 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          quota_resets: Mapping[str, datetime] | None = None,
          heads: Mapping[str, str | None] | None = None,
          architect_replies: Mapping[str, ArchitectReply] | None = None,
-         consult_requests: Mapping[str, Sequence[str]] | None = None,
+         consult_requests: Mapping[str, Mapping[str, Sequence[dict]] | Sequence[str]] | None = None,
          hold_stages: Sequence[str] = (),
          launcher_holds: Mapping[str, Mapping[str, object]] | None = None) -> list[Action]:
     """Actions oldest issue first; each panel reviewer and each fix consumes one slot.
 
     Findings are structured records from the latest panel; an absent item is unknown.
-    A finding the architect disposed of as file, keep or discard no longer blocks, and that disposition
+    A finding the architect disposed of as keep or discard no longer blocks, and that disposition
     stays with the finding key after the head moves. Only an approval is bound to the forge head.
     Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
     Merge requires answered decisions and, where policy requires it, an architect approval for the current forge head.
@@ -558,7 +576,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             required = _reviewers(policies, room) if "review" in policies.stages else ()
             counts = []
             for finding in findings:
-                if finding.get("disposition", "fix") != "fix":
+                if finding.get("disposition", "fix") in ("keep", "discard"):
                     continue
                 persona = actors.get(int(finding["finding_key"].split("/")[1]))
                 if persona not in required:
@@ -568,7 +586,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                     counts.append(finding)
             if planned is None and not item.human_review and item.forge_state != "closed":
                 workflow = policies.workflow_for(issue_types.get(key))
-                planned = _burn_down(item, history, counts, policies, room, head, workflow, now, verdict, requested)
+                planned = _burn_down(item, history, counts, policies, room, head, workflow, now, reply, requested)
         # A partly launched panel must keep filling available slots while its peers run.
         latest = {getattr(s, "persona", ""): s for s in panel}
         action = None

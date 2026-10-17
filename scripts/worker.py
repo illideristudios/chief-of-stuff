@@ -342,24 +342,36 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                             for name in dispatch_prompt.SUITE_KEYS)
                         reason = f"suite is not green; Suite: {shown}; worker said: {reports[-1].summary}"
                         store.set_human_review(key, True)
-                        data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
-                                              "published": False}
+                        holds = data.setdefault("suite_hold", {})
+                        if "stage" in holds:  # preserve a pre-map hold across the upgrade
+                            holds = {f"{holds['stage']}-{holds['attempt']}": holds}
+                            data["suite_hold"] = holds
+                        holds[f"{segment.stage}-{segment.attempt}"] = {
+                            "stage": segment.stage, "attempt": segment.attempt, "published": False}
                         store.set_resume(key, data)
                     else:
                         outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
             if segment.finding_key and outcome == "done":
-                # The head a fix produced is the forge's, read after the worker exits. The worktree HEAD is not it.
-                # An unreadable head leaves the segment open: the next pass reads it again, and nothing is recorded.
+                # Only transport failures retry collection; permanent refusals need a human and free the slot.
                 try:
-                    produced = (getattr(forge.closing_request(key), "head", None) or "").strip() if forge is not None else ""
-                except ForgeError:
-                    produced = ""
-                if not produced:
-                    continue
-                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
-                                     reviewed_head=produced)
+                    if forge is None:
+                        raise ForgeError("forge is missing")
+                    produced = (getattr(forge.closing_request(key), "head", None) or "").strip()
+                    if not produced:
+                        raise ForgeError("closing request has no head")
+                except ForgeError as exc:
+                    if exc.retryable:
+                        store.add_log(key, f"fix head unreadable; retrying: {exc}", now.isoformat())
+                        continue
+                    outcome, reason = "human_review", f"fix head requires human review: {exc}"
+                    store.set_human_review(key, True)
+                    data["pending_hold"] = {"stage": segment.stage, "attempt": segment.attempt, "retry": False}
+                    store.set_resume(key, data)
+                else:
+                    store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                         reviewed_head=produced)
             if segment.stage == "review":
                 # This attempt's collected result always names the SHA pinned at launch.
                 store.record_segment(key, segment.stage, segment.attempt, segment.started_at,

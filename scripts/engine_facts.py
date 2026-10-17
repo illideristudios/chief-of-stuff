@@ -17,27 +17,51 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def architect_comments(comments: list, *, head: str | None = None,
-                       author: str | None = None) -> tuple[reconcile.ArchitectReply | None, list[str]]:
-    """The reply for `head` (or the latest reply), plus dispositions merged across every accepted reply.
+def architect_comments(comments: list, *, head: str | None = None, author: str | None = None,
+                       engine_author: str | None = None, requests: dict | None = None
+                       ) -> tuple[reconcile.ArchitectReply | None, list[str]]:
+    """Read only authorized comments, matching replies to locally recorded requests by commit prefix.
 
-    Replies start `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`. A request is `Architect review
-    requested: <token>`; `reconcile.request_token` names it. Dispositions map finding keys to
-    fix/file/keep/discard and stay in force after the head moves; they fold oldest reply first, so the newest
-    wins whatever order the forge listed them in. Only the approval is bound to `head`.
-    When `author` is set, a reply counts only from that forge login. With none configured, the worker
-    guard is what refuses a worker's `Architect:` marker; this function then accepts any author.
-    A malformed disposition body adds nothing and does not erase dispositions already read.
+    Dispositions fold oldest first and are limited to findings the engine actually asked about.
+    Comment text alone never creates posting evidence. The digest is an internal key, not a reply SHA.
     """
-    replies, requested = [], []
+    records = reconcile.request_records(requests or {})
+    replies, requested, postings = [], [], []
     for index, note in enumerate(comments):
-        body = note.body.strip()
-        request = re.match(r"Architect review requested: (\S+)", body)
-        if request:
-            requested.append(request[1])
-        match = re.match(r"Architect: (APPROVED|CHANGES) ([^\s]+)(?:\s|$)", body)
-        if not match or (author and getattr(note, "author", None) != author):
+        login = getattr(note, "author", None)
+        is_engine = bool(engine_author and login == engine_author)
+        is_architect = not author or login == author
+        if not is_engine and not is_architect:
             continue
+        body = note.body.strip()
+        if is_engine:
+            request = re.search(r"(?m)^(?:Request:|Architect review requested:) (\S+)$", body)
+            token = request[1] if request else None
+            # New bodies put the internal token on a separate Request line.
+            internal = re.search(r"(?m)^Request: (\S+)$", body)
+            if internal:
+                token = internal[1]
+            if token in records:
+                requested.append(token)
+                try:
+                    posted_at = datetime.fromisoformat(note.time)
+                    if posted_at.utcoffset() is not None:
+                        postings.append((posted_at, index, token))
+                except (ValueError, TypeError):
+                    pass
+        if not is_architect:
+            continue
+        match = re.match(r"Architect: (APPROVED|CHANGES) ([0-9a-fA-F]{7,})(?:\s|$)", body)
+        if not match:
+            continue
+        prefix = match[2].lower()
+        matching = {token.split("@", 1)[0] for token in records
+                    if token.split("@", 1)[0].lower().startswith(prefix)}
+        if len(matching) != 1:
+            continue
+        sha = matching.pop()
+        allowed = {f["finding_key"] for token, findings in records.items()
+                   if token.split("@", 1)[0] == sha for f in findings}
         try:
             when = datetime.fromisoformat(note.time)
             if when.utcoffset() is None:
@@ -51,9 +75,10 @@ def architect_comments(comments: list, *, head: str | None = None,
             got = data.get("dispositions", {})
             if not isinstance(got, dict) or any(not isinstance(k, str) or v not in DISPOSITIONS for k, v in got.items()):
                 got = {}
+            got = {k: v for k, v in got.items() if k in allowed}
         except (ValueError, TypeError, AttributeError):
             got = {}
-        replies.append((when, index, match[2], match[1], note.time, got))
+        replies.append((when, index, sha, match[1], note.time, got))
     replies.sort(key=lambda row: row[:2])
     dispositions = {}
     for *_, got in replies:
@@ -63,8 +88,10 @@ def architect_comments(comments: list, *, head: str | None = None,
         if not dispositions:
             return None, requested
         return reconcile.ArchitectReply(head or "", "", "", dict(dispositions)), requested
-    _, _, sha, status, created_at, _ = matched[-1]
-    return reconcile.ArchitectReply(sha, status, created_at, dict(dispositions)), requested
+    when, index, sha, status, created_at, _ = matched[-1]
+    prior = [row for row in postings if row[:2] <= (when, index) and row[2].split("@", 1)[0] == sha]
+    token = max(prior)[2] if prior else ""
+    return reconcile.ArchitectReply(sha, status, created_at, dict(dispositions), token), requested
 
 
 def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: Any = None,
@@ -103,16 +130,22 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
             if request is None or not (policies is None or reconcile.consults_architect(
                     policies, segments[key], issue_types[key], states[key].get("room"))):
                 continue
+            known = reconcile.request_records(states[key].get("architect_requests") or {})
+            requested[key] = known
             try:
                 comments = forge.change_comments(request.number)
-            except ForgeError:
-                # The head is already known. A comment failure leaves the reply absent; it does not block the item.
-                requested[key] = list(dict.fromkeys(states[key].get("architect_requests") or []))
+                engine_author = forge.login() if hasattr(forge, "login") else None
+            except ForgeError as exc:
+                message = f"architect comments unreadable: {exc}"
+                logged = store.log(key)
+                if at and (not logged or logged[-1].message != message):
+                    store.add_log(key, message, at)
                 continue
-            reply, posted = architect_comments(comments, head=heads[key], author=architect_login or None)
+            reply, _ = architect_comments(comments, head=heads[key], author=architect_login or None,
+                                           engine_author=engine_author, requests=known)
             if reply is not None:
                 replies[key] = reply
-            requested[key] = list(dict.fromkeys([*posted, *states[key].get("architect_requests", [])]))
+
     return {
         "segments": segments,
         "launcher_holds": {key: state.get("launcher_hold", {}) for key, state in states.items()},

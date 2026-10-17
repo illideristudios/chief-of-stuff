@@ -386,24 +386,24 @@ BODY_FILE_FLAGS = {"--body-file", "-F", "--file", "--editor", "-e"}
 
 
 def _architect_marker(flags: list[str]) -> bool:
-    """True when a comment body is hidden from the guard or starts with the architect reply or request marker.
-
-    A body read from a file, stdin or an editor cannot be inspected here, so those forms count as a marker.
-    """
+    """Refuse posting unless every body is inline and contains no reserved marker on any line."""
+    found = False
     i = 0
     while i < len(flags):
         name, sep, inline = flags[i].partition("=")
-        if name in BODY_FILE_FLAGS:
+        if name in BODY_FILE_FLAGS or name == "--":
             return True
         if name in {"--body", "-b", "--message", "-m"}:
-            text = inline if sep else ""
-            if not sep and i + 1 < len(flags):
+            if not sep:
                 i += 1
-                text = flags[i]
-            if text.strip().startswith(("Architect:", "Architect review requested:")):
+                if i >= len(flags) or flags[i].startswith("-"):
+                    return True
+            body = inline if sep else flags[i]
+            if re.search(r"(?m)^\s*(?:Architect:|Architect review requested:|## Architecture review(?:\s|$))", body):
                 return True
+            found = True
         i += 1
-    return False
+    return not found
 
 
 # GitLab quick actions run from note text; a leading /word on a line changes forge state.
