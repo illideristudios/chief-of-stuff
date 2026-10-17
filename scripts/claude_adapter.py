@@ -272,7 +272,7 @@ def drive_turns(request: Request, prompts: list[str | None], waits: list[float],
                                     return classify(process.returncode, json.dumps(events[-1]) if events else "",
                                                     diagnostic, keep_events=True)
                                 if prompt is not None:
-                                    return Failure("unknown", "exit 0 with no answer")
+                                    return classify(0, "", diagnostic, keep_events=True)
                                 break
                             raw.extend(chunk)
                             pending.extend(chunk)
@@ -307,9 +307,10 @@ def drive_turns(request: Request, prompts: list[str | None], waits: list[float],
                 process.stdin = None
                 natural_exit = True
                 try:
-                    tail, _ = process.communicate(timeout=0.2)
+                    tail, _ = process.communicate(timeout=1)
                 except subprocess.TimeoutExpired:
-                    natural_exit = False
+                    # A leader that exited while a descendant holds a pipe is still a natural exit.
+                    natural_exit = process.poll() is not None
                     tail, _ = _kill_and_drain(process)
                 except BaseException:
                     _kill_and_drain(process)
