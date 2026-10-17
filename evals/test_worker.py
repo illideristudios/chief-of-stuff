@@ -929,6 +929,10 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.launch_in(clone)
             self.assertTrue(reconcile._decision_pending(self.db.decisions(KEY)))
+            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[-1].question, answer="keep")
+            with self.assertRaises(RuntimeError):
+                self.launch_in(clone)
+            self.assertTrue(reconcile._decision_pending(self.db.decisions(KEY)))
 
     def test_a_prior_keep_answer_does_not_apply_to_changed_orphan_heads(self):
         from evals import git_taint as taint, make_repo

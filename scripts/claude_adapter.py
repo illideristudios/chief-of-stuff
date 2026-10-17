@@ -149,7 +149,7 @@ def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
         return Reply(text=said, data=envelope.get("structured_output"), session_id=str(envelope.get("session_id", "")),
                      cost_usd=float(envelope.get("total_cost_usd") or 0), num_turns=int(envelope.get("num_turns") or 0))
     # A quota stop is checked first: it is never reported as the model's failure (ledger E5, #422).
-    reset = quota_reset(f"{stderr}\n{said}")
+    reset = quota_reset(f"{stderr}\n{said if envelope else stdout}")
     if reset is not None:
         return Failure("quota", reset or "quota stop")
     if "No conversation found" in stderr:

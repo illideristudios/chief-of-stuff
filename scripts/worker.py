@@ -86,6 +86,8 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                 raise RuntimeError("existing worker start is unverified; preserving its evidence")
             return None
         record = json.loads(started.read_text())
+        if (run_dir / "actor.json").is_file():
+            record.update(json.loads((run_dir / "actor.json").read_text()))
         prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
             "tree": data.get("worktree"), "branch": data.get("work_branch")}
         record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
@@ -140,7 +142,8 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def _ask_conflict(store: Any, key: str, stage: str, attempt: int, reason: str, clock: engine_clock.Clock) -> None:
     now = clock().isoformat()
-    if not any(d.topic == "conflict" and d.question == reason for d in store.decisions(key)):
+    rows = [d for d in store.decisions(key) if (d.topic, d.question) == ("conflict", reason)]
+    if not rows or rows[-1].answer:
         store.add_decision(key, "conflict", reason)
     if not any(a.question == reason for a in store.asks(key)):
         store.add_ask(key, stage, attempt, "", reason, ["keep one branch/worktree", "abort"], reason)
@@ -182,7 +185,7 @@ def _status(tree: Path, common: Path) -> tuple[bool, bool] | None:
         return None
     if out.returncode:
         return None
-    lines = [line for line in out.stdout.splitlines() if line and not line[3:].startswith(".chief-of-stuff")]
+    lines = [line for line in out.stdout.splitlines() if line and line[3:] != ".chief-of-stuff" and not line[3:].startswith(".chief-of-stuff/")]
     return bool(lines), any(line[:2] in {"UU", "AA", "DD", "AU", "UA", "DU", "UD"} for line in lines)
 
 
@@ -192,7 +195,9 @@ def _read_tree(path: Path, common: Path) -> completion.OrphanTree:
     status = _status(path, common)
     if branch_code or head_code or status is None or not branch or not head:
         return completion.OrphanTree(str(path), "", "", unreadable=True)
-    merging = make_worktree.git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], path, expected_common=common)[0] == 0
+    # Private Git views intentionally omit merge state; read only the validated metadata entry.
+    layout = git_view.locate(path, expected_common=common)
+    merging = (layout.gitdir / "MERGE_HEAD").exists()
     code, count = make_worktree.git(["rev-list", "--count", f"{git_trees.REF}..HEAD"], path, expected_common=common)
     return completion.OrphanTree(str(path), branch, head, dirty=status[0], conflicted=status[1] or merging,
                                  ahead=int(count) if code == 0 and count.isdecimal() else None)
@@ -303,18 +308,21 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
         if code or (data.get("work_branch") and actual != data["work_branch"]) or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
 
-    def asked(reason: str) -> str:
-        return _asked(store, issue_key, stage, attempt, reason, clock)
-
     # The facts, the tip they name and the fast-forward or re-cut must not change between reading and acting.
     with make_worktree.clone_lock(repo):
         found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
+        # Answers apply only to these paths, branches, heads and working states.
+        identity = json.dumps(sorted((c.path or "", c.branch, c.head, c.dirty, c.conflicted, c.unreadable)
+                                     for c in found), separators=(",", ":"))
+        def asked(reason: str) -> str:
+            return _asked(store, issue_key, stage, attempt, f"{reason}\nCandidates: {identity}", clock)
+
         preferred = str(Path(data["worktree"])) if data.get("worktree") else None
         chosen = completion.recovery(found, preferred=preferred)
         if isinstance(chosen, completion.Conflict):
             chosen = completion.recovery(found, preferred=preferred, answer=asked(chosen.reason))
             if isinstance(chosen, completion.Conflict):
-                raise RuntimeError(chosen.reason)
+                _ask_conflict(store, issue_key, stage, attempt, f"{chosen.reason}\nCandidates: {identity}", clock)
         if chosen is not None and chosen.path is not None:
             tree = Path(chosen.path)
             if next(c.head for c in found if c.path == chosen.path) != chosen.head:
@@ -436,6 +444,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
+    (run_dir / "actor.json").write_text(json.dumps({"model": actor.model, "effort": actor.effort or ""}))
     runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
     try:
         deadline = time.monotonic() + 5
@@ -461,6 +470,9 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         _save_run(store, issue_key, stage, attempt, record)
     except BaseException:  # an interrupt too: a start that was never verified must not leave a runner behind
         claude_adapter.cancel(runner)
+        if not (run_dir / "started.json").exists():
+            # cancel waited for the whole runner group: this command can no longer produce a start.
+            run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
         raise
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""

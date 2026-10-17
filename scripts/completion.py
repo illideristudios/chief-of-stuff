@@ -6,6 +6,7 @@ decides which one to reuse, or why the choice is the user's.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -41,7 +42,7 @@ def _label(c: OrphanTree) -> str:
 
 
 def _reuse(c: OrphanTree, head: str) -> Recovery:
-    return Recovery(c.path, c.branch, head, c.path is None or c.dirty or c.ahead is None or c.ahead > 0)
+    return Recovery(c.path, c.branch, head, c.path is None or c.dirty or c.ahead is None or c.ahead > 0 or head != c.head)
 
 
 def _preferring(candidates: Sequence[OrphanTree], preferred: str | None) -> OrphanTree:
@@ -53,9 +54,10 @@ def _kept(candidates: Sequence[OrphanTree], answer: str, preferred: str | None) 
     usable = [c for c in candidates if not (c.unreadable or c.conflicted)]
     if not usable:
         return Conflict("no orphaned worktree or branch is readable and free of merge conflicts")
-    trees = [c for c in usable if c.path] or usable
-    named = [c for c in trees if c.branch in answer]
-    chosen = _preferring(named or [c for c in trees if c.dirty] or trees, preferred)
+    named = [c for c in usable if re.search(r"(?<![\w/.-])" + re.escape(c.branch) + r"(?![\w/.-])", answer)]
+    pool = named or usable
+    trees = [c for c in pool if c.path] or pool
+    chosen = _preferring([c for c in trees if c.dirty] or trees, preferred)
     return _reuse(chosen, chosen.head)
 
 
@@ -84,4 +86,4 @@ def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None,
     # A surviving tree is fast-forwarded before a branch is re-cut.
     trees = [c for c in candidates if c.path]
     at_tip = [c for c in trees if c.head == tip] or trees or [c for c in candidates if c.head == tip]
-    return _reuse(_preferring(at_tip, preferred), tip)
+    return _reuse(_preferring(dirty or at_tip, preferred), tip)
