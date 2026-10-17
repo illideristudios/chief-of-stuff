@@ -309,9 +309,6 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     actions = []
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
         reset = (quota_resets or {}).get(item.issue_key)
-        if reset is not None and _time(reset) > now and item.forge_state != "closed":
-            actions.append(Wait(item.issue_key, "quota reset pending"))
-            continue
         room = (rooms or {}).get(item.issue_key)
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        room, now, open_findings.get(item.issue_key),
@@ -322,6 +319,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             kind = breach(_policy(policies, target, room), (usage or {}).get(item.issue_key)) if target in policies.stages else None
             if kind:
                 action = Limit(item.issue_key, kind, f"reached {kind} limit")
+            elif reset is not None and _time(reset) > now:
+                action = Wait(item.issue_key, "quota reset pending")
             elif free_slots:
                 free_slots -= 1
             else:
