@@ -395,6 +395,10 @@ def _snapshot_orphans(found: list[completion.OrphanTree], repo: Path, common: Pa
     """Save abort's state under the discovery lock, before preparing a replacement."""
     snapshots = []
     for c in found:
+        if c.unreadable:  # nothing is verified, so nothing is deleted: retirement sets it aside whole
+            snapshots.append({"path": c.path, "branch": c.branch, "head": c.head, "contents": None,
+                              "unreadable": True, "refs": {}})
+            continue
         current = _observe(Path(c.path), common) if c.path else completion.RetirementSnapshot(c.branch, c.head, None)
         expected = completion.RetirementSnapshot(c.branch, c.head, current.contents, c.unreadable)
         if not completion.may_retire(expected, current):
@@ -405,6 +409,18 @@ def _snapshot_orphans(found: list[completion.OrphanTree], repo: Path, common: Pa
                          if c.branch.startswith("work/")}
         snapshots.append(saved)
     return snapshots
+
+
+def _set_aside(repo: Path, trees: Path, path: Path, detail: str) -> None:
+    """Move a tree git cannot remove out of the way, whole (#774). `worktree move` keeps a valid tree registered, so
+    its HEAD stays referenced; a tree with corrupt metadata is renamed. Nothing is deleted."""
+    aside = trees / f".retired-{path.name}-{uuid.uuid4()}"
+    code, _ = make_worktree.git_trusted(["worktree", "move", str(path), str(aside)], repo)
+    if code or os.path.lexists(path):
+        try:
+            os.rename(path, aside)
+        except OSError as exc:
+            raise RuntimeError(f"could not retire orphaned worktree: {detail or exc}") from exc
 
 
 def _checked_out(repo: Path) -> dict[str, list[Path]]:
@@ -432,7 +448,9 @@ def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
         path = Path(c["path"])
         if not path.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("orphaned worktree is outside the worktrees directory")
-        saved = completion.RetirementSnapshot(c["branch"], c["head"], c.get("contents"), c.get("unreadable", False))
+        if c.get("unreadable"):
+            return
+        saved = completion.RetirementSnapshot(c["branch"], c["head"], c.get("contents"), False)
         if not completion.may_retire(saved, _observe(path, common)):
             raise RuntimeError("orphaned worktree changed since abort snapshot; preserving work")
 
@@ -458,9 +476,14 @@ def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
             continue
         check_tree(c)  # the window is one tree's hash, not every tree's
         path = Path(c["path"])
-        _, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
+        detail = ""
+        if not c.get("unreadable"):
+            _, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
         if os.path.lexists(path):
-            raise RuntimeError(f"could not retire orphaned worktree: {detail}")
+            # Git cannot remove it (corrupt metadata), or its state was never readable: keep every file, and its branch.
+            _set_aside(repo, trees, path, detail)
+            for ref in c["refs"]:
+                refs.pop(ref, None)
     for ref, expected in refs.items():
         if expected is not None:
             # Compare-and-delete: a tip moved by a writer outside clone_lock survives. Checkouts were refused above.
