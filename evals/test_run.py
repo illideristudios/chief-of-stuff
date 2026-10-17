@@ -857,21 +857,59 @@ class ClaudeAdapterRunTest(unittest.TestCase):
             self.assertTrue((out / "fixture-turn1").is_dir())
             self.assertTrue((out / "fixture-turn2").is_dir())
 
-    def test_wait_turn_grades_inline_notification_without_an_extra_call(self):
-        for notification in (True, False):
-            with self.subTest(notification=notification), tempfile.TemporaryDirectory() as d:
+    def test_wait_turn_receives_delayed_notification_or_reports_unreached(self):
+        import time
+        import sys
+        for mode, wait in (("delayed", 1), ("inline", 1), ("absent", 0.2)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
                 base = Path(d); work = base / "work"; work.mkdir(); out = base / "out"; out.mkdir()
-                reply = self.reply()
-                if notification:
-                    reply.events.insert(-1, {"type": "system", "subtype": "task_notification"})
-                spec = {"turns": [{"prompt": "go", "graders": []},
-                                  {"wait_seconds": 240, "graders": [{"type": "regex", "pattern": "done"}]}]}
-                with unittest.mock.patch.object(run.claude_adapter, "call", return_value=reply) as call:
-                    results, error, _ = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None,
-                                                     base / "calls", "America/Chicago")
+                cli = base / "claude"
+                init = self.reply().events[0]
+                result = {"type": "result", "is_error": False, "result": "done"}
+                cli.write_text(f"#!{sys.executable}\n" +
+                    "import json,sys,time\n" +
+                    "message=json.loads(sys.stdin.readline())\n" +
+                    "assert message['message']['content']=='go'\n" +
+                    f"print(json.dumps({init!r}),flush=True)\n" +
+                    ("print(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" if mode == "inline" else "") +
+                    f"print(json.dumps({result!r}),flush=True)\n" +
+                    ("time.sleep(0.1)\nprint(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" +
+                     f"print(json.dumps({result!r}),flush=True)\n" if mode == "delayed" else "") +
+                    "assert not sys.stdin.read(), 'wait must not send a prompt'\n")
+                cli.chmod(0o755)
+                spec = {"timeout_seconds": 3, "turns": [{"prompt": "go", "graders": []},
+                        {"wait_seconds": wait, "graders": [{"type": "regex", "pattern": "done"}]}]}
+                started = time.monotonic()
+                with unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
+                    results, error, meta = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None,
+                                                         base / "calls", "America/Chicago")
                 self.assertIsNone(error)
-                self.assertEqual(call.call_count, 1)
-                self.assertEqual(results[0][1], notification, results)
+                self.assertEqual(results[0][1], None if mode == "absent" else True, results)
+                if mode == "absent":
+                    self.assertGreaterEqual(time.monotonic() - started, wait)
+                    verdict = run.write_verdict(out, "wait", "agent", "sonnet", 1, results, error, meta)
+                    self.assertIsNone(json.loads(verdict.read_text())["passed"])
+                self.assertLess(time.monotonic() - started, 2)
+
+    def test_unreached_prompted_turns_do_not_crash_the_grader(self):
+        spec = {"turns": [{"prompt": "one", "graders": []},
+                          {"prompt": "two", "graders": []}, {"wait_seconds": 0.1, "graders": []}]}
+        now = datetime.now(ZoneInfo("America/Chicago"))
+        results = run.grade_turns(spec, [run.Turn([], now, now)], "America/Chicago", Path("."), [])
+        self.assertEqual([passed for _, passed, _ in results], [None, None])
+
+    def test_snapshot_errors_do_not_replace_a_model_failure(self):
+        for multi in (False, True):
+            with self.subTest(multi=multi), tempfile.TemporaryDirectory() as d:
+                base = Path(d)
+                spec = {"turns": [{"prompt": "p", "graders": []}]} if multi else {"prompt": "p", "graders": []}
+                def call(request, **kwargs):
+                    (Path(request.cwd) / "dangling").symlink_to("missing")
+                    return run.Failure("auth", "original failure")
+                with unittest.mock.patch.object(run.claude_adapter, "call", side_effect=call):
+                    _, error, _ = run.run_one(run.Case("snapshot", base, spec), "baseline", "sonnet", base / "out")
+                self.assertIn("original failure", error)
+                self.assertIn("dangling", (base / "out/snapshot-errors.jsonl").read_text())
 
     def test_failed_single_and_multi_turn_calls_keep_the_fixture(self):
         for multi in (False, True):
@@ -907,8 +945,9 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                  unittest.mock.patch.object(run.claude_adapter, 'forget_session') as forget, \
                  unittest.mock.patch.object(run.shutil, 'copytree', side_effect=OSError('snapshot failed')), \
                  unittest.mock.patch.object(run, 'stop_pages') as stop:
-                with self.assertRaisesRegex(OSError, 'snapshot failed'):
-                    run.run_one(run.Case('failure', base, spec), 'baseline', 'sonnet', out)
+                _, error, _ = run.run_one(run.Case('failure', base, spec), 'baseline', 'sonnet', out)
+                self.assertIn('snapshot', error)
+                self.assertIn('snapshot failed', (out / 'snapshot-errors.jsonl').read_text())
             stop.assert_called_once()
             forget.assert_called_once()
 
