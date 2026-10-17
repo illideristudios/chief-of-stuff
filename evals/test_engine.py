@@ -591,7 +591,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
         self.assertEqual([stage for _, stage, _, _ in self.launched], ["implement", "review"])
 
-    def test_retryable_gate_consultation_is_retried_on_the_next_pass(self):
+    def test_retryable_gate_consultation_waits_for_persisted_backoff(self):
         self._trio()
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
         self.db.upsert_item(KEY, stage="implement")
@@ -600,8 +600,110 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(model=failed), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
         model = self._votes([("adopt", "approve")] * 3)
         self.assertEqual(self.run_pass(model=model), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+        self.assertEqual(model.n, 0)
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+        self.addCleanup(self.db.engine.dispose)
+        self.now += timedelta(seconds=60)
+        self.run_pass(model=model)
         self.assertEqual(model.n, 3)
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
+
+    def test_answering_split_asks_directly_releases_only_the_matching_decision(self):
+        import decision_actions
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic")
+        first, second = [self.db.add_ask(KEY, "review", 1, "s1", "Which parser?", ["Split", "Keep"], ctx)
+                         for ctx in ("one", "two")]
+        model = self._votes([("concern", "Split")] * 6)
+        self.run_pass(model=model)
+        self.db.answer_ask(first, "Keep")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
+        rows = decision_actions.latest(self.db.decisions(KEY))
+        self.assertEqual(rows[("ask", "Which parser?", f"ask-{first}")].answer, "Keep")
+        self.assertIsNone(rows[("ask", "Which parser?", f"ask-{second}")].answer)
+        self.db.answer_ask(second, "Split")
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(len(self.forge.merges), 1)
+        self.assertEqual(model.n, 6)
+
+    def test_retryable_ask_consultation_backs_off_without_delaying_siblings(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 3)
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 3)
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which backend?", ["Local", "Remote"], "")
+        model = self._votes([("adopt", "Local")] * 3)
+        self.run_pass(model=model)
+        self.assertEqual([a.answer for a in self.db.asks(KEY)], [None, "Local"])
+        self.now += timedelta(seconds=60)
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 6)
+        self.now += timedelta(seconds=60)
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 6)
+        self.now += timedelta(seconds=60)
+        self.run_pass(model=self._votes([("adopt", "Keep")] * 3))
+        self.assertEqual(self.db.asks(KEY)[0].answer, "Keep")
+
+    def test_short_asks_keep_the_question_in_the_interrupt(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        model = mock.Mock()
+        for options in ([], ["Continue"]):
+            with self.subTest(options=options):
+                self.db.add_ask(KEY, "implement", 1, "s1", "Which credentials should I use?", options, "")
+                self.run_pass(model=model)
+                self.assertIn("Which credentials should I use?", self.db.resume(KEY)["interrupt"]["reason"])
+        model.assert_not_called()
+
+    def test_adopting_a_sibling_ask_does_not_clear_the_split_interrupt(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "one")
+        first = self._votes([("concern", "Split")] * 3)
+        self.run_pass(model=first)
+        interrupt = self.db.resume(KEY)["interrupt"]
+        # Identical text and options still belong to a different persisted ask instance.
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "one")
+        self.run_pass(model=self._votes([("adopt", "Keep")] * 3))
+        self.assertEqual(self.db.resume(KEY).get("interrupt"), interrupt)
+
+    def test_consulting_another_stage_does_not_clear_its_siblings_limit(self):
+        self._trio()
+        self.p.stages["review"] = policy.Place("review", "critic", {"spend_usd": 1})
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.set_resume(KEY, {"spend_usd": 1})
+        self.db.add_ask(KEY, "review", 1, "s1", "Review choice?", ["Yes", "No"], "")
+        self.run_pass(model=mock.Mock())
+        interrupt = self.db.resume(KEY)["interrupt"]
+        self.db.add_ask(KEY, "implement", 1, "s1", "Implementation choice?", ["Yes", "No"], "")
+        # Resolve the blocked ask externally; its stage's limit remains until that stage is unblocked.
+        self.db.answer_ask(self.db.asks(KEY)[0].id, "Yes")
+        self.run_pass(model=self._votes([("adopt", "Yes")] * 3))
+        self.assertEqual(self.db.resume(KEY).get("interrupt"), interrupt)
+
+    def test_failed_reversal_claim_does_not_leave_a_pending_stage(self):
+        import decision_actions
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
+                             record={"decision": {"options": ["Split", "Keep"]}})
+        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        for failure in (ValueError("slot taken"), RuntimeError("launch failed")):
+            with self.subTest(failure=failure), mock.patch.object(engine.slots, "claim", side_effect=failure):
+                self.assertIsInstance(self.run_pass()[0], reconcile.Dispatch)
+                self.assertNotIn("pending_stage", self.db.resume(KEY) or {})
+                self.assertEqual(self.forge.writes, [])
+                self.assertEqual(self.forge.rows[0]["stage"], "merge")
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+        self.assertEqual(self.forge.rows[0]["stage"], "implement")
 
     def test_permission_asks_context_options_limits_and_failure_spend(self):
         import guard_binding
