@@ -69,12 +69,11 @@ def _measured(state: dict) -> dict:
             if type(state.get(key)) in (int, float)}
 
 
-def _interrupt(store: Any, key: str, kind: str, reason: str, at: str, *, scope: dict,
-               keep: tuple[str, ...] = ()) -> None:
-    """Record the issue's interrupt; one of a kind in `keep` already there stays."""
+def _interrupt(store: Any, key: str, kind: str, reason: str, at: str, *, scope: dict) -> None:
+    """Persist the issue's interrupt when it changes."""
     data = _resume(store, key)
     record = {"kind": kind, "reason": reason, **scope}
-    if data.get("interrupt") != record and (data.get("interrupt") or {}).get("kind") not in keep:
+    if data.get("interrupt") != record:
         store.add_log(key, f"{kind}: {reason}", at)
         data["interrupt"] = record
         store.set_resume(key, data)
@@ -152,12 +151,10 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
             data.pop("trio_retries", None)
         store.set_resume(key, data)
     if outcome.unanimous:
-        _clear_interrupt(store, key, "ambiguity", scope=scope)
+        _sync_decision_interrupt(store, key, at)
         return outcome.recommendation
-    capped = decision_actions.latest(store.decisions(key)).get((topic, question, instance))
-    # Capped decisions queue behind an ambiguity already waiting on Zach instead of replacing it every pass.
-    _interrupt(store, key, "ambiguity", outcome.reason or question, at, scope=scope,
-               keep=("ambiguity",) if capped is not None and capped.record.get("retry_exhausted") else ())
+    _sync_decision_interrupt(store, key, at, proposed={
+        "kind": "ambiguity", "reason": outcome.reason or question, **scope})
     return None
 
 
@@ -212,17 +209,16 @@ def _settle_asks(store: Any, key: str) -> None:
         _clear_interrupt(store, key, "ambiguity", scope=decision_actions.ask_scope(rows, ask))
 
 
-def _restore_exhausted(store: Any, key: str, at: str) -> None:
-    """Rebuild the interrupt of a capped decision when a kill landed between its row and its interrupt."""
-    for row in decision_actions.latest(store.decisions(key)).values():
-        record = row.record if isinstance(row.record, dict) else {}
-        decision = record.get("decision")
-        if (record.get("retry_exhausted") and not row.answer and not decision_actions.is_reversed(row)
-                and isinstance(decision, dict)):
-            topic, question, instance = decision_actions.identity(row)
-            _interrupt(store, key, "ambiguity", record["error"], at, keep=("ambiguity", "limit", "exhausted"),
-                       scope={"decision": {"topic": topic, "question": question, "instance": instance,
-                                           "context": decision.get("context", "")}})
+def _sync_decision_interrupt(store: Any, key: str, at: str, *, proposed: dict | None = None) -> None:
+    """Persist the lifecycle judgement, also repairing a kill after a capped row's commit."""
+    data = _resume(store, key)
+    selected = decision_actions.pending_interrupt(store.decisions(key), data.get("interrupt"),
+                                                 asks=store.asks(key), proposed=proposed)
+    if selected is None:
+        if data.pop("interrupt", None) is not None:
+            store.set_resume(key, data)
+    elif selected != data.get("interrupt"):
+        _interrupt(store, key, selected["kind"], selected["reason"], at, scope={"decision": selected["decision"]})
 
 
 def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
@@ -236,7 +232,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
         # Repair an interrupted ask/link write before accepting any direct answer.
         _link_replacement_asks(store, key, replacements)
         _settle_asks(store, key)
-        _restore_exhausted(store, key, at)
+        _sync_decision_interrupt(store, key, at)
         asks = store.asks(key)
         if model is None:
             continue

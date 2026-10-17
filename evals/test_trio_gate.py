@@ -270,8 +270,7 @@ class GateTest(unittest.TestCase):
                        replace(gate, record={**gate.record, "reversed": True}),
                        replace(gate, record={**gate.record, "restarted": "implement"}),
                        replace(gate, record={**gate.record, "decision": {
-                           **gate.record["decision"], "context": "implement-2"}}, answer="approve"),
-                       replace(gate, record=None)):
+                           **gate.record["decision"], "context": "implement-2"}}, answer="approve")):
             with self.subTest(update=update):
                 self.assertEqual(choose([gate, update, ask], gate_interrupt), ask_interrupt)
                 self.assertIsNone(choose([gate, update], gate_interrupt))
@@ -281,6 +280,9 @@ class GateTest(unittest.TestCase):
             self.assertEqual(choose([pending, ask], gate_interrupt), gate_interrupt)
         limit = {"kind": "limit", "reason": "reached spend_usd limit", "stage": "implement"}
         self.assertEqual(choose([ask], limit), limit)
+        historical = replace(gate, record=None)
+        self.assertIsNone(choose([historical]))
+        self.assertEqual(choose([historical], gate_interrupt), gate_interrupt)
 
     def test_replacement_ask_specification_and_link_are_decision_updates(self):
         import decision_actions
