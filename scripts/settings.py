@@ -323,7 +323,7 @@ def _workers(table) -> Workers:
         and "(via " not in rule and len(rule) <= 2400
         and not any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in rule) for rule in rules
     ):
-        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
+        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without Unicode Cc, Cf, Zl, or Zp characters '
                             'or "(via " markers, each at most 2400 characters')
     if len(rules) > RULES_MAX or sum(map(len, rules)) > RULES_TOTAL_CAP:
         raise SettingsError(f"[workers] rules must be at most {RULES_MAX} rules and {RULES_TOTAL_CAP} characters in all")

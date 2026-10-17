@@ -17,7 +17,7 @@ import make_worktree
 import process_status
 import reconcile
 import supervisor
-from settings import load as load_settings
+from settings import Settings, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import Failure, Request, retry_at
@@ -110,9 +110,9 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
+           claude_as_profile: str | None = None, config: Settings | None = None,
            clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
-    """The Launch port: verify a live start or adopt durable completion before slots records it."""
+    """Verify start or adopt completion; return (model, effort). Use config or load it; an explicit claude_as_profile overrides config (empty selects default login)."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
@@ -125,16 +125,19 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    loaded = load_settings(root, settings_path(text))
-    defaults = loaded.stages.get(stage)
+    if config is None:
+        config = load_settings(root, settings_path(text))
+    if claude_as_profile is None:
+        claude_as_profile = config.workers.claude_as_profile
+    defaults = config.stages.get(stage)
     agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
-                                               skills=defaults.skills if defaults else (), rules=rules,
-                                               require_green=require_green)
+                                               skills=defaults.skills if defaults else (), rules=config.workers.rules,
+                                               require_green=config.workers.require_green_tests)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -226,13 +229,15 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
     except Exception:
-        claude_adapter.cancel(runner)
-        # The process is already up. collect() never sees a segment slots.claim drops on this failure.
-        for error in teardown(root, tree, tree.name, teardown_command):
-            try:
-                store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
-            except Exception:
-                pass
+        try:
+            claude_adapter.cancel(runner)
+        finally:
+            # The process is already up. collect() never sees a segment slots.claim drops on this failure.
+            for error in teardown(root, tree, tree.name, config.workers.teardown):
+                try:
+                    store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                except Exception:
+                    pass
         raise
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
