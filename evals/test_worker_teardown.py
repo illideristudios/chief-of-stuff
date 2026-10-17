@@ -102,14 +102,15 @@ class WorkerTeardownTest(unittest.TestCase):
         (run_dir / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run_dir / "stderr").write_text("")
         (run_dir / "exit.json").write_text('{"exit_code": 0}')
-        # Stop after collection so this test needs no forge/planner stand-ins.
-        forge = mock.Mock()
-        forge.snapshots.side_effect = RuntimeError("collection finished")
+        # Collection follows forge sync; provide a clean tree so only teardown failure is under test.
+        forge = engine_fixtures.FakeForge()
         with mock.patch.object(shell_setup, "run_command", return_value=subprocess.CompletedProcess([], 7, "", "failed")) as run, \
-             mock.patch.object(engine, "_record_limits"):
-            with self.assertRaisesRegex(RuntimeError, "collection finished"):
-                engine.run_pass(forge=forge, store=fx.db, policies=fx.p, root=fx.root,
-                                trees=fx.trees, launch=fx.launch, workers=settings.Workers(), teardown_command="exit 7")
+             mock.patch.object(engine, "_record_limits"), \
+             mock.patch.object(engine.cleanup, "execute", return_value=0), \
+             mock.patch.object(engine.engine_facts, "_tree_facts",
+                               return_value=(engine_fixtures.reconcile.TreeState("head", 0, 0, 0), False, engine_fixtures.NOW)):
+            engine.run_pass(forge=forge, store=fx.db, policies=fx.p, root=fx.root,
+                            trees=fx.trees, launch=fx.launch, workers=settings.Workers(), teardown_command="exit 7")
         segment = fx.db.segments()[0]
         self.assertEqual(segment.outcome, "done")
         run.assert_called_once()
