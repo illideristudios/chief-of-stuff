@@ -295,7 +295,10 @@ class MigrationTest(unittest.TestCase):
         old = {"stage write failed: x": "stage_write", "stage write refused: x": "stage_write",
                "decision comment failed: x": "decision_comment", "merge refused: x": "merge_refused",
                "merged #1": "merge", "escalate: retry limit reached": "worker_run",
-               "dispatch failed: x": "worker_run", "wait: merge is not ready": ""}
+               "dispatch failed: x": "worker_run", "wait: merge is not ready": "unknown",
+               "ask failed: x": "unknown", "wait failed: x": "unknown", "merge failed: x": "merge_refused",
+               "unrecognized worker failed: x": "unknown", "arbitrary refused operation": "unknown",
+               "worker implement attempt 1: failed": "worker_run", "review failed: x": "worker_run"}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.db"
             command.upgrade(store._config(path), "0003")

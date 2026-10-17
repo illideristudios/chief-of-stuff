@@ -238,11 +238,11 @@ class DecisionUpdateTest(unittest.TestCase):
         for status in ("open", "answered"):
             self.assertIsNone(da.block([make_decision(id=1, status=status)], 1, "offline"))
 
-    def test_block_takes_a_reversed_decision_past_the_retry_limit_and_keeps_it_reversed(self) -> None:
+    def test_block_takes_a_reversed_decision_past_the_retry_limit_with_canonical_status(self) -> None:
         update = da.block([make_decision(id=1, status="reversed", answer="Redo")], 1, "retry limit reached")
-        self.assertEqual((update.store_write.status, update.store_write.blocked_reason), ("reversed", "retry limit reached"))
+        self.assertEqual((update.store_write.status, update.store_write.blocked_reason), ("blocked", "retry limit reached"))
         self.assertEqual(da.board_status(update.decision), "blocked")
-        self.assertIsNone(da.unblock([update.decision], 1))
+        self.assertEqual(da.unblock([update.decision], 1).decision.status, "reversed")
 
     def test_restore_held_restores_only_blocked_answers_when_no_decision_is_open(self) -> None:
         row = dict(topic="design", rerouted_to="")

@@ -664,12 +664,12 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         return dec
 
-    def test_a_reversal_blocked_by_the_retry_limit_stays_reversed_after_a_decision_hold(self):
+    def test_a_reversal_blocked_by_the_retry_limit_stays_blocked_after_a_decision_hold(self):
         dec = self.spent_reversal()
         with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
             self.run_pass()
         saved = self.db.decision(dec.id)
-        self.assertEqual(saved.status, "reversed")
+        self.assertEqual(saved.status, "blocked")
         self.assertEqual(saved.blocked_reason, "retry limit reached")
         self.assertFalse(decision_actions.is_closed(saved))
 
