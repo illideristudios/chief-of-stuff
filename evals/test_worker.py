@@ -23,7 +23,7 @@ import slots
 import store
 import supervisor
 import worker
-from evals.test_engine import KEY, NOW, policies
+from evals.test_engine import KEY, NOW, FakeForge, policies
 
 
 class WorkerTest(unittest.TestCase):
@@ -498,6 +498,9 @@ class WorkerTest(unittest.TestCase):
             self.db.items()[0], "title", "body", "implement", self.persona, root=self.root, require_green=True)
         self.assertIn("require_green_tests", prompt)
         self.assertIn("human review", prompt)
+        self.assertIn("passed, failed, skipped and xfailed are all known", prompt)
+        self.assertIn("passed > 0", prompt)
+        self.assertIn("failed, skipped and xfailed all zero", prompt)
         off = worker.dispatch_prompt.compose_issue(
             self.db.items()[0], "title", "body", "implement", self.persona, root=self.root)
         self.assertNotIn("require_green_tests", off)
@@ -540,18 +543,100 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn("suite is not green", log)
                     self.assertIn("reported done", log)
 
-    def test_a_non_done_report_is_not_suite_gated(self):
+    def suite_run(self, stage="implement", outcome="done"):
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
         (self.root / "chief-of-stuff.toml").write_text("[workers]\nrequire_green_tests = true\n")
-        run = self.launched()
-        self.report(run, outcome="blocked", suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
+        self.db.upsert_item(KEY, stage=stage)
+        run = self.launched(stage)
+        self.report(run, stage=stage, outcome=outcome,
+                    suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
         (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code": 0}')
-        with mock.patch.object(worker.process_status, "identity", return_value=None):
-            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        forge = FakeForge()
+        forge.rows[0].update(stage=stage, human_review=False)
+        return forge
+
+    def suite_pass(self, forge, launch):
+        with mock.patch.object(engine.cleanup, "execute", return_value=0):
+            return engine.run_pass(store=self.db, root=self.root, trees=self.trees,
+                                   forge=forge, policies=self.p, launch=launch,
+                                   clock=lambda: NOW + timedelta(minutes=1))
+
+    def test_a_non_done_report_is_not_suite_gated(self):
+        forge = self.suite_run(outcome="blocked")
+        forge.add_human_hold = mock.Mock(return_value="")
+        self.suite_pass(forge, mock.Mock(return_value=("example", "")))
         self.assertEqual(self.db.segments(KEY)[0].outcome, "blocked")
         self.assertFalse(self.db.items()[0].human_review)
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
+        forge.add_human_hold.assert_not_called()
+
+    def test_suite_hold_survives_forge_errors_and_restart_until_release(self):
+        for failure in ("label unavailable", RuntimeError("forge offline")):
+            with self.subTest(failure=failure):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                forge = self.suite_run()
+                def hold(number):
+                    if hold.failure:
+                        if isinstance(hold.failure, Exception):
+                            raise hold.failure
+                        return hold.failure
+                    forge.rows[0]["human_review"] = True
+                    return ""
+                hold.failure = failure
+                forge.add_human_hold = mock.Mock(side_effect=hold)
+                launch = mock.Mock(return_value=("example", ""))
+                self.suite_pass(forge, launch)
+                # Reopen the store: a process-local flag cannot preserve this hold.
+                self.db.engine.dispose()
+                self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
+                self.addCleanup(self.db.engine.dispose)
+                self.suite_pass(forge, launch)
+                launch.assert_not_called()
+                self.assertTrue(self.db.items()[0].human_review)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                evidence = "\n".join(row.message for row in self.db.log(KEY))
+                self.assertIn("suite is not green", evidence)
+                self.assertNotIn("unreadable worker run", evidence)
+                hold.failure = None
+                self.suite_pass(forge, launch)
+                self.suite_pass(forge, launch)
+                launch.assert_not_called()
+                self.assertEqual(forge.add_human_hold.call_count, 3)
+                forge.rows[0]["human_review"] = False
+                actions = self.suite_pass(forge, launch)
+                self.assertEqual(actions, [reconcile.Review(KEY, 1)])
+                self.assertEqual(launch.call_args.args[1], "review")
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+
+    def test_releasing_a_review_suite_hold_accepts_the_review(self):
+        forge = self.suite_run(stage="review")
+        data = self.db.resume(KEY)
+        data["review_findings"] = {"attempt": 1, "counts": {}}
+        self.db.set_resume(KEY, data)
+        def hold(number):
+            forge.rows[0]["human_review"] = True
+            return ""
+        forge.add_human_hold = mock.Mock(side_effect=hold)
+        launch = mock.Mock(return_value=("example", ""))
+        self.suite_pass(forge, launch)
+        launch.assert_not_called()
+        forge.rows[0]["human_review"] = False
+        with mock.patch.object(engine.engine_merge, "execute", return_value=False):
+            actions = self.suite_pass(forge, launch)
+        self.assertEqual(actions, [reconcile.Merge(KEY)])
+        launch.assert_not_called()
+        self.assertEqual(self.db.resume(KEY)["runs"]["review-1"]["result"]["outcome"], "done")
+
+    def test_collect_uses_passed_policy_when_workspace_configuration_breaks(self):
+        self.suite_run()
+        (self.root / "CLAUDE.md").write_bytes(b"\xff")
+        (self.root / "chief-of-stuff.toml").write_text("invalid toml [")
+        worker.collect(self.db, self.root, lambda: NOW, require_green=True)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
 
     def test_successful_host_takes_the_segment_outcome_from_its_session_report(self):
         for outcome, expected in (("done", "done"), ("blocked", "blocked"), ("failed", "failed"), (None, "failed")):
