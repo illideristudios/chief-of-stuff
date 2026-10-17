@@ -1170,24 +1170,103 @@ class WorkerTest(unittest.TestCase):
                 (kept,) = self.quarantined(tree.name)
                 self.assertEqual((kept / "scratch.txt").read_text(), "uncommitted work\n")
 
-    def test_abort_refuses_a_replacement_on_the_right_branch_at_the_wrong_head(self):
+    def test_a_rejected_replacement_keeps_its_head_and_does_not_wedge_retry(self):
         from evals import git_taint as taint, make_repo
         with taint.private_git_views(self.root / "private-views"):
             clone, heads = self.abort_fixture()
-
-            def wrong_head(root, repo, trees, name, branch, agent):
-                path = self.trees / name
-                make_repo.git(["worktree", "add", "-b", branch, str(path), next(iter(heads.values()))], repo)
-                return SimpleNamespace(path=path)
-
-            with mock.patch.object(worker.make_worktree, "build", side_effect=wrong_head):
-                with self.assertRaisesRegex(RuntimeError, "replacement does not match"):
+            with mock.patch.object(worker, "_verify_replacement", side_effect=RuntimeError("replacement rejected")):
+                with self.assertRaisesRegex(RuntimeError, "replacement rejected"):
                     self.launch_in(clone, attempt=3)
-            for tree in heads:
-                self.assertFalse(tree.exists())
-                (kept,) = self.quarantined(tree.name)
-                self.assertEqual((kept / "scratch.txt").read_text(), "uncommitted work\n")
-            self.assertIn("abort_quarantine", self.db.resume(KEY))
+            rejected = list((self.trees / "quarantine").rglob("issue-1-implement-3-*"))
+            self.assertEqual(len(rejected), 1)
+            kept_head = make_repo.git(["rev-parse", "HEAD"], rejected[0])
+            fresh = Path(self.launch_in(clone, attempt=3).cwd)
+            self.assertTrue(fresh.is_dir())
+            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], rejected[0]), kept_head)
+            self.assertNotIn("abort_quarantine", self.db.resume(KEY))
+
+    def test_replacement_uses_its_own_head_when_another_fetch_moves_main(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            build = worker.make_worktree.build
+            expected = []
+
+            def concurrent_fetch(*args, **kwargs):
+                made = build(*args, **kwargs)
+                expected.append(make_repo.git(["rev-parse", "HEAD"], made.path))
+                make_repo.git(["update-ref", "refs/remotes/origin/main", next(iter(heads.values()))], clone)
+                return made
+
+            with mock.patch.object(worker.make_worktree, "build", side_effect=concurrent_fetch):
+                fresh = Path(self.launch_in(clone, attempt=3).cwd)
+            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], fresh), expected[0])
+
+    def test_an_unverified_pre_start_refuses_abort_and_preserves_all_evidence(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            run = worker._run_dir(self.root, KEY, "implement", 1)
+            run.mkdir(parents=True)
+            (run / "command.json").write_text('{"session_id": "possibly-live"}')
+            with self.assertRaisesRegex(RuntimeError, "unverified"):
+                self.launch_in(clone, attempt=3)
+            self.assertTrue((run / "command.json").is_file())
+            self.assert_abort_work_preserved(clone, heads)
+
+    def test_transient_status_and_ancestry_failures_wait_then_recover_dirty_work(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([
+                {"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "dirty": True}])
+            old = self.trees / "issue-1-implement-1"
+            run = worker.git_view.run
+
+            def fail_status(args, *a, **kw):
+                if args[0] == "status":
+                    return SimpleNamespace(returncode=128, stdout="", stderr="index locked")
+                return run(args, *a, **kw)
+
+            with mock.patch.object(worker.git_view, "run", side_effect=fail_status):
+                with self.assertRaisesRegex(RuntimeError, "status"):
+                    self.launch_in(clone)
+            self.assertTrue((old / "scratch.txt").is_file())
+            self.assertFalse((self.trees / "quarantine").exists())
+            fresh = Path(self.launch_in(clone).cwd)
+            self.assertEqual(fresh, old)
+            candidates = [worker.completion.OrphanTree(str(old), "a", "a", dirty=True),
+                          worker.completion.OrphanTree(None, "b", "b")]
+            with mock.patch.object(worker.git_trees, "git", return_value=(128, "temporarily unavailable")):
+                with self.assertRaisesRegex(RuntimeError, "ancestry"):
+                    worker._with_ancestry(candidates, clone, worker._common(clone))
+
+    def test_quarantined_remote_only_branch_is_never_rediscovered_after_fetch(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([])
+            head = make_repo.git(["rev-parse", "HEAD"], clone)
+            ref = "refs/remotes/origin/work/issue-1-orphan"
+            make_repo.git(["update-ref", ref, head], clone)
+            with worker.make_worktree.clone_lock(clone) as common:
+                worker._apply_quarantine(clone, self.trees, 1,
+                                         {"stamp": "remote", "paths": [], "refs": [ref]}, common)
+                make_repo.git(["update-ref", ref, head], clone)  # the next fetch restores the remote ref
+                self.assertEqual(worker._read_branches(1, {}, clone, common, set()), [])
+
+    def test_quarantine_discovery_read_failure_refuses_to_reuse_branches(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([])
+            read = worker.make_worktree.git
+
+            def fail_list(args, *a, **kw):
+                if args[-1] == "refs/quarantine/1/":
+                    return 128, "cannot read refs"
+                return read(args, *a, **kw)
+
+            with mock.patch.object(worker.make_worktree, "git", side_effect=fail_list):
+                with self.assertRaisesRegex(RuntimeError, "quarantine"):
+                    worker._quarantined_branches(clone, 1, worker._common(clone))
 
     def test_a_failed_fast_forward_is_quarantined_and_starts_fresh_without_a_hold(self):
         from evals import git_taint as taint, make_repo
@@ -1213,13 +1292,14 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(self.db.asks(KEY), [])
             self.assertEqual(self.db.decisions(KEY), [])
 
-    def test_a_pre_start_without_started_json_is_quarantined_and_abort_continues(self):
+    def test_a_canceled_pre_start_without_started_json_is_quarantined_and_abort_continues(self):
         from evals import git_taint as taint
         with taint.private_git_views(self.root / "private-views"):
             clone, heads = self.abort_fixture()
             run = worker._run_dir(self.root, KEY, "implement", 1)
             run.mkdir(parents=True)
             (run / "command.json").write_text("{}")
+            (run / "canceled").write_text("canceled\n")
             fresh = Path(self.launch_in(clone, attempt=3).cwd)
             self.assertTrue(fresh.is_dir())
             self.assertFalse(run.exists())

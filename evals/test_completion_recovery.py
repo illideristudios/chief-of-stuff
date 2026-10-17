@@ -21,6 +21,28 @@ class RecoveryTest(unittest.TestCase):
                 self.assertIsInstance(recovery([bad]), completion.Quarantine)
         self.assertIsInstance(recovery([tree("/t/a"), tree("/t/b", unreadable=True)]), completion.Quarantine)
 
+    def test_holds_are_judged_from_latest_answers_and_current_conflict(self):
+        decisions = [("conflict", "implement\nold", "hold"),
+                     ("conflict", "implement\nold", "abort"),
+                     ("conflict", "fix\ncurrent", "hold"),
+                     ("other", "review\ncurrent", "hold")]
+        self.assertEqual(completion.held_stages(decisions, conflict="current", readable=True), {"fix"})
+        self.assertEqual(completion.held_stages(decisions, conflict=None, readable=True), set())
+        self.assertEqual(completion.held_stages(decisions, conflict=None, readable=False), {"fix"})
+
+    def test_recovery_fact_gatherer_returns_decisions_without_judging_them(self):
+        from unittest import mock
+        from types import SimpleNamespace
+        import engine_facts
+        rows = [SimpleNamespace(topic="conflict", question="implement\na", answer="abort"),
+                SimpleNamespace(topic="conflict", question="review\nb", answer="hold")]
+        store = SimpleNamespace(decisions=lambda key: rows)
+        with mock.patch.object(engine_facts.worker, "recovery_conflict", return_value="a"):
+            facts = engine_facts.recovery(store, "repo#1", trees=Path("/trees"), repo=Path("/repo"))
+        self.assertEqual(facts["decisions"], [(r.topic, r.question, r.answer) for r in rows])
+        self.assertEqual(facts["conflict"], "a")
+        self.assertTrue(facts["readable"])
+
     def test_no_candidates_recovers_nothing(self):
         self.assertIsNone(recovery([]))
 
