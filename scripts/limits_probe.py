@@ -42,35 +42,61 @@ def _unknown(runtime: str, account: str, reason: str, limit: str = "limits") -> 
     return Reading(runtime, account, limit, None, None, "", None, _now(), reason)
 
 
-def _events(root: Path, markers: tuple[str, ...]):
+# One engine process repeats the pass. Unchanged files are not mapped again.
+# shortcut: the cache dies with the process and keeps a deleted file's last key, drop it if retained keys grow.
+_scans: dict[tuple[str, int, int], tuple[dict, ...]] = {}
+
+
+def _scan_file(path: Path, needles: tuple[bytes, ...]) -> tuple[dict, ...] | None:
     """Search bytes before decoding: transcripts mostly contain unrelated conversation text."""
+    found = []
+    try:
+        with path.open("rb") as stream:
+            if not os.fstat(stream.fileno()).st_size:
+                return ()
+            with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                offsets = set()
+                for needle in needles:
+                    start = 0
+                    while (hit := data.find(needle, start)) >= 0:
+                        left = data.rfind(b"\n", 0, hit) + 1
+                        right = data.find(b"\n", hit)
+                        if right < 0:
+                            right = len(data)
+                        if left not in offsets:
+                            offsets.add(left)
+                            try:
+                                event = json.loads(data[left:right])
+                            except (ValueError, UnicodeDecodeError):
+                                event = None
+                            if isinstance(event, dict):
+                                found.append(event)
+                        start = right + 1
+    except (OSError, ValueError):
+        # A rotated/deleted transcript does not hide the other sessions' data.
+        return None
+    return tuple(found)
+
+
+def _events(root: Path, markers: tuple[str, ...]):
     needles = tuple(marker.encode() for marker in markers)
     for path in root.rglob("*.jsonl"):
         try:
-            with path.open("rb") as stream:
-                if not os.fstat(stream.fileno()).st_size:
-                    continue
-                with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
-                    offsets = set()
-                    for needle in needles:
-                        start = 0
-                        while (hit := data.find(needle, start)) >= 0:
-                            left = data.rfind(b"\n", 0, hit) + 1
-                            right = data.find(b"\n", hit)
-                            if right < 0:
-                                right = len(data)
-                            if left not in offsets:
-                                offsets.add(left)
-                                try:
-                                    event = json.loads(data[left:right])
-                                except (ValueError, UnicodeDecodeError):
-                                    event = None
-                                if isinstance(event, dict):
-                                    yield event
-                            start = right + 1
-        except (OSError, ValueError):
-            # A rotated/deleted transcript does not hide the other sessions' data.
+            stat = path.stat()
+        except OSError:
             continue
+        if not stat.st_size:
+            continue
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        cached = _scans.get(key)
+        if cached is None:
+            scanned = _scan_file(path, needles)
+            if scanned is None:
+                continue
+            for stale in [item for item in _scans if item[0] == key[0]]:
+                del _scans[stale]
+            _scans[key] = cached = scanned
+        yield from cached
 
 
 def _reading(runtime, account, name, used, reset, stamp) -> Reading:

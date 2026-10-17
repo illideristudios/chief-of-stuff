@@ -106,7 +106,7 @@ class Sources(unittest.TestCase):
             self.assertEqual(scans, 1)
             self.assertEqual(mapped.call_count, scans)
         self.assertEqual(first[0].used, second[0].used)
-        later = dict(event, timestamp=(NOW + timedelta(minutes=5)).isoformat(), rate_limit_info={
+        later = dict(event, rate_limit_info={
             "rateLimitType": "five_hour", "utilization": .1,
             "resetsAt": (NOW + timedelta(hours=2)).timestamp()})
         self.write(".claude/projects/work/session.jsonl", [later])
