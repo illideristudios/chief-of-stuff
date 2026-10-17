@@ -1516,11 +1516,14 @@ class ForgeRetryabilityTest(unittest.TestCase):
                 self.assertFalse(raised.exception.retryable)
 
     def test_http_status_and_transport_exception_survive_gitlab_request_gathering(self):
+        import http.client
         import urllib.error
         source = forge.Forge(GL, token="fake")
         failures = [(urllib.error.HTTPError("https://gitlab.example.test/pulls/512", code, "response", {}, None),
-                     code in (429, 503)) for code in (401, 404, 429, 503)]
-        failures += [(urllib.error.URLError("network failure"), True), (TimeoutError("slow read"), True)]
+                     code in (429, 503)) for code in (401, 403, 404, 429, 503)]
+        failures += [(urllib.error.URLError("network failure"), True), (TimeoutError("slow read"), True),
+                     (http.client.IncompleteRead(b"short", 10), True), (EOFError("closed response"), True),
+                     (urllib.error.HTTPError("https://gitlab.example.test", 403, "denied", None, None), False)]
         for error, retryable in failures:
             with self.subTest(error=error), mock.patch.object(backlog.urllib.request, "urlopen", side_effect=error):
                 with self.assertRaises(forge.ForgeError) as raised:
