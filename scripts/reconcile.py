@@ -382,9 +382,12 @@ def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[di
     consult = next((p for name in _reviewers(policies, room)
                     if (p := policies.resolve(name, "review", room)).architect), None)
     if consult is not None:
+        # No reply for this forge head: one request, listing only findings with no disposition.
+        # A reply that leaves a finding undisposed waits; it does not post a second request for the same head.
+        undisposed = [f for f in findings if "disposition" not in f]
         if reply is None:
-            return [_consult(item.issue_key, head, findings, requested)]
-        if any("disposition" not in f for f in pending):
+            return [_consult(item.issue_key, head, undisposed, requested)]
+        if undisposed:
             return [Wait(item.issue_key, "architect left a review finding undisposed")]
     finding = pending[0]
     tries = [s for s in fixes if s.finding_key == finding["finding_key"] and s.outcome not in RETRYABLE]
@@ -393,6 +396,27 @@ def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[di
     attempt = max((s.attempt for s in history if s.stage == edge.target), default=0) + 1
     return [Dispatch(item.issue_key, edge.target, policies.stages[edge.target].persona, attempt,
                      finding["finding_key"], dict(finding))]
+
+
+def _after_panel(reply: ArchitectReply, panel: Sequence[Segment]) -> bool:
+    """A verdict counts when it does not predate the panel. Dispositions are not dropped for this."""
+    if not reply.created_at:
+        return False
+    started = [_time(s.started_at) for s in panel if s.started_at]
+    return not started or _time(reply.created_at) >= min(started)
+
+
+def _unexplained(item: WorkItem, history: Sequence[Segment], panel: Sequence[Segment], head: str | None) -> bool:
+    """The forge head moved off the panel, and no done fix in this round recorded that forge head."""
+    if not head or not panel or item.human_review or item.forge_state == "closed":
+        return False
+    if any(s.started_at and not s.ended_at for s in history):
+        return False
+    if not any(getattr(s, "reviewed_head", "") not in ("", head) for s in panel):
+        return False
+    prefixes = {str(getattr(s, "review_round", 0) or s.attempt) for s in panel}
+    return not any(getattr(s, "finding_key", "") and s.outcome == "done" and s.ended_at and s.reviewed_head == head
+                   and s.finding_key.split("/")[0] in prefixes for s in history)
 
 
 def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], policies: Policies,
@@ -407,9 +431,10 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     """Actions oldest issue first; each panel reviewer and each fix consumes one slot.
 
     Findings are structured records from the latest panel; an absent item is unknown.
-    A finding the architect disposed of as file, keep or discard no longer blocks.
+    A finding the architect disposed of as file, keep or discard no longer blocks, and that disposition
+    stays with the finding key after the head moves. Only an approval is bound to the forge head.
     Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
-    Merge requires answered decisions and, where policy requires it, an architect approval comment for the current head.
+    Merge requires answered decisions and, where policy requires it, an architect approval for the current forge head.
     Without creation times, issue numbers order work within each forge namespace.
     """
     _time(now)
@@ -429,24 +454,17 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         panel = _panel_history(history)
         requested = (consult_requests or {}).get(key, ())
         reply = (architect_replies or {}).get(key)
-        # A changed policy can add a panel member after a previous reply. All current members must be covered.
-        if reply and (reply.reviewed_head != head or reply.status not in ("APPROVED", "CHANGES")
-                      or any(_time(reply.created_at) < _time(s.ended_at or s.started_at) for s in panel)):
-            reply = None
+        dispositions = reply.dispositions if reply else {}
+        # Approval counts only for this forge head. Dispositions apply by finding key whatever head they came from.
+        verdict = reply if (reply and head and reply.reviewed_head == head and reply.status in ("APPROVED", "CHANGES")
+                            and _after_panel(reply, panel)) else None
         if findings is not None:
             findings = [{**{k: v for k, v in f.items() if k != "disposition"},
-                         **({"disposition": reply.dispositions[f["finding_key"]]}
-                            if reply and reply.dispositions.get(f["finding_key"]) in DISPOSITIONS else {})}
+                         **({"disposition": dispositions[f["finding_key"]]}
+                            if dispositions.get(f["finding_key"]) in DISPOSITIONS else {})}
                         for f in findings]
         counts = findings
         planned = None
-        fixes = [s for s in history if getattr(s, "finding_key", "") and s.ended_at and s.outcome == "done"]
-        produced = max(fixes, key=lambda s: (_time(s.ended_at), s.attempt), default=None)
-        if (head and panel and not item.human_review and item.forge_state != "closed"
-                and not any(s.started_at and not s.ended_at for s in history)
-                and any(getattr(s, "reviewed_head", "") not in ("", head) for s in panel)
-                and (produced is None or not produced.reviewed_head or produced.reviewed_head != head)):
-            planned = _panel(key, history, policies, room, head, fresh=True)
         if findings is not None:
             actors = {s.attempt: s.persona for s in history if s.stage == "review"}
             required = _reviewers(policies, room) if "review" in policies.stages else ()
@@ -462,7 +480,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                     counts.append(finding)
             if planned is None and not item.human_review and item.forge_state != "closed":
                 workflow = policies.workflow_for(issue_types.get(key))
-                planned = _burn_down(item, history, counts, policies, room, head, workflow, now, reply, requested)
+                planned = _burn_down(item, history, counts, policies, room, head, workflow, now, verdict, requested)
         # A partly launched panel must keep filling available slots while its peers run.
         latest = {getattr(s, "persona", ""): s for s in panel}
         if (planned is None and panel and item.stage == "review" and not item.human_review
@@ -472,13 +490,18 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             planned = _panel(key, history, policies, room, head)
         if planned is None:
             action = _item(item, history, policies, issue_types.get(key), room, now, counts,
-                           (decisions or {}).get(key, ()), head, reply, requested)
+                           (decisions or {}).get(key, ()), head, verdict, requested)
             if isinstance(action, Review):
                 complete = (panel and all(s.ended_at and s.outcome == "done" for s in panel)
                             and all(name in latest for name in _reviewers(policies, room)))
                 planned = _panel(key, history, policies, room, head, fresh=bool(complete))
             else:
                 planned = [action] if action is not None else []
+        # Stage and gate rules have already had their say. An unexplained forge-head move is re-reviewed;
+        # a gate or a hold is not. A done fix explains the move only when it recorded this forge head.
+        if (_unexplained(item, history, panel, head) and planned
+                and any(isinstance(a, (Dispatch, Consult, Merge)) for a in planned)):
+            planned = _panel(key, history, policies, room, head, fresh=True)
         for action in planned:
             if isinstance(action, (Dispatch, Review)):
                 actor = policies.personas.get(action.persona)

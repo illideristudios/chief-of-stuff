@@ -58,13 +58,13 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, architect_login: str | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
-    worker.collect(store, root, clock, trees)
+    worker.collect(store, root, clock, trees, forge)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -104,7 +104,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             **_planning_inputs(store, items, forge, at))
+                             **_planning_inputs(store, items, forge, at, policies, architect_login))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
@@ -128,7 +128,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
                 elif engine_merge.execute(action, forge, store, at, policies=policies,
-                                         inputs=_planning_inputs(store, [by_key[key]], forge, at)):
+                                         inputs=_planning_inputs(store, [by_key[key]], forge, at, policies,
+                                                                 architect_login)):
                     stage = "merge"
             elif isinstance(action, reconcile.Consult):
                 request = forge.closing_request(key)
@@ -214,7 +215,8 @@ def main(argv: list[str] | None = None) -> int:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, max_concurrency=config.workers.max_concurrency,
+                                 architect_login=config.architect_login)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

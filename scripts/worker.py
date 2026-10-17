@@ -258,7 +258,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None) -> None:
+            trees: Path | None = None, forge: Any = None) -> None:
     """Finish every exited or lost open segment, using only the engine's run directory."""
     for segment in store.segments():
         if segment.ended_at is not None:
@@ -332,12 +332,19 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
             if segment.finding_key and outcome == "done":
-                code, produced = make_worktree.git(["rev-parse", "HEAD"], Path(record["tree"]))
-                if code or not produced.strip():
+                # The head a fix produced is the forge's, read after the worker exits. The worktree HEAD is not it.
+                produced = ""
+                if forge is not None:
+                    try:
+                        request = forge.closing_request(key)
+                        produced = (getattr(request, "head", None) or "").strip()
+                    except ForgeError:
+                        produced = ""
+                if not produced:
                     outcome = "failed"
                     raise RuntimeError("completed fix head is unreadable")
                 store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
-                                     reviewed_head=produced.strip())
+                                     reviewed_head=produced)
             if segment.stage == "review":
                 # This attempt's collected result always names the SHA pinned at launch.
                 store.record_segment(key, segment.stage, segment.attempt, segment.started_at,

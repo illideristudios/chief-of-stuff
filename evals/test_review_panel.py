@@ -277,12 +277,17 @@ class ReviewPanelTest(unittest.TestCase):
         self.review(2, "security", head="old")
         self.assertEqual(self.plan(head="new"), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
 
-    def test_a_fix_push_keeps_dispositions_and_the_next_fix(self):
+    def test_a_fix_push_keeps_dispositions_and_asks_approval_for_the_new_head(self):
         self.consulted(("Keep me", "keep"), ("Fix me", "fix"), ("Also", "fix"))
         action, = self.plan()
         self.assertEqual(action.finding["title"], "Fix me")
         self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="produced")
         self.requests = {KEY: ["head"]}
+        nxt = self.plan(head="produced")[0]
+        self.assertIsInstance(nxt, reconcile.Consult)
+        self.assertEqual((nxt.head, list(nxt.findings)), ("produced", []))
+        self.replies[KEY] = reconcile.ArchitectReply("produced", "CHANGES", NOW.isoformat(), self.replies[KEY].dispositions)
+        self.requests = {KEY: ["head", "produced"]}
         nxt = self.plan(head="produced")[0]
         self.assertEqual((nxt.stage, nxt.finding["title"]), ("fix", "Also"))
 

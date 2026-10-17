@@ -192,6 +192,7 @@ class Settings:
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
     repos: dict[str, str] = field(default_factory=dict)
     stages: dict[str, Stage] = field(default_factory=dict)
+    architect_login: str | None = None  # forge login whose Architect: replies count; unset relies on the worker guard
 
 
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
@@ -468,6 +469,17 @@ def _notify(table: dict, root: Path) -> Notify:
     return Notify(adapter=adapter, queue=queue, warnings=tuple((w, _offset(w)) for w in labels), **times)
 
 
+def _architect(table) -> str | None:
+    if not isinstance(table, dict) or set(table) - {"login"}:
+        raise SettingsError("[architect] is a table with only login")
+    login = table.get("login")
+    if login is None:
+        return None
+    if not isinstance(login, str) or not login.strip() or any(c.isspace() for c in login):
+        raise SettingsError("[architect] login must be a forge username")
+    return login
+
+
 def load(root: Path, settings_path: str | None) -> Settings:
     """`settings_path` is the `Settings:` line's value, relative to `root`, or None when there is none.
 
@@ -507,13 +519,16 @@ def load(root: Path, settings_path: str | None) -> Settings:
     if not isinstance(budgets, dict) or not set(budgets) <= {"S", "M", "L", "XL"}:
         raise SettingsError(f"{settings_path}: [budgets] is a table of S, M, L, XL")
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
+    architect_login = _architect(data["architect"]) if "architect" in data else None
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages,
+                        models=models, graph=graph, repos=repos, stages=stages, architect_login=architect_login)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph,
+                    repos=repos, stages=stages, architect_login=architect_login)
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:
