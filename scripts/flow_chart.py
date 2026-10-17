@@ -140,7 +140,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             else:
                 stop = last.at
         finish = task and (ended or {}).get(task.name.strip())
-        is_held = bool(task and task.name.strip() in held)
+        is_held = bool(task and (task.name or task.item).strip() in held)
         boundary = last.at
         # A launcher stop ends its run but leaves the row at its prior working stage.
         mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
@@ -172,7 +172,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             status, note = word, f"{word} {at:%H:%M}"
         elif is_held:
             segs.append(gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner(key, now, task)))
-            status, note = "needs input", f"needs input · {held[task.name.strip()]}"
+            status, note = "needs input", f"needs input · {held[(task.name or task.item).strip()]}"
         elif last.stage in terminal:
             status, note = "merged", f"merged {last.at:%H:%M}"
         elif task and lane and last.stage in lane.stages and (end := ends.get(task.item)) and end > now:
@@ -187,7 +187,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             kind = task.kind if task else ""
             status = "approved" if is_approved else ("running" if kind == "open" else kind)
             note = "approved" if is_approved else last.stage
-        out.append((status, gantt.Row(ref_of(task, last.name), task.name.strip() if task else launch_row(last.name, ())[1],
+        out.append((status, gantt.Row(ref_of(task, last.name), (task.name or task.item).strip() if task else launch_row(last.name, ())[1],
                                       note, tuple(segs))))
     # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.
     slots = max(1, slots)

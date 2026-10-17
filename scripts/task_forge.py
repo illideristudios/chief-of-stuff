@@ -80,7 +80,7 @@ def canonical_names(tasks: list[Task], earlier: list[Task] = (), home=None) -> d
     by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip()}
 
     def today(t: Task) -> Task | None:
-        return by_name.get(t.name.strip().casefold()) or (by_issue.get(issue_key(t.issue, home)) if t.issue.strip() else None)
+        return by_issue.get(issue_key(t.issue, home)) if t.issue.strip() else by_name.get(t.name.strip().casefold())
 
     out: dict[str, str] = {}
 
@@ -113,8 +113,8 @@ def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources
             if (cause := hold_cause(t, kanban, effective_stage(t, sources, lanes), workers=workers,
                                     pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip()),
                                     review_stages=review_stages,
-                                    completed_review=(completed.get(aliases.get(t.name.strip().casefold(),
-                                                                                t.name.strip().casefold()), (None,))[0]
+                                    completed_review=(completed.get(aliases.get((t.name or t.item).strip().casefold(),
+                                                                                (t.name or t.item).strip().casefold()), (None,))[0]
                                                       == t.stage.strip())))}
 
 
@@ -160,9 +160,9 @@ def went_held(held: dict[Task, str], began: dict[Task, datetime | None], since: 
 
 
 def held_names(held: dict[Task, str]) -> dict[str, str]:
-    """`hold_causes` by task name, as flow_chart.build reads it. A nameless task has no name to hold it by (as forge_ends)."""
-    return {t.name.strip(): REVIEW_LABEL if cause == STAGE_REVIEW else cause
-            for t, cause in held.items() if t.name.strip()}
+    """`hold_causes` by task name or item, as flow_chart.build reads it."""
+    return {(t.name or t.item).strip(): REVIEW_LABEL if cause == STAGE_REVIEW else cause
+            for t, cause in held.items() if (t.name or t.item).strip()}
 
 
 def forge_ends(tasks: list[Task], sources: board_sources.Sources, zone: ZoneInfo) -> dict[str, tuple[datetime, str]]:

@@ -338,7 +338,6 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
     chart_days = [*(stage_log or []), (tracker_day or today, tracker_text)]
-    flow_moves = tracker_log.day_moves(chart_days, zone)
     review_days = review_log if review_log is not None else [*(look_log or []), *chart_days]
     review_moves = tracker_log.day_moves(review_days, zone)
     earlier = [t for _, text in review_days for t in parse_tracker(text).tasks]
@@ -351,11 +350,11 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     since = looked or datetime.combine(today, time(), zone)
     shown = since.astimezone(zone)  # a look on another day names its day
     went = went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == today else f"{shown:%a %H:%M}"
-    known = [t for _, text in stage_log or [] for t in parse_tracker(text).tasks] + tasks
+    known = earlier + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     epics = epic_risk(tasks, sources, ends, zone, now)
-    flow_rows = flow_chart.build(flow_moves, known, lanes or {}, held_names(held), ends, now,
+    flow_rows = flow_chart.build(review_moves, known, lanes or {}, held_names(held), ends, now,
                                  queue_durations(active, hist), slots,
                                  frozenset(t.name.strip() for t in tasks
                                            if t.name.strip() and any(c.state == "open" and c.approved for c in task_changes(t, sources))),
@@ -473,6 +472,7 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
     trackers = [(d, path) for d, path in daily_trackers(root, cfg) if min(reach, since_day) <= d < tracker_day]
     stage_log = [(d, path.read_text()) for d, path in trackers if reach <= d]
     look_log = [(d, path.read_text()) for d, path in trackers if d < reach]
+    # shortcut: scan all trackers until durable review state replaces launcher history; cost grows with workspace age.
     review_log = [(d, path.read_text()) for d, path in daily_trackers(root, cfg) if d < tracker_day]
     review_log.append((tracker_day, tracker_text))
     page = render(tracker_text, cfg, now, lanes=settings.lanes,

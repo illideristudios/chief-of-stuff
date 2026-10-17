@@ -457,7 +457,7 @@ class BoardTest(unittest.TestCase):
         for block in blocks:
             self.assertEqual(used - set(re.findall(r"(--stage-[\w-]+):#", block)), set())
 
-    def test_main_reads_the_trackers_the_window_covers(self):
+    def test_main_keeps_ongoing_history_older_than_the_chart_window(self):
         root = Path(tempfile.mkdtemp())
         (root / "CLAUDE.md").write_text(self.CLAUDE)
         (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "pr", "review", "triage", "merge", "main"] }\n')
@@ -468,7 +468,8 @@ class BoardTest(unittest.TestCase):
         (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(YESTERDAY_TRACKER.replace("Upload size limit", "Too old"))
         html = rb.main(["--root", str(root)]).read_text()
         self.assertIn('title="implement ', html)
-        self.assertNotIn("Too old", html)
+        # Both pages now read durable history; an old ongoing stage still crosses today's chart window.
+        self.assertIn('class="gantt-name">Too old<', html)
 
 
 WAITING_TRACKER = """# Tracker

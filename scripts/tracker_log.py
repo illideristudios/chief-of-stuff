@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 # and does not use that daily relaunch. That marker is a launcher-written Log line; a worker's reason can never carry it.
 COMPLETED = "completed; awaiting integration"
 HUMAN_REVIEW = "HUMAN REVIEW NEEDED"
-REVIEW_COMPLETED = re.compile(r"^- \d{1,2}:\d{2} one-shot \S+: completed; awaiting integration \[review_after=(\S+)\] — ")
+REVIEW_COMPLETED = re.compile(r"^- \d{1,2}:\d{2} one-shot \S+: completed; awaiting integration \[review_after=([^\]]+)\] — ")
 RELAUNCHED = ": relaunch requested for {task} — "
 RELAUNCH_STAGE = "relaunch"
 

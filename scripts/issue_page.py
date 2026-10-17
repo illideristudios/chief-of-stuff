@@ -27,8 +27,8 @@ from tracker import TRAILING_NUMBER, issue_number, parse_tracker, resolve_due as
 from workspace import Config, ConfigError, daily_trackers, read_config
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
-# A worker's outcome by its last launcher move's stage (tracker_log.moves: completed → pr, HUMAN REVIEW → review).
-ENDED = {"pr": "completed", "review": "human review"}
+# A worker's outcome is independent of the completed stage awaiting review.
+ENDED = {tracker_log.COMPLETED: "completed", tracker_log.HUMAN_REVIEW: "human review"}
 # The Flow chart's colours on HEAD's tokens in the dark scheme, as the board sets them (render_board.render).
 CSS = """<style>
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}}
@@ -199,7 +199,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     earlier = [t for _, text in review_days for t in parse_tracker(text).tasks]
     known = [t for _, text in [*review_days, *trackers] for t in parse_tracker(text).tasks]
     mine = [t for t in known if issue_number(t.issue) == number]
-    if not mine:
+    if not trackers or not mine:
         return None
     keys = set().union(*map(names, mine))
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
@@ -242,7 +242,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             what[m] = f"{escape(stage)} started · {escape(started[2])} · {escape(started[4])}"
         elif (w := tracker_log.ENDED.match(m.line)) and (runs := workers.get(w[3])):
             runs[-1][2] = m
-            what[m] = f"ended {escape(ENDED.get(m.stage, 'ended'))} · {escape(w[3])} · {escape(runs[-1][1][4])}"
+            what[m] = f"ended {escape(ENDED[w[4]])} · {escape(w[3])} · {escape(runs[-1][1][4])}"
     steps = "\n".join(f'      <div class="step"><span class="when">{_clock(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'
                       f"</span><span>{what.get(m) or _md(m.line.split(' ', 2)[2])}</span></div>" for m in log)
     # (#200, #220) the same clipped rows end both a still-running worker's span and elapsed, below
@@ -251,7 +251,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     for who, runs in workers.items():
         task = latest.get(runs[-1][0].name.strip().casefold())
         live = runs[-1][2] is None and task is not None and task.kind == "running" and task.owner.strip() == who
-        state = "running" if live else ENDED.get(runs[-1][2].stage, "ended") if runs[-1][2] else "ended"
+        state = "running" if live else ENDED[tracker_log.ENDED.match(runs[-1][2].line)[4]] if runs[-1][2] else "ended"
         stop = min(now, end)
         mine_spans = [(s.at, e.at if e else stop) for s, _, e in runs if e or (live and s is runs[-1][0])]
         spans += mine_spans
@@ -327,6 +327,7 @@ def write(root: Path, pages_dir: Path, number: int) -> Path | None:
     cfg, now, trackers, settings = inputs(root)
     ctx = context(root, now.date().isoformat())
     pending = entries(pages_dir, ctx) if ctx else []
+    # shortcut: scan all trackers until durable review state replaces launcher history; cost grows with workspace age.
     review_log = [(d, path.read_text()) for d, path in daily_trackers(root, cfg) if d <= now.date()]
     page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
                   sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx),

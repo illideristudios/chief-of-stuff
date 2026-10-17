@@ -107,7 +107,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         workflow = policies.workflow_for(issue_type if isinstance(issue_type, str) else None)
         observed = row.get("stage") or ""
         _, latest, tied = reconcile.review_attempt(history, observed, workflow)
-        if tied:
+        if tied and row.get("forge_state") != "closed":
             continue
         norm = observed or workflow.start
         current = (latest is not None and latest.outcome == "done" and latest.stage == norm
