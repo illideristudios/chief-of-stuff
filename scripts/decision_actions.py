@@ -41,6 +41,16 @@ def exhaust_retry(row: Any, failures: int) -> DecisionUpdate | None:
                           {**row.record, "retry_exhausted": failures, "error": reason})
 
 
+def stamped_failures(row: Any, context: str, options: Sequence[str]) -> int:
+    """Failed consultations a retryable row recorded in its own commit, for this context and these options."""
+    record = row.record if row is not None and isinstance(row.record, dict) else {}
+    prior = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    if (row is None or row.answer or not retryable_failure(record) or prior.get("context", "") != context
+            or tuple(prior.get("options") or ()) != tuple(options)):
+        return 0
+    return int(record.get("failures", 0))
+
+
 def _time(value: datetime | str) -> datetime:
     when = datetime.fromisoformat(value) if isinstance(value, str) else value
     if when.utcoffset() is None:

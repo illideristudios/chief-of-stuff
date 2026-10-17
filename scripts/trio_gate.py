@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
-from decision_actions import DecisionUpdate, identity, preserve_ask_link, retryable_failure
+from decision_actions import DecisionUpdate, exhaust_retry, identity, preserve_ask_link, retryable_failure
 from model_port import Failure, Model, Reply, Request
 from policy import Persona, Policy, PolicyError
 
@@ -82,8 +82,11 @@ def _verdict(persona: Persona, got: Reply | Failure, options: tuple[str, ...]) -
     return {"persona": persona.name, "vote": "concern", "choice": None, "reasoning": reasoning}
 
 
-def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any) -> Outcome:
-    """Consult all three under a resolved policy, then record adoption or escalation on the existing issue."""
+def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any,
+            failures: int = 0) -> Outcome:
+    """Consult all three under a resolved policy, then record adoption or escalation on the existing issue.
+
+    `failures` is the count of earlier outages; a retryable result carries the new count, and the cap, in its row."""
     trio = select(policy, personas, decision.tags)
     described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
     verdicts = [_verdict(persona, model(_request(described, persona)), decision.options) for persona in trio]
@@ -94,9 +97,13 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
         decision.topic, decision.question, recommendation, "trio" if unanimous else "zach",
         {"decision": described, "verdicts": verdicts,
          "recommendation": recommendation, "unanimous": unanimous}))
+    if retryable_failure(update.record):
+        update = DecisionUpdate(update.topic, update.question, update.answer, update.decided_by,
+                                {**update.record, "failures": failures + 1})
+        update = exhaust_retry(update, failures + 1) or update
     store.add_decision(decision.issue_key, update.topic, update.question, update.answer,
                        update.decided_by, update.record)
-    return Outcome(recommendation, unanimous, "" if unanimous else decision.question)
+    return Outcome(recommendation, unanimous, "" if unanimous else str(update.record.get("error") or decision.question))
 
 
 def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
@@ -122,7 +129,7 @@ def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
 
 
 def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas: Mapping[str, Persona],
-           model: Model | None, store: Any) -> Outcome:
+           model: Model | None, store: Any, failures: int = 0) -> Outcome:
     """Reuse a settled decision for these options and context, or consult the trio once."""
     settled = _settled(decision, earlier)
     if settled is not None:
@@ -130,7 +137,7 @@ def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas:
     if model is None:
         return Outcome(None, False, decision.question)
     try:
-        return consult(decision, policy, personas, model, store)
+        return consult(decision, policy, personas, model, store, failures)
     except (PolicyError, ValueError) as exc:
         described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
         update = preserve_ask_link(earlier, DecisionUpdate(

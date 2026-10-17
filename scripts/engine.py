@@ -69,10 +69,12 @@ def _measured(state: dict) -> dict:
             if type(state.get(key)) in (int, float)}
 
 
-def _interrupt(store: Any, key: str, kind: str, reason: str, at: str, *, scope: dict) -> None:
+def _interrupt(store: Any, key: str, kind: str, reason: str, at: str, *, scope: dict,
+               keep: tuple[str, ...] = ()) -> None:
+    """Record the issue's interrupt; one of a kind in `keep` already there stays."""
     data = _resume(store, key)
     record = {"kind": kind, "reason": reason, **scope}
-    if data.get("interrupt") != record:
+    if data.get("interrupt") != record and (data.get("interrupt") or {}).get("kind") not in keep:
         store.add_log(key, f"{kind}: {reason}", at)
         data["interrupt"] = record
         store.set_resume(key, data)
@@ -128,33 +130,22 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     retry_key = json.dumps([topic, question, instance, context, options])
     retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
     prior = decision_actions.latest(earlier).get((topic, question, instance))
-    # Recover an exhaustion write interrupted after persisting the final failure/backoff.
-    exhausted = decision_actions.exhaust_retry(prior, retry.get("failures", 0))
-    if exhausted is not None:
-        store.add_decision(key, exhausted.topic, exhausted.question, exhausted.answer,
-                           exhausted.decided_by, exhausted.record)
-        earlier = store.decisions(key)
-    elif (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
+    failures = max(retry.get("failures", 0), decision_actions.stamped_failures(prior, context, options))
+    if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
             and datetime.fromisoformat(retry["retry_at"]) > clock()):
         return None
     outcome = trio_gate.decide(decision, earlier, resolved, personas,
-                               _metered(store, key, model) if model is not None else None, store)
+                               _metered(store, key, model) if model is not None else None, store, failures=failures)
     rows = store.decisions(key)
     data = _resume(store, key)
     retries = data.get("trio_retries") or {}
     if len(rows) > len(earlier) and decision_actions.retryable_failure(rows[-1].record):
-        failures = retry.get("failures", 0) + 1
-        exhausted = decision_actions.exhaust_retry(rows[-1], failures)
-        if exhausted is None:
-            delay = min(3600, 60 * 2 ** min(failures - 1, 6))
-            retries[retry_key] = {"failures": failures,
-                                  "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
-            data["trio_retries"] = retries
-            store.set_resume(key, data)
-            return None
-        store.add_decision(key, exhausted.topic, exhausted.question, exhausted.answer,
-                           exhausted.decided_by, exhausted.record)
-        outcome = trio_gate.Outcome(None, False, exhausted.record["error"])
+        delay = min(3600, 60 * 2 ** min(failures, 6))
+        retries[retry_key] = {"failures": failures + 1,
+                              "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
+        data["trio_retries"] = retries
+        store.set_resume(key, data)
+        return None
     if retry_key in retries:
         retries.pop(retry_key)
         if not retries:
@@ -163,7 +154,10 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     if outcome.unanimous:
         _clear_interrupt(store, key, "ambiguity", scope=scope)
         return outcome.recommendation
-    _interrupt(store, key, "ambiguity", outcome.reason or question, at, scope=scope)
+    capped = decision_actions.latest(store.decisions(key)).get((topic, question, instance))
+    # Capped decisions queue behind an ambiguity already waiting on Zach instead of replacing it every pass.
+    _interrupt(store, key, "ambiguity", outcome.reason or question, at, scope=scope,
+               keep=("ambiguity",) if capped is not None and capped.record.get("retry_exhausted") else ())
     return None
 
 
@@ -218,6 +212,19 @@ def _settle_asks(store: Any, key: str) -> None:
         _clear_interrupt(store, key, "ambiguity", scope=decision_actions.ask_scope(rows, ask))
 
 
+def _restore_exhausted(store: Any, key: str, at: str) -> None:
+    """Rebuild the interrupt of a capped decision when a kill landed between its row and its interrupt."""
+    for row in decision_actions.latest(store.decisions(key)).values():
+        record = row.record if isinstance(row.record, dict) else {}
+        decision = record.get("decision")
+        if (record.get("retry_exhausted") and not row.answer and not decision_actions.is_reversed(row)
+                and isinstance(decision, dict)):
+            topic, question, instance = decision_actions.identity(row)
+            _interrupt(store, key, "ambiguity", record["error"], at, keep=("ambiguity", "limit", "exhausted"),
+                       scope={"decision": {"topic": topic, "question": question, "instance": instance,
+                                           "context": decision.get("context", "")}})
+
+
 def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
     for item in store.items():
         if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
@@ -229,6 +236,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
         # Repair an interrupted ask/link write before accepting any direct answer.
         _link_replacement_asks(store, key, replacements)
         _settle_asks(store, key)
+        _restore_exhausted(store, key, at)
         asks = store.asks(key)
         if model is None:
             continue
