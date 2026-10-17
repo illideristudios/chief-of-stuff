@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, select
@@ -289,6 +290,27 @@ class MigrationTest(unittest.TestCase):
                 drift = compare_metadata(MigrationContext.configure(conn), store.Base.metadata)
             engine.dispose()
             self.assertEqual(drift, [])
+
+    def test_the_log_operation_migration_backfills_kind_from_the_old_wording(self) -> None:
+        old = {"stage write failed: x": "stage_write", "stage write refused: x": "stage_write",
+               "decision comment failed: x": "decision_comment", "merge refused: x": "merge_refused",
+               "merged #1": "merge", "escalate: retry limit reached": "worker_run",
+               "dispatch failed: x": "worker_run", "wait: merge is not ready": ""}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            command.upgrade(store._config(path), "0003")
+            conn = sqlite3.connect(path)
+            conn.execute("insert into work_item (issue_key, title, stage, forge_state, review_state, merge_state, human_review, "
+                         "updated_at) values ('o/r#1', '', '', 'open', '', '', 0, '')")
+            for message in old:
+                conn.execute("insert into log_entry (issue_key, at, message) values ('o/r#1', 'now', ?)", (message,))
+            conn.commit()
+            conn.close()
+            store.migrate(path)
+            conn = sqlite3.connect(path)
+            kinds = dict(conn.execute("select message, kind from log_entry").fetchall())
+            conn.close()
+            self.assertEqual(kinds, old)
 
     def test_migrating_twice_is_a_no_op_and_records_the_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

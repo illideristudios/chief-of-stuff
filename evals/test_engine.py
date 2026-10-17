@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import decision_actions
 import engine
 import issue_gate
 import policy
@@ -643,6 +644,73 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
             self.run_pass()
         self.assertEqual(self.db.decision(answered.id).status, "answered")
+
+    def test_a_pending_sibling_decision_does_not_clear_another_decisions_block(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        blocked = self.db.add_decision(KEY, "design", "Approve schema?")
+        self.db.answer_decision(blocked.id, "Yes", status="blocked", blocked_reason="merge conflicts")
+        self.db.add_decision(KEY, "scope", "Still open?")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+            self.run_pass()
+        saved = self.db.decision(blocked.id)
+        self.assertEqual((saved.status, saved.blocked_reason), ("blocked", "merge conflicts"))
+
+    def spent_reversal(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        dec = self.db.add_decision(KEY, "design", "Back?")
+        self.db.answer_decision(dec.id, "No, redo", status="reversed", decided_by="user")
+        self.db.set_resume(KEY, {"redispatch": {"stage": "implement", "persona": "builder", "attempt": 9, "decision_id": dec.id}})
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Escalate(KEY, "retry limit reached")]):
+            self.run_pass()
+        return dec
+
+    def test_a_reversal_blocked_by_the_retry_limit_stays_reversed_after_a_decision_hold(self):
+        dec = self.spent_reversal()
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+            self.run_pass()
+        saved = self.db.decision(dec.id)
+        self.assertEqual(saved.status, "reversed")
+        self.assertEqual(saved.blocked_reason, "retry limit reached")
+        self.assertFalse(decision_actions.is_closed(saved))
+
+    def test_a_retry_limit_blocked_reroute_is_left_to_its_own_stage_write_by_later_actions(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        dec = self.db.add_decision(KEY, "design", "Back?")
+        self.db.answer_decision(dec.id, "Back", status="blocked", blocked_reason="retry limit reached", rerouted_to="implement")
+        for action in (reconcile.Wait(KEY, "merge is not ready"), reconcile.Merge(KEY)):
+            with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
+                with mock.patch.object(engine.engine_merge, "execute", return_value=False):
+                    self.run_pass()
+            saved = self.db.decision(dec.id)
+            self.assertEqual((saved.status, saved.blocked_reason), ("blocked", "retry limit reached"))
+
+    def test_a_request_with_no_decision_id_survives_a_spent_retry_limit(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        request = {"stage": "implement", "persona": "builder", "attempt": 9}
+        self.db.set_resume(KEY, {"redispatch": request})
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Escalate(KEY, "retry limit reached")]):
+            self.run_pass()
+        self.assertEqual(self.db.resume(KEY).get("redispatch"), request)
+
+    def test_a_failed_stage_write_after_a_dispatch_is_logged_as_a_stage_write(self):
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="label offline")):
+            self.run_pass()
+        self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [reconcile.OP_STAGE_WRITE])
+
+    def test_a_failed_merge_hold_write_is_logged_as_a_stage_write_not_a_refused_merge(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: stage == "merge", stage_map={})
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Merge(KEY)]):
+            with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="label offline")):
+                self.run_pass()
+        self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [reconcile.OP_STAGE_WRITE])
+
+    def test_a_failed_ask_is_not_recorded_as_a_worker_run(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split?")]):
+            with mock.patch.object(self.db, "add_decision", side_effect=RuntimeError("store busy")):
+                self.run_pass()
+        self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [""])
 
     def test_comment_delivery_keeps_what_the_board_queued_meanwhile(self):
         self.db.sync_from_forge(self.forge.snapshots())

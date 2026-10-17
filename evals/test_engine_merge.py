@@ -339,6 +339,11 @@ class ExecutorTest(unittest.TestCase):
         self.assertIn("merge refused", self.message())
         self.assertIn("head changed", self.db.log(self.key)[0].message)
 
+    def test_a_merge_that_is_not_confirmed_is_not_logged_as_a_merge(self):
+        with mock.patch.object(forge.Forge, "merge", return_value="queued #21 at abc"):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.db.log(self.key)[0].kind, "")
+
     def test_a_queued_github_request_is_logged_once_and_returns_false(self):
         def queued(args, input_text=None):
             if args[:2] == ["pr", "view"]:

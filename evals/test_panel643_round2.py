@@ -50,6 +50,43 @@ class BoardPostTest(unittest.TestCase):
         self.assertEqual(self.db.item(KEY).stage, "review")
         self.assertIn("stage write refused: write refused", [e.message for e in self.db.log(KEY)])
 
+    def test_a_refusal_after_the_engine_restored_the_decision_blocks_nothing(self):
+        dec = self.db.add_decision(KEY, "design", "Choose")
+        fg = mock.Mock()
+
+        def engine_lands_it_first(*args, **kwargs):
+            self.db.update_resume(KEY, lambda data: data.pop("pending_stage", None))
+            return SimpleNamespace(ok=False, done=False, error="late failure")
+
+        fg.write_stage.side_effect = engine_lands_it_first
+        self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg)
+        self.assertEqual(self.db.decision(dec.id).status, "re-routed")
+
+    def test_a_late_success_keeps_a_newer_pending_write(self):
+        dec = self.db.add_decision(KEY, "design", "Choose")
+        newer = {"stage": "review", "expected": "implement", "decision_id": dec.id + 1}
+        fg = mock.Mock()
+
+        def newer_reroute_lands_meanwhile(*args, **kwargs):
+            self.db.update_resume(KEY, lambda data: data.__setitem__("pending_stage", newer))
+            return SimpleNamespace(ok=True, done=True, error="")
+
+        fg.write_stage.side_effect = newer_reroute_lands_meanwhile
+        self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg)
+        self.assertEqual(self.db.resume(KEY).get("pending_stage"), newer)
+
+    def test_a_success_restores_a_decision_the_engine_blocked_meanwhile(self):
+        dec = self.db.add_decision(KEY, "design", "Choose")
+        fg = mock.Mock()
+
+        def engine_retry_refused(*args, **kwargs):
+            self.db.answer_decision(dec.id, "Back", status="blocked", blocked_reason="offline", rerouted_to="implement")
+            return SimpleNamespace(ok=True, done=True, error="")
+
+        fg.write_stage.side_effect = engine_retry_refused
+        self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg)
+        self.assertEqual((self.db.decision(dec.id).status, self.db.decision(dec.id).blocked_reason), ("re-routed", ""))
+
     def test_a_landed_reroute_leaves_no_pending_write(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         fg = mock.Mock()
