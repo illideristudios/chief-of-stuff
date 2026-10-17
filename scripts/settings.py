@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -90,6 +91,7 @@ class Workflow:
 
 @dataclass(frozen=True)
 class Workers:
+    """Worker launch configuration and standing instructions for one-shot and engine tasks."""
     launcher: str = "ghostty"
     mode: str = "interactive"
     # #100: one-shots running at once across every session in the workspace; None is no cap.
@@ -97,6 +99,7 @@ class Workers:
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
     require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
+    rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
 
 
 @dataclass(frozen=True)
@@ -293,8 +296,18 @@ def _workers(table) -> Workers:
     if "claude_as_profile" in table and not (isinstance(profile, str) and CLAUDE_AS_PROFILE.fullmatch(profile)):
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
+    rules = table.get("rules", [])
+    # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
+    if not isinstance(rules, list) or not all(
+        isinstance(rule, str) and rule.strip() and len(rule.splitlines()) == 1
+        and "(via " not in rule and len(rule) <= 2400
+        and not any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in rule) for rule in rules
+    ):
+        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
+                            'or "(via " markers, each at most 2400 characters')
+    # Preserve the user's wording, including surrounding spaces.
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green)
+                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))
 
 
 def _repos(table) -> dict[str, str]:

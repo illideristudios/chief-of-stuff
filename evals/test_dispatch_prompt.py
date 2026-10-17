@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_prompt as dp  # noqa: E402
 import inbox  # noqa: E402
 import make_repo  # noqa: E402
+from settings import Settings, Stage, Workers, Workflow  # noqa: E402
 from evals.rules_text import one_shot_paragraph, rules_text, sections, skill_body  # noqa: E402
 
 CLAUDE = """# Workspace
@@ -1330,6 +1331,78 @@ class ReviewerRoutingTest(unittest.TestCase):
         self.assertIn("never resolve", body)
         (root / "cos.toml").write_text('[workflow]\ndelivery = "branch"\n')
         self.assertNotIn("--reply", dp.compose(root, "2026-09-18", "Security audit"))
+
+
+class StandingWorkerRulesTest(unittest.TestCase):
+    """Standing `[workers] rules` ride the one-shot header; interactive launches do not carry them."""
+
+    def setUp(self):
+        tmp, self.root = workspace(claude_md=CLAUDE + "- Settings: `cos.toml`\n")
+        self.addCleanup(tmp.cleanup)
+        self.settings = self.root / "cos.toml"
+
+    def compose(self, **kwargs):
+        return dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
+                          name="impl07", one_shot=True, **kwargs)
+
+    def test_rules_precede_the_task(self):
+        rules = ["Never skip or weaken tests.", "Verify the change before reporting completion."]
+        self.settings.write_text('[workers]\nrules = ' + json.dumps(rules) + '\n')
+        body = self.compose()
+        block = ("\n\nStanding worker rules:\n\n- Never skip or weaken tests.\n"
+                 "- Verify the change before reporting completion.\n\n")
+        source = "These rules come from workspace settings (`[workers] rules`).\n\n"
+        self.assertTrue(body.startswith("# One-shot assignment" + block + source + "You are"))
+        for rule in rules:
+            self.assertEqual(body.count(rule), 1)
+            self.assertLess(body.index(rule), body.index("Security audit"))
+
+    def test_absent_and_empty_rules_leave_the_assignment_unchanged(self):
+        original = self.compose()
+        self.assertNotIn("Standing worker rules:", original)
+        for text in ("[workers]\n", "[workers]\nrules = []\n"):
+            self.settings.write_text(text)
+            self.assertEqual(self.compose(), original)
+
+    def test_invalid_rules_refuse_dispatch(self):
+        self.settings.write_text('[workers]\nrules = "Keep tests."\n')
+        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
+            self.compose()
+
+    def test_rules_count_toward_the_assignment_size_limit(self):
+        self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
+        with self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
+            self.compose()
+
+    def test_named_dispatch_preserves_literal_placeholder_in_rules(self):
+        rule = "Preserve the literal <your_ref_or_name> in examples."
+        self.settings.write_text('[workers]\nrules = ' + json.dumps([rule]) + '\n')
+        self.assertIn("- " + rule + "\n", self.compose())
+
+    def test_interactive_assignment_carries_no_rules(self):
+        self.settings.write_text('[workers]\nrules = ["Keep tests."]\n')
+        self.assertNotIn("Standing worker rules:", dp.compose(self.root, "2026-09-18", "Security audit"))
+
+    def test_preloaded_rules_and_stage_skills_share_one_settings_snapshot(self):
+        tracker = next(self.root.glob("daily/*.md"))
+        tracker.write_text(tracker.read_text().replace(
+            "| item | owner | state | since | due | checklist |",
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |")
+            .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|---|---|", 1)
+            .replace("| Security audit | unassigned | open | 09:00 |  |",
+                     "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
+        settings = Settings(workflow=Workflow(delivery="branch"),
+                            workers=Workers(rules=("Keep tests.",), require_green_tests=True),
+                            stages={"review": Stage(skills=("security-review",))})
+        # A later disk edit must not mix policy from different snapshots.
+        self.settings.write_text('[workers]\nrules = ["Changed on disk."]\n')
+        with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
+            body = self.compose(settings=settings)
+        self.assertIn("- Keep tests.\n", body)
+        self.assertNotIn("Changed on disk.", body)
+        self.assertIn("Skills: load and follow security-review.", body)
+        self.assertIn("Workspace [workers] require_green_tests is enabled:", body)
+        self.assertIn("do not push or merge without existing authorization", body)
 
 
 class DetachedWorktreeTest(unittest.TestCase):

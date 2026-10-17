@@ -501,6 +501,14 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         sleep.assert_not_called()
 
+    def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
+        path = self.root / "settings.toml"
+        path.write_text(path.read_text() + '\n[workers]\nrules = ["Keep tests."]\n')
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed:
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["rules"], ("Keep tests.",))
+
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

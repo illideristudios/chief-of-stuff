@@ -381,10 +381,11 @@ EFFORTS = ("", *runtimes.EFFORTS)
 CHECK_TREE = Path("<worktree>")  # --check makes no tree; the one-shot assignment still names one
 
 
-def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None = None) -> str:
+def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None = None, settings=None) -> str:
     """The assignment a dispatch composes from its flags: one path for a launch and for --check."""
     return dispatch_prompt.compose(Path(args.root), args.date, args.task, worktree=worktree, coordinator=args.coordinator,
-                                   name=args.title if name is None else name, runtime=args.runtime, one_shot=one_shot)
+                                   name=args.title if name is None else name, runtime=args.runtime, one_shot=one_shot,
+                                   settings=settings)
 
 
 def main(argv_in: list[str] | None = None) -> int:
@@ -439,7 +440,8 @@ def main(argv_in: list[str] | None = None) -> int:
         # The launch-only flags below (--runtime, --model, --effort, --class, --coordinator) are no part of the rows.
         args.coordinator, args.runtime = None, "claude"
         try:
-            sys.stdout.write(assignment(args, one_shot, Path(args.cwd) if args.cwd else CHECK_TREE if one_shot else None))
+            sys.stdout.write(assignment(args, one_shot, Path(args.cwd) if args.cwd else CHECK_TREE if one_shot else None,
+                                        settings=settings))
         except dispatch_prompt.RefusedError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 1
@@ -460,7 +462,7 @@ def main(argv_in: list[str] | None = None) -> int:
     args.runtime = args.runtime or "claude"
     if args.agent_type is None and settings.stages and args.runtime == "claude":
         try:
-            stage = dispatch_prompt.stage_defaults(Path(args.root), args.date, args.task)
+            stage = dispatch_prompt.stage_defaults(Path(args.root), args.date, args.task, settings=settings)
             text = (Path(args.root) / "CLAUDE.md").read_text()
             if stage is not None and stage.agent in make_worktree.agent_types(text):
                 args.agent_type = stage.agent
@@ -499,7 +501,7 @@ def main(argv_in: list[str] | None = None) -> int:
     override = os.environ.get(ENV)
     try:
         selected = args.launcher or worker_settings.launcher
-        body = assignment(args, False, Path(args.cwd))
+        body = assignment(args, False, Path(args.cwd), settings=settings)
         # The eval harness uses the argv override.
         worker = dict(cwd=args.cwd, agent_type=args.agent_type, title=args.title, runtime=args.runtime,
                       model=args.model, effort=args.effort, workspace=args.root,

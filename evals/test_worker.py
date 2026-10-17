@@ -94,6 +94,40 @@ class WorkerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "via"):
             worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona)
 
+    def test_issue_assignments_include_prevalidated_workspace_rules_for_every_stage(self):
+        dp = worker.dispatch_prompt
+        for stage in ("plan", "implement", "review", "fix"):
+            with self.subTest(stage=stage):
+                prompt = dp.compose_issue(self.db.items()[0], "title", "body", stage, self.persona,
+                                          rules=("Keep tests.", "Keep <your_ref_or_name> literal."))
+                self.assertIn("\n\nStanding worker rules:\n\n- Keep tests.\n- Keep <your_ref_or_name> literal.\n\n", prompt)
+                self.assertIn("workspace settings (`[workers] rules`)", prompt)
+                self.assertLess(prompt.index("- Keep tests."), prompt.index("Issue:"))
+
+    def test_issue_assignment_header_still_bounds_standing_rules(self):
+        dp = worker.dispatch_prompt
+        with self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
+            dp.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona, rules=("x" * 2000,) * 9)
+
+    def test_large_forge_issues_are_preserved_with_or_without_standing_rules(self):
+        dp = worker.dispatch_prompt
+        title = "Forge title " + "t" * dp.BODY_CAP
+        body = "Issue body " + "b" * dp.BODY_CAP
+        for stage in ("plan", "implement", "review", "fix"):
+            for rules in ((), ("Keep tests.",)):
+                with self.subTest(stage=stage, rules=rules):
+                    prompt = dp.compose_issue(self.db.items()[0], title, body, stage, self.persona, rules=rules)
+                    self.assertTrue(prompt.endswith(f"\n## Forge issue\n\n{title}\n\n{body}\n"))
+                    self.assertEqual("Standing worker rules:" in prompt, bool(rules))
+
+    def test_launch_passes_workspace_rules_to_the_host_assignment(self):
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge, rules=("Keep tests.",), clock=lambda: NOW)
+        self.assertIn("- Keep tests.\n", start.call_args.args[0].prompt)
+
     def test_implement_assignment_requires_delivery_before_reporting_done(self):
         prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona)
         self.assertIn(worker.dispatch_prompt.COMMITS, prompt)

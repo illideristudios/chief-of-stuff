@@ -513,9 +513,9 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
         timeout_minutes: int = 60) -> int:
     cfg = dispatch_prompt.config(root)
     chosen_day = day or datetime.now(cfg.zone).date().isoformat()
-    body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
-                                   runtime=runtime, one_shot=True)
     settings = load_settings(root, cfg.settings_path)
+    body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
+                                   runtime=runtime, one_shot=True, settings=settings)
     workers = settings.workers
     commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)

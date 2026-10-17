@@ -200,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("no [repos] clone matches the workspace backlog")
             launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
                              clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile)
+                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules)
             try:
                 while True:
                     failed = False
