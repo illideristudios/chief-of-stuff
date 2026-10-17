@@ -396,7 +396,8 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge.__class__, "write_stage",
                                side_effect=self.forge.write_stage) as write:
             actions = engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                                      trees=self.trees, launch=launch, clock=lambda: self.now)
+                                      trees=self.trees, launch=launch, workers=engine.settings.Workers(),
+                                      clock=lambda: self.now)
         self.assertIsInstance(actions[0], reconcile.Review if stage == "review" else reconcile.Dispatch)
         write.assert_called_once_with(1, stage, expected=stage, initialize=False, commit=True,
                                       release_hold=True)
