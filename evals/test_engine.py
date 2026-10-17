@@ -789,11 +789,11 @@ class EngineTest(unittest.TestCase):
                 row = self.db.decisions(KEY)[-1]
                 self.assertEqual((row.answer, row.decided_by), (None, "zach"))
                 self.assertNotIn("decision_interrupts", self.db.resume(KEY))
-                self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
+                self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
                 interrupts = self.db.resume(KEY)["decision_interrupts"]
                 self.assertEqual(len(interrupts), 1)
                 self.assertEqual(interrupts[0]["decision"]["attempt"], attempt)
-                self.run_pass()
+                self.run_pass(model=model)
                 self.assertEqual(self.db.resume(KEY)["decision_interrupts"], interrupts)
                 self.assertEqual(model.n, 3)
 
