@@ -133,6 +133,42 @@ class EngineTest(unittest.TestCase):
         self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}),
                                  "review_findings": {"attempt": attempt, "counts": counts or {}}})
 
+    def declare(self, text="- Agent: specialist task\n"):
+        self.p.personas["builder"] = replace(self.p.personas["builder"], agent="specialist")
+        (self.root / "CLAUDE.md").write_text(f"## Coordinator\n- User: Robin\n{text}")
+
+    def test_the_segment_records_the_agent_type_the_launch_reports(self):
+        self.launch = mock.Mock(return_value=("used-model", "high", "specialist"))
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "specialist")
+        # A launch that reports no type (the default agent) leaves the segment's type empty.
+        self.db.drop_segment(KEY, "implement", 1)
+        self.launch = mock.Mock(return_value=("used-model", "high", None))
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
+
+    def failed_type(self, agent_line):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.declare(agent_line)
+        self.run_pass()
+        failed = self.db.segments(KEY)[0]
+        self.assertEqual(failed.outcome, "failed")
+        return failed.agent_type
+
+    def test_a_failed_start_records_a_declared_agent_type(self):
+        self.assertEqual(self.failed_type("- Agent: specialist task\n"), "specialist")
+
+    def test_a_failed_start_records_no_undeclared_agent_type(self):
+        self.assertEqual(self.failed_type("- Agent: implementer task\n"), "")
+
+    def test_a_failed_start_with_an_unreadable_workspace_file_still_records_the_failure(self):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.declare()
+        (self.root / "CLAUDE.md").write_bytes(b"\xff")
+        self.run_pass()
+        failed = self.db.segments(KEY)[0]
+        self.assertEqual((failed.outcome, failed.agent_type), ("failed", ""))
+
     def test_dispatch_review_merge_end_to_end(self):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])

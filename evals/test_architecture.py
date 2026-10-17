@@ -511,6 +511,11 @@ class ImportGraphTest(unittest.TestCase):
             Path(tmp, "c.py").write_text("import a\n", encoding="utf-8")
             self.assertEqual(cycle_in(import_graph(Path(tmp))), ["a", "b", "c", "a"])
 
+    def test_performance_report_opens_the_store_only_through_store_access(self) -> None:
+        names = imports(SCRIPTS / "performance_report.py")
+        self.assertIn("store_access", names)
+        self.assertNotIn("store", names)
+
     def test_a_module_loaded_as_scripts_x_imports_nothing_from_the_plugin(self) -> None:
         # The scripts load the same file by bare name with scripts/ on the path, and the package-style importers
         # load it as `scripts.X` without scripts/ on the path. No spelling of a sibling import works in both.

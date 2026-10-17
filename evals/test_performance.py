@@ -6,7 +6,7 @@ import io
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +18,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 import performance  # noqa: E402
 import performance_report  # noqa: E402
 import store  # noqa: E402
+import supervisor  # noqa: E402
 
 UTC = ZoneInfo("UTC")
 KEY = "github:example/repo#12"
@@ -144,6 +145,21 @@ class PerformanceReportTest(unittest.TestCase):
         store.command.upgrade(cfg, "0001")
         with redirect_stdout(io.StringIO()):
             self.assertEqual(performance_report.main(["--root", str(old), "--since", "2026-10-09"]), 0)
+
+    def test_a_stale_store_under_a_running_engine_is_an_error_line_not_a_traceback(self) -> None:
+        old = self.root / "old"
+        old.mkdir()
+        cfg = store.Config()
+        cfg.set_main_option("script_location", str(ROOT / "scripts" / "migrations"))
+        cfg.set_main_option("sqlalchemy.url", f"sqlite:///{old / 'store.db'}")
+        cfg.attributes["metadata"] = store.Base.metadata
+        store.command.upgrade(cfg, "0001")
+        (old / "CLAUDE.md").write_text(COORD)
+        err = io.StringIO()
+        with supervisor.lock(supervisor.state_dir(old) / "engine.lock"), redirect_stderr(err):
+            code = performance_report.main(["--root", str(old), "--since", "2026-10-09"])
+        self.assertEqual(code, 2)
+        self.assertIn("engine is running", err.getvalue())
 
     def test_the_router_runs_it_as_performance(self) -> None:
         sys.path.insert(0, str(ROOT))

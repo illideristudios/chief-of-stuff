@@ -101,18 +101,34 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     store.set_resume(key, data)
 
 
-def _declared_agent(text: str, agent: str) -> str:
-    """Pass the agent type only when the workspace's Agent: lines declare it (§9)."""
-    if not agent:
-        return ""
-    return agent if agent in make_worktree.agent_types(text) else ""
+def declared_agent(text: str, agent: str) -> str | None:
+    """§9: an agent type only when the workspace's Agent: lines declare it. None is the default agent."""
+    if agent and agent in make_worktree.agent_types(text):
+        return agent
+    return None
+
+
+def _named_agent(actor: Any, defaults: Any) -> str:
+    return actor.agent or (defaults.agent if defaults else "") or ""
+
+
+def resolved_agent(root: Path, policies: Any, stage: str, persona: str | None) -> str | None:
+    """The one agent type a launch and its segment record. None is the default agent."""
+    name = persona or policies.stages[stage].persona
+    actor = policies.personas.get(name) if name else None
+    if actor is None:
+        return None
+    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
+    defaults = load_settings(root, settings_path(text)).stages.get(stage)
+    return declared_agent(text, _named_agent(actor, defaults))
 
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
-           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
-    """The Launch port: verify a live start or adopt durable completion before slots records it."""
+           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str, str | None]:
+    """The Launch port: verify a live start or adopt durable completion before slots records it.
+    Returns (model, effort, declared agent type); the type is resolved here, once, and the segment records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
@@ -123,11 +139,12 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if existing is not None:
         store.set_ownership(issue_key, existing["tree"])
         _save_run(store, issue_key, stage, attempt, existing)
-        return actor.model, actor.effort or ""
+        return actor.model, actor.effort or "", existing.get("agent_type")
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     loaded = load_settings(root, settings_path(text))
     defaults = loaded.stages.get(stage)
-    agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
+    agent_type = declared_agent(text, _named_agent(actor, defaults))
+    agent = agent_type or ""
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
@@ -222,6 +239,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
                   "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
+        if agent_type:  # an adopting restart reports the type the run started with
+            record["agent_type"] = agent_type
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
@@ -235,7 +254,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 pass
         raise
     _runners[str(run_dir)] = runner
-    return actor.model, actor.effort or ""
+    return actor.model, actor.effort or "", agent_type
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,

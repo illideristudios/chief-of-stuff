@@ -1006,7 +1006,7 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             used = worker.launch(KEY, "implement", 1, "builder", store=self.db, root=self.root,
                                  trees=self.trees, policies=self.p, forge=self.forge, claude_as_profile="secondary")
-        self.assertEqual(used, ("opus", "high"))
+        self.assertEqual(used, ("opus", "high", "specialist"))
         self.assertEqual(start.call_args.args[0].agent, "specialist")
         self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
 
@@ -1063,6 +1063,31 @@ class WorkerTest(unittest.TestCase):
                     self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"], record)
                     start.assert_not_called()
                     build.assert_not_called()
+
+    def launch_as(self, claude_md, agent="specialist"):
+        (self.root / "CLAUDE.md").write_text(claude_md)
+        self.p.personas["builder"] = SimpleNamespace(name="builder", role="build", rules=(), agent=agent,
+                                                       model="opus", effort="")
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            return self.launch()
+
+    def test_launch_reports_the_declared_agent_type_it_launched_with(self):
+        declared = "## Coordinator\n- User: Robin\n- Agent: specialist task\n"
+        self.assertEqual(self.launch_as(declared), ("opus", "", "specialist"))
+        self.db.engine.dispose()
+        self.setUp()
+        self.assertEqual(self.launch_as(declared.replace("specialist", "implementer")), ("opus", "", None))
+
+    def test_the_claimed_segment_takes_the_type_launch_resolved_once(self):
+        self.launch_as("## Coordinator\n- User: Robin\n- Agent: specialist task\n")
+        # A restart adopts the run: the type it started with, not whatever the file says now.
+        (self.root / "CLAUDE.md").write_bytes(b"\xff")
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                        max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "specialist")
 
     def test_undeclared_agent_is_omitted_so_default_agent_runs(self):
         (self.root / "CLAUDE.md").write_text(
