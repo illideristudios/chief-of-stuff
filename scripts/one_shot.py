@@ -353,12 +353,12 @@ class _TaskLookup(NamedTuple):
         return self.rows[0] if len(self.rows) == 1 else None
 
 
-def _lookup_task(path: Path, task: str) -> _TaskLookup:
+def _lookup_task(path: Path, task: str, *, allow_missing: bool = False) -> _TaskLookup:
     """Read one tracker's task, keeping unreadable evidence separate from clean absence."""
     try:
         text = path.read_text()
-    except FileNotFoundError:
-        return _TaskLookup()
+    except FileNotFoundError as exc:
+        return _TaskLookup(error=None if allow_missing else exc)
     except (OSError, ValueError) as exc:
         return _TaskLookup(error=exc)
     return _TaskLookup(text, tuple(row for row in parse_tracker(text).tasks if row.item.strip() == task))
@@ -366,7 +366,10 @@ def _lookup_task(path: Path, task: str) -> _TaskLookup:
 
 def _launch_row_running(launch: Path, task: str, name: str) -> bool:
     """The launch-day row the midnight rollover carried over is still running under this worker (#576)."""
-    row = _lookup_task(launch, task).row
+    found = _lookup_task(launch, task)
+    if found.error is not None:
+        raise found.error
+    row = found.row
     return row is not None and row.kind == "running" and row.owner.strip().lower() == name.lower()
 
 
@@ -374,7 +377,7 @@ def _pending_run(root: Path, cfg, day: str, task: str, name: str) -> bool:
     """Whether reconciliation still owns a running row, including its midnight rollover twin."""
     launch = root / cfg.tracker_path(day)
     end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
-    found = _lookup_task(end, task)
+    found = _lookup_task(end, task, allow_missing=end != launch)
     if found.error is not None:
         return True  # an unreadable tracker cannot authorize discarding recovery evidence
     if found.rows:
@@ -412,7 +415,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     launch = path
     end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
     carried = False
-    found = _lookup_task(end, task)
+    found = _lookup_task(end, task, allow_missing=end != launch)
     if found.error is not None:
         raise found.error
     if found.rows:
@@ -797,7 +800,7 @@ def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tupl
     and none says running here. An unreadable tracker raises, preserving recovery evidence (#99)."""
     tree = f"worktree `{cwd.resolve().name}`"
     for day in days:  # latest first
-        found = _lookup_task(root / cfg.tracker_path(day), task)
+        found = _lookup_task(root / cfg.tracker_path(day), task, allow_missing=True)
         if found.error is not None:
             raise found.error
         row = found.row
@@ -817,7 +820,8 @@ def adopt(root: Path, day: str | None = None, *,
     whose launcher report copy was never written, is reconciled from its own evidence - the result
     file, the changed files, the work already in the tree. A worker still alive is left to finish;
     the next sweep adopts it. The day is a tracker day, not the zone's today; with none given,
-    adoption looks back through ADOPT_LOOKBACK days."""
+    adoption looks back through ADOPT_LOOKBACK days. Tracker read failures preserve that tree's
+    marker and are raised after the remaining trees have been processed."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
     commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
@@ -825,13 +829,18 @@ def adopt(root: Path, day: str | None = None, *,
     days = [day] if day else [(datetime.now(cfg.zone).date() - timedelta(days=n)).isoformat()
                               for n in range(ADOPT_LOOKBACK)]
     adopted = []
+    failures = []
     for cwd, pid, task in pidfile_runs(trees):
         if process_exists(pid):
             continue  # a worker still running is still working on its row
         if launcher_copy(root, cwd).exists():
             _unlink_own_pidfile(trees, cwd, pid)
             continue  # a copy is there: a reconcile already answered for this tree's latest run
-        found = _running_row(root, cfg, task, cwd, days)
+        try:
+            found = _running_row(root, cfg, task, cwd, days)
+        except (OSError, ValueError) as exc:
+            failures.append(exc)
+            continue
         if found is None:
             _unlink_own_pidfile(trees, cwd, pid)
             continue
@@ -859,14 +868,17 @@ def adopt(root: Path, day: str | None = None, *,
                                expected_common=commons.get(cwd.resolve()),
                                teardown_errors=teardown(root, cwd, name, settings.workers.teardown))
             adopted.append(report)
-        except BaseException:
+        except BaseException as exc:
             # Preserve the dead worker evidence so a later sweep can retry interrupted adoption.
             if claimed and _pending_run(root, cfg, row_day, task, name):
                 with suppress(OSError):
                     _write_pidfile(trees, cwd, f"{pid} {task}\n", {os.getpid(), pid})
             elif claimed:
                 _unlink_own_pidfile(trees, cwd, os.getpid())
-            raise
+            if isinstance(exc, (OSError, ValueError)):
+                failures.append(exc)
+            else:
+                raise
         else:
             errors = report["errors"]
             unfinished = _pending_run(root, cfg, row_day, task, name) and (not launcher_copy(root, cwd).exists()
@@ -879,4 +891,8 @@ def adopt(root: Path, day: str | None = None, *,
                     _write_pidfile(trees, cwd, f"{pid} {task}\n", {os.getpid(), pid})
             else:
                 _unlink_own_pidfile(trees, cwd, os.getpid())
+    if len(failures) == 1:
+        raise failures[0]
+    if failures:
+        raise OSError("adoption tracker failures: " + "; ".join(str(exc) for exc in failures))
     return adopted
