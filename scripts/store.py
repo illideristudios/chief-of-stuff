@@ -304,8 +304,12 @@ class Store:
         if not isinstance(answer, str) or not answer.strip():
             raise ValueError("ask answer must be non-empty")
         with self.session() as s:
-            if s.execute(update(Ask).where(Ask.id == ask_id, Ask.answer.is_(None)).values(answer=answer)).rowcount == 0:
+            row = s.get(Ask, ask_id)
+            if row is None or row.answer is not None:
                 raise KeyError(ask_id)
+            if row.options and answer not in row.options:
+                raise ValueError(f"ask answer {answer!r} is not in options")
+            row.answer = answer
 
     def _all(self, stmt: Any) -> list[Any]:
         with self.session() as s:

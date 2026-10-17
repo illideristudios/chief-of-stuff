@@ -46,6 +46,7 @@ RETRYABLE = ("quota", "unknown")
 class Failure:
     kind: str  # missing_program | quota | session_missing | auth | budget | error | unknown
     message: str
+    cost_usd: float = 0.0
 
     @property
     def retryable(self) -> bool:

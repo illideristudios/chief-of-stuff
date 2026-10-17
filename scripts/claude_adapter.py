@@ -14,6 +14,7 @@ import signal
 import subprocess
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 import runtimes
@@ -88,7 +89,7 @@ def _worker(run_dir: Path) -> None:
         except OSError as exc:
             stderr.write(str(exc))
             code = 127
-    _write(run_dir, "exit.json", {"exit_code": code})
+    _write(run_dir, "exit.json", {"exit_code": code, "ended_at": datetime.now(timezone.utc).isoformat()})
 
 
 def call(request: Request, *, claude_as_profile: str = "") -> Reply | Failure:
@@ -138,6 +139,16 @@ def _is_uuid(value: str) -> bool:
     return True
 
 
+def _cost(envelope: dict | None) -> float:
+    if not envelope:
+        return 0.0
+    try:
+        value = float(envelope.get("total_cost_usd") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return value if 0 < value < float("inf") else 0.0
+
+
 def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
     try:
         envelope = json.loads(stdout)
@@ -145,22 +156,23 @@ def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
         envelope = None
     envelope = envelope if isinstance(envelope, dict) else None
     said = str(envelope.get("result", "")) if envelope else ""
+    cost = _cost(envelope)
     if exit_code == 0 and envelope and envelope.get("is_error") is False:
         return Reply(text=said, data=envelope.get("structured_output"), session_id=str(envelope.get("session_id", "")),
-                     cost_usd=float(envelope.get("total_cost_usd") or 0), num_turns=int(envelope.get("num_turns") or 0))
+                     cost_usd=cost, num_turns=int(envelope.get("num_turns") or 0))
     # A quota stop is checked first: it is never reported as the model's failure (ledger E5, #422).
     reset = quota_reset(f"{stderr}\n{said}")
     if reset is not None:
-        return Failure("quota", reset or "quota stop")
+        return Failure("quota", reset or "quota stop", cost_usd=cost)
     if "No conversation found" in stderr:
-        return Failure("session_missing", stderr.strip())
+        return Failure("session_missing", stderr.strip(), cost_usd=cost)
     if not envelope:
         return Failure("unknown", stderr.strip() or f"exit {exit_code} with no answer")
     if envelope.get("subtype") == "error_max_budget_usd":
-        return Failure("budget", said or "budget cap reached")
+        return Failure("budget", said or "budget cap reached", cost_usd=cost)
     if "Not logged in" in said:
-        return Failure("auth", said)
-    return Failure("error", said or f"exit {exit_code}")
+        return Failure("auth", said, cost_usd=cost)
+    return Failure("error", said or f"exit {exit_code}", cost_usd=cost)
 
 
 if __name__ == "__main__":

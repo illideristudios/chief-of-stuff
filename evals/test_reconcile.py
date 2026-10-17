@@ -275,7 +275,7 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(field=field):
                 self.p = replace(policies(), base=replace(policies().base, **{field: value}))
                 self.assertEqual(self.plan(usage={KEY: {field: value}}),
-                                 [reconcile.Limit(KEY, kind, f"approaching {kind} limit")])
+                                 [reconcile.Limit(KEY, kind, f"reached {kind} limit")])
                 self.p = replace(policies(), base=replace(policies().base, **{field: value}))
                 self.assertEqual(self.plan(usage={KEY: {field: value - 0.1}}),
                                  [reconcile.Dispatch(KEY, "implement", "builder", 1)])
@@ -286,7 +286,7 @@ class ReconcileTest(unittest.TestCase):
     def test_a_room_limit_overrides_an_unset_base(self):
         self.p.rooms["lab"] = policy.Place("lab", policy={"time_minutes": 5})
         self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}, rooms={KEY: "lab"}),
-                         [reconcile.Limit(KEY, "time", "approaching time limit")])
+                         [reconcile.Limit(KEY, "time", "reached time limit")])
         self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}),
                          [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 

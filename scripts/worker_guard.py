@@ -40,7 +40,7 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
         if event_name == "PermissionRequest":
             question, context = permission_ask(event)
             ask_id = db.add_ask(binding.issue_key, binding.stage, binding.attempt, binding.session_id,
-                                question, [], context)
+                                question, ["allow", "deny"], context)
             # Already recorded: asking again through the MCP tool would duplicate it.
             return _deny(event_name, f"Recorded permission ask {ask_id}. An ask is not an approval. "
                                      "Report blocked, then stop and wait.")

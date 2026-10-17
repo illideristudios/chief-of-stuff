@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, Sequence
 
+import decision_actions
 from model_port import RETRYABLE
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow, breach
 
@@ -116,14 +117,42 @@ def _policy(policies: Policies, stage: str, room: str | None) -> Policy:
 
 
 def _gate(key: str, edge: Edge, policies: Policies, room: str | None, now: datetime,
-          waived: Sequence[str] = ()) -> Ask | None:
+          waived: Sequence[str] = (), decisions: Sequence[Decision] = (),
+          latest: Segment | None = None) -> Ask | Wait | None:
     if edge.gate in waived:
         return None
     resolved = _policy(policies, edge.source, room)
     if (edge.gate in resolved.zach_gates
             and not any(a.gate == edge.gate and a.expires > now for a in resolved.approvals)):
+        context = f"{latest.stage}-{latest.attempt}" if latest is not None else ""
+        row = next((d for d in reversed(decisions)
+                    if d.topic == edge.gate and d.question == "gate requires Zach's approval"), None)
+        if row is not None and not decision_actions.is_reversed(row):
+            record = getattr(row, "record", None)
+            prior = record.get("decision") if isinstance(record, dict) and isinstance(record.get("decision"), dict) else None
+            if not decision_actions.retryable_failure(record) and not (isinstance(record, dict) and record.get("restarted")) and (
+                    prior is None or prior.get("context", "") in ("", context)):
+                if (getattr(row, "answer", None) or "").strip() != "approve":
+                    return Wait(key, "decision pending")
         return Ask(key, edge.gate, "gate requires Zach's approval")
     return None
+
+
+def gate_source(workflow: Workflow, stage: str, history: Sequence[Segment], gate: str) -> str:
+    """The source stage whose policy governs `gate` at `stage`."""
+    stage = stage or workflow.start
+    matching = [e for e in workflow.edges if e.gate == gate]
+    if stage != "merge" and any(e.source == stage for e in matching):
+        return stage
+    if len(matching) == 1:
+        return matching[0].source
+    stages = {workflow.start} | {e.target for e in workflow.edges}
+    completed = [s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
+                 and (stage != "merge" or s.stage != "merge")]
+    latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
+    if latest is not None and any(e.source == latest.stage for e in matching):
+        return latest.stage
+    return stage
 
 
 def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
@@ -152,7 +181,8 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
 
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
            room: str | None, now: datetime, counts: Mapping[str, int] | None, edges: Sequence[Edge],
-           decisions: Sequence[Decision], waived: Sequence[str] = ()) -> Action:
+           decisions: Sequence[Decision], waived: Sequence[str] = (),
+           latest_segment: Segment | None = None) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
     # Decision rows are append-only, oldest first: the latest row for a question is its state.
@@ -192,15 +222,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         return Merge(key)
     if len(edges) != 1:
         return Wait(key, "no unique incoming merge edge")
-    return _gate(key, edges[0], policies, room, now, waived) or Merge(key)
-
-
-def _open_reversal(decisions: Sequence[Decision]) -> bool:
-    """The latest row for a question is a board reversal when it reopens an adopted choice."""
-    latest = {(d.topic, d.question): d for d in decisions}
-    return any(not (getattr(d, "answer", None) or "").strip()
-               and isinstance(getattr(d, "record", None), dict) and d.record.get("reversed")
-               for d in latest.values())
+    return _gate(key, edges[0], policies, room, now, waived, decisions, latest_segment) or Merge(key)
 
 
 def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
@@ -223,7 +245,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
         return Wait(key, "stage is outside the workflow")
-    if _open_reversal(decisions) and stage != workflow.start:
+    if decision_actions.open_reversal(decisions, history, workflow.start):
         return _work(key, workflow.start, workflow, history, policies, room)
     # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
     completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
@@ -244,7 +266,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if stage == "merge":
         incoming = ((return_edge,) if return_edge else
                     tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage))
-        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, waived)
+        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, waived, latest)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, workflow, history, policies, room)
@@ -259,11 +281,11 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if edge is None:
         return Wait(key, "no unique workflow edge")
     if edge.target == "merge":
-        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, waived)
+        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, waived, latest)
     action = _work(key, edge.target, workflow, history, policies, room)
     if isinstance(action, Escalate):
         return action
-    return _gate(key, edge, policies, room, now, waived) or action
+    return _gate(key, edge, policies, room, now, waived, decisions, latest) or action
 
 
 def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], policies: Policies,
@@ -290,19 +312,17 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         if reset is not None and _time(reset) > now and item.forge_state != "closed":
             actions.append(Wait(item.issue_key, "quota reset pending"))
             continue
-        stage = item.stage or policies.workflow_for(issue_types.get(item.issue_key)).start
         room = (rooms or {}).get(item.issue_key)
-        if item.forge_state != "closed" and stage in policies.stages:
-            kind = breach(_policy(policies, stage, room), (usage or {}).get(item.issue_key))
-            if kind:
-                actions.append(Limit(item.issue_key, kind, f"approaching {kind} limit"))
-                continue
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        room, now, open_findings.get(item.issue_key),
                        (decisions or {}).get(item.issue_key, ()),
                        tuple((waived_gates or {}).get(item.issue_key) or ()))
         if isinstance(action, (Dispatch, Review)):
-            if free_slots:
+            target = action.stage if isinstance(action, Dispatch) else "review"
+            kind = breach(_policy(policies, target, room), (usage or {}).get(item.issue_key)) if target in policies.stages else None
+            if kind:
+                action = Limit(item.issue_key, kind, f"reached {kind} limit")
+            elif free_slots:
                 free_slots -= 1
             else:
                 action = Wait(item.issue_key, "no free worker slots")
