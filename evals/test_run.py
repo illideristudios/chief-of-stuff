@@ -905,7 +905,7 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                 cli.write_text(f"#!{sys.executable}\nimport json,sys,time\n" +
                     "sys.stdin.readline()\n" +
                     f"print(json.dumps({result!r}),flush=True)\n" +
-                    ("sys.stdin.readline()\nsys.exit(0)\n" if mode == "empty" else
+                    ("sys.stdin.readline()\nprint('empty prompted turn',file=sys.stderr)\nsys.exit(0)\n" if mode == "empty" else
                      "sys.stdin.readline()\nprint('API Error: 429 RESOURCE_EXHAUSTED, resets at 5pm.',file=sys.stderr)\nsys.exit(0)\n"
                      if mode == "empty_quota" else
                      "sys.stdin.read()\n" +
@@ -926,7 +926,7 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                     self.assertIsInstance(got, run.Failure)
                     self.assertEqual(got.kind, expected)
                     if mode == "empty":
-                        self.assertIn("exit 0 with no answer", got.message)
+                        self.assertIn("empty prompted turn", got.message)
                     if mode in ("quota", "empty_quota"):
                         self.assertEqual(got.message, "resets at 5pm.")
                 else:
