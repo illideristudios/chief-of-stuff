@@ -84,6 +84,29 @@ class GateTest(unittest.TestCase):
         got = issue_gate.start(f, self.store, "Parser", issue=3, commit=True)
         self.assertEqual(self.store.ownership(got.issue_key), [])
 
+    def test_intake_and_ask_answers_preserve_claims_until_every_segment_ends(self):
+        key = "github:example/app#3"
+        for body in ("", "## File ownership\n- typo: src/", "## File ownership\n- read-only: docs/"):
+            for answering in (False, True):
+                with self.subTest(body=body, answering=answering):
+                    self.store.upsert_item(key)
+                    self.store.replace_file_ownership(key, [("src", "write")])
+                    self.store.record_segment(key, "implement", 1, started_at="2000-01-01T00:00:00+00:00")
+                    self.store.record_segment(key, "review", 1, started_at="2000-01-01T00:01:00+00:00",
+                                              ended_at="2000-01-01T00:02:00+00:00", outcome="done")
+                    ask = self.store.add_ask(key, "implement", 1, "session", "Continue?", [], "")
+                    f = forge.Forge(tf.GH, gh=tf.FakeGh(issues=[{**tf.gh_issue(3, "Parser"), "body": body}]))
+                    kwargs = {"ask_id": ask, "answer": "yes"} if answering else {}
+                    got = issue_gate.start(f, self.store, "Parser", issue=3, commit=True, **kwargs)
+                    self.assertEqual(got.issue_key, key)
+                    if answering:
+                        self.assertEqual(self.store.asks(key)[-1].answer, "yes")
+                    self.assertEqual([(r.path, r.mode) for r in self.store.ownership(key)], [("src", "write")])
+                    self.store.end_segment(key, "implement", 1, "2000-01-01T00:03:00+00:00", "done")
+                    issue_gate.start(f, self.store, "Parser", issue=3, commit=True, **kwargs)
+                    expected = [("docs", "read")] if "read-only" in body else []
+                    self.assertEqual([(r.path, r.mode) for r in self.store.ownership(key)], expected)
+
     def test_a_supplied_issue_the_forge_does_not_confirm_is_refused_and_writes_no_row(self):
         got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Add a flag", issue=999999, commit=True)
         self.assertIn("#999999", got.refused)

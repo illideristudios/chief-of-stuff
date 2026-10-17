@@ -216,7 +216,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(max_concurrency=1), [reconcile.Review(KEY, 1)])
         self.publish_exit(stage="review")
         self.forge.rows[0].update(forge_state="closed", merge_state="merged", human_review=True)
-        # Undeclared scopes own the whole repository, so a retained claim would block OTHER.
+        # Both issues explicitly claim `.`; KEY's ended review is no longer running, so its retained claim cannot block OTHER.
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         status = "none"
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status=status)
@@ -232,6 +232,7 @@ class EngineTest(unittest.TestCase):
                     self.assertEqual(len(self.launched), 2)
                     self.assertEqual(slots.running(self.db), 1)  # Only OTHER's worker is live.
                     self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+                    self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [(".", "write")])
                     self.assertTrue(next(item for item in self.db.items() if item.issue_key == KEY).human_review)
                     self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
                     self.assertEqual(self.forge.writes, [])
@@ -324,6 +325,7 @@ class EngineTest(unittest.TestCase):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
         self.forge.rows[1]["body"] = "## File ownership\n- write: `src/a.py`"
+        self.db.replace_file_ownership(OTHER, [("src/a.py", "write")])
         self.db.record_segment(OTHER, "implement", 1, started_at=NOW.isoformat())
         run_dir = engine.worker._run_dir(self.root, OTHER, "implement", 1)
         self.db.set_resume(OTHER, {"runs": {"implement-1": {
@@ -375,17 +377,58 @@ class EngineTest(unittest.TestCase):
         self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
         self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
 
-    def test_scope_edits_replace_old_claims_and_keep_worktree_registrations(self):
+    def test_scope_edits_wait_for_the_open_segment_and_keep_worktree_registrations(self):
         self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
         self.run_pass()
         tree = str(self.trees / "fake")
         self.db.set_ownership(KEY, tree)
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `docs/`"
-        self.run_pass()
-        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("docs", "read")})
-        self.forge.rows[0]["body"] = "scope removed"
-        self.run_pass()
+        for body in ("## File ownership\n- read-only: `docs/`", "scope removed"):
+            self.forge.rows[0]["body"] = body
+            self.run_pass()
+            self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("src/a.py", "write")})
+        self.finish("implement")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
         self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree")})
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `docs/`"
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("docs", "read")})
+
+    def test_removed_or_malformed_scope_keeps_a_live_write_lock_until_collection_ends_it(self):
+        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
+        self.run_pass()
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
+                                "body": "## File ownership\n- write: `src/a.py`"})
+        for body in ("", "## File ownership\n- typo: src/", "## File ownership\n- read-only: docs/"):
+            with self.subTest(body=body):
+                self.forge.rows[0]["body"] = body
+                self.assertEqual(self.run_pass(), [reconcile.Wait(OTHER, f"file ownership conflict with {KEY}")])
+                self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+                self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [("src", "write")])
+        self.forge.rows[0]["body"] = ""
+        self.publish_exit()
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 1, 0), False, NOW)):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership"),
+                                              reconcile.Dispatch(OTHER, "implement", "builder", 1)])
+        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+        self.assertEqual(self.db.ownership(KEY), [])
+
+    def test_unreadable_declaration_cannot_erase_read_only_completion_evidence(self):
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
+        self.run_pass()
+        self.forge.rows[0]["body"] = ""
+        self.run_pass()
+        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [(".", "read")])
+        self.forge.rows[0]["body"] = "## File ownership\n- typo: src/"
+        self.publish_exit()
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
+             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "current-head")):
+            self.run_pass()
+        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertTrue(any("read-only run left changes" in row.message for row in self.db.log(KEY)))
+        self.assertEqual(self.db.ownership(KEY), [])
+        self.assertEqual(len(self.launched), 1)
 
     def test_root_layout_keeps_declared_file_scopes(self):
         self.trees = self.root

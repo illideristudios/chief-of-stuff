@@ -1,6 +1,8 @@
 """#57: one rule for a read-only task, read the same way by the prompt and the launcher."""
 
+import re
 import sys
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -19,13 +21,13 @@ class IssueScopesTest(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertIsNone(ownership.issue_scopes(body))
 
-    def test_a_malformed_line_cannot_silently_drop_a_write_scope(self):
+    def test_a_malformed_line_invalidates_the_declaration(self):
         for bad in ("write src/", "- write src/", "| write |", "some prose", "| write | src/ | extra |", "| Mode | src/ |", "- mode: src/"):
             with self.subTest(bad=bad):
                 self.assertIsNone(ownership.issue_scopes("## File ownership\n- read-only: docs/\n" + bad))
 
     def test_noncanonical_path_segments_cannot_bypass_overlap(self):
-        for path in ("src//a.py", "src/./a.py", "src/../a.py"):
+        for path in ("src//a.py", "src/./a.py", "src/../a.py", "./", ".//", "./."):
             with self.subTest(path=path):
                 self.assertIsNone(ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + path))
 
@@ -42,9 +44,38 @@ class IssueScopesTest(unittest.TestCase):
             with self.subTest(mode=mode):
                 self.assertEqual(ownership.issue_scopes(f"## File ownership\n- {mode}: `.`"), [(".", expected)])
 
-    def test_issue_form_body_keeps_the_canonical_section(self):
-        body = "### Outcome\n\nFix the parser\n\n### File ownership\n\n## File ownership\n- write: `src/`"
-        self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
+    def test_empty_path_rows_are_ignored_only_when_a_valid_path_remains(self):
+        for empty in ("- write:", "- read-only:", "| write | |"):
+            with self.subTest(empty=empty):
+                self.assertIsNone(ownership.issue_scopes("## File ownership\n" + empty))
+                for paths, expected in (("- write: `src/`", [("src", "write")]),
+                                        ("- read-only: `docs/`", [("docs", "read")])):
+                    self.assertEqual(ownership.issue_scopes("## File ownership\n" + empty + "\n" + paths), expected)
+        self.assertIsNone(ownership.issue_scopes("## File ownership\n- typo:\n- write: `src/`"))
+        self.assertIsNone(ownership.issue_scopes("## File ownership\n- write: none\n- read-only: docs/"))
+
+    def test_issue_forms_require_input_and_submit_a_parseable_section(self):
+        templates = Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE"
+        for name in ("bug.yml", "task.yml"):
+            with self.subTest(template=name):
+                # Read the actual ownership field and its literal YAML block without a YAML dependency.
+                fields = (templates / name).read_text().split("  - type: ")[1:]
+                fields = [field for field in fields if "    id: file_ownership\n" in field]
+                self.assertEqual(len(fields), 1, "the form must include the ownership field")
+                field = fields[0]
+                self.assertRegex(field, r"validations:\n      required: true")
+                default = re.search(r"(?m)^      value:", field)
+                self.assertIsNone(default, "a prefilled skeleton satisfies required without declaring a path")
+                placeholder = re.search(r"(?m)^      placeholder: \|\n((?:        .*\n)+)", field)
+                self.assertIsNotNone(placeholder)
+                skeleton = textwrap.dedent(placeholder[1]).rstrip()
+                label = re.search(r"(?m)^      label: (.+)$", field)[1]
+                submitted = skeleton.replace("- write:", "- write: `src/`")
+                body = f"### {label}\n\n{submitted}"
+                self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
+                # Appending a filled row to the visible skeleton must also work.
+                body = f"### {label}\n\n{skeleton}\n- write: `src/`"
+                self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
 
 
 class ReadOnlyTest(unittest.TestCase):
