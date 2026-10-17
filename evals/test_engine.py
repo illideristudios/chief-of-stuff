@@ -3,6 +3,7 @@
 import contextlib
 from dataclasses import replace
 import io
+import os
 import sys
 import tempfile
 import unittest
@@ -920,6 +921,8 @@ class MainTest(unittest.TestCase):
         original = path.read_text()
         for problem in ("missing", "empty", "truncated", "unreadable"):
             with self.subTest(problem=problem):
+                if problem == "unreadable" and os.geteuid() == 0:
+                    continue  # root reads a mode-0 file, so the reload would succeed
                 path.write_text(original + 'max_concurrency = 2\nrules = ["Keep tests."]\n'
                                 '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
                 configs = []
@@ -953,6 +956,34 @@ class MainTest(unittest.TestCase):
                 self.assertEqual(configs[1].workers.rules, ("Keep tests.",))
                 self.assertEqual(configs[1].stages["implement"].skills, ("original-skill",))
                 self.assertIn("settings reload failed", errors.getvalue())
+                if problem in ("missing", "empty"):
+                    self.assertIn("settings.toml", errors.getvalue())
+
+    def test_reload_failure_outside_settings_error_keeps_the_snapshot(self):
+        configs = []
+
+        def passed(**kwargs):
+            configs.append(kwargs["launch"].keywords["config"])
+
+        real = engine.settings.load
+        loads = []
+
+        def load(*args):
+            loads.append(1)
+            if len(loads) == 1:
+                return real(*args)
+            raise ValueError("invalid literal for int() with base 10: '²'")
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.settings, "load", side_effect=load), \
+             mock.patch.object(engine, "run_pass", side_effect=passed), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(configs), 2)
+        self.assertIs(configs[0], configs[1])
+        self.assertIn("settings reload failed", errors.getvalue())
 
     def test_once_bad_reload_runs_on_the_valid_startup_snapshot(self):
         path = self.root / "settings.toml"
