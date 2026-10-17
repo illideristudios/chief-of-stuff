@@ -158,10 +158,10 @@ def _release_result(result: kanban.Sync, config: Kanban, current: tuple[str, ...
     if not release_hold:
         return result
     present = config.human_review_label in current
+    added = commit and result.done and config.holds(result.stage) and config.human_review_label in result.delta.add
     outcome = ("failed" if result.error else
                "removed" if present and config.human_review_label in result.delta.remove and commit and result.done else
-               "retained" if present or config.holds(result.stage) or
-               (keep_hold and result.done and config.human_review_label in result.delta.add) else "absent")
+               "retained" if present or added else "absent")
     return replace(result, hold_release=outcome)
 
 
@@ -191,8 +191,9 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if error:
         return result(kanban.Sync(ref, stage, error=error))
     current = kanban.canonical_labels(config, current)
-    delta = kanban.github_label_delta(config, current, stage,
-                                      keep_hold=keep_hold or kanban.extra_hold(config, current, expected_stage, release_hold=release_hold))
+    retain = kanban.extra_hold(config, current, expected_stage, release_hold=release_hold) or (
+        keep_hold and config.human_review_label in current)
+    delta = kanban.github_label_delta(config, current, stage, keep_hold=retain)
     managed = kanban.managed_labels(config)
     current_labels = frozenset(current) & managed
     desired_labels = set(kanban.after(current, delta)) & managed
@@ -230,7 +231,7 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
         # Status is written before labels when leaving a hold or migrating; a retry after a failed label edit
         # finds that half-written state.
         priors = (prior_state, (prior_status, prior_labels | hold), (wanted, prior_labels), (wanted, prior_labels | hold))
-        if only_if_held and not present and not current_labels:
+        if only_if_held and old_status is None and not current_labels:
             priors += ((None, frozenset()),)
         blanks = ((None, frozenset()), (None, hold))
         if legacy or (single_mark and present and old_status == wanted):
@@ -357,7 +358,8 @@ def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, st
     if error:
         return result(kanban.Sync(ref, stage, error=error))
     current = kanban.canonical_labels(config, current)
-    held = keep_hold or kanban.extra_hold(config, current, expected_stage, release_hold=release_hold)
+    held = kanban.extra_hold(config, current, expected_stage, release_hold=release_hold) or (
+        keep_hold and config.human_review_label in current)
     delta = kanban.label_delta(config, current, stage, keep_hold=held)
     managed = kanban.managed_labels(config)
     prior = frozenset(kanban.label_delta(config, (), expected_stage).add) if expected_stage else frozenset()

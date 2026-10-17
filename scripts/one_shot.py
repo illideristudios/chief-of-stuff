@@ -362,14 +362,18 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     launch = path
     end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
     carried = False
+    unreadable_end = False
     try:
         end_tasks = parse_tracker(end.read_text()).tasks if end.exists() else []
     except OSError:
         end_tasks = []  # The locked edit below records an unreadable tracker as a report error.
+        unreadable_end = True
     if any(row.item.strip() == task for row in end_tasks):
         # The midnight rollover carries a still-running launch-day row over as the end day's open twin (#576):
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
+        path = end
+    elif unreadable_end and launch != end and _launch_row_running(launch, task, name):
         path = end
     if status == "done" and read_only and (actual or commits != NO_COMMITS):
         # A task that owns nothing changed something: whatever the worker wrote, someone looks (#57).
@@ -388,8 +392,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                (f"\nWorking tree:\n{actual}" if actual else "\nWorking tree clean"))
     errors = []
     hold_release, release_error = "", ""
-    if adopted:
-        reason = f"the launcher died before reconciling this run; {reason}"
 
     def finish(text: str) -> str:
         nonlocal status, reason, hold_release, release_error
@@ -422,7 +424,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         ref = backlog.issue_ref(row.issue, cfg.backlog) if row.issue.strip() else None
         if (status in ("relaunch", "done") and ref and settings.kanban and not row.standing
                 and row.lane.strip() and row.stage.strip()):
-            furthest, keep_hold = kanban.shared_issue(settings.kanban, tasks, cfg.backlog, ref,
+            issue_rows = [item for item in tasks if backlog.issue_ref(item.issue, cfg.backlog) == ref]
+            furthest, keep_hold = kanban.shared_issue(settings.kanban, issue_rows,
                 completed=tracker_log.completed_tasks(text), releasing=row)
             stage = (furthest or row).stage.strip()
             released = forge.sync_stage(ref, cfg.backlog, settings.kanban, stage, expected=stage,
@@ -434,6 +437,12 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 errors.append(f"release review hold: {release_error}")
                 if status == "relaunch":
                     status, reason = "human_review", f"could not release review hold: {release_error}; worker said: {reason}"
+        if adopted:
+            # A quota marker has to stay at the front of the Log line so the next cap can see it.
+            if _brief(reason).startswith(QUOTA_STOP):
+                reason = f"{reason}; the launcher died before reconciling this run"
+            else:
+                reason = f"the launcher died before reconciling this run; {reason}"
         hold_error = ""
         if status == "human_review" and ref:
             # A refused stage guard is evidence to reconcile; do not overwrite its board state with a hold.

@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     selected = []
     for task in tracker.tasks:
-        if task.standing or (task.kind == "done" and not wanted) or not task.lane.strip() or not task.issue.strip():
+        if task.standing or (task.kind == "done" and (not wanted or args.release_hold)) or not task.lane.strip() or not task.issue.strip():
             continue
         ref = backlog.issue_ref(task.issue, cfg.backlog)
         if ref is None or (wanted and ref != wanted):
@@ -71,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     if wanted and not selected:
         print(f"kanban: {args.issue} is not a tracked task with a lane", file=sys.stderr)
         return 2
+    on_issue = selected
     if args.task:
         # #69: a --task names one row of the issue, by the row's name or its tracker item number.
         picked = [(task, ref) for task, ref in selected
@@ -93,14 +94,15 @@ def main(argv: list[str] | None = None) -> int:
     rows = []
     for task, ref in selected:
         keep_hold = False
-        if args.release_hold:
-            shared, keep_hold = kanban.shared_issue(settings.kanban, tracker.tasks, cfg.backlog, ref,
-                completed=tracker_log.completed_tasks(text), releasing=task)
-            task = shared or task
         stage = task.stage.strip()
         if not stage:
             result = kanban.Sync(ref, stage, error="tracker stage is blank")
         else:
+            if args.release_hold:
+                siblings = [item for item, item_ref in on_issue if item_ref == ref]
+                shared, keep_hold = kanban.shared_issue(settings.kanban, siblings,
+                    completed=tracker_log.completed_tasks(text), releasing=task)
+                stage = (shared or task).stage.strip()
             result = forge.sync_stage(ref, cfg.backlog, settings.kanban, stage,
                                       expected=args.from_stage, initialize=args.initialize, commit=args.commit,
                                       release_hold=args.release_hold, keep_hold=keep_hold)

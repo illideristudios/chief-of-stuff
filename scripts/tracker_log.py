@@ -110,7 +110,7 @@ def _log_lines(text: str) -> list[str]:
 
 
 def hold_failures(text: str) -> dict[str, str]:
-    """Task -> unresolved hold application or release error; a new start alone clears neither."""
+    """Task -> unresolved hold-application error. A failed release is release_failures."""
     out: dict[str, str] = {}
     workers: dict[str, str] = {}
     for line in _log_lines(text):
@@ -119,9 +119,7 @@ def hold_failures(text: str) -> dict[str, str]:
             workers[m[3]] = m[5]
         elif m := HOLD_RELEASE.match(line):
             workers[m[3]] = m[6]
-            if m[4] == "failed":
-                out[m[6]] = m[5]
-            else:
+            if m[4] != "failed":
                 out.pop(m[6], None)
         elif m := STARTED.match(line):
             workers[m[3]] = m[4]
@@ -133,6 +131,18 @@ def hold_failures(text: str) -> dict[str, str]:
                 out.pop(task, None)
         elif (m := ENDED.match(line)) and m[4] == COMPLETED:
             out.pop(workers.get(m[3], ""), None)
+    return out
+
+
+def release_failures(text: str) -> dict[str, str]:
+    """Task -> unresolved hold-release error. A later successful release clears it."""
+    out: dict[str, str] = {}
+    for line in _log_lines(text):
+        if m := HOLD_RELEASE.match(line):
+            if m[4] == "failed":
+                out[m[6]] = m[5]
+            else:
+                out.pop(m[6], None)
     return out
 
 
@@ -164,6 +174,8 @@ def completed_tasks(text: str) -> set[str]:
             workers[m[3]] = m[6]
             if outcomes.get(m[3]) == COMPLETED:
                 completed.add(m[6])
+            elif outcomes.get(m[3]) == HUMAN_REVIEW:
+                completed.discard(m[6])
         elif m := RELAUNCH.match(line):
             task = workers.get(m[3]) or line[m.end():].partition(" — ")[0]
             completed.discard(task)

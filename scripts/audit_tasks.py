@@ -307,14 +307,16 @@ class KanbanFault:
 
 def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
                   hold_failures: dict[str, str] | None = None,
-                  completed: set[str] | None = None) -> list[KanbanFault]:
+                  completed: set[str] | None = None,
+                  release_failures: dict[str, str] | None = None) -> list[KanbanFault]:
     """Report label or Project Status drift; never move a card during an audit.
 
     Rows sharing one issue are audited once against the furthest row by the board's stage order (#87):
     an issue carries one stage label, and a closed issue is expected to carry none. `hold_failures`
-    maps task item -> the Log's unresolved hold application or release error (#566): a failed hold operation
-    stays visible here while the issue still has no hold label, and stops once the hold lands.
-    `completed` identifies waiting rows that await integration rather than human review.
+    maps task item -> the Log's unresolved hold application error (#566): a failed hold stays visible
+    here while the issue still has no hold label, and stops once the hold lands. `release_failures`
+    maps a release that failed while the hold label is still on the issue. A completed task is not
+    a missing hold. `completed` identifies waiting rows that await integration rather than human review.
     """
     selected = []
     for task in tasks:
@@ -341,11 +343,18 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         found = states[(ref.host, ref.repo)].get(ref.number)
         if found is None:
             continue  # issue_faults already reports a missing issue
+        labels = kanban_tool.canonical_labels(config, tuple(found.labels))
         for task, _ in rows:
-            failed = (hold_failures or {}).get(task.item.strip()) if config.human_review_label else None
-            if failed and task.kind == "waiting" and config.human_review_label not in found.labels:
+            item = task.item.strip()
+            failed = (hold_failures or {}).get(item) if config.human_review_label else None
+            if (failed and task.kind == "waiting" and item not in (completed or ())
+                    and config.human_review_label not in labels):
                 faults.append(KanbanFault(clip_name(task.label),
                                           f"review hold failed: {failed}; the issue has no hold label"))
+            released = (release_failures or {}).get(item) if config.human_review_label else None
+            if released and config.human_review_label in labels:
+                faults.append(KanbanFault(clip_name(task.label),
+                                          f"review hold release failed: {released}; the issue still has the hold label"))
         if found.state == CLOSED:
             # #87: a closed issue keeps no managed stage label, whatever the tracker rows still record.
             managed = set(config.stages) | {config.human_review_label}
@@ -355,7 +364,7 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
                                           f"expected no managed labels, found {', '.join(present)}"))
             continue
         # #87: one expected stage per issue — the furthest row by the board's stage order decides the label.
-        furthest, keep_hold = kanban_tool.shared_issue(config, [task for task, _ in rows], home, ref,
+        furthest, keep_hold = kanban_tool.shared_issue(config, [task for task, _ in rows],
                                                        completed=completed or ())
         furthest = furthest or rows[0][0]
         status = None
@@ -986,6 +995,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     if settings.kanban and cfg.backlog and check_issues:
         report.kanban.extend(kanban_faults(tasks, cfg.backlog, settings.kanban, gh=gh,
                                            hold_failures=tracker_log.hold_failures(tracker_text),
+                                           release_failures=tracker_log.release_failures(tracker_text),
                                            completed=tracker_log.completed_tasks(tracker_text)))
         report.lines.extend(str(f) for f in report.kanban)
     report.over.extend(over_budget(tasks, settings.budgets, day, now or datetime.now(cfg.zone)))

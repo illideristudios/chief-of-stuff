@@ -131,16 +131,19 @@ class RoundTripTest(unittest.TestCase):
         other = tl.hold_failed_line("10:00", "old", "Other", "offline")
         failed = tl.hold_failed_line("10:20", "worker01", "Security audit", "offline")
         relaunch = tl.relaunch_line("11:10", "worker03", "Security audit", "base moved — retry")
-        self.assertEqual(tl.hold_failures("## Log\n" + other + "\n" + failed + "\n" + relaunch),
-                         {"Other": "offline"})
+        with self.subTest(reader="hold_failures", outcome="relaunch without same-day start"):
+            self.assertEqual(tl.hold_failures("## Log\n" + other + "\n" + failed + "\n" + relaunch),
+                             {"Other": "offline"})
         done = tl.ended_line("01:00", "old", "done", "finished", "none")
         released = tl.hold_release_line("01:01", "old", "Security audit", "removed")
-        self.assertNotIn("Security audit", tl.completed_tasks(
-            "## Log\n" + done + "\n" + released + "\n" + relaunch))
+        with self.subTest(reader="completed_tasks", outcome="relaunch without same-day start"):
+            self.assertEqual(tl.completed_tasks(
+                "## Log\n" + done + "\n" + released + "\n" + relaunch), set())
         end = tl.ended_line("11:10", "worker03", "done", "finished after midnight", "none")
         clear = tl.hold_release_line("11:11", "worker03", "Security audit", "removed")
-        self.assertEqual(tl.hold_failures("## Log\n" + other + "\n" + failed + "\n" + end + "\n" + clear),
-                         {"Other": "offline"})
+        with self.subTest(reader="hold_failures", outcome="completion without same-day start"):
+            self.assertEqual(tl.hold_failures("## Log\n" + other + "\n" + failed + "\n" + end + "\n" + clear),
+                             {"Other": "offline"})
 
     def test_start_preserves_a_failed_hold_until_an_outcome_is_known(self):
         text = "## Log\n" + tl.hold_failed_line("10:00", "old", "Task", "offline") + "\n"
@@ -149,10 +152,11 @@ class RoundTripTest(unittest.TestCase):
 
     def test_release_failures_are_durable_until_a_successful_release(self):
         text = "## Log\n" + tl.hold_release_line("10:00", "old", "Task", "failed", "offline")
-        self.assertEqual(tl.hold_failures(text), {"Task": "offline"})
+        self.assertEqual(tl.release_failures(text), {"Task": "offline"})
+        self.assertEqual(tl.hold_failures(text), {})
         for outcome in ("removed", "retained", "absent"):
             with self.subTest(outcome=outcome):
-                self.assertEqual(tl.hold_failures(text + "\n" + tl.hold_release_line("11:00", "new", "Task", outcome)), {})
+                self.assertEqual(tl.release_failures(text + "\n" + tl.hold_release_line("11:00", "new", "Task", outcome)), {})
 
     def test_completion_hold_policy_recognizes_cross_midnight_and_later_review(self):
         text = "## Log\n" + tl.ended_line("01:00", "old", "done", "finished", "none") + "\n"
