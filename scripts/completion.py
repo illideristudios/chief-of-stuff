@@ -60,7 +60,7 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
               changed: bool | None = None, on_main: bool | None = None, suite_on_main: bool | None = None,
               tree: TreeState | None = None, tree_name: str = "",
               tree_claims: Sequence[Claim] = (), tree_unreadable: bool = False,
-              landing_required: bool = True, tree_landed: bool = False) -> Verdict | None:
+              landing_required: bool = True, tree_landed: bool | None = None) -> Verdict | None:
     """Close a gone worker using the module contract; holds preserve its report or failed outcome."""
     if worker_alive is not False:
         return None
@@ -84,11 +84,11 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
         reason = ", ".join(left) if left else ("" if report == "done" else "worker gone")
         return Verdict(outcome, reason, bool(left))
     left = unlanded(tree)
-    landed = (tree_landed and tree is not None and tree.dirty == 0
+    landed = (tree_landed is True and tree is not None and tree.dirty == 0
               and done_on_main(on_main, suite_on_main) is None)
     # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
-    if report == "done" and left and not landed:
-        return Verdict("done", left, True)
+    if report == "done" and not landed and (left or tree_landed is False):
+        return Verdict("done", left or "tree HEAD is outside the verified landing", True)
     orphaned = None if landed and report == "done" else orphan_reason(tree_name, tree, tree_claims)
     if orphaned:
         return Verdict("failed", orphaned, True)

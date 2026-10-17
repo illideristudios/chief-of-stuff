@@ -247,6 +247,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
             landings = forge.landings(pipeline, pending, errors=landing_errors, heads=landing_heads)
         except (ForgeError, OSError, ValueError, TypeError) as exc:
             landing_errors.update((key, str(exc)) for key in pending)
+    local_on_main = dict(on_main)
     for key in pending:
         landed, suite = landings.get(key, (None, None))
         on_main.append((key, landed))
@@ -258,8 +259,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     for key, head in landing_heads.items():
         if key in recorded_trees:
             code, local_head = git_trees.git(["rev-parse", "HEAD"], recorded_trees[key])
-            if code == 0 and local_head == head:
-                landed_trees.append(key)
+            landed_trees.append((key, code == 0 and (local_head == head or local_on_main.get(key) is True)))
     # Read after liveness, using the same recorded-session selector as worker.collect.
     suites = []
     for item in store.items():
