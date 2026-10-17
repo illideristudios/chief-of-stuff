@@ -134,32 +134,47 @@ class VenvTest(SupervisorTest):
         self.pip_fails = False
         new_python = supervisor.ensure_venv(self.data, release=current)
         self.assertNotEqual(old_python, new_python)
-        self.assertIn([str(new_python), "-m", "pip", "install", "--disable-pip-version-check",
+        self.assertIn([str(new_python.parent.parent.resolve() / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check",
                        "-r", str(current / "requirements.txt")], self.calls)
         self.assertEqual(supervisor.ensure_venv(self.data, release=current), new_python)
         self.assertEqual(supervisor.ensure_venv(self.data), old_python)
 
-    def test_same_pins_update_never_rebuilds_the_running_interpreters_venv(self):
+    def test_repairing_the_running_interpreters_venv_publishes_a_new_generation_beside_it(self):
         python = supervisor.ensure_venv(self.data)
-        marker = python.parent.parent / ".installed"
-        current = self.release.parent / "next"
-        current.mkdir()
-        (current / "requirements.txt").write_bytes((self.release / "requirements.txt").read_bytes())
-        self.pip_fails = True
-        for failure, executable, prefix in (("probe timeout", str(python), sys.prefix),
-                                             ("prefix alias", "/unrelated/python", str(python.parent.parent)),
-                                             ("missing marker", str(python), sys.prefix)):
+        running = python.parent.parent.resolve()
+        for failure, executable, prefix in (("probe timeout", str(python), str(running)),
+                                             ("prefix alias", "/unrelated/python", str(running))):
             with self.subTest(failure=failure):
-                if failure == "missing marker":
-                    marker.unlink(missing_ok=True)
-                self.calls.clear()
                 with mock.patch.object(supervisor.sys, "executable", executable), \
                      mock.patch.object(supervisor.sys, "prefix", prefix), \
-                     mock.patch.object(supervisor, "_venv_python_runs", return_value=False), \
-                     self.assertRaisesRegex(supervisor.ServiceError, "running interpreter"):
-                    supervisor.ensure_venv(self.data, release=current)
-                self.assertTrue(python.is_file(), "the launchd interpreter must survive failed preflight")
-                self.assertFalse(any("pip" in call or call[1:3] == ["-m", "venv"] for call in self.calls))
+                     mock.patch.object(supervisor, "_venv_python_runs", return_value=False):
+                    repaired = supervisor.ensure_venv(self.data)
+                self.assertEqual(repaired, python)
+                self.assertTrue((running / "bin/python").is_file(), "the running interpreter must survive repair")
+                self.assertNotEqual(repaired.parent.parent.resolve(), running)
+                running = repaired.parent.parent.resolve()
+
+    def test_a_repair_keeps_the_launch_path_a_launchagent_already_records(self):
+        supervisor.install(self.root, ENGINE, self.jobs)
+        launch = self.job()["ProgramArguments"][0]
+        generation = Path(launch).parent.parent.resolve()
+        (generation / "bin/python").unlink()
+        supervisor.ensure_venv(self.data)
+        self.assertNotEqual(Path(launch).parent.parent.resolve(), generation)
+        self.assertTrue(Path(launch).is_file(), "the recorded path must resolve to the repaired interpreter")
+        self.calls.clear()
+        supervisor.install(self.root, ENGINE, self.jobs)
+        self.assertEqual(self.job()["ProgramArguments"][0], launch)
+        self.assertNotIn("bootout", self.verbs(), "an unchanged launch path is not a changed job")
+
+    def test_a_corrupt_generation_pointer_is_a_cache_miss(self):
+        python = supervisor.ensure_venv(self.data)
+        pointer = python.parent.parent
+        pointer.unlink()
+        pointer.write_text("../../outside")
+        repaired = supervisor.ensure_venv(self.data)
+        self.assertEqual(repaired, python)
+        self.assertTrue(pointer.is_symlink() and repaired.is_file())
 
     def test_failed_repair_preserves_another_workspaces_interpreter_and_marker(self):
         python = supervisor.ensure_venv(self.data)
@@ -199,16 +214,16 @@ class VenvTest(SupervisorTest):
                 self.assertNotEqual(new, old)
                 self.assertTrue(old.is_file(), "the running engine's venv must stay intact")
                 self.assertTrue((old.parent.parent / ".installed").exists())
-                self.assertIn(["/login/bin/python3", "-m", "venv", str(new.parent.parent)], self.calls)
+                self.assertIn(["/login/bin/python3", "-m", "venv", str(new.parent.parent.resolve())], self.calls)
                 self.assertEqual(supervisor.ensure_venv(self.data), new)
                 old = new
 
     def test_builds_once_from_the_login_shell_python_and_reuses_it(self):
         python = supervisor.ensure_venv(self.data)
-        venv = python.parent.parent
-        self.assertEqual(python, venv / "bin/python")
+        venv = python.parent.parent.resolve()
+        self.assertEqual(python.parent.parent.name, venv.name.rsplit("-", 1)[0] + ".current")
         self.assertEqual(self.calls, [self.identity_call, ["/login/bin/python3", "-m", "venv", str(venv)],
-                                      [str(python), "-m", "pip", "install", "--disable-pip-version-check",
+                                      [str(venv / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check",
                                        "-r", str(self.release / "requirements.txt")]])
         self.assertEqual(supervisor.ensure_venv(self.data), python)
         # Reuse checks the base identity and probes the cached interpreter; it must not rebuild.
@@ -239,23 +254,26 @@ class VenvTest(SupervisorTest):
         python = supervisor.ensure_venv(self.data)
         for failure in ("missing", "dangling"):
             with self.subTest(failure=failure):
+                generation = python.parent.parent.resolve()
                 python.unlink()
                 if failure == "dangling":
                     python.symlink_to("/nonexistent/chief-of-stuff-venv-python")
                 repaired = supervisor.ensure_venv(self.data)
-                self.assertNotEqual(repaired, python)
+                self.assertEqual(repaired, python)
+                self.assertNotEqual(repaired.parent.parent.resolve(), generation)
                 self.assertTrue(repaired.is_file() and not repaired.is_symlink())
-                self.assertTrue((python.parent.parent / ".installed").exists())
+                self.assertTrue((repaired.parent.parent / ".installed").exists())
                 self.assertEqual(supervisor.ensure_venv(self.data), repaired)
-                python = repaired
 
     def test_successful_repair_keeps_the_previous_generation_at_its_original_path(self):
         old = supervisor.ensure_venv(self.data)
+        generation = old.parent.parent.resolve()
         with mock.patch.object(supervisor, "_venv_python_runs", return_value=False):
             new = supervisor.ensure_venv(self.data)
-        self.assertNotEqual(old, new)
-        self.assertTrue(old.is_file())
-        self.assertTrue((old.parent.parent / ".installed").is_file())
+        self.assertEqual(old, new, "launch path is stable across repairs")
+        self.assertNotEqual(new.parent.parent.resolve(), generation)
+        self.assertTrue((generation / "bin/python").is_file())
+        self.assertTrue((generation / ".installed").is_file())
         self.assertEqual(supervisor.ensure_venv(self.data), new)
 
     def test_data_dir_falls_back_to_the_plugin_data_dir_when_unset(self):
