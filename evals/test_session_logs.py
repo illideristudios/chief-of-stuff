@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import board_sources
 import limits_probe
 import session_logs
 import workers_page
@@ -73,12 +74,36 @@ class SharedLogsTest(unittest.TestCase):
         self.assertEqual(held, [False])
 
     def test_cache_forgets_deleted_transcripts_and_keeps_only_compact_records(self):
-        path = self.log([json.dumps(dict(limit_event(), message={"id": "m", "usage": {}, "content": "secret"}))])
+        line = json.dumps(dict(limit_event(), message={"id": "m", "usage": {}, "content": "secret"}))
+        path = self.log([line])
         limits_probe.read("claude", "")
         workers_page.activity(self.tree)
         self.assertTrue(all(key[1] == path for key in session_logs._scans))
         self.assertNotIn("secret", repr(session_logs._scans))
-        path.unlink()
-        limits_probe.read("claude", "")
+        for name, read in (("limits", lambda: limits_probe.read("claude", "")),
+                           ("activity", lambda: workers_page.activity(self.tree))):
+            with self.subTest(reader=name):
+                session_logs._scans.clear()
+                path.write_text(line + "\n")
+                read()
+                self.assertTrue(session_logs._scans)
+                path.unlink()
+                read()
+                self.assertEqual(session_logs._scans, {})
+
+    def test_a_workers_render_drops_activity_for_trees_that_are_not_running(self):
+        line = json.dumps({"timestamp": STAMP.isoformat(), "message": {"id": "m", "usage": {"input_tokens": 1}}})
+        running = self.log([line])
+        ended = self.home / "ended"
+        slug = re.sub(r"[^A-Za-z0-9]", "-", str(ended.resolve()))
+        ended_log = self.home / "config" / "projects" / slug / "session.jsonl"
+        ended_log.parent.mkdir(parents=True)
+        ended_log.write_text(line + "\n")
         workers_page.activity(self.tree)
-        self.assertEqual(session_logs._scans, {})
+        workers_page.activity(ended)
+        worker = board_sources.Worker("impl", "one-shot", "claude", "opus", "Cut", self.tree.name, None, None)
+        sources = board_sources.Sources({}, {}, {}, (worker,), {})
+        workers_page.render("# Tracker\n\n## Log\n", sources, STAMP, self.tree.parent, None)
+        self.assertEqual([k for k in session_logs._scans if k[0] == "activity"], [("activity", running)])
+        workers_page.render("# Tracker\n\n## Log\n", board_sources.EMPTY, STAMP, self.tree.parent, None)
+        self.assertFalse(any(k[0] == "activity" for k in session_logs._scans))

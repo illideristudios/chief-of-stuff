@@ -154,6 +154,23 @@ class VenvTest(SupervisorTest):
                 self.assertNotEqual(repaired.parent.parent.resolve(), running)
                 running = repaired.parent.parent.resolve()
 
+    def test_a_legacy_directory_is_published_behind_the_stable_link(self):
+        python = supervisor.ensure_venv(self.data)
+        pointer = python.parent.parent
+        generation = pointer.resolve()
+        legacy_name = pointer.name.removesuffix(".current")
+        legacy = self.data / legacy_name
+        pointer.unlink()
+        generation.rename(legacy)
+        adopted = supervisor.ensure_venv(self.data)
+        self.assertEqual(adopted, pointer / "bin/python")
+        self.assertEqual(pointer.readlink(), legacy_name)
+        supervisor.install(self.root, ENGINE, self.jobs)
+        self.assertEqual(self.job()["ProgramArguments"][0], str(adopted))
+        (legacy / "bin/python").unlink()
+        supervisor.ensure_venv(self.data)
+        self.assertTrue(Path(self.job()["ProgramArguments"][0]).is_file())
+
     def test_a_repair_keeps_the_launch_path_a_launchagent_already_records(self):
         supervisor.install(self.root, ENGINE, self.jobs)
         launch = self.job()["ProgramArguments"][0]
