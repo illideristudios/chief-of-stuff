@@ -118,9 +118,12 @@ class Sources(unittest.TestCase):
 
     def test_unknown_never_invents_zero_or_reads_prompt_text(self):
         self.write(".claude/projects/work/session.jsonl", [{"type": "assistant", "timestamp": NOW.isoformat(),
+                   "rate_limit_info": {"rateLimitType": "five_hour", "utilization": .4,
+                                       "resetsAt": (NOW + timedelta(hours=2)).timestamp()},
                    "message": {"usage": {"input_tokens": 100}, "content": "rate_limit_info utilization .4"}}])
         for runtime in ("claude", "codex", "cursor", "agy"):
-            r = limits_probe.read(runtime, "")[0]
+            with patch("limits_probe._now", return_value=NOW):
+                r = limits_probe.read(runtime, "")[0]
             self.assertIsNone(r.used)
             self.assertIsNone(r.cap)
             self.assertTrue(r.unknown)
