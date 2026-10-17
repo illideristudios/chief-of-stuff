@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import start_coordinator as start  # noqa: E402
+import shell_setup  # noqa: E402
 import dispatch_prompt as dispatch  # noqa: E402
 import session_exec  # noqa: E402
 import process_status  # noqa: E402
@@ -235,6 +236,16 @@ class CoordinatorLaunchTest(unittest.TestCase):
              mock.patch.dict(sys.modules, {"supervisor": fake}):
             self.assertEqual(start.check_once(self.root, release), "")
         self.assertEqual(run.call_args_list[1].args[0][0], "/managed/bin/python")
+
+    def test_watcher_audit_outlasts_stack_discovery(self):
+        release = start.install(ROOT, self.install_dir)
+        clean = [mock.Mock(returncode=0, stdout="[]"),
+                 mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
+                 mock.Mock(returncode=0, stdout="[]")]
+        with mock.patch.object(start.subprocess, "run", side_effect=clean) as run:
+            start.check_once(self.root, release)
+        self.assertGreater(run.call_args_list[1].kwargs["timeout"],
+                           shell_setup.run_command.__kwdefaults__["timeout"])
 
     def test_watcher_audits_the_workspace_day_not_the_hosts(self):
         # Between the host's midnight and the workspace's, the host's date names the wrong tracker.

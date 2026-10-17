@@ -474,6 +474,24 @@ class WorkerTeardownTest(unittest.TestCase):
                 self.fx._run(self.fx._fake(None, write_partial=False))
         self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), "123 Security audit\n")
 
+    def test_interrupted_teardown_keeps_the_dead_worker_pid_for_adoption(self):
+        child = mock.Mock(pid=123, returncode=0)
+        child.wait.return_value = 0
+        child.poll.return_value = 0
+        real_popen = subprocess.Popen
+
+        def popen(argv, *args, **kwargs):
+            if argv and argv[0] == "git":
+                return real_popen(argv, *args, **kwargs)
+            return child
+
+        with mock.patch.object(one_shot.subprocess, "Popen", side_effect=popen), \
+             mock.patch.object(shell_setup, "teardown", side_effect=KeyboardInterrupt), \
+             contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                self.fx._run(self.fx._fake(None, write_partial=False))
+        self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), "123 Security audit\n")
+
     def test_finished_command_does_not_wait_for_daemon_stderr(self):
         script = "import os,time; pid=os.fork(); (os.setsid(),time.sleep(2),os._exit(0)) if pid == 0 else None"
         result = shell_setup.run_command(shlex.join([sys.executable, "-c", script]), self.tree,
@@ -646,6 +664,29 @@ class WorkerTeardownTest(unittest.TestCase):
         with mock.patch.object(store, "migrate", side_effect=AssertionError("audit migrated")):
             report = audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
         self.assertTrue(any("engine ownership unreadable" in line for line in report.lines), report.lines)
+
+    def test_a_failed_engine_probe_does_not_orphan_an_at_risk_tree(self):
+        (self.tree / "wip.txt").write_text("wip\n")
+        with mock.patch.object(audit_tasks, "engine_ownership", side_effect=RuntimeError("ps timed out")):
+            report = audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
+        named = [str(item) for item in (*report.orphans, *report.unclaimed)]
+        self.assertFalse(any(self.tree.name in line for line in named), named)
+
+    def test_a_failed_second_ownership_sample_does_not_orphan_an_at_risk_tree(self):
+        (self.tree / "wip.txt").write_text("wip\n")
+        self.configure(teardown_list="printf '[]'")
+        calls = {"n": 0}
+
+        def sample(root, trees):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                return {}, RuntimeError("ps timed out"), "engine"
+            return {}, None, ""
+
+        with mock.patch.object(audit_tasks, "_sample_claims", side_effect=sample):
+            report = audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
+        named = [str(item) for item in (*report.orphans, *report.unclaimed)]
+        self.assertFalse(any(self.tree.name in line for line in named), named)
 
     def test_an_engine_probe_failure_without_stack_discovery_is_not_a_stack_finding(self):
         with mock.patch.object(audit_tasks, "engine_ownership", side_effect=RuntimeError("ps timed out")):
