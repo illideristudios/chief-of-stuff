@@ -12,16 +12,6 @@ from datetime import datetime
 
 from fragment import colour as _colour, css_str as _css_str, esc as _esc, href as _href, kind as _kind
 
-# Okabe-Ito on parchment: a kind's accent, its top rule and its count.
-PALETTE: dict[str, str] = {
-    "blocked": "#c9533a", "decisions": "#a7843e", "approved": "#009E73", "running": "#0072B2",
-    "drift": "#c9533a", "orphaned": "#6e6470", "merge": "#009E73", "workers": "#0072B2",
-}
-TOKENS: dict[str, str] = {
-    "ink": "#2f2630", "muted": "#6e6470", "card": "#fbf8ef", "rule": "#ddd3bd", "edge": "#a7843e", "link": "#8a6c30",
-    "hot": "#c9533a", "hot-ink": "#fbf8ef",
-}
-
 
 @dataclass(frozen=True)
 class Header:
@@ -151,8 +141,8 @@ BASE_CSS = """\
 """
 
 
-def css(colors: dict[str, str] = PALETTE, tokens: dict[str, str] = TOKENS) -> str:
-    """The stylesheet: layout, the `--panels-*` tokens and one accent per kind."""
+def css(colors: dict[str, str], tokens: dict[str, str]) -> str:
+    """Layout, `--panels-*` tokens and kind accents using the host's colours."""
     root = ";".join(f"--panels-{_kind(k)}:{_colour(v)}" for k, v in tokens.items())
     rules = [f'.panels-tile[data-kind="{_css_str(k)}"],.panels-panel[data-kind="{_css_str(k)}"]{{--k:{_colour(v)}}}'
              for k, v in colors.items()]
