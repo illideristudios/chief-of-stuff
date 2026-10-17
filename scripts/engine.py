@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -16,6 +16,7 @@ import cleanup
 import clock as engine_clock
 import dispatch_prompt
 import engine_merge
+import engine_facts
 import forge
 import issue_gate
 import limits_history
@@ -39,22 +40,7 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _planning_inputs(store: Any, items: list) -> dict:
-    """Read the same issue context for the engine pass and merge recheck."""
-    segments = {item.issue_key: store.segments(item.issue_key) for item in items}
-    states = {item.issue_key: _resume(store, item.issue_key) for item in items}
-    return {
-        "segments": segments,
-        "launcher_holds": {key: state.get("launcher_hold", {}) for key, state in states.items()},
-        "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
-                        or getattr(item, "issue_type", None) for item in items},
-        "open_findings": {key: counts for key, history in segments.items()
-                          if (counts := reconcile.review_findings(states[key], history)) is not None},
-        "rooms": {key: state.get("room") for key, state in states.items()},
-        "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
-        "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
-                         if (quota := state.get("quota"))},
-    }
+_planning_inputs = engine_facts.gather
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
@@ -190,14 +176,15 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None, require_green: bool = False) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, require_green: bool = False,
+             architect_login: str | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     _record_limits(workers)
-    worker.collect(store, root, clock, trees, require_green=require_green)
+    worker.collect(store, root, clock, trees, forge, require_green=require_green)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -278,7 +265,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
-                             **_planning_inputs(store, items))
+                             **_planning_inputs(store, items, forge, at, policies, architect_login))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
@@ -287,8 +274,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             stage = None
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"
-                persona = action.persona if isinstance(action, reconcile.Dispatch) else policies.stages[stage].persona
-                if policies.resolve(persona=persona, stage=stage).launch == "session":
+                persona = action.persona or policies.stages[stage].persona
+                if policies.resolve(persona=persona, stage=stage if stage in policies.stages else None,
+                                    room=_resume(store, key).get("room")).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
                 launch_failed = False
@@ -326,21 +314,44 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
-                                agent_type=persona, runtime="claude")
+                                agent_type=persona, runtime="claude", persona=persona,
+                                review_round=getattr(action, "review_round", None),
+                                finding_key=getattr(action, "finding_key", None))
                 except Exception:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
-                                             runtime="claude", agent_type=persona)
+                                             runtime="claude", agent_type=persona, persona=persona,
+                                             review_round=getattr(action, "review_round", None),
+                                             finding_key=getattr(action, "finding_key", None))
                     raise
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
                 elif engine_merge.execute(action, forge, store, at, policies=policies,
-                                         inputs=_planning_inputs(store, [by_key[key]]),
+                                         inputs=_planning_inputs(store, [by_key[key]], forge, at, policies,
+                                                                 architect_login),
                                          hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
+            elif isinstance(action, reconcile.Consult):
+                request = forge.closing_request(key)
+                if request.head != action.head:
+                    raise ForgeError("change head moved before architect request")
+                data = _resume(store, key)
+                _, posted = engine_facts.architect_comments(forge.change_comments(request.number))
+                known = list(dict.fromkeys([*posted, *data.get("architect_requests", [])]))
+                token = reconcile.request_token(action.head, action.findings)
+                if token not in known:
+                    body = (f"Architect review requested: {token}\n\n"
+                            "Dispose of each finding and reply with `Architect: APPROVED <sha>` or "
+                            "`Architect: CHANGES <sha>`. Include a JSON block with a `dispositions` object "
+                            "mapping each finding_key to fix, file, keep or discard.\n\n"
+                            + "```json\n" + json.dumps({"findings": list(action.findings)}, indent=2) + "\n```")
+                    forge.comment_change(request.number, body)
+                    known.append(token)
+                data["architect_requests"] = known
+                store.set_resume(key, data)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
                 record = {"kind": type(action).__name__, "reason": action.reason}
@@ -364,6 +375,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 data["pending_stage"] = {"stage": stage, "expected": stages[key]}
                 store.set_resume(key, data)
                 _write_stage(forge, store, key, stage, stages[key])
+                stages[key] = stage
         except Exception as exc:
             if not isinstance(exc, HoldReleaseFailed):
                 store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
@@ -415,7 +427,8 @@ def main(argv: list[str] | None = None) -> int:
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
                                  launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
-                                 require_green=config.workers.require_green_tests)
+                                 require_green=config.workers.require_green_tests,
+                                 architect_login=config.architect_login)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

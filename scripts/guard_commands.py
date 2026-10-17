@@ -339,6 +339,8 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...], dept
     verb, flags = rest[0], rest[1:]
     if verb not in allowed:
         return True
+    if group in {"issue", "pr", "mr"} and verb in {"comment", "note", "review"} and _architect_marker(flags):
+        return True  # the standing architect's marker; a worker on the shared account must not post it
     if group in {"issue", "pr", "mr"} and verb in {"comment", "note"}:
         # The shared identity's earlier comments and discussion state belong to the user.
         if any(flag.split("=", 1)[0] in {"--delete-last", "--edit-last", "--create-if-none",
@@ -380,6 +382,30 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...], dept
 
 
 NESTED_WORD = re.compile(r"(?<![\w.-])(?:gh|glab|git|hub|sh|bash|zsh|dash|eval)(?![\w.])")
+BODY_FILE_FLAGS = {"--body-file", "-F", "--file", "--editor", "-e"}
+
+
+def _architect_marker(flags: list[str]) -> bool:
+    """True when a comment body is hidden from the guard or starts with the architect reply or request marker.
+
+    A body read from a file, stdin or an editor cannot be inspected here, so those forms count as a marker.
+    """
+    i = 0
+    while i < len(flags):
+        name, sep, inline = flags[i].partition("=")
+        if name in BODY_FILE_FLAGS:
+            return True
+        if name in {"--body", "-b", "--message", "-m"}:
+            text = inline if sep else ""
+            if not sep and i + 1 < len(flags):
+                i += 1
+                text = flags[i]
+            if text.strip().startswith(("Architect:", "Architect review requested:")):
+                return True
+        i += 1
+    return False
+
+
 # GitLab quick actions run from note text; a leading /word on a line changes forge state.
 GLAB_QUICK_ACTION = re.compile(r"(?m)^\s*/\w+")
 

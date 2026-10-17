@@ -34,12 +34,22 @@ def _median_minutes(durations: list[int]) -> int | None:
     return xs[(len(xs) - 1) // 2]  # lower middle when even
 
 
+def _run(seg: Any) -> tuple:
+    return tuple(getattr(seg, name, default) for name, default in (
+        ("issue_key", ""), ("stage", ""), ("persona", ""), ("review_round", 0), ("finding_key", "")))
+
+
 def table(segments: Iterable[Any], since: date, until: date, by: str = "day",
           zone: ZoneInfo = ZoneInfo("UTC")) -> list[Row]:
     """Per period and runtime/model/effort/agent_type: runs, outcomes, and median whole minutes."""
     if by not in ("day", "week"):
         raise ValueError(f"by must be 'day' or 'week', not {by!r}")
     groups: dict[tuple[date, str, str, str, str], list[Any]] = defaultdict(list)
+    segments = list(segments)
+    # A panel numbers attempts across personas, so only an earlier attempt of the same review or fix is a relaunch.
+    first: dict[tuple, int] = {}
+    for seg in segments:
+        first[_run(seg)] = min(seg.attempt, first.get(_run(seg), seg.attempt))
     for seg in segments:
         start_day = _parse(seg.started_at).astimezone(zone).date()
         if start_day < since or start_day > until:
@@ -57,7 +67,7 @@ def table(segments: Iterable[Any], since: date, until: date, by: str = "day",
                 completed += 1
             if seg.outcome == "human_review" or getattr(seg, "required_human_review", False):
                 human_review += 1
-            if seg.attempt > 1:
+            if seg.attempt > first[_run(seg)]:
                 relaunched += 1
             if seg.ended_at:
                 minutes = int((_parse(seg.ended_at) - _parse(seg.started_at)).total_seconds() // 60)

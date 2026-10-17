@@ -25,6 +25,7 @@ import slots
 import store
 import supervisor
 import worker
+from forge_port import ForgeError
 from evals.test_engine import KEY, NOW, FakeForge, policies
 
 
@@ -46,7 +47,8 @@ class WorkerTest(unittest.TestCase):
         self.persona = self.p.personas["builder"]
         self.forge = SimpleNamespace(
             issue=lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Forge title", body="Issue body")),
-            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"),
+            requests=lambda: [],
+            closing_request=lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="head"),
             protected_branches=lambda: ("trunk", "main"))
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
@@ -144,12 +146,18 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("do not open a new request", prompt)
         self.assertIn("before reporting done", prompt)
 
-    def test_review_assignment_names_code_review_skill_and_report_rule(self):
-        prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "review", self.persona)
-        self.assertIn("Review: run the extras:code-review skill on the request; report findings and do not fix.",
-                      prompt)
+    def test_review_assignment_uses_persona_rules_and_the_shared_report_shape(self):
+        custom = SimpleNamespace(role="Security review", rules=("Inspect trust boundaries.",))
+        prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "review", custom)
+        self.assertIn("Inspect trust boundaries.", prompt)
+        self.assertNotIn("extras:code-review", prompt)
         self.assertIn(worker.dispatch_prompt.REVIEW_RULE, prompt)
-        self.assertIn("review-report.md", prompt)
+        self.assertIn("engine report tool", prompt)
+        import settings
+        default = settings.load_policy().personas["reviewer"]
+        prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "review", default)
+        self.assertIn("extras:code-review", prompt)
+        self.assertIn("Do not fix", prompt)
 
     def test_launch_implement_and_fix_receive_workspace_architecture(self):
         self.p.stages["fix"] = self.p.stages["implement"]
@@ -235,6 +243,78 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(record["started_at"], NOW.isoformat())
         self.assertTrue(record["session_id"])
 
+    def test_per_finding_fix_in_a_shared_implement_stage_keeps_the_existing_request(self):
+        self.assert_finding_fix_keeps_request("implement")
+
+    def test_architect_workflow_fixes_receive_fix_instructions_in_the_writable_tree(self):
+        import policy
+        self.p.stages["architect"] = policy.Place("architect", "builder")
+        self.assert_finding_fix_keeps_request("architect")
+
+    def assert_finding_fix_keeps_request(self, stage):
+        self.launched()
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        self.db.record_segment(KEY, "review", 1, NOW.isoformat(), NOW.isoformat(), "done",
+                               persona="critic", reviewed_head="head", review_round=1)
+        finding = dict(severity="minor", title="Handle the boundary", evidence="Observed failure", suggestion="Fix it")
+        self.db.add_report(KEY, "review", 1, "review-session", "done", "Reviewed", [finding])
+        data = self.db.resume(KEY)
+        data["runs"]["review-1"] = {"session_id": "review-session"}
+        self.db.set_resume(KEY, data)
+        key = reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY),
+                                        sessions={1: "review-session"})[0]["finding_key"]
+        with mock.patch.object(worker.make_worktree, "git", return_value=(0, "work/issue-1-implement-1")), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            slots.claim(self.trees, self.db, issue_key=KEY, stage=stage, attempt=2,
+                        max_concurrency=1, finding_key=key, clock=lambda: NOW,
+                        launch=lambda: self.launch(stage, 2))
+        self.assertEqual(start.call_args.args[0].cwd, str(self.tree))
+        prompt = start.call_args.args[0].prompt
+        self.assertIn("Handle the boundary", prompt)
+        self.assertIn("push the existing request branch", prompt)
+        self.assertIn("do not open a new request", prompt)
+
+    def test_explicit_architect_workflow_work_starts_without_a_request(self):
+        self.forge.closing_request = mock.Mock(side_effect=RuntimeError("no request yet"))
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "architect", 1, "critic", store=self.db, root=self.root, trees=self.trees,
+                          policies=self.p, forge=self.forge, clock=lambda: NOW)
+        self.forge.closing_request.assert_not_called()
+        self.assertEqual(build.call_args.kwargs["from_branch"], "")
+        self.assertNotIn("Consult on these review findings", start.call_args.args[0].prompt)
+        self.assertEqual(self.db.resume(KEY)["worktree"], str(self.tree))
+
+    def test_collection_records_the_head_produced_by_a_done_finding_fix(self):
+        run = self.launched()
+        seg = self.db.segments(KEY)[0]
+        self.db.record_segment(KEY, "implement", 1, seg.started_at, finding_key="1/1/key")
+        self.report(run)
+        (run / "stdout").write_text('{"is_error":false,"result":"done"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code":0}')
+        self.forge.closing_request = lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="forge-sha")
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=self.forge)
+        self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "forge-sha")
+
+    def test_an_unreadable_forge_head_leaves_a_done_finding_fix_open_for_the_next_pass(self):
+        run = self.launched()
+        seg = self.db.segments(KEY)[0]
+        self.db.record_segment(KEY, "implement", 1, seg.started_at, finding_key="1/1/key")
+        self.report(run)
+        (run / "stdout").write_text('{"is_error":false,"result":"done"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code":0}')
+        self.forge.closing_request = mock.Mock(side_effect=ForgeError("rate limited"))
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=self.forge)
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "")
+        self.forge.closing_request = lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="forge-sha")
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=2), forge=self.forge)
+        self.assertEqual((self.db.segments(KEY)[0].outcome, self.db.segments(KEY)[0].reviewed_head), ("done", "forge-sha"))
+
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
@@ -262,6 +342,7 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(reopened.resume(KEY)["runs"]["review-1"]["result"], {
             "reviewed_head": "head", "outcome": "done", "ended_at": (NOW + timedelta(minutes=1)).isoformat()})
         self.assertEqual(reopened.segments(KEY)[0].outcome, "done")
+        self.assertEqual(reopened.segments(KEY)[0].reviewed_head, "head")
         self.forge.closing_request.assert_not_called()
 
     def test_generated_trees_have_cleanup_ownership_even_after_refused_start(self):
@@ -617,15 +698,14 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(forge.add_human_hold.call_count, 3)
                 forge.rows[0]["human_review"] = False
                 actions = self.suite_pass(forge, launch)
-                self.assertEqual(actions, [reconcile.Review(KEY, 1)])
+                self.assertEqual(actions, [reconcile.Review(KEY, 1, "critic", 1)])
                 self.assertEqual(launch.call_args.args[1], "review")
                 self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
 
     def test_releasing_a_review_suite_hold_accepts_the_review(self):
         forge = self.suite_run(stage="review")
-        data = self.db.resume(KEY)
-        data["review_findings"] = {"attempt": 1, "counts": {}}
-        self.db.set_resume(KEY, data)
+        self.db.record_segment(KEY, "review", 1, self.db.segments(KEY)[0].started_at, persona="critic", review_round=1)
+        forge.closing_request = lambda key, requests=None: SimpleNamespace(number=10, verdict="ready", approval="", head="head")
         def hold(number):
             forge.rows[0]["human_review"] = True
             return ""

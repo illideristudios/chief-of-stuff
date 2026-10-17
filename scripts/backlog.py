@@ -310,13 +310,16 @@ def comments(cfg: Backlog | GitHubBacklog, iid: int, token: str | None = None,
     """An issue's comments in order, each with author and time (#63). GitLab's system notes record
     label and state changes, not a person speaking, and are not comments. A failed read says why."""
     if isinstance(cfg, GitHubBacklog):
-        rc, out, err = (gh or run_gh)(["api", "--paginate", f"repos/{cfg.repo}/issues/{iid}/comments?per_page={PER_PAGE}"])
+        rc, out, err = (gh or run_gh)(["api", "--paginate", "--slurp",
+                                       f"repos/{cfg.repo}/issues/{iid}/comments?per_page={PER_PAGE}"])
         if rc != 0:
             return Notes(error=f"gh: {(err.strip().splitlines() or [f'exit {rc}'])[-1]}")
         try:
             rows = json.loads(out)
         except ValueError:
             return Notes(error="GitHub did not answer with JSON")
+        if isinstance(rows, list) and rows and all(isinstance(page, list) for page in rows):
+            rows = [row for page in rows for row in page]  # --slurp emits one JSON array per page
         if not isinstance(rows, list):
             return Notes(error="GitHub answered with something that is not a list of comments")
         return Notes(notes=tuple(_note(r) for r in rows if isinstance(r, dict)))

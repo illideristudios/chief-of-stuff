@@ -234,6 +234,7 @@ Never remove a worktree. The engine owns stage changes and completion records.
 ISSUE_JOBS = {"implement": "Implement the issue and verify it with tests.",
               "plan": "Plan the issue's implementation, tests and risks.",
               "fix": "Fix the findings on the existing work branch and verify the changes.",
+              "architect": "Consult the canonical architecture and report your judgement without changing code.",
               "review": "Review the request head; report findings and evidence without changing the code."}
 
 
@@ -262,14 +263,14 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
     if stage == "fix":
         delivery = ("Commits: Commit the fixes and verify them with tests, then push the existing request branch "
                     "before reporting done; do not open a new request. Report its URL and head sha.\n")
-    review = f"{CODE_REVIEW}\n{REVIEW_RULE}\n" if stage == "review" else ""
+    review = f"{REVIEW_RULE}\nReport findings through the engine report tool.\n" if stage == "review" else ""
     suite_gate = ("" if not require_green else
                   "Rule: Workspace [workers] require_green_tests is enabled: the engine holds a done report "
                   "as human review unless passed, failed, skipped and xfailed are all known, with passed > 0 "
                   "and failed, skipped and xfailed all zero. Report those counts on the report tool; omit a count "
                   "when unknown.\n")
     architecture = ""
-    if root is not None and stage in ("implement", "fix"):
+    if root is not None and stage in ("implement", "fix", "architect"):
         line = architecture_line(root)
         architecture = f"{line}\n" if line else ""
     header = ISSUE_HEADER.replace("# Assignment\n", "# Assignment" + standing_rules(rules), 1) if rules else ISSUE_HEADER

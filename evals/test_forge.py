@@ -66,6 +66,8 @@ class FakeGh(tma.FakeGhGraphql):
         validate_project_cli(args)
         if tuple(args[:2]) in self.fail:
             return 1, "", "rate limited"
+        if args[0] == "api" and "--paginate" in args and any("/comments?" in arg for arg in args):
+            return 0, "[]", ""
         if args[:2] == ["issue", "list"]:
             state = args[args.index("--state") + 1] if "--state" in args else "open"
             rows = [i for i in self.issues.values()
@@ -236,7 +238,7 @@ class GitHubTest(unittest.TestCase):
                     item.stage = stage
                     self.assertEqual(tr.reconcile.plan([item],
                                      {item.issue_key: [tr.Segment("review")]}, tr.policies(), {}, 0, tr.NOW,
-                                     {item.issue_key: {}}),
+                                     {item.issue_key: []}),
                                      [tr.reconcile.Wait(item.issue_key, "changes requested on the forge")])
 
     def test_approval_consumers_keep_their_blockers_and_latest_review_rules(self):
@@ -1445,3 +1447,38 @@ class GitHubProjectWriteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChangeCommentsTest(unittest.TestCase):
+    def test_github_reads_all_change_comments_and_posts_to_the_request(self):
+        pages = [[{"user": {"login": "robin"}, "created_at": "2000-01-01T00:00:00Z", "body": "first"}],
+                 [{"user": {"login": "robin"}, "created_at": "2000-01-01T00:01:00Z", "body": "Architect: APPROVED head"}]]
+        gh = mock.Mock(return_value=(0, json.dumps(pages), ""))
+        source = forge.Forge(GH, gh=gh)
+        self.assertEqual([note.body for note in source.change_comments(21)], ["first", "Architect: APPROVED head"])
+        self.assertIn("--paginate", gh.call_args.args[0])
+        self.assertIn("--slurp", gh.call_args.args[0])
+        source.comment_change(21, "Architect review requested: head")
+        self.assertEqual(gh.call_args.args[0][:3], ["pr", "comment", "21"])
+        self.assertEqual(gh.call_args.args[1], "Architect review requested: head")
+
+    def test_gitlab_pages_merge_request_notes_and_omits_system_notes(self):
+        source = forge.Forge(GL, token="test-token")
+        def call(method, url, token, timeout, payload=None):
+            self.assertIn("/merge_requests/21/notes", url)
+            if method == "POST":
+                self.assertEqual(payload, {"body": "Architect review requested: head"})
+                return {}, {}, ""
+            page = parse_qs(urlsplit(url).query)["page"][0]
+            return ([{"author": {"username": "robin"}, "body": "reply " + page, "created_at": "2000-01-01T00:00:00Z"},
+                     {"system": True, "body": "system"}], {"x-next-page": "2" if page == "1" else ""}, "")
+        with mock.patch.object(backlog, "_call", side_effect=call):
+            self.assertEqual([n.body for n in source.change_comments(21)], ["reply 1", "reply 2"])
+            source.comment_change(21, "Architect review requested: head")
+
+    def test_comment_read_or_write_failure_is_never_an_empty_success(self):
+        source = forge.Forge(GH, gh=mock.Mock(return_value=(1, "", "unavailable")))
+        with self.assertRaises(forge.ForgeError):
+            source.change_comments(21)
+        with self.assertRaises(forge.ForgeError):
+            source.comment_change(21, "request")

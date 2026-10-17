@@ -30,6 +30,21 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def _detached(stage: str) -> bool:
+    """Reviews read the request head in a detached tree; workflow work uses the writable tree."""
+    return stage == "review"
+
+
+def _tree_key(stage: str, attempt: int) -> str:
+    return str(attempt) if stage == "review" else f"{stage}-{attempt}"
+
+
+def run_sessions(data: dict, history: Any, stage: str) -> dict[int, str]:
+    """Each attempt's launched session, so a report from another session cannot stand in for it."""
+    return {s.attempt: data.get("runs", {}).get(f"{stage}-{s.attempt}", {}).get("session_id")
+            for s in history if s.stage == stage}
+
+
 def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
     number = key.rpartition("#")[2]
     if not number.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_-]+", stage) or attempt < 1:
@@ -57,7 +72,7 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                 raise RuntimeError("existing worker start is unverified; preserving its evidence")
             return None
         record = json.loads(started.read_text())
-        prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
+        prepared = data.get("review_trees", {}).get(_tree_key(stage, attempt), {}) if _detached(stage) else {
             "tree": data.get("worktree"), "branch": data.get("work_branch")}
         record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
                       started_at=clock().isoformat())
@@ -98,6 +113,10 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
     data.pop("quota", None)
     store.set_resume(key, data)
+    segment = next((s for s in store.segments(key) if s.stage == stage and s.attempt == attempt), None)
+    if segment is not None:
+        store.record_segment(key, stage, attempt, segment.started_at,
+                             reviewed_head=record.get("reviewed_head"))
 
 
 def _declared_agent(text: str, agent: str) -> str:
@@ -131,16 +150,27 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
-    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
+    segment = next((s for s in store.segments(issue_key) if s.stage == stage and s.attempt == attempt), None)
+    assignment_stage = "fix" if segment is not None and segment.finding_key else stage
+    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, assignment_stage, actor, root=root,
                                                skills=defaults.skills if defaults else (), rules=rules,
                                                require_green=require_green)
+    if segment is not None and segment.finding_key:
+        history = store.segments(issue_key)
+        findings = reconcile.review_findings(store.reports(issue_key), history,
+                                             sessions=run_sessions(data, history, "review"))
+        finding = next((f for f in findings or () if f["finding_key"] == segment.finding_key), None)
+        if finding is None:
+            raise RuntimeError("assigned finding is no longer available")
+        assignment += "\nFix this review finding, then report the result:\n" + json.dumps(finding) + "\n"
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
     # build's from_branch is detached. Reviews use it; fixes need the original writable checkout.
-    prepared_review = data.get("review_trees", {}).get(str(attempt)) if stage == "review" else None
-    request_head = forge.closing_request(issue_key) if stage == "review" else None
-    if stage == "review" and (request_head is None or not request_head.branch or not request_head.head):
+    detached = _detached(stage)
+    prepared_review = data.get("review_trees", {}).get(_tree_key(stage, attempt)) if detached else None
+    request_head = forge.closing_request(issue_key) if detached else None
+    if detached and (request_head is None or not request_head.branch or not request_head.head):
         raise RuntimeError("request head branch or SHA is unreadable")
     if prepared_review:
         tree, branch = Path(prepared_review["tree"]), prepared_review["branch"]
@@ -154,7 +184,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             # Retain the obsolete tree under cleanup ownership; build the new head in a fresh checkout.
             tree_name = f"{tree_name}-{uuid.uuid4()}"
             prepared_review = None
-    if stage != "review" and data.get("worktree"):
+    if not detached and data.get("worktree"):
         tree, branch = Path(data["worktree"]), data["work_branch"]
         code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
         if code or actual != branch or not tree.resolve().is_relative_to(trees.resolve()):
@@ -163,7 +193,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     elif not prepared_review:
         started = any(name.startswith(f"{stage}-") for name in data.get("runs", {}))
         # A failed start before any worker (such as an unreadable issue) left no tree to lose.
-        if stage == "fix" or (stage != "review" and attempt > 1 and started):
+        if not detached and (stage == "fix" or (attempt > 1 and started)):
             raise RuntimeError("fix/retry has no existing worktree; refusing a fresh branch")
         from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
@@ -171,12 +201,12 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                                    agent, from_branch=from_branch)
         tree = made.path
         store.set_ownership(issue_key, str(tree))
-        if stage != "review":
+        if not detached:
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
             data.update(worktree=str(tree), work_branch=branch)
             store.set_resume(issue_key, data)
         else:
-            data["review_trees"] = {**data.get("review_trees", {}), str(attempt): {
+            data["review_trees"] = {**data.get("review_trees", {}), _tree_key(stage, attempt): {
                 "tree": str(tree), "branch": branch, "head": request_head.head}}
             store.set_resume(issue_key, data)
             code, actual_head = make_worktree.git(["rev-parse", "HEAD"], tree)
@@ -223,6 +253,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
+        if segment is not None:
+            store.record_segment(issue_key, stage, attempt, segment.started_at, agent_type=agent)
     except Exception:
         claude_adapter.cancel(runner)
         raise
@@ -231,7 +263,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None, *, require_green: bool = False) -> None:
+            trees: Path | None = None, forge: Any = None, *, require_green: bool = False) -> None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     for segment in store.segments():
         if segment.ended_at is not None:
@@ -317,6 +349,21 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
+            if segment.finding_key and outcome == "done":
+                # The head a fix produced is the forge's, read after the worker exits. The worktree HEAD is not it.
+                # An unreadable head leaves the segment open: the next pass reads it again, and nothing is recorded.
+                try:
+                    produced = (getattr(forge.closing_request(key), "head", None) or "").strip() if forge is not None else ""
+                except ForgeError:
+                    produced = ""
+                if not produced:
+                    continue
+                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                     reviewed_head=produced)
+            if segment.stage == "review":
+                # This attempt's collected result always names the SHA pinned at launch.
+                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                     reviewed_head=record.get("reviewed_head"))
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)

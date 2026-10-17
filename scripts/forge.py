@@ -562,6 +562,46 @@ class Forge:
             raise ForgeError(f"no open request closes {issue_key}")
         return max(closing, key=lambda r: r.number)
 
+    def change_comments(self, number: int) -> list[backlog.Note]:
+        """All human comments on a pull/merge request, oldest first; a failed read raises."""
+        if self.github:
+            notes = backlog.comments(self.home, number, gh=self.gh)
+            if not notes.ok:
+                raise ForgeError(notes.error)
+            return list(notes.notes)
+        token = self._token()
+        if not token:
+            raise ForgeError(self.home.missing_token)
+        notes, page = [], "1"
+        for _ in range(backlog.MAX_PAGES):
+            query = urlencode({"per_page": backlog.PER_PAGE, "sort": "asc", "page": page})
+            rows, headers, error = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}/notes?{query}",
+                                                token, backlog.TIMEOUT)
+            if error or not isinstance(rows, list):
+                raise ForgeError(error or "merge request notes are unreadable")
+            notes.extend(backlog.Note(str((r.get("author") or {}).get("username", "")),
+                                      str(r.get("created_at", "")), str(r.get("body", "")))
+                         for r in rows if isinstance(r, dict) and not r.get("system"))
+            page = (headers.get("x-next-page") or "").strip()
+            if not page:
+                return notes
+        raise ForgeError("merge request notes were truncated")
+
+    def comment_change(self, number: int, body: str) -> None:
+        """Post the engine's consultation request on the change, never the issue."""
+        if self.github:
+            code, _, error = self.gh(["pr", "comment", str(number), "-R", self.home.repo, "--body-file", "-"], body)
+            if code:
+                raise ForgeError(error.strip() or f"gh exited {code}")
+        else:
+            token = self._token()
+            if not token:
+                raise ForgeError(self.home.missing_token)
+            _, _, error = backlog._call("POST", f"{self.home.api()}/merge_requests/{number}/notes",
+                                        token, backlog.TIMEOUT, {"body": body})
+            if error:
+                raise ForgeError(error)
+
     def threads(self) -> list[review_threads.Thread]:
         """The user's unresolved review threads: fix work for the finding burn-down."""
         if not self.approver:

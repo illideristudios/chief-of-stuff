@@ -43,7 +43,7 @@ def policies():
 class FakeForge:
     def __init__(self):
         self.rows = [{"issue_key": KEY, "stage": "implement", "forge_state": "open", "merge_state": "ready"}]
-        self.writes, self.merges = [], []
+        self.writes, self.merges, self.comments = [], [], []
         self.kanban, self.github = None, True
         self.home = SimpleNamespace(repo=KEY.split(":", 1)[1].rsplit("#", 1)[0])
 
@@ -65,12 +65,21 @@ class FakeForge:
         next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))["stage"] = stage
         return SimpleNamespace(ok=True, done=True, error="")
 
+    def requests(self):
+        return []
+
     def add_human_hold(self, number):
         self.rows[0]["human_review"] = True
         return ""
 
-    def closing_request(self, issue_key):
+    def closing_request(self, issue_key, requests=None):
         return SimpleNamespace(number=10, verdict="ready", approval="", head=tf.tma.HEAD)
+
+    def change_comments(self, number):
+        return list(self.comments)
+
+    def comment_change(self, number, body):
+        self.comments.append(SimpleNamespace(body=body, time=NOW.isoformat()))
 
     def issue(self, number):
         row = next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))
@@ -80,6 +89,50 @@ class FakeForge:
         self.merges.append((number, commit, issue_key))
         next(row for row in self.rows if row["issue_key"] == issue_key)["forge_state"] = "closed"
         return "merged #10"
+
+
+class PlanningInputsTest(unittest.TestCase):
+    def test_the_request_list_is_read_once_and_an_unreadable_head_is_logged_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            other = KEY.rpartition("#")[0] + "#2"
+            for key in (KEY, other):
+                db.upsert_item(key, stage="review")
+            def closing_request(key, requests):
+                if key != KEY:
+                    raise ForgeError("no open request")
+                return SimpleNamespace(head="h", number=10)
+
+            forge = SimpleNamespace(requests=mock.Mock(return_value=["listed"]),
+                                    closing_request=mock.Mock(side_effect=closing_request),
+                                    change_comments=mock.Mock(return_value=[]))
+            for _ in range(2):
+                inputs = engine._planning_inputs(db, db.items(), forge, NOW.isoformat())
+            self.assertEqual(inputs["heads"], {KEY: "h", other: None})
+            forge.closing_request.assert_called_with(other, ["listed"])
+            self.assertEqual(forge.requests.call_count, 2)  # once per call, not once per item
+            self.assertEqual([e.message for e in db.log(other)], ["change head unreadable: no open request"])
+
+    def test_a_comment_read_failure_keeps_the_known_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            db.upsert_item(KEY, stage="review")
+            forge = SimpleNamespace(requests=mock.Mock(return_value=[]),
+                                    closing_request=mock.Mock(return_value=SimpleNamespace(head="h", number=10)),
+                                    change_comments=mock.Mock(side_effect=ForgeError("rate limit")))
+            rules = policies()
+            rules.stages["review"].policy["architect"] = True
+            inputs = engine._planning_inputs(db, db.items(), forge, NOW.isoformat(), rules)
+            self.assertEqual(inputs["heads"], {KEY: "h"})
+            forge.change_comments.assert_called_once()
+            self.assertEqual(inputs["architect_replies"], {})
+            self.assertEqual(db.log(KEY), [])
 
 
 class EngineTest(unittest.TestCase):
@@ -115,6 +168,9 @@ class EngineTest(unittest.TestCase):
             "tree": str(self.trees / "fake"),
         }}
         self.db.set_resume(key, data)
+        if stage == "review":
+            segment = next(s for s in self.db.segments(key) if s.stage == stage and s.attempt == attempt)
+            self.db.record_segment(key, stage, attempt, segment.started_at, reviewed_head=tf.tma.HEAD)
         return "used-model", "high"
 
     def run_pass(self, **kwargs):
@@ -130,15 +186,23 @@ class EngineTest(unittest.TestCase):
         self.now += timedelta(minutes=1)
 
     def findings(self, attempt=1, counts=None):
-        self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}),
-                                 "review_findings": {"attempt": attempt, "counts": counts or {}}})
+        segment = next(s for s in self.db.segments(KEY) if s.stage == "review" and s.attempt == attempt)
+        self.db.record_segment(KEY, "review", attempt, segment.started_at, persona="critic",
+                               reviewed_head=tf.tma.HEAD, review_round=attempt)
+        data = self.db.resume(KEY) or {}
+        runs = data.setdefault("runs", {})
+        record = runs.setdefault(f"review-{attempt}", {"session_id": "fake-session"})
+        self.db.set_resume(KEY, data)
+        findings = [dict(severity=k, title=f"Finding {i}", evidence="Observed failure", suggestion="Fix it")
+                    for k, n in (counts or {}).items() for i in range(n)]
+        self.db.add_report(KEY, "review", attempt, record["session_id"], "done", "Reviewed", findings)
 
     def test_dispatch_review_merge_end_to_end(self):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
         self.assertEqual(self.db.segments(KEY)[0].model, "used-model")
         self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertEqual(self.launched[-1], (KEY, "review", 1, "critic"))
         self.finish("review")
         self.findings()
@@ -299,7 +363,9 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.finish("review")
         self.findings(counts={"minor": 1})
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        actions = self.run_pass()
+        self.assertEqual([(a.stage, a.persona, a.attempt) for a in actions], [("implement", "builder", 2)])
+        self.assertEqual(actions[0].finding["severity"], "minor")
         self.assertEqual(self.forge.writes[-1], (1, "implement", "review", True))
 
     def test_the_engine_initializes_only_when_the_store_has_no_prior_stage(self):
@@ -355,7 +421,7 @@ class EngineTest(unittest.TestCase):
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.run_pass()
         self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
         self.finish("review")
         self.findings()
@@ -366,7 +432,9 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertEqual(len(self.launched), 2)
         gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        actions = self.run_pass()
+        self.assertEqual([(a.stage, a.persona, a.attempt) for a in actions], [("implement", "builder", 2)])
+        self.assertEqual(actions[0].finding["severity"], "minor")
         self.assertFalse(self.db.items()[0].human_review)
 
     def test_implementation_relaunch_releases_hold_before_starting_the_next_worker(self):
@@ -376,7 +444,8 @@ class EngineTest(unittest.TestCase):
         self.assert_relaunch_releases_hold("review")
 
     def assert_relaunch_releases_hold(self, stage):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         gh.issues[1]["labels"][0]["name"] = board.label_for(stage)
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -563,7 +632,8 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
     def test_launch_failure_creates_the_owned_hold_used_by_the_next_pass(self):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
@@ -622,7 +692,8 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 3)])
 
     def test_failed_review_launch_after_implementation_moves_the_card_and_owns_the_hold(self):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Handoff", ["stage: doing", "bug"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Handoff", ["stage: doing", "bug"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.sync_from_forge(self.forge.snapshots())
@@ -633,7 +704,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.items()[0].stage, "review")
         self.assertIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "review", "attempt": 1})
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 2)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 2, "critic", 1)])
         self.assertEqual(self.launched[-1][1:3], ("review", 2))
         self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
 
@@ -714,7 +785,8 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
 
     def test_shared_label_preserves_implement_when_it_reads_back_as_plan(self):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Shared stages", ["stage: doing"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Shared stages", ["stage: doing"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human",
                        {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -735,7 +807,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.items()[0].stage, "implement")
         self.assertEqual(self.forge.snapshots()[0]["stage"], "plan")
         self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertEqual([call[1] for call in self.launched], ["plan", "implement", "review"])
 
     def test_retried_merge_hold_write_cannot_merge_on_the_retry_pass(self):
@@ -760,12 +832,13 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("pending_stage", self.db.resume(KEY))
 
     def test_manual_move_to_a_different_label_overrides_the_stored_stage(self):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Moved by hand", ["stage: review"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Moved by hand", ["stage: review"])],
+                       prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human",
                        {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.upsert_item(KEY, stage="implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1, "critic", 1)])
         self.assertEqual(self.db.items()[0].stage, "review")
 
     def test_unresolved_stage_write_cannot_dispatch_work_from_the_old_stage(self):
@@ -788,13 +861,79 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(engine.reconcile, "plan", return_value=[]) as planned:
             self.run_pass()
         self.assertEqual(planned.call_args.kwargs["now"], self.now)
-        self.assertEqual(planned.call_args.kwargs["open_findings"], {KEY: {}})
+        self.assertEqual(planned.call_args.kwargs["open_findings"], {KEY: []})
 
     def test_cleanup_failure_is_a_failed_pass_after_actions_run(self):
         self.cleanup.return_value = 1
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
+
+    def test_engine_launches_both_reviewers_with_distinct_attempts(self):
+        self.p.personas["security"] = policy.Persona("security", "reviews", "example")
+        self.p.stages["review"].policy["reviewers"] = ("critic", "security")
+        self.forge.rows[0]["stage"] = "review"
+        actions = self.run_pass()
+        self.assertEqual([a.persona for a in actions], ["critic", "security"])
+        self.assertEqual([r[3] for r in self.launched], ["critic", "security"])
+        self.assertEqual([s.persona for s in self.db.segments(KEY)], ["critic", "security"])
+
+    def test_entering_a_panel_writes_the_stage_only_once(self):
+        self.p.personas["security"] = policy.Persona("security", "reviews", "example")
+        self.p.stages["review"].policy["reviewers"] = ("critic", "security")
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.assertEqual(len([w for w in self.forge.writes if w[1] == "review"]), 1)
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.assertEqual([s.persona for s in self.db.segments(KEY) if s.stage == "review"], ["critic", "security"])
+
+
+    def test_architect_request_posts_once_then_waits_for_a_current_head_reply(self):
+        self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
+        self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        self.assertIsInstance(self.run_pass()[0], reconcile.Consult)
+        self.assertEqual(self.db.items()[0].stage, "review")
+        self.assertEqual(len(self.forge.comments), 1)
+        self.assertIn("Architect review requested: " + tf.tma.HEAD, self.forge.comments[0].body)
+        self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
+        self.assertEqual(len(self.forge.comments), 1)
+        self.assertFalse(any(s.stage == "architect" for s in self.db.segments(KEY)))
+        self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED old", time=self.now.isoformat()))
+        self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
+        self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=self.now.isoformat()))
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
+    def test_a_consulting_work_stage_reads_the_architects_reply(self):
+        self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
+        self.p.stages["implement"].policy.update(architect=True, architect_persona="architect")
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=self.now.isoformat()))
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
+    def test_latest_equal_time_reply_wins_and_request_survives_lost_resume(self):
+        self.forge.rows[0]["stage"] = "review"
+        self.db.sync_from_forge(self.forge.rows)
+        self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(),
+                               (NOW - timedelta(minutes=1)).isoformat(), "done", persona="critic", reviewed_head=tf.tma.HEAD, review_round=1)
+        self.findings()
+        self.p.stages["review"].policy.update(architect=True, architect_persona="critic")
+        self.forge.comments = [SimpleNamespace(body="Architect review requested: " + tf.tma.HEAD, time=NOW.isoformat()),
+                               SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=NOW.isoformat()),
+                               SimpleNamespace(body="Architect: CHANGES " + tf.tma.HEAD, time=NOW.isoformat())]
+        self.assertEqual(self.run_pass()[0], reconcile.Wait(KEY, "architect requested changes"))
+        self.assertEqual(len(self.forge.comments), 3)
+        self.assertEqual(self.forge.merges, [])
+
 
 
 class MainTest(unittest.TestCase):

@@ -53,13 +53,20 @@ class ExecutorTest(unittest.TestCase):
         self.db.upsert_item(self.key, stage="merge", review_state="approved", merge_state="ready")
         self.db.record_segment(self.key, "review", 1,
                                (datetime.fromisoformat(self.at) - timedelta(minutes=2)).isoformat(),
-                               self.at, "done")
-        self.db.set_resume(self.key, {"review_findings": {"attempt": 1, "counts": {}}})
+                               self.at, "done", persona="critic", reviewed_head=tma.HEAD, review_round=1)
+        self.findings({}, room=None, issue_type=None)
+
+    def findings(self, counts, room=None, issue_type=None):
+        self.db.set_resume(self.key, {"room": room, "issue_type": issue_type,
+                                    "runs": {"review-1": {"session_id": "review-session"}}})
+        findings = [dict(severity=k, title=f"Finding {i}", evidence="Observed", suggestion="Fix it")
+                    for k, n in counts.items() for i in range(n)]
+        self.db.add_report(self.key, "review", 1, "review-session", "done", "Reviewed", findings)
 
     def planned(self):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
         actions = reconcile.plan([item], policies=self.p, free_slots=0, now=datetime.fromisoformat(self.at),
-                                 **engine._planning_inputs(self.db, [item]))
+                                 **engine._planning_inputs(self.db, [item], self.forge))
         self.assertEqual(actions, [reconcile.Merge(self.key)])
         self.action = actions[0]
 
@@ -89,15 +96,16 @@ class ExecutorTest(unittest.TestCase):
 
     def test_required_architect_and_answered_decision_allow_merge(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
-        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
         self.db.add_decision(self.key, "design", "Split the parser?", answer="yes", decided_by="trio")
-        self.planned()
-        self.assertTrue(self.execute())
+        note = backlog.Note("architect", self.at, f"Architect: APPROVED {tma.HEAD}")
+        with mock.patch.object(forge.Forge, "change_comments", return_value=[note]):
+            self.planned()
+            self.assertTrue(self.execute(forge_facts=True))
         self.assertEqual(len(self.gh.merges), 1)
         self.assertIn("merged", self.message())
 
     def test_room_policy_changed_after_planning_is_rechecked(self):
-        self.db.set_resume(self.key, {"room": "lab", "review_findings": {"attempt": 1, "counts": {}}})
+        self.findings({}, room="lab", issue_type=None)
         self.planned()
         self.p.rooms["lab"] = policy.Place("lab", policy={"architect": True})
         self.refused("architect")
@@ -109,7 +117,7 @@ class ExecutorTest(unittest.TestCase):
 
     def test_changed_review_severity_policy_is_rechecked(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "important"})
-        self.db.set_resume(self.key, {"review_findings": {"attempt": 1, "counts": {"minor": 1}}})
+        self.findings({"minor": 1}, room=None, issue_type=None)
         self.planned()
         self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "minor"})
         self.refused("blocking review findings")
@@ -121,7 +129,7 @@ class ExecutorTest(unittest.TestCase):
 
     def test_new_blocking_findings_after_planning_refuse_merge(self):
         self.planned()
-        self.db.set_resume(self.key, {"review_findings": {"attempt": 1, "counts": {"important": 1}}})
+        self.findings({"important": 1}, room=None, issue_type=None)
         self.refused("blocking review findings")
 
     def test_an_expired_merge_approval_is_rechecked_at_execution_time(self):
@@ -293,6 +301,16 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(self.gh.merges, [])
         self.assertIn("head changed", self.message())
 
+    def test_a_push_after_review_requires_new_reviews_even_when_the_forge_is_green(self):
+        self.planned()
+        self.gh.prs[0]["headRefOid"] = "f" * 40
+        self.refused("review required")
+
+    def test_a_review_without_its_pinned_head_cannot_approve_merge(self):
+        segment, = self.db.segments(self.key)
+        self.db.record_segment(self.key, "review", 1, segment.started_at, reviewed_head="")
+        self.refused("review required")
+
     def test_a_human_review_hold_added_after_planning_refuses(self):
         self.planned()
         self.db.set_human_review(self.key, True)
@@ -306,16 +324,16 @@ class ExecutorTest(unittest.TestCase):
 
     def test_issue_type_without_engine_review_requires_current_forge_approval(self):
         self.p.workflows["short"] = policy.Workflow("short", "merge", issue_types=("bug",))
-        self.db.set_resume(self.key, {"issue_type": "bug", "review_findings": {"attempt": 1, "counts": {}}})
+        self.findings({}, room=None, issue_type="bug")
         self.forge = replace(self.forge, approver="robin")
         self.planned()
         self.gh.prs[0]["reviews"] = []
         self.refused("review has not run")
 
-    def execute(self):
+    def execute(self, *, forge_facts=False):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
         return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p,
-                                    inputs=engine._planning_inputs(self.db, [item]),
+                                    inputs=engine._planning_inputs(self.db, [item], self.forge if forge_facts else None),
                                     hold_stages=getattr(self.forge.kanban, "hold_stages", ()))
 
     def message(self):
