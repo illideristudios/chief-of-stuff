@@ -196,6 +196,21 @@ class WorkerTest(unittest.TestCase):
         rebuild.assert_not_called()
         self.assertEqual(start.call_args.args[0].cwd, str(self.tree))
 
+    def test_retry_may_cut_a_branch_when_no_earlier_attempt_started_a_worker(self):
+        # A transient issue-read failure records attempt 1 as failed before any worktree exists.
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch(attempt=2)
+        build.assert_called_once()
+
+    def test_retry_refuses_a_fresh_branch_after_an_earlier_worker_started(self):
+        self.db.set_resume(KEY, {"runs": {"implement-1": {"pid": 1}}})
+        with mock.patch.object(worker.make_worktree, "build") as build:
+            with self.assertRaisesRegex(RuntimeError, "no existing worktree"):
+                self.launch(attempt=2)
+        build.assert_not_called()
+
     def test_verification_failure_records_no_segment_or_run(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \

@@ -4,6 +4,7 @@ default; a read that fails is an error, never an empty forge."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import tempfile
@@ -325,6 +326,53 @@ class GitHubTest(unittest.TestCase):
 class StageWriteBackTest(unittest.TestCase):
     def edits(self, gh):
         return [c for c in gh.all_calls if c[:2] == ["issue", "edit"]]
+
+    def test_release_hold_is_guarded_previewable_and_idempotent_on_both_forges(self):
+        for host in ("github", "gitlab"):
+            for required in (False, True):
+                with self.subTest(host=host, required=required):
+                    config = replace(FLOW, hold_stages=("doing",) if required else ())
+                    labels = ["stage: doing", "needs human", "bug"]
+                    if host == "github":
+                        gh = FakeGh(issues=[gh_issue(4, "Retry", labels)])
+                        f = forge.Forge(GH, kanban=config, gh=gh)
+                        read_labels = lambda: [x["name"] for x in gh.issues[4]["labels"]]
+                        patch = contextlib.nullcontext()
+                    else:
+                        issues = {4: gl_issue(4, "Retry", labels)}
+                        f = forge.Forge(GL, kanban=config, token="t")
+                        read_labels = lambda: issues[4]["labels"]
+                        patch = mock.patch.object(backlog, "_call", gitlab_call(issues, {}))
+                    with patch:
+                        preview = f.write_stage(4, "doing", expected="doing", release_hold=True)
+                        self.assertTrue(preview.ok, preview.error)
+                        self.assertEqual(read_labels(), labels)
+                        for _ in range(2):
+                            got = f.write_stage(4, "doing", expected="doing", release_hold=True, commit=True)
+                            self.assertTrue(got.done, got.error)
+                            self.assertEqual(set(read_labels()), {"stage: doing", "bug"} |
+                                             ({"needs human"} if required else set()))
+
+    def test_release_hold_refuses_missing_prior_and_stage_drift(self):
+        for host in ("github", "gitlab"):
+            for kwargs in ({}, {"expected": "doing"}, {"expected": "review"},
+                           {"expected": "doing", "initialize": True}):
+                with self.subTest(host=host, kwargs=kwargs):
+                    labels = ["stage: review", "needs human"]
+                    if host == "github":
+                        gh = FakeGh(issues=[gh_issue(4, "Retry", labels)])
+                        f = forge.Forge(GH, kanban=FLOW, gh=gh)
+                        read_labels = lambda: [x["name"] for x in gh.issues[4]["labels"]]
+                        patch = contextlib.nullcontext()
+                    else:
+                        issues = {4: gl_issue(4, "Retry", labels)}
+                        f = forge.Forge(GL, kanban=FLOW, token="t")
+                        read_labels = lambda: issues[4]["labels"]
+                        patch = mock.patch.object(backlog, "_call", gitlab_call(issues, {}))
+                    with patch:
+                        got = f.write_stage(4, "doing", release_hold=True, commit=True, **kwargs)
+                    self.assertFalse(got.ok)
+                    self.assertEqual(read_labels(), labels)
 
     def test_a_stage_write_previews_by_default(self):
         gh = github()
@@ -1024,6 +1072,22 @@ BOARD_FLOW = Kanban(
 )
 
 class GitHubProjectWriteTest(unittest.TestCase):
+    def test_release_hold_preserves_project_status_and_rejects_drift(self):
+        self.labels = ["kind::code", BOARD_FLOW.human_review_label]
+        self.status = "Test"
+        got = forge.Forge(GH, kanban=self.config, gh=self.gh).write_stage(
+            7, "test", expected="test", release_hold=True, commit=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "Test")
+        self.assertEqual(self.labels, ["kind::code"])
+        self.labels.append(BOARD_FLOW.human_review_label)
+        self.status = "Build"
+        got = forge.Forge(GH, kanban=self.config, gh=self.gh).write_stage(
+            7, "test", expected="test", release_hold=True, commit=True)
+        self.assertFalse(got.ok)
+        self.assertEqual(self.status, "Build")
+        self.assertIn(BOARD_FLOW.human_review_label, self.labels)
+
     def setUp(self):
         self.ref = backlog.IssueRef("example/app", 7)
         self.item_url = self.ref.url
