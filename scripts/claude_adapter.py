@@ -149,7 +149,7 @@ def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
         return Reply(text=said, data=envelope.get("structured_output"), session_id=str(envelope.get("session_id", "")),
                      cost_usd=float(envelope.get("total_cost_usd") or 0), num_turns=int(envelope.get("num_turns") or 0))
     # A quota stop is checked first: it is never reported as the model's failure (ledger E5, #422).
-    reset = quota_reset(f"{stderr}\n{said}")
+    reset = quota_reset(f"{stderr}\n{said if envelope else stdout}")
     if reset is not None:
         return Failure("quota", reset or "quota stop")
     if "No conversation found" in stderr:
@@ -161,6 +161,18 @@ def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
     if "Not logged in" in said:
         return Failure("auth", said)
     return Failure("error", said or f"exit {exit_code}")
+
+
+def inferred_exit(stdout: str, stderr: str) -> int | None:
+    """The exit code a runner that died before writing exit.json would have had, from what the host left; else None."""
+    try:
+        envelope = json.loads(stdout)
+    except ValueError:
+        envelope = None
+    if isinstance(envelope, dict) and isinstance(envelope.get("is_error"), bool):
+        return 1 if envelope["is_error"] else 0
+    failure = classify(1, stdout, stderr)
+    return 1 if isinstance(failure, Failure) and failure.kind == "quota" else None
 
 
 if __name__ == "__main__":

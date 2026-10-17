@@ -145,9 +145,21 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
-                slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
-                            max_concurrency=max_concurrency, clock=clock,
-                            launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
+                if stage != stages[key]:
+                    data = _resume(store, key)
+                    data["pending_stage"] = {"stage": stage, "expected": stages[key]}
+                    store.set_resume(key, data)
+                try:
+                    slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
+                                max_concurrency=max_concurrency, clock=clock,
+                                launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
+                except BaseException:
+                    if stage != stages[key] and not any(
+                            s.stage == stage and s.attempt == action.attempt for s in store.segments(key)):
+                        data = _resume(store, key)
+                        data.pop("pending_stage", None)
+                        store.set_resume(key, data)
+                    raise
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
