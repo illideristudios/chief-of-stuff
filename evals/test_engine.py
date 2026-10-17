@@ -571,12 +571,33 @@ class EngineTest(unittest.TestCase):
                                (NOW - timedelta(hours=1)).isoformat(), "done")
         self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=30)).isoformat(), NOW.isoformat(), "done")
         self.db.add_decision(KEY, topic="ask", question="Which parser?", answer="Split the parser",
-                             decided_by="trio", record={"decision": {"options": ["Split the parser", "Keep the parser"]}})
+                             decided_by="trio", record={"decision": {"options": ["Split the parser", "Keep the parser"],
+                                                                    "context": "parser constraints"}})
         rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question,
                              answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
         self.assertEqual(self.db.decisions(KEY)[-1].record.get("restarted"), "implement")
+        self.finish("implement", 2)
+        model = self._votes([("adopt", "Keep the parser")] * 3)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Review(KEY, 2)])
+        self.assertEqual(model.n, 3)
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep the parser")
+        self.finish("review", 2)
+        self.findings(2)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
+        self.assertEqual([stage for _, stage, _, _ in self.launched], ["implement", "review"])
+
+    def test_retryable_gate_consultation_is_retried_on_the_next_pass(self):
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "temporarily unavailable"))
+        self.assertEqual(self.run_pass(model=failed), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+        model = self._votes([("adopt", "approve")] * 3)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+        self.assertEqual(model.n, 3)
+        self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
 
     def test_permission_asks_context_options_limits_and_failure_spend(self):
         import guard_binding
