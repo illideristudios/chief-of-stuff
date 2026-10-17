@@ -68,6 +68,9 @@ SETTLED_ASK_GRANT_PATTERN = (
 REPOS_RULE = "`<repo>` is the repository's checkout directory; when the settings' `[repos]` table names that repository, pass the name instead."
 
 
+RETIRED_PROVIDER = "rail" + "way"  # split so this file also meets #726's grep acceptance
+
+
 def grader_hits(g: dict, tool: str, **tool_input) -> bool:
     """Whether a tool_use grader's `tool` and `input_match` fire on a call, as run.py matches them."""
     return bool(re.fullmatch(g["tool"], tool) and re.search(g["input_match"], json.dumps(tool_input)))
@@ -101,25 +104,40 @@ def fixture_files(case: Path, suffix: str) -> list[Path]:
 
 class CaseLintTest(unittest.TestCase):
     def test_retired_deploy_provider_is_absent_outside_archives(self):
-        # Split the name so this regression check also meets #726's grep acceptance.
-        retired = "rail" + "way"
-        root = EVALS.parent
-        found = []
-        # CI copies a worktree without its git directory; scan source files directly.
-        for directory, subdirs, files in os.walk(root):
-            folder = Path(directory)
-            subdirs[:] = [d for d in subdirs if d not in {".git", ".claude", "__pycache__"}
-                          and folder / d != root / "docs/archive"]
-            if folder == EVALS / "results":
-                subdirs.clear()
-                files = ["PROGRESS.md"]
-            for name in files:
-                if name == ".git" or name == ".DS_Store" or name.endswith(".pyc"):
-                    continue
-                path = folder / name
-                if retired.encode() in path.read_bytes().lower():
-                    found.append(str(path.relative_to(root)))
-        self.assertEqual(found, [])
+        self.assertEqual(retired_provider_files(EVALS.parent), [])
+
+    def test_retired_provider_scan_reads_source_and_skips_generated_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for rel in ("README.md", "docs/guide.md", "evals/results/PROGRESS.md",
+                        "docs/archive/old.md", "evals/results/20260101-000000/out.txt",
+                        ".chief-of-stuff/mailbox/note.md", ".venv/lib/mod.py", "node_modules/pkg/index.js"):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(f"mentions {RETIRED_PROVIDER.title()}\n")
+            (root / "docs/dangling.md").symlink_to(root / "nowhere")
+            os.mkfifo(root / "docs/pipe")
+            self.assertEqual(retired_provider_files(root), ["README.md", "docs/guide.md", "evals/results/PROGRESS.md"])
+
+    def test_progress_marks_every_redaction_and_says_quotes_are_not_verbatim(self):
+        text = (EVALS / "results/PROGRESS.md").read_text()
+        self.assertNotRegex(text, r"(?<!\[)retired deploy CLI")
+        self.assertNotIn("DEPLOY_CLI_SHIM", text)
+        self.assertNotIn("test_deploy_cli_shim", text)
+        self.assertIn("no longer verbatim", "\n".join(text.splitlines()[:6]))
+
+    def test_git_refusal_graders_catch_options_and_chained_commands(self):
+        calls = ("git push", "git -C . push", "git -c user.name=x commit -m m", "git --no-pager add -A",
+                 "git --git-dir .git push origin main", "git push; true", "cd x && git -C y commit -m m")
+        for name in ("blocked-becomes-one-line", "decision-cannot-lift-human-only", "no-unapproved-actions",
+                     "item-becomes-task-and-dispatch", "relay-does-not-restate-limits",
+                     "standing-approval-for-the-day", "standing-approval-expired-at-midnight"):
+            gs = [g for g in graders(spec(EVALS / "cases" / name))
+                  if g["type"] == "tool_used" and g.get("max") == 0 and "commit" in g.get("input_match", "")]
+            with self.subTest(case=name):
+                self.assertEqual(len(gs), 1)
+                for call in calls:
+                    self.assertTrue(grader_hits(gs[0], "Bash", command=call), call)
+                self.assertFalse(grader_hits(gs[0], "Bash", command="git log --oneline -3"))
 
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)
