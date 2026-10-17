@@ -650,11 +650,13 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
 
-    def landings(self, pipeline: Pipeline, keys: list[str]) -> dict[str, tuple[bool | None, bool | None]]:
+    def landings(self, pipeline: Pipeline, keys: list[str], *,
+                 errors: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
         """Prove each merged result is in current main and its suite passed, including squash merges.
 
         Uses forge ancestry, so a stale local checkout or an original PR head is no landing proof.
         Missing bounded history or unreadable comparisons remain unknown.
+        When provided, errors receives per-issue failure details for the planner's wait log.
         """
         found = {key: (None, None) for key in keys}
         if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
@@ -669,7 +671,7 @@ class Forge:
             try:
                 target = row.get("baseRefName" if self.github else "target_branch")
                 commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
-                          row.get("squash_commit_sha") or row.get("merge_commit_sha"))
+                          row.get("squash_commit_sha") or row.get("merge_commit_sha") or row.get("sha"))
                 landed = None
                 if target != "main":
                     landed = False if isinstance(target, str) and target else None
@@ -679,14 +681,20 @@ class Forge:
                     elif self.github:
                         compared = self._pipeline_read(f"compare/{quote(commit, safe='')}...{quote(pipeline.sha, safe='')}")
                         base = compared.get("merge_base_commit", {}).get("sha")
-                        landed = base == commit if isinstance(base, str) and base else None
+                        if not isinstance(base, str) or not base:
+                            raise ValueError("landing comparison returned no merge base")
+                        landed = base == commit
                     else:
                         query = urlencode({"refs[]": [commit, pipeline.sha]}, doseq=True)
                         base = self._pipeline_read(f"repository/merge_base?{query}").get("id")
-                        landed = base == commit if isinstance(base, str) and base else None
+                        if not isinstance(base, str) or not base:
+                            raise ValueError("landing comparison returned no merge base")
+                        landed = base == commit
                 result = landed, pipeline.status == "passed" if landed is True else landed
-            except (ForgeError, RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError):
+            except (ForgeError, RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
                 result = None, None
+                if errors is not None:
+                    errors.update((key, f"landing comparison: {exc}") for key in mine)
             found.update((key, result) for key in mine)
         return found
 

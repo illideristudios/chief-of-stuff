@@ -208,9 +208,12 @@ def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any
                    outcome: str, reason: str, now: datetime, *, policies: policy.Policies) -> None:
     """Adapter classification precedes completion judgement; a forge hold must precede closure."""
     key = segment.issue_key
-    inputs = _planning_inputs(store, [item for item in store.items() if item.issue_key == key])
-    workflow = policies.workflow_for(inputs["issue_types"].get(key))
+    item = next((item for item in store.items() if item.issue_key == key), None)
+    workflow = policies.workflow_for(_resume(store, key).get("issue_type") or getattr(item, "issue_type", None))
     facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now)
+    if (item is not None and item.forge_state == "closed" and item.merge_state == "merged"
+            and reconcile.completion_wait(key, facts)):
+        return  # Keep the segment and its hold; this pass's planner records the wait.
     verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
     held = verdict.human_review or reason.startswith("unreadable worker run:")
     if verdict.human_review:
@@ -424,7 +427,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         except Exception as exc:
             if not isinstance(exc, HoldReleaseFailed):
                 store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
-    if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
+    completed = {item.issue_key for item in store.items()
+                 if item.forge_state == "closed" and item.merge_state == "merged"
+                 and reconcile.completion_wait(item.issue_key, facts) is None
+                 and not any(segment.ended_at is None for segment in store.segments(item.issue_key))}
+    if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True,
+                       completed=completed):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions
 

@@ -157,7 +157,7 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.db.items()[0].forge_state, "closed")
         self.assertEqual(len(self.launched), 2)
-        self.cleanup.assert_called_with(self.root, self.trees, self.db, remove=True)
+        self.cleanup.assert_called_with(self.root, self.trees, self.db, remove=True, completed=set())
 
     def test_standard_merge_waits_until_the_merged_commit_has_passing_main_ci(self):
         self.run_pass()
@@ -169,10 +169,10 @@ class EngineTest(unittest.TestCase):
         self.forge.rows[0]["merge_state"] = "merged"
         status = "running"
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status=status)
-        self.forge.landings = lambda pipeline, keys: {KEY: (True, pipeline.status == "passed")}
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "suite has not run on main")])
+        self.forge.landings = lambda pipeline, keys, **kwargs: {KEY: (True, pipeline.status == "passed")}
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "merged, awaiting main CI: suite has not run on main")])
         status = "failed"
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "suite has not run on main")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "merged, awaiting main CI: suite has not run on main")])
         status = "passed"
         self.assertEqual(self.run_pass(), [])
         self.assertEqual(len(self.forge.merges), 1)

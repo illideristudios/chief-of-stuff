@@ -6,6 +6,7 @@ launcher end line in today's tracker. pages.py renders it into `workers.html` on
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import date, datetime
 from html import escape
@@ -13,7 +14,6 @@ from pathlib import Path
 
 import board_sources
 import panels
-import session_logs
 from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar
 from md import section as _section
@@ -41,17 +41,17 @@ def activity(tree: Path) -> tuple[datetime | None, int]:
     """(last line's timestamp, tokens) over the Claude transcripts of a session run in `tree`; (None, 0) with none.
     A message split over lines repeats its usage, so each message id counts once."""
     last, usage = None, {}
-    project = Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(tree.resolve()))
-    for log, n, d in session_logs.records(project, recursive=False):
-        try:
-            at = datetime.fromisoformat(d["timestamp"])
-            if at.utcoffset() is None:
-                continue
-            last = at if last is None or at > last else last
-            message = d.get("message") or {}
-            usage[message.get("id") or (log, n)] = message.get("usage") or {}
-        except (ValueError, KeyError, TypeError, AttributeError):
-            continue
+    for log in (Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(tree.resolve()))).glob("*.jsonl"):
+        with log.open(errors="replace") as f:
+            for n, line in enumerate(f):
+                try:
+                    d = json.loads(line)
+                    at = datetime.fromisoformat(d["timestamp"])
+                    last = at if last is None or at > last else last
+                    message = d.get("message") or {}
+                    usage[message.get("id") or (log, n)] = message.get("usage") or {}
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    continue
     return last, sum(v for u in usage.values() if isinstance(u, dict) for k in USAGE if isinstance(v := u.get(k), int))
 
 

@@ -10,6 +10,7 @@ import completion
 import readiness
 import worker_health
 from model_port import RETRYABLE
+from orphans import Claim
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
 from tree_state import TreeState
 
@@ -155,6 +156,7 @@ class Facts:
     tree_names: tuple[tuple[str, str], ...] = ()
     tree_claims: tuple[tuple[str, tuple], ...] = ()
     progress: tuple[tuple[str, datetime | None], ...] = ()  # present None: no usable progress evidence; absent: not gathered
+    landing_errors: tuple[tuple[str, str], ...] = ()  # per-issue forge landing failures
     blockers_error: str = ""  # why `blockers` is None
     stall_after: timedelta = timedelta(minutes=45)
 
@@ -276,16 +278,29 @@ def _running_segment(history: Sequence[Segment]) -> Segment | None:
     return next((segment for segment in history if segment.started_at and not segment.ended_at), None)
 
 
+def completion_wait(key: str, facts: Facts) -> Wait | None:
+    """Forge closure alone cannot complete a merged item or release its tree."""
+    gate = completion.done_on_main(dict(facts.on_main).get(key), dict(facts.suite_on_main).get(key))
+    if gate:
+        error = dict(facts.landing_errors).get(key)
+        reason = f"merged, awaiting main CI: {gate}" + (f": {error}" if error else "")
+        return Wait(key, reason)
+    return None
+
+
 def completion_verdict(key: str, segment: Segment, facts: Facts, workflow: Workflow, *,
                        report: str | None, worker_alive: bool | None) -> completion.Verdict | None:
     """One completion input mapping for collected exits and abandoned workers."""
+    claims = dict(facts.tree_claims).get(key, ())
+    if worker_alive is False:
+        claims = tuple(Claim(claim.owner, False, "has no process", claim.ref) if claim.owner == key else claim for claim in claims)
     return completion.abandoned(
         worker_alive, report=report,
         read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
         on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
         tree_unreadable=key in facts.unreadable,
         tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
-        tree_claims=dict(facts.tree_claims).get(key, ()), landing_required=not workflow.next(segment.stage))
+        tree_claims=claims, landing_required=not workflow.next(segment.stage))
 
 
 def _abandoned(item: WorkItem, segment: Segment, facts: Facts, workflow: Workflow) -> Close | None:
@@ -312,16 +327,16 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
           decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object], facts: Facts | None = None) -> Action | None:
     key = item.issue_key
     workflow = policies.workflow_for(issue_type)
+    if item.forge_state == "closed" and item.merge_state == "merged" and facts is not None:
+        waiting = completion_wait(key, facts)
+        if waiting:
+            return waiting
     running = _running_segment(history)
     if running is not None:
         if facts is None:
             return None
         return _abandoned(item, running, facts, workflow) or _stalled(item, running, facts, now)
     if item.forge_state == "closed":
-        if item.merge_state == "merged" and facts is not None:
-            gate = completion.done_on_main(dict(facts.on_main).get(key), dict(facts.suite_on_main).get(key))
-            if gate:
-                return Wait(key, gate)
         return None
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}

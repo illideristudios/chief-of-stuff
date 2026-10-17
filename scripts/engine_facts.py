@@ -153,10 +153,10 @@ def _starting_head(record: dict | None) -> str | None:
     if isinstance(head, str) and head.strip():
         return head.strip()
     run = record.get("run_dir")
-    if isinstance(run, str) and run:
+    if isinstance(run, str) and run and "\x00" not in run:
         try:
-            return (Path(run) / "starting_head").read_text().strip() or None
-        except OSError:
+            return (Path(run) / "starting_head").read_text(encoding="utf-8").strip() or None
+        except (OSError, UnicodeError, ValueError):
             pass
     return None
 
@@ -227,11 +227,12 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
     merged = [item.issue_key for item in store.items()
               if item.forge_state == "closed" and item.merge_state == "merged"]
     landings = {}
+    landing_errors = {}
     if merged and pipeline is not None and callable(getattr(forge, "landings", None)):
         try:
-            landings = forge.landings(pipeline, merged)
-        except (ForgeError, OSError, ValueError, TypeError):
-            pass
+            landings = forge.landings(pipeline, merged, errors=landing_errors)
+        except (ForgeError, OSError, ValueError, TypeError) as exc:
+            landing_errors.update((key, str(exc)) for key in merged)
     for key in merged:
         landed, suite = landings.get(key, (None, None))
         on_main.append((key, landed))
@@ -247,4 +248,4 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
                  asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
                  changed=tuple(changed), unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
                  trees=tuple(tree_rows), tree_names=tuple(names),
-                 tree_claims=tuple(tree_claims), progress=tuple(progress))
+                 tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()))

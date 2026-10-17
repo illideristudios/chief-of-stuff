@@ -286,6 +286,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 record["starting_head"] = (run_dir / "starting_head").read_text().strip()
                 _save_run(store, key, segment.stage, segment.attempt, record)
                 data = _resume(store, key)
+                record = data["runs"][f"{segment.stage}-{segment.attempt}"]
             runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))

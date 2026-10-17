@@ -20,7 +20,6 @@ import limits
 import limits_cli
 import limits_history
 import limits_probe
-import session_logs
 import settings
 import store
 
@@ -112,7 +111,7 @@ class Sources(unittest.TestCase):
         self.write(".claude/projects/work/session.jsonl", [event])
         import mmap
         with patch("limits_probe._now", return_value=NOW), \
-                patch("session_logs.mmap.mmap", wraps=mmap.mmap) as mapped:
+                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
             first = limits_probe.read("claude", "")
             scans = mapped.call_count
             second = limits_probe.read("claude", "")
@@ -124,33 +123,10 @@ class Sources(unittest.TestCase):
             "resetsAt": (NOW + timedelta(hours=2)).timestamp()})
         self.write(".claude/projects/work/session.jsonl", [later])
         with patch("limits_probe._now", return_value=NOW), \
-                patch("session_logs.mmap.mmap", wraps=mmap.mmap) as mapped:
+                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
             third = limits_probe.read("claude", "")
             self.assertEqual(mapped.call_count, 1)
         self.assertEqual(third[0].used, 10)
-
-    def test_limits_and_workers_share_decoded_transcript_records(self):
-        import workers_page
-        tree = Path.home() / "work"
-        import re
-        project = re.sub(r"[^A-Za-z0-9]", "-", str(tree.resolve()))
-        self.write(f".claude/projects/{project}/session.jsonl", [
-            {"type": "assistant", "timestamp": NOW.isoformat(), "message": {
-                "id": "message", "usage": {"input_tokens": 12}}},
-            {"type": "rate_limit_event", "timestamp": NOW.isoformat(), "rate_limit_info": {
-                "rateLimitType": "five_hour", "utilization": .85,
-                "resetsAt": (NOW + timedelta(hours=2)).timestamp()}}])
-        import json
-        with patch("limits_probe._now", return_value=NOW), patch("json.loads", wraps=json.loads) as decoded:
-            self.assertEqual(limits_probe.read("claude", "")[0].used, 85)
-            scans = decoded.call_count
-            self.assertEqual(workers_page.activity(tree), (NOW, 12))
-            self.assertEqual(decoded.call_count, scans)
-        self.write(f".claude/projects/{project}/subagents/agent.jsonl", [
-            {"type": "assistant", "timestamp": NOW.isoformat(), "message": {
-                "id": "subagent", "usage": {"input_tokens": 1000}}}])
-        # Worker activity has always counted its direct session files, not nested subagent logs.
-        self.assertEqual(workers_page.activity(tree), (NOW, 12))
 
     def test_unknown_event_keeps_an_unexpired_numeric_limit(self):
         known = {"type": "rate_limit_event", "timestamp": (NOW - timedelta(minutes=2)).isoformat(),
