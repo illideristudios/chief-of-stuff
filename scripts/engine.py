@@ -291,6 +291,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
+                agent_type = worker.resolved_agent(root, policies, stage, persona)
                 launch_failed = False
 
                 def start():
@@ -315,7 +316,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                 store.add_log(key, message, at)
                             raise HoldReleaseFailed(message) from exc
                     try:
-                        return launch(key, stage, action.attempt, persona)
+                        return launch(key, stage, action.attempt, persona, agent_type=agent_type)
                     except Exception as exc:
                         # slots drops a failed reservation. Keep the actual failed start so its
                         # attempt spends the retry budget, and replace the hold before returning.
@@ -326,12 +327,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
-                                agent_type=persona, runtime="claude")
+                                agent_type=agent_type, runtime="claude")
                 except Exception:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
-                                             runtime="claude", agent_type=persona)
+                                             runtime="claude", agent_type=agent_type)
                     raise
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":

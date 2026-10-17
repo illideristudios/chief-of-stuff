@@ -24,6 +24,7 @@ from model_port import Failure, Request, retry_at
 from shell_setup import teardown
 
 _runners: dict[str, Any] = {}
+_RESOLVE = object()
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -101,17 +102,33 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     store.set_resume(key, data)
 
 
-def _declared_agent(text: str, agent: str) -> str:
-    """Pass the agent type only when the workspace's Agent: lines declare it (§9)."""
-    if not agent:
-        return ""
-    return agent if agent in make_worktree.agent_types(text) else ""
+def declared_agent(text: str, agent: str) -> str | None:
+    """§9: an agent type only when the workspace's Agent: lines declare it. None is the default agent."""
+    if agent and agent in make_worktree.agent_types(text):
+        return agent
+    return None
+
+
+def _named_agent(actor: Any, defaults: Any) -> str:
+    return actor.agent or (defaults.agent if defaults else "") or ""
+
+
+def resolved_agent(root: Path, policies: Any, stage: str, persona: str | None) -> str | None:
+    """The one agent type a launch and its segment record. None is the default agent."""
+    name = persona or policies.stages[stage].persona
+    actor = policies.personas.get(name) if name else None
+    if actor is None:
+        return None
+    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
+    defaults = load_settings(root, settings_path(text)).stages.get(stage)
+    return declared_agent(text, _named_agent(actor, defaults))
 
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
-           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
+           clock: engine_clock.Clock = engine_clock.system,
+           agent_type: Any = _RESOLVE) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -127,7 +144,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     loaded = load_settings(root, settings_path(text))
     defaults = loaded.stages.get(stage)
-    agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
+    # The engine passes the type it already resolved; a direct launch resolves the same way.
+    if agent_type is _RESOLVE:
+        agent_type = declared_agent(text, _named_agent(actor, defaults))
+    agent = agent_type or ""
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:

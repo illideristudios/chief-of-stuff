@@ -105,7 +105,7 @@ class EngineTest(unittest.TestCase):
         limits.start()
         self.addCleanup(limits.stop)
 
-    def launch(self, key, stage, attempt, persona):
+    def launch(self, key, stage, attempt, persona, agent_type=None):
         self.launched.append((key, stage, attempt, persona))
         # A live fake worker must supply the run record the production Launch port now promises.
         data = self.db.resume(key) or {}
@@ -414,10 +414,10 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": stage, "attempt": 1})
         self.assertIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
 
-        def launch(key, launched_stage, attempt, persona):
+        def launch(key, launched_stage, attempt, persona, agent_type=None):
             self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
             self.assertFalse(self.db.items()[0].human_review)
-            return self.launch(key, launched_stage, attempt, persona)
+            return self.launch(key, launched_stage, attempt, persona, agent_type=agent_type)
 
         with mock.patch.object(self.forge.__class__, "write_stage",
                                side_effect=self.forge.write_stage) as write:
