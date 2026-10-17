@@ -471,6 +471,224 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
 
+    def test_pending_decision_waits_at_any_stage_until_answered(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.add_decision(KEY, "conflict", "Diverged branches on #1")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(self.launched, [])
+        self.db.add_decision(KEY, "conflict", "Diverged branches on #1", answer="Keep work/issue-1-implement-1")
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+
+    def test_killed_launcher_reconciles_started_tasks_and_pending_stages_on_restart(self):
+        self.run_pass(max_concurrency=1)
+        self.finish("implement")
+        # Pass 2 plans Review(KEY, 1) (transitioning KEY from implement -> review).
+        # Simulate the launcher being killed mid-pass after starting KEY's review worker, before runs or stage write land.
+        def killed_launch(key, stage, attempt, persona):
+            run = engine.worker._run_dir(self.root, key, stage, attempt)
+            run.mkdir(parents=True, exist_ok=True)
+            tree = self.trees / f"issue-{key.rpartition('#')[2]}-{stage}-{attempt}"
+            tree.mkdir(exist_ok=True)
+            data = self.db.resume(key) or {}
+            data["review_trees"] = {"1": {"tree": str(tree), "branch": "feature/existing", "head": tf.tma.HEAD}}
+            self.db.set_resume(key, data)
+            (run / "started.json").write_text('{"pid": 301, "runner_pid": 302, "session_id": "sess-1"}')
+            raise KeyboardInterrupt("engine killed mid-launch")
+
+        self.launch = killed_launch
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_pass()
+        # Pass 3: engine restarts while KEY's review worker is still live; it adopts the worker and flushes pending_stage.
+        self.launch = mock.Mock(side_effect=AssertionError("started workers must be reconciled, not relaunched"))
+        self.assertEqual(self.run_pass(), [])
+        self.assertEqual(self.forge.writes, [(1, "review", "implement", True)])
+        # Pass 4: KEY's review worker finishes (with no exit.json because its runner died) and advances to Merge.
+        key_run = engine.worker._run_dir(self.root, KEY, "review", 1)
+        (key_run / "stdout").write_text('{"is_error": false, "result": "reviewed"}')
+        (key_run / "stderr").write_text("")
+        self.db.add_report(KEY, "review", 1, "sess-1", "done", "clean review", [])
+        self.findings(attempt=1, counts={})
+        self.now += timedelta(minutes=1)
+        with mock.patch.object(engine.worker.process_status, "identity", return_value=None):
+            actions = self.run_pass()
+        self.assertEqual(actions, [reconcile.Merge(KEY)])
+        self.assertEqual(self.forge.writes, [(1, "review", "implement", True), (1, "merge", "review", True)])
+        self.assertEqual(self.forge.merges, [(10, True, KEY)])
+
+    def test_s1_s4_eval_kill_engine_mid_run_and_hit_fake_quota_resumes_with_no_prompt(self):
+        import json as _json
+        import os as _os
+        import shutil
+        from evals import git_taint as taint, make_repo
+
+        with taint.private_git_views(self.root / "private-views"):
+            shutil.rmtree(self.trees)
+            clone = make_repo.build(self.root, {})
+            self.forge.rows.append(
+                {"issue_key": OTHER, "stage": "implement", "forge_state": "open", "merge_state": "ready"})
+            heads = {KEY: tf.tma.HEAD, OTHER: tf.tma.HEAD}
+            branches = {KEY: "work/issue-1-implement-1", OTHER: "work/issue-2-implement-1"}
+
+            def issue(number):
+                row = next(r for r in self.forge.rows if r["issue_key"].endswith(f"#{number}"))
+                return SimpleNamespace(ok=True, issue=SimpleNamespace(
+                    title=f"Issue {number}", body=f"Implement #{number}",
+                    is_open=row["forge_state"] == "open", labels=[]))
+
+            def closing_request(issue_key):
+                return SimpleNamespace(number=10 if issue_key == KEY else 20, verdict="ready",
+                                       approval="", branch=branches[issue_key], head=heads[issue_key])
+
+            self.forge.issue = issue
+            self.forge.closing_request = closing_request
+            self.forge.protected_branches = lambda: ("main",)
+
+            fake = Path(__file__).parent / "fixtures" / "fake_claude.py"
+            cli = self.root / "fake-claude-cli"
+            cli.write_text(
+                f"#!{sys.executable}\n"
+                "import json, os, subprocess, sys, time, runpy\n"
+                "from pathlib import Path\n"
+                f"sys.path.insert(0, {str((Path(__file__).resolve().parents[1] / 'scripts'))!r})\n"
+                "import store\n"
+                "key = os.environ['CHIEF_ISSUE_KEY']\n"
+                "stage = os.environ['CHIEF_STAGE']\n"
+                "attempt = int(os.environ['CHIEF_ATTEMPT'])\n"
+                "session = os.environ['CHIEF_SESSION_ID']\n"
+                "root = Path(os.environ['CHIEF_ROOT'])\n"
+                "cwd = Path.cwd()\n"
+                "env = {**os.environ, 'GIT_AUTHOR_NAME': 'Worker', 'GIT_AUTHOR_EMAIL': 'w@example.test',\n"
+                "       'GIT_COMMITTER_NAME': 'Worker', 'GIT_COMMITTER_EMAIL': 'w@example.test'}\n"
+                "if key.endswith('#1') and stage == 'implement' and attempt == 1:\n"
+                "    (cwd / 'committed.txt').write_text('from attempt 1\\n')\n"
+                "    subprocess.run(['git', 'add', 'committed.txt'], cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)\n"
+                "    subprocess.run(['git', 'commit', '-m', 'Inherit: attempt 1 (#1)'], cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)\n"
+                "    (cwd / 'partial.txt').write_text('uncommitted before quota\\n')\n"
+                "    deadline = time.monotonic() + 10\n"
+                "    while not (root / 'release-1').exists() and time.monotonic() < deadline:\n"
+                "        time.sleep(0.02)\n"
+                "    idx = sys.argv.index('--') + 1\n"
+                "    sys.argv[idx] = 'QUOTA ' + sys.argv[idx]\n"
+                "    runpy.run_path(" + repr(str(fake.resolve())) + ", run_name='__main__')\n"
+                "if stage == 'implement':\n"
+                "    if key.endswith('#1'):\n"
+                "        assert (cwd / 'committed.txt').read_text() == 'from attempt 1\\n'\n"
+                "        assert (cwd / 'partial.txt').read_text() == 'uncommitted before quota\\n'\n"
+                "    (cwd / f'done-{attempt}.txt').write_text('finished\\n')\n"
+                "    subprocess.run(['git', 'add', '-A'], cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)\n"
+                "    subprocess.run(['git', 'commit', '-m', f'Green: finish {key}'], cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)\n"
+                "    branch = subprocess.run(['git', 'symbolic-ref', '--short', 'HEAD'], cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()\n"
+                "    subprocess.run(['git', 'push', '-u', 'origin', branch], cwd=cwd, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)\n"
+                "db = store.Store(root / 'store.db')\n"
+                "db.add_report(key, stage, attempt, session, 'done', f'{stage} complete', [])\n"
+                "db.engine.dispose()\n"
+                "runpy.run_path(" + repr(str(fake.resolve())) + ", run_name='__main__')\n"
+            )
+            cli.chmod(0o755)
+            self.p = policy.replace(self.p, base=policy.Policy(retry_limit=0))
+
+            real_launch = lambda k, s, a, p: engine.worker.launch(
+                k, s, a, p, store=self.db, root=self.root, trees=self.trees,
+                policies=self.p, forge=self.forge, clone=clone, clock=lambda: self.now)
+
+            self.addCleanup(lambda: (self.root / "release-1").write_text("go\n")
+                            if self.root.exists() else None)
+            with mock.patch.object(engine.worker.claude_adapter, "resolve", return_value=str(cli)), \
+                 mock.patch.object(engine.worker.make_worktree.git_trees, "audit_env",
+                                   side_effect=engine.worker.make_worktree.git_trees.audit_env), \
+                 mock.patch.object(engine.worker.process_status, "identity",
+                                   side_effect=lambda pid, sid, host=False:
+                                   "fake-start" if engine.worker.process_status.process_exists(pid) else None), \
+                 mock.patch.dict(_os.environ, {"SHELL": "/bin/sh"}):
+                engine.worker._runners.clear()
+                self.launch = real_launch
+                # Pass 1: starts real detached workers for #1 and #2.
+                self.assertEqual(self.run_pass(), [
+                    reconcile.Dispatch(KEY, "implement", "builder", 1),
+                    reconcile.Dispatch(OTHER, "implement", "builder", 1),
+                ])
+                for r in list(engine.worker._runners.values()):
+                    self.addCleanup(lambda proc=r: engine.worker.claude_adapter.cancel(proc)
+                                    if hasattr(proc, "wait") and proc.poll() is None else None)
+
+                # Simulate killing the engine mid-run: drop in-memory runners and unsaved run/worktree records.
+                run_1 = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+                run_2 = Path(self.db.resume(OTHER)["runs"]["implement-1"]["run_dir"])
+                runner_1 = engine.worker._runners.pop(str(run_1))
+                runner_2 = engine.worker._runners.pop(str(run_2))
+                runner_2.wait(timeout=5)
+                # Simulate #2's runner dying before writing exit.json and before saving its run record (#99, #375).
+                (run_2 / "exit.json").unlink(missing_ok=True)
+                data_2 = self.db.resume(OTHER)
+                data_2.pop("runs", None)
+                self.db.set_resume(OTHER, data_2)
+                data_1 = self.db.resume(KEY)
+                data_1.pop("runs", None)
+                self.db.set_resume(KEY, data_1)
+                heads[OTHER] = make_repo.git(["rev-parse", "HEAD"], self.trees / "issue-2-implement-1")
+
+                # Pass 2 (restart while #1 is still live, #2 finished with nobody answering):
+                # #1's live worker is adopted without relaunching; #2 is collected and advances to review!
+                self.now += timedelta(minutes=1)
+                with mock.patch.object(engine.worker.claude_adapter, "start",
+                                       wraps=engine.worker.claude_adapter.start) as spy_start:
+                    actions = self.run_pass()
+                self.assertEqual(actions, [reconcile.Review(OTHER, 1)])
+                self.assertEqual(spy_start.call_count, 1)  # only OTHER's review started; KEY was adopted
+
+                # Release #1's attempt 1 to hit fake quota, and wait for it and #2's review 1 to exit.
+                (self.root / "release-1").write_text("go\n")
+                runner_1.wait(timeout=5)
+                for r in list(engine.worker._runners.values()):
+                    r.wait(timeout=5)
+                self.db.set_resume(OTHER, {**(self.db.resume(OTHER) or {}),
+                                           "review_findings": {"attempt": 1, "counts": {}}})
+
+                # Pass 3: #1's quota stop is collected and waits until 5pm with no prompt; #2 merges!
+                self.now += timedelta(minutes=1)
+                actions = self.run_pass()
+                self.assertEqual(actions, [
+                    reconcile.Wait(KEY, "quota reset pending"),
+                    reconcile.Merge(OTHER),
+                ])
+                self.assertEqual(self.db.segments(KEY)[-1].outcome, "quota")
+                self.assertEqual(self.db.decisions(KEY), [])
+                self.assertEqual(self.db.asks(KEY), [])
+                self.assertNotIn("interrupt", self.db.resume(KEY) or {})
+
+                # Simulate orphaned worktree state on disk (worktree/work_branch lost from resume store, #725).
+                resume_1 = self.db.resume(KEY)
+                resume_1.pop("worktree", None)
+                resume_1.pop("work_branch", None)
+                self.db.set_resume(KEY, resume_1)
+
+                # Pass 4: advance clock past 5pm quota reset; #1 recovers orphaned tree/branch/commits and resumes!
+                self.now = NOW + timedelta(hours=17, minutes=1)
+                actions = self.run_pass()
+                self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+                for r in list(engine.worker._runners.values()):
+                    r.wait(timeout=5)
+                tree_1 = self.trees / "issue-1-implement-1"
+                heads[KEY] = make_repo.git(["rev-parse", "HEAD"], tree_1)
+                log_1 = make_repo.git(["log", "--oneline"], tree_1)
+                self.assertIn("Inherit: attempt 1 (#1)", log_1)
+                self.assertIn("Green: finish github:example/project#1", log_1)
+
+                # Pass 5 & 6: #1 collects implement-2, runs review-1, and merges with zero prompts!
+                self.now += timedelta(minutes=1)
+                self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+                for r in list(engine.worker._runners.values()):
+                    r.wait(timeout=5)
+                self.findings(attempt=1, counts={})
+                self.now += timedelta(minutes=1)
+                self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+                self.assertEqual(self.forge.merges, [(20, True, OTHER), (10, True, KEY)])
+                for issue_key in (KEY, OTHER):
+                    self.assertEqual(self.db.decisions(issue_key), [])
+                    self.assertEqual(self.db.asks(issue_key), [])
+                    self.assertNotIn("interrupt", self.db.resume(issue_key) or {})
+
 
 class MainTest(unittest.TestCase):
     def setUp(self):
