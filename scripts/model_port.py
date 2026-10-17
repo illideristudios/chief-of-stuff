@@ -37,14 +37,15 @@ class Reply:
     num_turns: int
 
 
-# missing_program, quota, session_missing, auth and budget each name their cause; error is the model's own failure;
-# unknown is anything the host did not explain, outage included, and is worth a retry.
+# missing_program, clock, quota, session_missing, auth and budget each name their cause; error is the model's own
+# failure; unknown is anything the host did not explain, outage included, and is worth a retry. clock is a worker
+# preflight refusal: the host binary is present and the clock plugin is not usable.
 RETRYABLE = ("quota", "unknown")
 
 
 @dataclass(frozen=True)
 class Failure:
-    kind: str  # missing_program | quota | session_missing | auth | budget | error | unknown
+    kind: str  # missing_program | clock | quota | session_missing | auth | budget | error | unknown
     message: str
 
     @property

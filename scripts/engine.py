@@ -8,7 +8,6 @@ import sys
 import time
 from collections.abc import Callable
 from datetime import datetime
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -70,7 +69,8 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
 
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
-             launch: Launch, clock: engine_clock.Clock = engine_clock.system,
+             launch: Launch, before: Callable[[], None] | None = None,
+             clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
@@ -130,6 +130,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
+                if before is not None:
+                    before()
                 slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                             max_concurrency=max_concurrency, clock=clock,
                             launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
@@ -160,7 +162,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 store.set_resume(key, data)
                 _write_stage(forge, store, key, stage, stages[key])
         except Exception as exc:
-            store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
+            message = f"{type(action).__name__.lower()} failed: {exc}"
+            logged = store.log(key)
+            if not logged or logged[-1].message != message:  # retried every pass; log only a change
+                store.add_log(key, message, at)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions
@@ -198,15 +203,23 @@ def main(argv: list[str] | None = None) -> int:
                 selected = next(iter(config.repos.values()))
             if not selected and config.repos:
                 raise ValueError("no [repos] clone matches the workspace backlog")
-            launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                             clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile)
+            profile = config.workers.claude_as_profile
+            clone = root / selected if selected else root
+
+            def launch(key: str, stage: str, attempt: int, persona: str | None) -> tuple[str, str] | None:
+                return worker.launch(key, stage, attempt, persona, store=db, root=root, trees=trees,
+                                     policies=policies, forge=source, clone=clone,
+                                     claude_as_profile=profile, clock_checked=True)
+
+            def before() -> None:
+                worker.require_clock(profile, str(root))
+
             try:
                 while True:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, before=before, max_concurrency=config.workers.max_concurrency)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)
