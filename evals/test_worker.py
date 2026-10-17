@@ -675,12 +675,17 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
 
     def test_malformed_suite_holds_fail_closed_without_blocking_other_issues(self):
-        bad_holds = [{}, "broken", {"published": True},
-                     {"stage": "implement", "attempt": 99, "published": True},
-                     {"stage": "implement", "attempt": True, "published": True},
-                     {"stage": "implement", "attempt": 1, "published": "yes"}]
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(),
+                               ended_at=NOW.isoformat(), outcome="human_review")
+        invalid_record = "suite hold: invalid suite hold record"
+        missing_segment = "suite hold: suite hold must reference a completed human-review segment"
+        bad_holds = [({}, invalid_record), ("broken", invalid_record),
+                     ({"published": True}, invalid_record),
+                     ({"stage": "implement", "attempt": 99, "published": True}, missing_segment),
+                     ({"stage": "implement", "attempt": True, "published": True}, invalid_record),
+                     ({"stage": "implement", "attempt": 1, "published": "yes"}, invalid_record)]
         other = KEY.rpartition("#")[0] + "#2"
-        for hold in bad_holds:
+        for hold, message in bad_holds:
             with self.subTest(hold=hold):
                 self.db.set_resume(KEY, {"suite_hold": hold})
                 forge = FakeForge()
@@ -692,9 +697,13 @@ class WorkerTest(unittest.TestCase):
                 self.db.drop_segment(other, "implement", 1)
                 self.suite_pass(forge, launch)
                 self.assertTrue(self.db.items()[0].human_review)
+                self.assertEqual(self.db.resume(KEY)["suite_hold"], hold)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
                 self.assertEqual(launch.call_args.args[0], other)
                 forge.add_human_hold.assert_not_called()
-                self.assertTrue(any("suite hold" in entry.message for entry in self.db.log(KEY)))
+                hold_logs = [entry.message for entry in self.db.log(KEY)
+                             if entry.message.startswith("suite hold:")]
+                self.assertEqual(hold_logs[-1], message)
 
     def test_missing_hold_observations_retain_hold_and_original_outcome(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(),

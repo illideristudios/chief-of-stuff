@@ -81,8 +81,11 @@ class ReconcileTest(unittest.TestCase):
             self.assertEqual(decide(Item(), hold, history, observed=observed), "wait")
         self.assertEqual(decide(Item(), {**hold, "published": False}, history, observed=False), "publish")
         self.assertEqual(decide(Item(forge_state="closed"), hold, history, observed=False), "retire")
-        with self.assertRaises(ValueError):
-            decide(Item(), hold, [], observed=False)
+        for invalid_history in ([], [Segment("implement", ended_at=None, outcome="human_review")],
+                                [Segment("implement", outcome="done")]):
+            with self.subTest(history=invalid_history):
+                with self.assertRaisesRegex(ValueError, "completed human-review segment"):
+                    decide(Item(), hold, invalid_history, observed=False)
 
     def plan(self, item=Item(), history=(), findings=None, slots=4, **kwargs):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
