@@ -221,6 +221,54 @@ class CleanupTest(unittest.TestCase):
             self.run_cleanup("--remove")
         self.assertEqual(stop.call_count, 2)
 
+    def test_tree_recreated_after_the_outer_attempt_check_gets_its_own_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "teardown", return_value=[]), \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def recreate(trees):
+            with real_lock(trees):
+                make_repo.git(["worktree", "remove", str(tree)], self.clone)
+                make_repo.git(["worktree", "add", str(tree), "done"], self.clone)
+                yield
+
+        with mock.patch.object(cleanup, "trees_lock", recreate), \
+                mock.patch.object(cleanup, "containers", return_value=[]), \
+                mock.patch.object(shell_setup, "teardown", return_value=[]) as stop:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        stop.assert_called_once()
+        self.assertFalse(tree.exists())
+
+    def test_an_attempt_recorded_by_another_pass_still_checks_owners_after_mounts(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        real_lock = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def another_pass(trees):
+            with real_lock(trees):
+                layout = cleanup.git_view.locate(tree)
+                self.store.claim_teardown(str(tree), cleanup.teardown_identity(layout, "stack-stop"))
+                yield
+
+        def reopen():
+            self.finish("done", state="open")
+            return []
+
+        with mock.patch.object(cleanup, "trees_lock", another_pass), \
+                mock.patch.object(cleanup, "containers", side_effect=reopen), \
+                mock.patch.object(shell_setup, "teardown") as stop:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        stop.assert_not_called()
+        self.assertEqual(self.kept(out)["done"], f"keep done — {KEY}-done is not finished")
+        self.assertTrue(tree.is_dir())
+
     def test_each_new_teardown_warning_is_logged_while_unchanged_guard_refusals_are_deduplicated(self) -> None:
         self.configure_teardown()
         tree = self.trees / "done"
