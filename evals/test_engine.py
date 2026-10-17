@@ -1238,6 +1238,7 @@ class EngineTest(unittest.TestCase):
         self.assertIsNone(self.db.decisions(KEY)[-1].answer)
         self.p.stages["implement"] = policy.Place("implement", "builder", {
             "zach_gates": ("plan",), "approvals": (policy.Approval("plan", NOW + timedelta(days=1)),)})
+        self.now += timedelta(minutes=1)
         self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
         self.finish("review")
         self.findings()
