@@ -50,7 +50,7 @@ class WorkerTeardownTest(unittest.TestCase):
         return shlex.join([sys.executable, str(script)])
 
     def launch(self, status="done", codes=(0,)):
-        def worker(*args):
+        def worker(*args, **kwargs):
             if status:
                 (self.tree / one_shot.RESULT).write_text(f"status: {status}\nreason: checked\nchanges: none\n")
             return next(exits)
@@ -169,15 +169,6 @@ class WorkerTeardownTest(unittest.TestCase):
         self.assertTrue(any("teardown failed" in log.message for log in fx.db.log(engine_fixtures.KEY)))
 
 
-
-
-
-
-
-
-
-
-
     def test_teardown_warning_does_not_modify_a_reassigned_task(self):
         one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)", "codex", "", "10:00")
         self.fx.tracker.write_text(self.fx.tracker.read_text().replace("worker01 | running", "other | running"))
@@ -218,7 +209,6 @@ class WorkerTeardownTest(unittest.TestCase):
         self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), f"{os.getpid()} Security audit\n")
 
 
-
     def test_shell_startup_banner_does_not_corrupt_discovery_stdout(self):
         (self.root / ".zshrc").write_text("echo startup-banner\necho loaded > startup-marker\n")
         with mock.patch.object(shell_setup, "clean_env", return_value={**shell_setup.clean_env(), "ZDOTDIR": str(self.root)}), \
@@ -249,7 +239,6 @@ class WorkerTeardownTest(unittest.TestCase):
             shell_setup.run_command(shlex.join([sys.executable, "-c", script]), self.tree,
                                     workspace=self.root, timeout=0.1)
         self.assertLess(time.monotonic() - started, 1.5)
-
 
 
     def test_worker_pid_restoration_tolerates_removed_metadata_and_symlinks(self):
@@ -318,8 +307,6 @@ class WorkerTeardownTest(unittest.TestCase):
         result = shell_setup.run_command(shlex.join([sys.executable, "-c", script]), self.tree,
                                          workspace=self.root, timeout=0.5)
         self.assertEqual(result.returncode, 0)
-
-
 
 
     def test_worker_start_failure_and_disappeared_process_preserve_exit_code(self):
@@ -416,13 +403,6 @@ class WorkerTeardownTest(unittest.TestCase):
         self.assertEqual(pidfile.read_text(), "999999999 Other task\n")
 
 
-
-
-
-
-
-
-
     def test_unverified_engine_start_tears_the_stack_down(self):
         fx = engine_fixtures.WorkerTest("runTest")
         fx.setUp()
@@ -464,3 +444,87 @@ class WorkerTeardownTest(unittest.TestCase):
                            teardown=mock.Mock(side_effect=RuntimeError("interrupted cleanup")))
         self.assertEqual(pidfile.read_text(), "999999999 Security audit\n")
         self.assertEqual(len(one_shot.adopt(self.root, day="2026-09-18")), 1)
+
+    def test_interrupted_cleanup_after_spawn_failure_keeps_recovery_evidence(self):
+        fake = self.fx._fake(None, write_partial=False)
+        real_popen = subprocess.Popen
+        def popen(argv, *args, **kwargs):
+            if argv and argv[0] == "git":
+                return real_popen(argv, *args, **kwargs)
+            raise OSError("cannot spawn")
+        with mock.patch.object(one_shot.subprocess, "Popen", side_effect=popen), \
+             mock.patch.object(shell_setup, "teardown", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.fx._run(fake)
+        self.assertTrue((self.tree / one_shot.PIDFILE).exists())
+        self.assertIn("| worker01 | running", self.fx.tracker.read_text())
+        # The failed launcher has now exited; a restart can discover and reconcile it.
+        with mock.patch.object(one_shot, "process_exists", return_value=False):
+            self.assertEqual(len(one_shot.adopt(self.root, day="2026-09-18")), 1)
+
+    def test_interruption_after_reconciliation_releases_launch_and_adoption_markers(self):
+        original = one_shot.reconcile
+        def interrupted(*args, **kwargs):
+            original(*args, **kwargs)
+            raise KeyboardInterrupt
+        child = mock.Mock(pid=123, returncode=0)
+        child.wait.return_value = child.poll.return_value = 0
+        real_popen = subprocess.Popen
+        def popen(argv, *args, **kwargs):
+            return real_popen(argv, *args, **kwargs) if argv[0] == "git" else child
+        with mock.patch.object(one_shot, "reconcile", side_effect=interrupted), \
+             mock.patch.object(one_shot.subprocess, "Popen", side_effect=popen):
+            with self.assertRaises(KeyboardInterrupt):
+                self.fx._run(self.fx._fake(None, write_partial=False))
+        self.assertFalse((self.tree / one_shot.PIDFILE).exists())
+        self.fx.tracker.write_text(fixtures.TRACKER)
+        one_shot.launcher_copy(self.root, self.tree).unlink(missing_ok=True)
+        one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)", "codex", "", "10:00")
+        (self.tree / one_shot.PIDFILE).write_text("999999999 Security audit\n")
+        with mock.patch.object(one_shot, "reconcile", side_effect=interrupted):
+            with self.assertRaises(KeyboardInterrupt):
+                one_shot.adopt(self.root, day="2026-09-18")
+        self.assertFalse((self.tree / one_shot.PIDFILE).exists())
+        with one_shot.slot(self.tree.parent, self.tree, "Another task", None):
+            pass
+
+    def test_nested_cwd_uses_the_configured_worktrees_lock_for_pid_updates(self):
+        nested = self.tree / "nested"
+        nested.mkdir()
+        locks = []
+        original = one_shot.trees_lock
+        def lock(path):
+            locks.append(path)
+            return original(path)
+        with mock.patch.object(one_shot, "trees_lock", side_effect=lock), \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.fx._run(self.fx._fake(None, write_partial=False), tree=nested)
+        self.assertGreaterEqual(len(locks), 4)
+        self.assertEqual(set(locks), {self.tree.parent})
+
+    def test_adoption_retries_do_not_repeat_cleanup_warnings_or_issue_comments(self):
+        (self.root / "CLAUDE.md").write_text((self.root / "CLAUDE.md").read_text() +
+            "- Backlog: GitHub issues; repo https://github.com/team/repo (private)\n")
+        self.fx.tracker.write_text(
+            "## Tasks\n| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Security audit | Security audit | unassigned | open | 09:00 | | M | build | implement | #7 | Inspect |\n"
+            "\n## File ownership\n| context | paths |\n|---|---|\n| Security audit | `src/a/` |\n\n## Log\n")
+        one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)", "codex", "", "10:00")
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        pidfile.write_text("999999999 Security audit\n")
+        original = one_shot.update_tracker
+        calls = 0
+        def update(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise OSError("tracker busy")
+            return original(*args, **kwargs)
+        with mock.patch.object(one_shot, "update_tracker", side_effect=update), \
+             mock.patch.object(one_shot.backlog, "comment", return_value=mock.Mock(done=True)) as comment:
+            for _ in range(3):
+                self.assertEqual(len(one_shot.adopt(self.root, day="2026-09-18", teardown=lambda *a: ["teardown: failed"])), 1)
+        self.assertEqual(comment.call_count, 1)
+        self.assertEqual(self.fx.tracker.read_text().count("teardown failed:"), 1)
