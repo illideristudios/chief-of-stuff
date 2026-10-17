@@ -96,6 +96,13 @@ class Resume(Base):
     data: Mapped[Any] = mapped_column(JSON)
 
 
+class CleanupTeardown(Base):
+    """One attempt identity per tree, independent of owners' engine resume state."""
+    __tablename__ = "cleanup_teardown"
+    tree: Mapped[str] = mapped_column(String, primary_key=True)
+    identity: Mapped[list[Any]] = mapped_column(JSON)
+
+
 class WorkerRecord:
     """Launch identity on every worker record; records never update another run's row."""
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -295,6 +302,22 @@ class Store:
 
     def log(self, issue_key: str) -> list[LogEntry]:
         return self._all(select(LogEntry).where(LogEntry.issue_key == issue_key).order_by(LogEntry.id))
+
+    # cleanup attempts (shared by all owners of a tree)
+    def teardown_attempt(self, tree: str) -> list[Any] | None:
+        with self.session() as s:
+            row = s.get(CleanupTeardown, tree)
+            return row.identity if row else None
+
+    def claim_teardown(self, tree: str, identity: list[Any]) -> bool:
+        """Atomically record a new attempt before execution; False means it was already recorded."""
+        with self.session() as s:
+            row = s.get(CleanupTeardown, tree)
+            if row is not None and row.identity == identity:
+                return False
+            stmt = insert(CleanupTeardown).values(tree=tree, identity=identity)
+            s.execute(stmt.on_conflict_do_update(index_elements=("tree",), set_={"identity": identity}))
+        return True
 
     # resume
     def set_resume(self, issue_key: str, data: Any) -> None:
