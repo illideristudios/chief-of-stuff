@@ -250,18 +250,25 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
             mount_guard_checked = True
         if not kept and remove:
             removal_started, tree_removed = False, False
-            ran_teardown, owners_checked = False, False
+            ran_teardown = False
             try:
                 with trees_lock(trees):  # workers register under this lock: re-check, then delete, holding it
                     layout, kept = layout_guards(tree, common)
                     kept += claims(root, trees, tree)
                     if layout is not None and layout.tree is not None:
                         kept += git_guards(tree, common)
+                    if not kept and teardown_command:
+                        try:
+                            # Another cleanup may have recorded an attempt, or the tree may have been recreated,
+                            # while this pass waited for the launch lock. The locked identity owns the decision.
+                            needs_teardown = db.teardown_attempt(str(tree)) != teardown_identity(layout, teardown_command)
+                        except SQLAlchemyError as exc:
+                            failed = True
+                            kept.append(f"store teardown attempt cannot be checked ({type(exc).__name__})")
                     if not kept and needs_teardown:
                         try:
                             items, owners_kept = owner_guards(tree, owned_items(root, db))
                             kept += owners_kept
-                            owners_checked = True
                         except SQLAlchemyError as exc:
                             failed = True
                             kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
@@ -296,13 +303,12 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
                         if not kept or ran_teardown:
                             kept += mount_guards(tree, containers())
                             mount_guard_checked = True
-                            if ran_teardown or not owners_checked:
-                                try:
-                                    items, owners_kept = owner_guards(tree, owned_items(root, db))
-                                    kept += owners_kept
-                                except SQLAlchemyError as exc:
-                                    failed = True
-                                    kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
+                            try:
+                                items, owners_kept = owner_guards(tree, owned_items(root, db))
+                                kept += owners_kept
+                            except SQLAlchemyError as exc:
+                                failed = True
+                                kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
                     if not kept:
                         removal_started = True
                         shutil.rmtree(tree)
