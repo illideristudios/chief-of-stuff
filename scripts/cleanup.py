@@ -15,7 +15,8 @@ verified:
 - nothing on it is unpushed or unmerged (`tree_state.at_risk`).
 
 Removal runs the configured workspace teardown under the launch lock before checking mounts. Its warnings are
-reported and logged; all guards are checked again after it runs. Preview never runs teardown.
+reported and logged; all guards are checked again after it runs. The store remembers each tree's teardown attempt
+across passes; a new tree or changed command permits another attempt. Preview never runs teardown.
 
 A guard that cannot be verified keeps the tree. Worker-written repositories are read only through git_view, and a tree
 is removed by deleting it and then its admin dir, so no git command runs on its config. Engine code only: the model and
@@ -206,9 +207,8 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
     commons = trusted_commons([root / path for path in settings.repos.values()])
     owned = owned_items(root, db)
     teardown_command = settings.workers.teardown if remove else ""
-    # A mounted stack is what teardown is meant to stop. In removal mode with teardown configured, defer the
-    # mount query until after teardown, while every other guard must pass before any command can run.
-    mounts = [] if teardown_command else containers()
+    # Cache the outer mount query for refused trees. Only a teardown candidate defers its mount guard.
+    mounts_checked, mounts = False, None
     failed = False
     for tree in discover(root, trees_dir):
         common = commons.get(tree)
@@ -218,12 +218,15 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
         items, owners_kept = owner_guards(tree, owned)
         kept += owners_kept
         kept += claims(root, trees, tree)
-        if mounts is None:
-            kept.append("containers cannot be checked")
-        elif any(inside(mount.resolve(), tree) for mount in mounts):
-            kept.append("a container binds a path in it")
         if layout is not None and layout.tree is not None:
             kept += git_guards(tree, common)
+        if kept or not teardown_command:
+            if not mounts_checked:
+                mounts, mounts_checked = containers(), True
+            if mounts is None:
+                kept.append("containers cannot be checked")
+            elif any(inside(mount.resolve(), tree) for mount in mounts):
+                kept.append("a container binds a path in it")
         if not kept and remove:
             removal_started, tree_removed = False, False
             try:
@@ -239,25 +242,53 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
                         except SQLAlchemyError as exc:
                             failed = True
                             kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
-                        if not kept:
-                            warnings = shell_setup.teardown(root, tree, tree.name, teardown_command)
-                            # A workspace command may change files, metadata or claims. Its success never
-                            # substitutes for a guard, nor does a warning prevent an otherwise safe removal.
-                            layout, kept = layout_guards(tree, common)
-                            kept += claims(root, trees, tree)
-                            if layout is not None and layout.tree is not None:
-                                kept += git_guards(tree, common)
-                    current_mounts = containers()
-                    if current_mounts is None:
-                        kept.append("containers cannot be checked")
-                    elif any(inside(mount.resolve(), tree) for mount in current_mounts):
-                        kept.append("a container binds a path in it")
-                    try:
-                        items, owners_kept = owner_guards(tree, owned_items(root, db))
-                        kept += owners_kept
-                    except SQLAlchemyError as exc:
-                        failed = True
-                        kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
+                    if not kept:
+                        if teardown_command:
+                            # The backlink's identity changes when a worktree is recreated at the same path.
+                            # Record before running: even a timeout or interrupted pass must not retry forever.
+                            backlink = (layout.gitdir / "gitdir").stat()
+                            attempt = [str(layout.gitdir), backlink.st_dev, backlink.st_ino,
+                                       backlink.st_mtime_ns, teardown_command]
+                            try:
+                                states = [(item.issue_key, db.resume(item.issue_key) or {}) for item in items]
+                                attempted = any(state.get("cleanup_teardowns", {}).get(str(tree)) == attempt
+                                                for _, state in states)
+                                if not attempted:
+                                    for key, state in states:
+                                        state.setdefault("cleanup_teardowns", {})[str(tree)] = attempt
+                                        db.set_resume(key, state)
+                            except SQLAlchemyError as exc:
+                                failed = True
+                                kept.append(f"store teardown attempt cannot be checked ({type(exc).__name__})")
+                            if not kept and not attempted:
+                                before_teardown = layout
+                                warnings = shell_setup.teardown(root, tree, tree.name, teardown_command)
+                                layout, kept = layout_guards(tree, common)
+                                if (layout is None or layout.tree is None or layout.gitdir == layout.common
+                                        or layout.gitdir != before_teardown.gitdir):
+                                    failed = True
+                                    kept.append("teardown removed or replaced linked-worktree metadata")
+                                    partial.append("teardown removed or replaced the linked worktree")
+                                    if tree.exists():
+                                        partial.append(f"tree remains ({tree})")
+                                    if before_teardown.gitdir.exists():
+                                        partial.append(f"admin dir remains ({before_teardown.gitdir})")
+                                # A workspace command may change files, metadata or claims. Its success never
+                                # substitutes for a guard, nor does a warning prevent an otherwise safe removal.
+                                kept += claims(root, trees, tree)
+                                if layout is not None and layout.tree is not None:
+                                    kept += git_guards(tree, common)
+                        current_mounts = containers()
+                        if current_mounts is None:
+                            kept.append("containers cannot be checked")
+                        elif any(inside(mount.resolve(), tree) for mount in current_mounts):
+                            kept.append("a container binds a path in it")
+                        try:
+                            items, owners_kept = owner_guards(tree, owned_items(root, db))
+                            kept += owners_kept
+                        except SQLAlchemyError as exc:
+                            failed = True
+                            kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
                     if not kept:
                         removal_started = True
                         shutil.rmtree(tree)
@@ -283,13 +314,15 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
                     # Only an unchanged keep repeats each pass; every removal is its own event.
                     last = next((entry.message for entry in reversed(db.log(item.issue_key))
                                  if entry.message.startswith(("keep ", "removed ", "partially removed "))), None)
-                    if not (line.startswith("keep ") and last == line):
+                    if not (line.startswith("keep ") and last is not None
+                            and last.split("; teardown:", 1)[0] == line.split("; teardown:", 1)[0]):
                         db.add_log(item.issue_key, line, at)
                 except SQLAlchemyError as exc:
                     failed = True
                     print(f"cannot log cleanup result for {item.issue_key} ({type(exc).__name__})", file=sys.stderr)
     if not remove:
-        print("preview: nothing removed; --remove removes the trees marked remove")
+        print("preview: nothing removed; --remove removes the trees marked remove; "
+              "--remove runs teardown before rechecking mounts when configured")
     return 1 if failed else 0
 
 

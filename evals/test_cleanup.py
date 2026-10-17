@@ -178,7 +178,8 @@ class CleanupTest(unittest.TestCase):
     def test_successful_teardown_does_not_bypass_a_remaining_or_unreadable_mount(self) -> None:
         self.configure_teardown()
         tree = self.trees / "done"
-        for mounts in ([tree / "data"], None):
+        for number, mounts in enumerate(([tree / "data"], None)):
+            (self.root / "settings.toml").write_text(f'[workers]\nteardown = "stack-stop {number}"\n')
             with self.subTest(mounts=mounts), \
                     mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
                     mock.patch.object(cleanup, "containers", return_value=mounts):
