@@ -305,13 +305,13 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
           decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object], facts: Facts | None = None) -> Action | None:
     key = item.issue_key
-    if item.forge_state == "closed":
-        return None
     running = _running_segment(history)
     if running is not None:
         if facts is None:
             return None
         return _abandoned(item, running, facts) or _stalled(item, running, facts, now)
+    if item.forge_state == "closed":
+        return None
     workflow = policies.workflow_for(issue_type)
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}

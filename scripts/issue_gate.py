@@ -26,11 +26,14 @@ class Started:
     setup: str = ""       # the setup offered with a refusal
 
 
-def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None = None, commit: bool = False) -> Started:
+def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None = None, commit: bool = False,
+          ask_id: int | None = None, answer: str = "") -> Started:
     """`forge` is None when the workspace has no `Backlog:` line. With no `issue`, one is filed first; a supplied one must exist on
     the forge and be open. The row takes the forge's title and follows the issue; nothing is written unless `commit`."""
     if forge is None:
         return Started(refused="no `Backlog:` line, so no issue can be filed and no work starts", setup=SETUP)
+    if ask_id is not None and (issue is None or ask_id <= 0 or not answer.strip()):
+        return Started(refused="answering an ask requires an existing --issue, a positive --answer-ask and a nonempty --answer")
     if issue is None:
         made = forge.create_issue(title, body=body, commit=commit)
         if made.error or (made.done and not made.iid):
@@ -47,8 +50,14 @@ def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None 
         title = found.issue.title
         body = found.issue.body
         if not commit:
-            return Started(preview=f"would start: {forge.key(issue)} {title}")
+            return Started(preview=f"would answer ask {ask_id} on {forge.key(issue)}: {answer}" if ask_id is not None
+                           else f"would start: {forge.key(issue)} {title}")
     key = forge.key(issue)
+    if ask_id is not None:
+        try:
+            store.answer_ask(key, ask_id, answer)
+        except (KeyError, ValueError) as exc:
+            return Started(refused=str(exc))
     store.upsert_item(key, title=title)
     store.replace_file_ownership(key, ownership.issue_scopes(body))
     return Started(issue_key=key)

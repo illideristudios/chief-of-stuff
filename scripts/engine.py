@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import cleanup
+import completion
 import clock as engine_clock
 import dispatch_prompt
 import engine_facts
@@ -31,6 +32,7 @@ import store_access
 import supervisor
 import worker
 from forge_port import ForgeError
+from orphans import Claim
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
@@ -190,6 +192,30 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
                 store.add_log(key, message, at)
 
 
+def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any,
+                   outcome: str, reason: str, now: datetime) -> None:
+    """Adapter classification precedes completion judgement; a forge hold must precede closure."""
+    key = segment.issue_key
+    facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now)
+    verdict = completion.abandoned(
+        False, report=outcome, read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
+        on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
+        tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
+        tree_claims=(Claim(key, False, "worker exited"),),
+        tree_unreadable=dict(facts.changed).get(key) is None)
+    held = verdict.human_review or reason.startswith("unreadable worker run:")
+    if held:
+        if getattr(forge, "kanban", None) is not None:
+            error = forge.add_human_hold(int(key.rpartition("#")[2]))
+            if error:
+                raise ForgeError(error)
+        store.upsert_item(key, human_review=True)
+        reason = verdict.reason if verdict.human_review else reason
+    store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
+    store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" +
+                  (f": {reason}" if reason else ""), now.isoformat())
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "") -> list[reconcile.Action]:
@@ -199,7 +225,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     _record_limits(workers)
-    worker.collect(store, root, clock, trees, require_green=require_green, teardown_command=teardown_command)
+
     snapshots = list(forge.snapshots())
     scopes = {}
     for row in snapshots:
@@ -224,6 +250,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
+
+    worker.collect(store, root, clock, trees, finish=partial(_finish_worker, forge, store, root, trees),
+                   require_green=require_green, teardown_command=teardown_command)
 
     now = clock()
     at = now.isoformat()

@@ -8,6 +8,7 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 import claude_adapter
 import clock as engine_clock
@@ -239,7 +240,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False) -> None:
+            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False, finish: Callable | None = None) -> None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     for segment in store.segments():
         if segment.ended_at is not None:
@@ -331,6 +332,9 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = reports[-1].outcome, reports[-1].summary
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
+        if finish is not None:
+            finish(segment, outcome, reason, now)
+            continue
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),
                       now.isoformat())

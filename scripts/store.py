@@ -79,7 +79,7 @@ class Ownership(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"))
     path: Mapped[str] = mapped_column(String)
-    mode: Mapped[str] = mapped_column(String, default="write")  # "write" or "read"
+    mode: Mapped[str] = mapped_column(String, default="write")  # "write", "read", or engine-owned "tree"
 
 
 class LogEntry(Base):
@@ -371,6 +371,15 @@ class Store:
 
     def asks(self, issue_key: str) -> list[Ask]:
         return self._all(select(Ask).where(Ask.issue_key == issue_key).order_by(Ask.id))
+
+    def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
+        """An operator's answer is bound to the named issue; worker tools never expose this write."""
+        if not answer.strip():
+            raise ValueError("an ask answer must not be empty")
+        with self.session() as s:
+            if not s.execute(update(Ask).where(Ask.issue_key == issue_key, Ask.id == ask_id)
+                             .values(answer=answer)).rowcount:
+                raise KeyError(f"ask {ask_id} does not belong to {issue_key}")
 
     def _all(self, stmt: Any) -> list[Any]:
         with self.session() as s:

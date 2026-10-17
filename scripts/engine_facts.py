@@ -57,6 +57,8 @@ def _alive(record: dict | None) -> bool | None:
         if (type(runner) is int and runner > 0 and isinstance(runner_identity, str) and runner_identity
                 and process_status.identity(runner, session) == runner_identity):
             return True
+        if isinstance(run_dir, str) and run_dir and (Path(run_dir) / "exit.json").exists():
+            return None  # an exit published during the probes still belongs to worker.collect
         return False
     except (OSError, RuntimeError):
         return None
@@ -128,7 +130,7 @@ def _in_trees(root: Path, trees: Path, path: str) -> bool:
 
 
 def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) -> Facts:
-    """Plain fact records for `reconcile.plan`. A tree is read only when `git_trees.discover` listed it."""
+    """Plain facts for the planner. Unlisted recorded trees contribute unknown evidence, never clean evidence."""
     if now.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
     claims: list[readiness.Claim] = []
@@ -150,16 +152,24 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
     names: list[tuple[str, str]] = []
     tree_claims: list[tuple[str, tuple]] = []
     progress: list[tuple[str, datetime | None]] = []
+    suite_on_main: list[tuple[str, bool | None]] = []
+    pipeline = None
+    try:
+        if callable(getattr(forge, "branch_head", None)):
+            pipeline = forge.branch_head("main")
+    except (ForgeError, OSError, ValueError, TypeError):
+        pass  # unknown CI never certifies completion
     seen: set[str] = set()
     try:
         known = {path.resolve() for path in git_trees.discover(root, _trees_dir(root, trees))}
     except OSError:
         known = set()
+    latest = {}
     for segment in store.segments():
-        if segment.ended_at is not None:
-            continue
+        latest[segment.issue_key] = segment
+    for segment in latest.values():
         record = _record(store, segment.issue_key, segment.stage, segment.attempt)
-        flag = _alive(record)
+        flag = _alive(record) if segment.ended_at is None else False
         if flag is not None:
             alive.append(((segment.issue_key, segment.stage, segment.attempt), flag))
         raw = record.get("tree") if record else None
@@ -168,10 +178,10 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
             outside = tree is None or tree.resolve() not in known
         except OSError:
             outside = True
-        if outside or segment.issue_key in seen:
+        if segment.issue_key in seen:
             continue
         seen.add(segment.issue_key)
-        state, landed, stamp = _tree_facts(tree)
+        state, landed, stamp = (None, None, None) if outside else _tree_facts(tree)
         if state is not None:
             tree_rows.append((segment.issue_key, state))
             names.append((segment.issue_key, tree.name))
@@ -180,14 +190,23 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
         changed.append((segment.issue_key, _changed(state)))
         if landed is not None:
             on_main.append((segment.issue_key, landed))
-        if stamp is None or isinstance(stamp, datetime):
-            progress.append((segment.issue_key, stamp))
+        # Unknown progress is no evidence of progress; the bounded silence rule must still run.
+        progress.append((segment.issue_key, stamp if isinstance(stamp, datetime) else None))
+        suite = None
+        if not outside and pipeline is not None and isinstance(pipeline.sha, str) and pipeline.sha:
+            code = git_trees.git(["merge-base", "--is-ancestor", "HEAD", pipeline.sha], tree)[0]
+            if code == 0:
+                suite = pipeline.status == "passed"
+        suite_on_main.append((segment.issue_key, suite))
     # Read after liveness: a report written before a worker's exit is seen with it. By id: Store orders by attempt.
     for item in store.items():
+        segment = latest.get(item.issue_key)
         reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt)
-                       for row in sorted(store.reports(item.issue_key), key=lambda row: row.id))
+                       for row in sorted(store.reports(item.issue_key), key=lambda row: row.id)
+                       if segment is None or (row.stage, row.attempt) == (segment.stage, segment.attempt))
     blockers, why = _blockers(forge)
     return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
                  asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
-                 changed=tuple(changed), on_main=tuple(on_main), trees=tuple(tree_rows), tree_names=tuple(names),
+                 changed=tuple(changed), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
+                 trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress))

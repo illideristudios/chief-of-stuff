@@ -70,7 +70,22 @@ def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
         if numbers is None:
             raise ForgeError(f"blockers of #{item['number']} are incomplete")
         if numbers:
-            out[forge.key(item["number"])] = tuple(forge.key(number) for number in numbers)
+            raw = item["blockedBy"]
+            nodes = raw["nodes"] if isinstance(raw, dict) else raw
+            keys = []
+            for node in nodes:
+                if str(node.get("state", "OPEN")).upper() == "CLOSED":
+                    continue
+                repo = node.get("repository", {}).get("nameWithOwner")
+                url = node.get("url")
+                if url:
+                    ref = backlog.issue_ref(url, forge.home)
+                    if ref is None:
+                        raise ForgeError("a blocker has an unreadable issue URL")
+                    keys.append(f"github:{ref.repo}#{ref.number}")
+                else:
+                    keys.append(f"github:{repo}#{node['number']}" if repo else forge.key(node["number"]))
+            out[forge.key(item["number"])] = tuple(keys)
     return out
 
 
@@ -89,15 +104,18 @@ def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
             raise ForgeError(error or f"links of #{issue.iid} are not a list")
         if (headers.get("x-next-page") or "").strip():
             raise ForgeError(f"links of #{issue.iid} span more than one page")
-        numbers = []
+        keys = []
         for link in body:
             if not isinstance(link, dict) or link.get("link_type") != "is_blocked_by" or link.get("state") != "opened":
                 continue
             if type(link.get("iid")) is not int:
                 raise ForgeError(f"a link of #{issue.iid} has no iid")
-            numbers.append(link["iid"])
-        if numbers:
-            out[forge.key(issue.iid)] = tuple(forge.key(number) for number in numbers)
+            ref = backlog.issue_ref(link.get("web_url", ""), forge.home)
+            if ref is None:
+                raise ForgeError(f"a blocker of #{issue.iid} has no readable project URL")
+            keys.append(f"gitlab:{ref.host}/{ref.repo}#{ref.number}")
+        if keys:
+            out[forge.key(issue.iid)] = tuple(keys)
     return out
 
 
