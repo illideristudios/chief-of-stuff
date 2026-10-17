@@ -1,0 +1,1616 @@
+{
+  "version": 1,
+  "parser_sha256": {
+    "issue_gate.py": "d72319ed4fd4b41af4ff1d23618718d0885ec8833d3327168da6528b3448ce2f",
+    "ownership.py": "2d5a847d696655ffaa8f157f439ef3aaa9864d221687c61d990152aebc2424e9",
+    "md.py": "03e66e687a026c03164d5c14cbb1e87bc1ad61d5b55e0071e74b7d3ba6654bf0"
+  },
+  "workspaces": [
+    {
+      "repo": "illideristudios/chief-of-stuff",
+      "code_sha256": "50d5a544aab91b28e9c525f3727891f4e2bf42f26c6383bda8edd74a07481db5",
+      "issues": [
+        {
+          "number": 75,
+          "original": "042e455121b2c2d694d71a915b42709fdac055357f761b5b0b5b1bb76f7592f3",
+          "section": "## File ownership\n- read: `scripts/backlog.py`\n",
+          "scopes": [
+            [
+              "scripts/backlog.py",
+              "read"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "899a150c3c304ad4dd4636cc3c485ea502eac6a979a0a01704d45526517f133c"
+        },
+        {
+          "number": 92,
+          "original": "733e2427af1e29e0fdf2205882f36f13cb0304115576c18ad798419bb7466590",
+          "section": "## File ownership\n- write: `evals/test_kanban.py`\n- write: `scripts/kanban.py`\n",
+          "scopes": [
+            [
+              "evals/test_kanban.py",
+              "write"
+            ],
+            [
+              "scripts/kanban.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "c5156e0036e9d38b30f327deb3bc1daf71ed18ee8848413ac70a52ef3bfe8d34"
+        },
+        {
+          "number": 143,
+          "original": "7ba8f127f7984e779582bdf425f0728f85aeec78e8f73fa83ec0d3b881e35a80",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 173,
+          "original": "e5b5d5a5c6f5d6c9fec24e15b6419a3271fb212cc346ca8ff6d0ea68b90aa950",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 203,
+          "original": "b98a349efb01327bd5e34214404528f79d9d5738349e53e4d44ab4c8ccd61b8c",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 207,
+          "original": "d41357f5772b5e91a6ca8fa79826bad889ee5086df25ace66ff49b7ac6e7283a",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 208,
+          "original": "3e8f429783899dedda9bda0aeb023058d925690351ade65af8fcf1a492eaf4d3",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 210,
+          "original": "51f61128505eb8e32fa7fdf75b1e28abb8623344c1f591300cf6980faa1b44b9",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 224,
+          "original": "ec703f16298730ff48e4d276b144d9a1151273d3bddae5af3be8ea87fce2506f",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 231,
+          "original": "7f559d946447fd307bcd5487f118bc3d02d8491fc7f4712135a8a77c0d4b8bc6",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 235,
+          "original": "db903eeb62989cd8897e32d9920669f507b6c7b304e4accf859b1c4ce00d8f6a",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 236,
+          "original": "2830715ac327807cf6d4fd4a81ff965428e33414f8484d573e254a82c9cfa7cb",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 237,
+          "original": "bdd2451e151b4c9181fcabec6f99686ca01ef0f4138c2b35907e530de274f9d9",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 238,
+          "original": "828b81557669689b92a6e2e284913712c8f2b60425709f27ced278b557ca09a3",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 239,
+          "original": "78444590067440e1296805bd1a95aebd5b19d70a3473405a1badccd488591424",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 262,
+          "original": "6d4e91a11c5ea206db42f07424282c0744a4788919c1aabb71c7209f0856939e",
+          "section": "## File ownership\n- read: `agents/chief-of-stuff.md`\n- write: `start_coordinator.py`\n",
+          "scopes": [
+            [
+              "agents/chief-of-stuff.md",
+              "read"
+            ],
+            [
+              "start_coordinator.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "8dbedf778f76e88c1662b6dc0734135b17deb1635c396fa030645700c6af9229"
+        },
+        {
+          "number": 288,
+          "original": "9e06529100c0b9df3ca80c1ccd738798ede00ae02050a86fc326460c4d75b48a",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 290,
+          "original": "a20d148cb619a9e01e4b232d67a25528ad10a9041fe2b22788d9c6c31d94b4f2",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 313,
+          "original": "c5e1195fde8d904577e128cf9a62270f031d7f2c6c1cd1228778a811f13bd10c",
+          "section": "## File ownership\n- write: `evals/run.py`\n",
+          "scopes": [
+            [
+              "evals/run.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "064ca1ac434408af400d87cd8b96c4f6cc6a195e4a356010f5aff575d90c21b0"
+        },
+        {
+          "number": 317,
+          "original": "21d75e676546179836618bd179552dd9d608ce852870552020b554d9619d085e",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "ambiguous or missing named file/symbol: src/b/x.py; ambiguous or missing named file/symbol: x.py"
+        },
+        {
+          "number": 319,
+          "original": "a21c396aa9aa48d6c83e6df2a371f6b3e5e79ad0cffba1ba8bf6ba8298ecf200",
+          "section": "## File ownership\n- read: `scripts/one_shot.py`\n- read: `scripts/reconcile.py`\n",
+          "scopes": [
+            [
+              "scripts/one_shot.py",
+              "read"
+            ],
+            [
+              "scripts/reconcile.py",
+              "read"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "723717a70dcd82aea63693d72f740e72804f9b46c7bd4a06a6afbe8bcf254953"
+        },
+        {
+          "number": 324,
+          "original": "43885f0bffe30653be3f6c67febe70072318efcd5e28ea3e5556dc89cae60746",
+          "section": "## File ownership\n- write: `evals/test_findings.py`\n- write: `scripts/findings.py`\n",
+          "scopes": [
+            [
+              "evals/test_findings.py",
+              "write"
+            ],
+            [
+              "scripts/findings.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "4f048a2c3367e90e4ac50289c86a6a53c82a848c2027a30852ed516ac220f00c"
+        },
+        {
+          "number": 325,
+          "original": "df01e37c2caafd1a27f0b5269d8ddb777ab7c2c13779c007c456b5a58c3732c5",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 371,
+          "original": "a74c5a3e018b5d7c1df2b84afbee34a04fe2cd55667efd2024a10ff54b8d2793",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 372,
+          "original": "a73177c47400ba350185f9b86d350f31da5e8c34df7d90b95b038fa6a1db2842",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 373,
+          "original": "e172fe6c7cf6d4e88130724ed690225354938e24a318511d5eaa5d9bd94b3dce",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 378,
+          "original": "a9b64e47a983ae93b3a708cdd80625d96e4a041a208638f2c7ea65a1bac4a650",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 381,
+          "original": "51544935b14a60a3fccebf62e9659b740a8036f59657808a841e7c0d324f6444",
+          "section": "## File ownership\n- write: `evals/test_ownership.py`\n- write: `scripts/ownership.py`\n",
+          "scopes": [
+            [
+              "evals/test_ownership.py",
+              "write"
+            ],
+            [
+              "scripts/ownership.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "98b043c54966ffb806656faa87a5f514d95fb14bf1c2126f306959e3cc08999f"
+        },
+        {
+          "number": 385,
+          "original": "55eabbe905a72604e90b9941a27c17fd588865e92bd15e13e68086346a284fa2",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "ambiguous or missing named file/symbol: Flow.dc.html"
+        },
+        {
+          "number": 410,
+          "original": "16264b41a444915f720e499edb4617c04c4a20c069f562b5ec8dc309bc2ccaaa",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 412,
+          "original": "4e782734ef095376758e466103b7a89dd1bf6350bdbe49c6a4c4cdf106751292",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 416,
+          "original": "07e410b982b0d4dc62a22a3ba964cf4fc6448dba1ed192b74b3af387b9c6a862",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 418,
+          "original": "9e535517d4eb0f87135279f180d3c81dc3d6c5c916ad6bbd4c63ac0ffae63675",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 532,
+          "original": "68cc9e68dd4f79c8fdbd27d3a21562e527f2c006d7987e68215ce61b3f35b4ad",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 581,
+          "original": "a8cb2404ce62d7aa23c461d600ca66570c2857c643a88de9fc3a4e9cfa25d1e2",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "ambiguous or missing named file/symbol: evals/bench_concurrency.py"
+        },
+        {
+          "number": 582,
+          "original": "8247b68699786c39bcc475b0abb6df852bf3c857652ad6bb1bdd6bc1641c4aa0",
+          "section": "## File ownership\n- write: `architecture/ARCHITECTURE.md`\n- write: `chief_of_stuff.py`\n- write: `evals/test_board_sources.py`\n- write: `evals/test_flow.py`\n- write: `evals/test_inbox.py`\n- write: `evals/test_make_worktree.py`\n- write: `evals/test_notify.py`\n- write: `evals/test_notify_service.py`\n- write: `evals/test_one_shot.py`\n- write: `evals/test_pages.py`\n- write: `evals/test_tracker_write.py`\n- write: `scripts/board_sources.py`\n- write: `scripts/flow.py`\n- write: `scripts/inbox.py`\n- write: `scripts/make_worktree.py`\n- write: `scripts/notify.py`\n- write: `scripts/notify_service.py`\n- write: `scripts/one_shot.py`\n- write: `scripts/pages.py`\n- write: `scripts/tracker_write.py`\n- write: `scripts/workspace.py`\n",
+          "scopes": [
+            [
+              "architecture/ARCHITECTURE.md",
+              "write"
+            ],
+            [
+              "chief_of_stuff.py",
+              "write"
+            ],
+            [
+              "evals/test_board_sources.py",
+              "write"
+            ],
+            [
+              "evals/test_flow.py",
+              "write"
+            ],
+            [
+              "evals/test_inbox.py",
+              "write"
+            ],
+            [
+              "evals/test_make_worktree.py",
+              "write"
+            ],
+            [
+              "evals/test_notify.py",
+              "write"
+            ],
+            [
+              "evals/test_notify_service.py",
+              "write"
+            ],
+            [
+              "evals/test_one_shot.py",
+              "write"
+            ],
+            [
+              "evals/test_pages.py",
+              "write"
+            ],
+            [
+              "evals/test_tracker_write.py",
+              "write"
+            ],
+            [
+              "scripts/board_sources.py",
+              "write"
+            ],
+            [
+              "scripts/flow.py",
+              "write"
+            ],
+            [
+              "scripts/inbox.py",
+              "write"
+            ],
+            [
+              "scripts/make_worktree.py",
+              "write"
+            ],
+            [
+              "scripts/notify.py",
+              "write"
+            ],
+            [
+              "scripts/notify_service.py",
+              "write"
+            ],
+            [
+              "scripts/one_shot.py",
+              "write"
+            ],
+            [
+              "scripts/pages.py",
+              "write"
+            ],
+            [
+              "scripts/tracker_write.py",
+              "write"
+            ],
+            [
+              "scripts/workspace.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "91ae167d214dfbea1b17a7302c4afbb7908b72a3e777b73315aca98f78bf7414"
+        },
+        {
+          "number": 636,
+          "original": "e09d57d9c2a7186ff4098ab174663ff33db4cfcd39bb2bc6cdf344d74f3bb9a9",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 637,
+          "original": "47e5957a0fa3227128a12d20b483918bb71723b3964e98102f8e480365dcde7c",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 638,
+          "original": "2ff7568aa38d6f51767618f9625139f9874174ad7849bece3b59d067939f1e7f",
+          "section": "## File ownership\n- write: `assets/policy.toml`\n- read: `docs/specs/2026-10-09-chief-of-stuff-1.0-plan.md`\n",
+          "scopes": [
+            [
+              "assets/policy.toml",
+              "write"
+            ],
+            [
+              "docs/specs/2026-10-09-chief-of-stuff-1.0-plan.md",
+              "read"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "e51176d92b2d197be9628ddf533ca2ed5a3b610e7624519fd85ccecb41719255"
+        },
+        {
+          "number": 639,
+          "original": "a3a36986db12ba7c923419c27066659b0317412e25cf828c3bbd362085687759",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 640,
+          "original": "0ce05506322418045665d8d5025a088a20f0fadc5373d57cefc0b00e9488d7ea",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 641,
+          "original": "b500f34a06c47d6ddf9e9a0225f7204a478ceccfc2062b5d213779877e944844",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 642,
+          "original": "a221b095f41cbcf2374e902e3d0fef063b7e01f7ad9447187a5a48aea787e037",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 643,
+          "original": "fc9f7bb6ca2e18127dc2a3bb6652f14642585e91fcacd72fba83854032118d17",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 644,
+          "original": "a0d46a570f169f1d7d2c8beebd27020941fdad66d4bd70512bc9ad7d2bac526e",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 645,
+          "original": "3ddd9887221ca28cc073e11e492673f1b92b4934c30d0684e6017b37d01c436b",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 646,
+          "original": "ad98cb00c94d57a79b4008ba64c9d628ac83a37917cde77166f8e3773fe81ed6",
+          "section": "## File ownership\n- write: `CLAUDE.md`\n- write: `architecture/compliance.md`\n- read: `docs/specs/2026-10-09-chief-of-stuff-1.0-plan.md`\n",
+          "scopes": [
+            [
+              "CLAUDE.md",
+              "write"
+            ],
+            [
+              "architecture/compliance.md",
+              "write"
+            ],
+            [
+              "docs/specs/2026-10-09-chief-of-stuff-1.0-plan.md",
+              "read"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "81dd8cac2bd0d37ba89aaedad2566f794ce36e9cd239d37473bec793f94ca201"
+        },
+        {
+          "number": 647,
+          "original": "b8aad8a10c958349514e269c4b3103920a1dbe505529b157d75257672577986c",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 648,
+          "original": "18d519539c368f05b1badec30976da887974bf72698d43d4d9145b1bcc3b4be0",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 662,
+          "original": "9591fb9d06c8d9c565a7ac3428bb518344199a5c06951d1bb7501ab3d6f55146",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 684,
+          "original": "cd89f3d364e15d90ceb4a20dd919f129fae6794f8a87e3f4e509ad8c88851f14",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "ambiguous or missing named file/symbol: scripts/page_kit.py"
+        },
+        {
+          "number": 685,
+          "original": "c9bbcf8e7c27017ed027881178a1d324d653082601f45f79738b48f0808d6523",
+          "section": "## File ownership\n- read: `CLAUDE.md`\n- read: `architecture`\n- write: `evals/test_architecture.py`\n- write: `evals/test_audit_tasks.py`\n- write: `evals/test_backlog.py`\n- write: `evals/test_board_sources.py`\n- write: `evals/test_forge.py`\n- write: `evals/test_git_trees.py`\n- write: `evals/test_git_view.py`\n- write: `scripts/audit_tasks.py`\n- write: `scripts/backlog.py`\n- write: `scripts/board_sources.py`\n- write: `scripts/forge.py`\n- write: `scripts/git_trees.py`\n- write: `scripts/git_view.py`\n- write: `scripts/task_forge.py`\n",
+          "scopes": [
+            [
+              "CLAUDE.md",
+              "read"
+            ],
+            [
+              "architecture",
+              "read"
+            ],
+            [
+              "evals/test_architecture.py",
+              "write"
+            ],
+            [
+              "evals/test_audit_tasks.py",
+              "write"
+            ],
+            [
+              "evals/test_backlog.py",
+              "write"
+            ],
+            [
+              "evals/test_board_sources.py",
+              "write"
+            ],
+            [
+              "evals/test_forge.py",
+              "write"
+            ],
+            [
+              "evals/test_git_trees.py",
+              "write"
+            ],
+            [
+              "evals/test_git_view.py",
+              "write"
+            ],
+            [
+              "scripts/audit_tasks.py",
+              "write"
+            ],
+            [
+              "scripts/backlog.py",
+              "write"
+            ],
+            [
+              "scripts/board_sources.py",
+              "write"
+            ],
+            [
+              "scripts/forge.py",
+              "write"
+            ],
+            [
+              "scripts/git_trees.py",
+              "write"
+            ],
+            [
+              "scripts/git_view.py",
+              "write"
+            ],
+            [
+              "scripts/task_forge.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "74b74ae188d2db3cfbb950e0731b1b45cd0a386a649e26b84b41060b6202ac21"
+        },
+        {
+          "number": 686,
+          "original": "5a44cfddafc230700dcf7b1a30954dc98ca2d3e88e44e8eee29fb7774f545197",
+          "section": "## File ownership\n- read: `CLAUDE.md`\n- read: `architecture`\n- write: `evals/test_audit_tasks.py`\n- write: `evals/test_inbox.py`\n- write: `scripts/audit_tasks.py`\n- write: `scripts/inbox.py`\n",
+          "scopes": [
+            [
+              "CLAUDE.md",
+              "read"
+            ],
+            [
+              "architecture",
+              "read"
+            ],
+            [
+              "evals/test_audit_tasks.py",
+              "write"
+            ],
+            [
+              "evals/test_inbox.py",
+              "write"
+            ],
+            [
+              "scripts/audit_tasks.py",
+              "write"
+            ],
+            [
+              "scripts/inbox.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "2e020ae4c5ea66189aa814ba2641e743c13630efcbca98a02d7072e82b889ef5"
+        },
+        {
+          "number": 687,
+          "original": "1d98d8956c490009d7f68e9a2c02f0c100f1fa5ca0e91e53ce64158449529e9c",
+          "section": "## File ownership\n- read: `CLAUDE.md`\n- read: `architecture`\n- write: `evals/test_flow.py`\n- write: `scripts/flow.py`\n",
+          "scopes": [
+            [
+              "CLAUDE.md",
+              "read"
+            ],
+            [
+              "architecture",
+              "read"
+            ],
+            [
+              "evals/test_flow.py",
+              "write"
+            ],
+            [
+              "scripts/flow.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "812ca31e547eac4b267cdb14357453cb614d26820065da5c0efaa34257c29c3a"
+        },
+        {
+          "number": 688,
+          "original": "f00a2733afc9ae9475f49ff3c96c747e153de090b2ca599739239cfd2d68fae3",
+          "section": "## File ownership\n- read: `CLAUDE.md`\n- read: `architecture`\n- write: `evals/test_flow.py`\n- write: `evals/test_issue_page.py`\n- write: `evals/test_performance.py`\n- write: `evals/test_tracker_log.py`\n- write: `scripts/flow.py`\n- write: `scripts/issue_page.py`\n- write: `scripts/performance.py`\n- write: `scripts/performance_report.py`\n- write: `scripts/tracker_log.py`\n",
+          "scopes": [
+            [
+              "CLAUDE.md",
+              "read"
+            ],
+            [
+              "architecture",
+              "read"
+            ],
+            [
+              "evals/test_flow.py",
+              "write"
+            ],
+            [
+              "evals/test_issue_page.py",
+              "write"
+            ],
+            [
+              "evals/test_performance.py",
+              "write"
+            ],
+            [
+              "evals/test_tracker_log.py",
+              "write"
+            ],
+            [
+              "scripts/flow.py",
+              "write"
+            ],
+            [
+              "scripts/issue_page.py",
+              "write"
+            ],
+            [
+              "scripts/performance.py",
+              "write"
+            ],
+            [
+              "scripts/performance_report.py",
+              "write"
+            ],
+            [
+              "scripts/tracker_log.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "b1e1ab20745d8c4a5595b0917abc52c62476b612f0a86b97b9162505625ea029"
+        },
+        {
+          "number": 689,
+          "original": "29b0fb69f41f2b40530586eb97d93eb145be054e621ad7e8f0767745588e14e2",
+          "section": "## File ownership\n- read: `CLAUDE.md`\n- read: `architecture`\n- write: `evals/test_trio_gate.py`\n- write: `scripts/model_port.py`\n- write: `scripts/trio_gate.py`\n",
+          "scopes": [
+            [
+              "CLAUDE.md",
+              "read"
+            ],
+            [
+              "architecture",
+              "read"
+            ],
+            [
+              "evals/test_trio_gate.py",
+              "write"
+            ],
+            [
+              "scripts/model_port.py",
+              "write"
+            ],
+            [
+              "scripts/trio_gate.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "8eedda079134c430009e395e188fc70d82624c90c701fb02c769b46194ac76a8"
+        },
+        {
+          "number": 690,
+          "original": "17052082e8ac9538643982951fbd8574fd1d7d0f87f738811d970de7894c51ca",
+          "section": "## File ownership\n- read: `CLAUDE.md`\n- read: `architecture`\n- write: `evals/test_architecture.py`\n- write: `evals/test_board_sources.py`\n- write: `evals/test_decision_page.py`\n- write: `evals/test_dispatch_prompt.py`\n- write: `evals/test_git_trees.py`\n- write: `evals/test_kanban.py`\n- write: `evals/test_merge_approved.py`\n- write: `evals/test_merge_ready.py`\n- write: `evals/test_module_graph.py`\n- write: `evals/test_notify_service.py`\n- write: `evals/test_one_shot.py`\n- write: `evals/test_review_threads.py`\n- write: `evals/test_tree_claims.py`\n- write: `scripts/backlog_ref.py`\n- write: `scripts/board_sources.py`\n- write: `scripts/decision_page.py`\n- write: `scripts/dispatch_prompt.py`\n- write: `scripts/estimate.py`\n- write: `scripts/git_trees.py`\n- write: `scripts/kanban.py`\n- write: `scripts/merge_approved.py`\n- write: `scripts/merge_ready.py`\n- write: `scripts/module_graph.py`\n- write: `scripts/notify_service.py`\n- write: `scripts/one_shot.py`\n- write: `scripts/one_shot_report.py`\n- write: `scripts/review_threads.py`\n- write: `scripts/task_forge.py`\n- write: `scripts/tracker.py`\n- write: `scripts/tree_claims.py`\n- write: `scripts/workspace.py`\n",
+          "scopes": [
+            [
+              "CLAUDE.md",
+              "read"
+            ],
+            [
+              "architecture",
+              "read"
+            ],
+            [
+              "evals/test_architecture.py",
+              "write"
+            ],
+            [
+              "evals/test_board_sources.py",
+              "write"
+            ],
+            [
+              "evals/test_decision_page.py",
+              "write"
+            ],
+            [
+              "evals/test_dispatch_prompt.py",
+              "write"
+            ],
+            [
+              "evals/test_git_trees.py",
+              "write"
+            ],
+            [
+              "evals/test_kanban.py",
+              "write"
+            ],
+            [
+              "evals/test_merge_approved.py",
+              "write"
+            ],
+            [
+              "evals/test_merge_ready.py",
+              "write"
+            ],
+            [
+              "evals/test_module_graph.py",
+              "write"
+            ],
+            [
+              "evals/test_notify_service.py",
+              "write"
+            ],
+            [
+              "evals/test_one_shot.py",
+              "write"
+            ],
+            [
+              "evals/test_review_threads.py",
+              "write"
+            ],
+            [
+              "evals/test_tree_claims.py",
+              "write"
+            ],
+            [
+              "scripts/backlog_ref.py",
+              "write"
+            ],
+            [
+              "scripts/board_sources.py",
+              "write"
+            ],
+            [
+              "scripts/decision_page.py",
+              "write"
+            ],
+            [
+              "scripts/dispatch_prompt.py",
+              "write"
+            ],
+            [
+              "scripts/estimate.py",
+              "write"
+            ],
+            [
+              "scripts/git_trees.py",
+              "write"
+            ],
+            [
+              "scripts/kanban.py",
+              "write"
+            ],
+            [
+              "scripts/merge_approved.py",
+              "write"
+            ],
+            [
+              "scripts/merge_ready.py",
+              "write"
+            ],
+            [
+              "scripts/module_graph.py",
+              "write"
+            ],
+            [
+              "scripts/notify_service.py",
+              "write"
+            ],
+            [
+              "scripts/one_shot.py",
+              "write"
+            ],
+            [
+              "scripts/one_shot_report.py",
+              "write"
+            ],
+            [
+              "scripts/review_threads.py",
+              "write"
+            ],
+            [
+              "scripts/task_forge.py",
+              "write"
+            ],
+            [
+              "scripts/tracker.py",
+              "write"
+            ],
+            [
+              "scripts/tree_claims.py",
+              "write"
+            ],
+            [
+              "scripts/workspace.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "fddd7098bbc9a7d6561061f09a35a20835496e3b4ad8d1caf77842eedfbb5603"
+        },
+        {
+          "number": 700,
+          "original": "478964c9b4af722500c0fd4c5f09c8db037a5775539d9353eea50e22d7db7152",
+          "section": "## File ownership\n- write: `evals/test_runtimes.py`\n- write: `scripts/runtimes.py`\n- write: `start_coordinator.py`\n",
+          "scopes": [
+            [
+              "evals/test_runtimes.py",
+              "write"
+            ],
+            [
+              "scripts/runtimes.py",
+              "write"
+            ],
+            [
+              "start_coordinator.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "e221969f861296d822745d8f2723bc52ccde97916607e399482383538980278d"
+        },
+        {
+          "number": 701,
+          "original": "a1f12987f7ba6eede5fb024a3a58e76211439aad0799ce80f58fb96dc097effd",
+          "section": "## File ownership\n- write: `evals/test_settings.py`\n- write: `scripts/install_model_guidance.py`\n- write: `scripts/settings.py`\n",
+          "scopes": [
+            [
+              "evals/test_settings.py",
+              "write"
+            ],
+            [
+              "scripts/install_model_guidance.py",
+              "write"
+            ],
+            [
+              "scripts/settings.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "e78a02e1e1af102bb5613ee6f3e53809a3948568a7611a71695fd56b23e051f1"
+        },
+        {
+          "number": 702,
+          "original": "8d571a2a769b83ff3e281fa758ac2f1abe13b9157849d93bd37050fc8f878092",
+          "section": "## File ownership\n- write: `evals/run.py`\n- write: `evals/test_runtime_backends.py`\n",
+          "scopes": [
+            [
+              "evals/run.py",
+              "write"
+            ],
+            [
+              "evals/test_runtime_backends.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "b949fda97ef306872dfc02e2bf09311c5cd5ab83c3ad99a81695ed348f2b7f1e"
+        },
+        {
+          "number": 703,
+          "original": "98e06ca69afa8583e2f2f85ed235122c78af11affbbab5478534f79d4b3bdb04",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 704,
+          "original": "4d172e14b4444b5e47e31e11430874fc9fc765c5de90fe9589e3d83542624e0b",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 705,
+          "original": "b72f86998540e465b51f76b83eaab5c8857c6399d554de14f2f4ba9a26b3a13a",
+          "section": "## File ownership\n- read: `agents/chief-of-stuff.md`\n- write: `evals/mock_calendar.py`\n- write: `evals/test_clock.py`\n- write: `evals/test_mock_calendar.py`\n- write: `scripts/clock.py`\n",
+          "scopes": [
+            [
+              "agents/chief-of-stuff.md",
+              "read"
+            ],
+            [
+              "evals/mock_calendar.py",
+              "write"
+            ],
+            [
+              "evals/test_clock.py",
+              "write"
+            ],
+            [
+              "evals/test_mock_calendar.py",
+              "write"
+            ],
+            [
+              "scripts/clock.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "8e10cc0abdb33781e6068a72c42fa1b427819aaf24e0ef3be2058d9590d80a43"
+        },
+        {
+          "number": 706,
+          "original": "7c942da1d23f54a02561aba078797d68f7a491d53da347e85ccac3028441ba32",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 717,
+          "original": "99d27c10579143df26bd6e51ca650ce37f3837a5ac24cd879b1e0eef74735b89",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 728,
+          "original": "2f0c0621e752175b33e6d15b2ed77ba87f4b9a7f5036145b6e49d4fbf754d997",
+          "section": "## File ownership\n- write: `evals/test_cleanup.py`\n- write: `evals/test_shell_setup.py`\n- write: `scripts/cleanup.py`\n- write: `scripts/shell_setup.py`\n",
+          "scopes": [
+            [
+              "evals/test_cleanup.py",
+              "write"
+            ],
+            [
+              "evals/test_shell_setup.py",
+              "write"
+            ],
+            [
+              "scripts/cleanup.py",
+              "write"
+            ],
+            [
+              "scripts/shell_setup.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "8a98214a508510918cc33284c930c8846f7a7b8b5c3aeed8a7044723ca90fce7"
+        },
+        {
+          "number": 757,
+          "original": "423f61ff53955cf57a3ec12418ea51f2148df669b95daa1fb322e8851d99f0a1",
+          "section": "## File ownership\n- write: `evals/test_session_logs.py`\n- write: `scripts/limits_probe.py`\n- write: `scripts/session_logs.py`\n",
+          "scopes": [
+            [
+              "evals/test_session_logs.py",
+              "write"
+            ],
+            [
+              "scripts/limits_probe.py",
+              "write"
+            ],
+            [
+              "scripts/session_logs.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "891038c1e1536989153a46634f1bc4c369e3db2321213a9156289cd28a55afa9"
+        },
+        {
+          "number": 764,
+          "original": "6e8b9e980e7e9bf5e60afaf62bd823adfad5bd0646b2d0eaed2d8138fb502b5d",
+          "section": "## File ownership\n- write: `evals/run.py`\n",
+          "scopes": [
+            [
+              "evals/run.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "8f34431bccf57676eb4de80a49bbbe6987efca3c76a6e37b797e634ed2c874ad"
+        },
+        {
+          "number": 767,
+          "original": "d89cc86ee5b62d4639279c1cab0de33dd835e52ba20a2fee13242387ad50efc4",
+          "section": "## File ownership\n- read: `README.md`\n- read: `architecture/compliance.md`\n- write: `evals/test_engine.py`\n- write: `evals/test_reconcile.py`\n- write: `evals/test_session_logs.py`\n- write: `evals/test_settings.py`\n- write: `evals/test_worker.py`\n- write: `scripts/engine.py`\n- write: `scripts/limits_history.py`\n- write: `scripts/limits_probe.py`\n- write: `scripts/reconcile.py`\n- write: `scripts/session_logs.py`\n- write: `scripts/settings.py`\n- write: `scripts/worker.py`\n",
+          "scopes": [
+            [
+              "README.md",
+              "read"
+            ],
+            [
+              "architecture/compliance.md",
+              "read"
+            ],
+            [
+              "evals/test_engine.py",
+              "write"
+            ],
+            [
+              "evals/test_reconcile.py",
+              "write"
+            ],
+            [
+              "evals/test_session_logs.py",
+              "write"
+            ],
+            [
+              "evals/test_settings.py",
+              "write"
+            ],
+            [
+              "evals/test_worker.py",
+              "write"
+            ],
+            [
+              "scripts/engine.py",
+              "write"
+            ],
+            [
+              "scripts/limits_history.py",
+              "write"
+            ],
+            [
+              "scripts/limits_probe.py",
+              "write"
+            ],
+            [
+              "scripts/reconcile.py",
+              "write"
+            ],
+            [
+              "scripts/session_logs.py",
+              "write"
+            ],
+            [
+              "scripts/settings.py",
+              "write"
+            ],
+            [
+              "scripts/worker.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "f1d832da6f2af1e62131621adabd5fc6c72347133bcbd7671d3c973ad8fa49e6"
+        },
+        {
+          "number": 768,
+          "original": "0d4e7157c67dd16e2325af2ab3ae6631216f86861a2a06f880735fc845f1ccf4",
+          "section": "## File ownership\n- write: `evals/test_supervisor.py`\n- write: `scripts/supervisor.py`\n",
+          "scopes": [
+            [
+              "evals/test_supervisor.py",
+              "write"
+            ],
+            [
+              "scripts/supervisor.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "e3eba20c0d1875f0d0a7488096f5cef6ccdee08f9a70a58941c38739826ce58d"
+        },
+        {
+          "number": 770,
+          "original": "7a77bf052f639a3b8a309ce665d91529d93f5219fcb388dda683499061c82a95",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 772,
+          "original": "aaf0399483deb5684ed9eeed2b331f66c2bc68f3f7ae4bed87dd59405d9509e1",
+          "section": "## File ownership\n- write: `evals/test_engine_facts.py`\n- write: `evals/test_forge.py`\n- write: `scripts/engine_facts.py`\n- write: `scripts/forge.py`\n",
+          "scopes": [
+            [
+              "evals/test_engine_facts.py",
+              "write"
+            ],
+            [
+              "evals/test_forge.py",
+              "write"
+            ],
+            [
+              "scripts/engine_facts.py",
+              "write"
+            ],
+            [
+              "scripts/forge.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "b710bd6bf672c50012b2a24dd302dfaceb99637b17e4d7ab8a9dab46f4293cde"
+        },
+        {
+          "number": 774,
+          "original": "9a681fca9f5358a9536d58da65d8c6ffa79babb02b254f4e10c1c227b6f55705",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "ambiguous or missing named file/symbol: started.json"
+        },
+        {
+          "number": 775,
+          "original": "97ec70e134c2e078a48d6c3da5c605a37c843b492fc0104d2ea6d9a02ab4e520",
+          "section": "## File ownership\n- write: `evals/test_engine.py`\n- write: `scripts/engine.py`\n",
+          "scopes": [
+            [
+              "evals/test_engine.py",
+              "write"
+            ],
+            [
+              "scripts/engine.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "6fae16c8dae94d974b11973e20d6aeabf6c90ac0978f597012555c6e6838c933"
+        },
+        {
+          "number": 778,
+          "original": "ff27e1e58200cf051975b12ea089ca7dccd2998a3c03cf378aa7825fd0f6a9ff",
+          "section": "## File ownership\n- write: `.github/ISSUE_TEMPLATE/bug.yml`\n- write: `.github/ISSUE_TEMPLATE/task.yml`\n- write: `evals/test_engine.py`\n- write: `evals/test_issue_gate.py`\n- write: `evals/test_ownership.py`\n- write: `evals/test_readiness.py`\n- write: `scripts/engine.py`\n- write: `scripts/issue_gate.py`\n- write: `scripts/ownership.py`\n- write: `scripts/readiness.py`\n",
+          "scopes": [
+            [
+              ".github/ISSUE_TEMPLATE/bug.yml",
+              "write"
+            ],
+            [
+              ".github/ISSUE_TEMPLATE/task.yml",
+              "write"
+            ],
+            [
+              "evals/test_engine.py",
+              "write"
+            ],
+            [
+              "evals/test_issue_gate.py",
+              "write"
+            ],
+            [
+              "evals/test_ownership.py",
+              "write"
+            ],
+            [
+              "evals/test_readiness.py",
+              "write"
+            ],
+            [
+              "scripts/engine.py",
+              "write"
+            ],
+            [
+              "scripts/issue_gate.py",
+              "write"
+            ],
+            [
+              "scripts/ownership.py",
+              "write"
+            ],
+            [
+              "scripts/readiness.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "2534e002eed7ff29154b3944a6b9adb3464ce4d3f225595d1e149d04b3eb9b3d"
+        },
+        {
+          "number": 783,
+          "original": "e34107ca35755c8d2ec606a6f0477c1e4973bcba0d4a669eb74c79dbe2797754",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        },
+        {
+          "number": 793,
+          "original": "e58f0a28d29c893ccaad7dfe0deeb255405d9ef258dfd927ec679aa146aa2b57",
+          "section": "## File ownership\n- write: `evals/test_engine_facts.py`\n- write: `scripts/engine_facts.py`\n",
+          "scopes": [
+            [
+              "evals/test_engine_facts.py",
+              "write"
+            ],
+            [
+              "scripts/engine_facts.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "78194936cbb99b0280e88ccb6df926858dd8e7e1387df168e1976e3f02487ef8"
+        },
+        {
+          "number": 794,
+          "original": "8c26dc7d30a6dad85eb2449e37136e3f8a92cdc1973cf5de249155829559f6a2",
+          "section": "## File ownership\n- write: `evals/test_worker.py`\n- write: `scripts/worker.py`\n",
+          "scopes": [
+            [
+              "evals/test_worker.py",
+              "write"
+            ],
+            [
+              "scripts/worker.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "6c90f167ab2110a172de7e85f791cf995b82c2df7daf0ffea69ca16044eb41c2"
+        },
+        {
+          "number": 795,
+          "original": "34886d3f6c14ba53c6c7c2caf133814ee2f6e8fd24c1c74b741bc8ad5ff3cd39",
+          "section": "## File ownership\n- write: `evals/test_worker.py`\n- write: `scripts/worker.py`\n",
+          "scopes": [
+            [
+              "evals/test_worker.py",
+              "write"
+            ],
+            [
+              "scripts/worker.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "4b337f5ec518fb4bab579a1f6a67b8a615bad896c5cb85069ec3120f87eab49a"
+        },
+        {
+          "number": 796,
+          "original": "d6f31a3cb5fadccffda9e8d3468ae15816519f64049e2331e451d5c11e6eac0f",
+          "section": "## File ownership\n- write: `evals/test_engine.py`\n- write: `scripts/engine.py`\n",
+          "scopes": [
+            [
+              "evals/test_engine.py",
+              "write"
+            ],
+            [
+              "scripts/engine.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "d67eca10f868909e0f8f363e33a52ee6498c1a52d12730ac51ed237fd7986fc9"
+        },
+        {
+          "number": 797,
+          "original": "b7dc084dead055969cfe388d8cac8e28dffb2b3d8b892de5d8d182fb34b05a84",
+          "section": "## File ownership\n- write: `scripts/claude_adapter.py`\n",
+          "scopes": [
+            [
+              "scripts/claude_adapter.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "3b4875808697eb9ef6416904b601a12fc94eac8d0521e9cb4bed1db113e086cf"
+        },
+        {
+          "number": 798,
+          "original": "edd0901dd61b9261f404d7d2ef59784085ab26ccae880a8a72bda09f4d3f9c69",
+          "section": "## File ownership\n- write: `evals/test_shell_setup.py`\n- write: `scripts/shell_setup.py`\n",
+          "scopes": [
+            [
+              "evals/test_shell_setup.py",
+              "write"
+            ],
+            [
+              "scripts/shell_setup.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "17df7fff75bf306341a397fdde8608f573b88021c778db9b9fe7d2026ae1fa6a"
+        },
+        {
+          "number": 799,
+          "original": "3ea7f242107623fd34720fc5579fb69a543c81c10e6336c66c705c2560503bdd",
+          "section": "## File ownership\n- write: `evals/test_kanban.py`\n- write: `scripts/kanban.py`\n",
+          "scopes": [
+            [
+              "evals/test_kanban.py",
+              "write"
+            ],
+            [
+              "scripts/kanban.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "20b2189b41f633238831f3000d340f87ed1c2d7d0fce5e7eef9999c6382b7209"
+        },
+        {
+          "number": 800,
+          "original": "aea2fd2988846b8fb4a101fd5041241be9d8ae4546263c708cc306d1ba5ce64c",
+          "section": "## File ownership\n- write: `evals/test_shell_setup.py`\n- write: `scripts/shell_setup.py`\n",
+          "scopes": [
+            [
+              "evals/test_shell_setup.py",
+              "write"
+            ],
+            [
+              "scripts/shell_setup.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "7c6508942c967f5943bcfe80f4cb00b78d0bf16804a9db4fafdc21eeaf7ad472"
+        },
+        {
+          "number": 805,
+          "original": "6953a8eb661a21e6c266ecfb9a38aa2711d8ca834b8ee21c6dbfd1e9ead49d02",
+          "section": "## File ownership\n- write: `evals/test_forge.py`\n- write: `scripts/forge.py`\n",
+          "scopes": [
+            [
+              "evals/test_forge.py",
+              "write"
+            ],
+            [
+              "scripts/forge.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "261aeb070327721e522f0b02f8a6ab24a0c0681e2d1753d3e2497175691c3652"
+        },
+        {
+          "number": 809,
+          "original": "544fa6536ecb7e225384c7a380e636e0c96869c123e3ec69c93a1bc658f39c37",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "ambiguous or missing named file/symbol: decision_actions.py"
+        },
+        {
+          "number": 811,
+          "original": "ea62c7a5335d635453222ca8115bd6fd3c7f8a4d38fd7d6770144f50b7a024af",
+          "section": "## File ownership\n- write: `evals/test_forge.py`\n- write: `scripts/forge.py`\n",
+          "scopes": [
+            [
+              "evals/test_forge.py",
+              "write"
+            ],
+            [
+              "scripts/forge.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "84b8e594b8249e966f79ae5cbbcbec576ca81490d54afa00928aefb91389a818"
+        },
+        {
+          "number": 812,
+          "original": "c272ff7e54cbe1fdd583e6335bd52aa8d9b97bbd9d3faf9e789f20a79330619b",
+          "section": "## File ownership\n- write: `evals/test_forge.py`\n- write: `scripts/forge.py`\n",
+          "scopes": [
+            [
+              "evals/test_forge.py",
+              "write"
+            ],
+            [
+              "scripts/forge.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "c019d03be351021fb65d00ecd274e46e4c0bb0a76f001f9efac0511d936b7412"
+        },
+        {
+          "number": 813,
+          "original": "e0a623ce5db38a68b116cc51fa18faf2075028d79d295a95a2ea5e0957cbaefb",
+          "section": "## File ownership\n- write: `evals/test_worker.py`\n- write: `scripts/worker.py`\n",
+          "scopes": [
+            [
+              "evals/test_worker.py",
+              "write"
+            ],
+            [
+              "scripts/worker.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "75f6e81feb5a291323aaa1ce5f3b6b5322b80e67af96eebc1fb3a3d6f41b33b9"
+        },
+        {
+          "number": 817,
+          "original": "e9b4f932b42c1a28a4b6205a2d8dfed637ce9afefb8c3adca56f9b9b9a9fef29",
+          "section": "## File ownership\n- write: `evals/test_completion.py`\n- write: `scripts/completion.py`\n",
+          "scopes": [
+            [
+              "evals/test_completion.py",
+              "write"
+            ],
+            [
+              "scripts/completion.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "4463488ec23d722006f729fcf2b58d99aeed2b4384936ad78bf391b3a50fceae"
+        },
+        {
+          "number": 818,
+          "original": "071ab99b3b6676adde53b2e32476c777c76c751a1ef11e040e74c327926e666b",
+          "section": "## File ownership\n- write: `evals/test_engine.py`\n- write: `evals/test_store.py`\n- write: `scripts/engine.py`\n- write: `scripts/store.py`\n",
+          "scopes": [
+            [
+              "evals/test_engine.py",
+              "write"
+            ],
+            [
+              "evals/test_store.py",
+              "write"
+            ],
+            [
+              "scripts/engine.py",
+              "write"
+            ],
+            [
+              "scripts/store.py",
+              "write"
+            ]
+          ],
+          "status": "derived",
+          "reason": "named tracked files/symbols and their existing companion tests",
+          "proposed": "48352aba062b6f65197f891072dc583bfd1ab9225034e0cc33bb8f7c698acd78"
+        },
+        {
+          "number": 821,
+          "original": "90ef87bae8c3490f7cdd59ed9bc4fcc8c7cce7719f7eb59b776153419f25fba1",
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
+        }
+      ]
+    }
+  ]
+}
