@@ -171,6 +171,20 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(self.plan(history=[Segment("implement", outcome=outcome)]),
                                  [reconcile.Dispatch(KEY, "implement", "builder", 2)])
 
+    def test_a_quota_reset_holds_launches_but_not_the_gate_or_merge_actions(self):
+        later = NOW + timedelta(hours=1)
+        self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
+                         [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.plan(quota_resets={KEY: later}), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.plan(replace(Item(), stage="review", review_state="approved", merge_state="ready"),
+                                   [Segment("review")], {}, quota_resets={KEY: later}),
+                         [reconcile.Merge(KEY)])
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
+                         [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+        self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: NOW}),
+                         [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+
     def test_work_starting_at_first_review_end_counts_as_rework(self):
         item = replace(Item(), stage="review", review_state="changes_requested")
         history = [Segment("implement", started_at=NOW - timedelta(hours=6),

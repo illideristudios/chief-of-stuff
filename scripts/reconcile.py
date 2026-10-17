@@ -498,10 +498,6 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     running = _running_keys(items, segments, facts)
     accepted: list[str] = []
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
-        reset = (quota_resets or {}).get(item.issue_key)
-        if reset is not None and _time(reset) > now and item.forge_state != "closed":
-            actions.append(Wait(item.issue_key, "quota reset pending"))
-            continue
         history = segments.get(item.issue_key, ())
         action = _item(item, history, policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
@@ -510,7 +506,10 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         if facts is not None and action is not None:
             action = _with_facts(action, item, history, facts, (*running, *accepted))
         if isinstance(action, (Dispatch, Review)):
-            if free_slots:
+            reset = (quota_resets or {}).get(item.issue_key)  # quota holds launches only; merges and gates go on
+            if reset is not None and _time(reset) > now:
+                action = Wait(item.issue_key, "quota reset pending")
+            elif free_slots:
                 free_slots -= 1
                 accepted.append(item.issue_key)
             else:

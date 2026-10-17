@@ -4,8 +4,10 @@ import contextlib
 from dataclasses import replace
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -124,6 +126,7 @@ class EngineTest(unittest.TestCase):
             "tree": str(self.trees / "fake"), "starting_head": "starting-head",
         }}
         self.db.set_resume(key, data)
+        engine.worker._save_run(self.db, key, stage, attempt, data["runs"][f"{stage}-{attempt}"])
         return "used-model", "high"
 
     def run_pass(self, **kwargs):
@@ -1274,6 +1277,64 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
 
+    def _exit_worker(self, stage: str, attempt: int, stderr: str, exit_code: int = 1) -> None:
+        run_dir = Path(self.db.resume(KEY)["runs"][f"{stage}-{attempt}"]["run_dir"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "stdout").write_text("")
+        (run_dir / "stderr").write_text(stderr)
+        (run_dir / "exit.json").write_text(f'{{"exit_code": {exit_code}}}')
+
+    def test_quota_and_outage_wait_with_backoff_persist_across_restart_and_never_ask(self):
+        # An unreadable tree is a human hold. This case is the quota backoff, so the tree has to be readable.
+        readable = mock.patch.object(engine.engine_facts, "_tree_facts",
+                                     return_value=(TreeState("work", 0, 0, 0), False, self.now))
+        readable.start()
+        self.addCleanup(readable.stop)
+        # 1. Four consecutive outages exceed retry_limit (3) yet back off exponentially, persist across store reopen,
+        # log wait once, never Ask or Escalate, and dispatch again when retry_at passes.
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        for attempt, minutes in ((1, 1), (2, 2), (3, 4), (4, 8)):
+            self._exit_worker("implement", attempt, "503 Service Unavailable: overloaded")
+            expected_retry = self.now + timedelta(minutes=minutes)
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+            self.assertEqual(self.db.segments(KEY)[-1].outcome, "unknown")
+            self.assertEqual(datetime.fromisoformat(self.db.resume(KEY)["quota"]["retry_at"]), expected_retry)
+            self.assertNotIn("interrupt", self.db.resume(KEY))
+            # Reopen store to prove the quota wait survives an engine restart.
+            self.db.engine.dispose()
+            self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+            self.addCleanup(self.db.engine.dispose)
+            self.now = expected_retry - timedelta(seconds=1)
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+            self.assertEqual(len(self.launched), attempt)
+            self.now = expected_retry
+            self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", attempt + 1)])
+            self.assertNotIn("quota", self.db.resume(KEY))
+
+        wait_logs = [entry.message for entry in self.db.log(KEY) if entry.message.startswith("wait: ")]
+        self.assertEqual(wait_logs, ["wait: quota reset pending"])
+        self.assertFalse(any(entry.message.startswith(("ask:", "escalate:")) for entry in self.db.log(KEY)))
+
+        # 2. Quota with an explicit reset time waits until that reset and then dispatches.
+        self.now = datetime(2000, 1, 1, 14, 0, tzinfo=timezone.utc)
+        self._exit_worker("implement", 5, "429 quota exceeded; resets at 5pm.")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.db.segments(KEY)[-1].outcome, "quota")
+        self.assertEqual(self.db.resume(KEY)["quota"]["retry_at"], "2000-01-01T17:00:00+00:00")
+        self.now = datetime(2000, 1, 1, 16, 59, tzinfo=timezone.utc)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+        self.now = datetime(2000, 1, 1, 17, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 6)])
+        self.assertNotIn("quota", self.db.resume(KEY))
+
+        # 3. Completing implement resets retryable backoff: review's first outage backs off 1m, not 32m.
+        self.finish("implement", attempt=6, outcome="done")
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self._exit_worker("review", 1, "503 Service Unavailable: overloaded")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(datetime.fromisoformat(self.db.resume(KEY)["quota"]["retry_at"]),
+                         self.now + timedelta(minutes=1))
+
 
 class MainTest(unittest.TestCase):
     def setUp(self):
@@ -1303,7 +1364,7 @@ class MainTest(unittest.TestCase):
         settings_path.write_text(settings_path.read_text() + 'teardown = "exit 7"\n')
         fake = FakeForge()
         with mock.patch.object(engine.forge, "for_workspace", return_value=fake), \
-             mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep") as sleep:
+             mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("plugin update ignored")]) as sleep:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         self.assertTrue((self.root / "store.db").is_file())
         self.assertEqual(passed.call_count, 1)
@@ -1316,7 +1377,7 @@ class MainTest(unittest.TestCase):
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
         path = self.root / "settings.toml"
-        path.write_text(path.read_text() + 'rules = ["Keep tests."]\n')
+        path.write_text(path.read_text() + '\nrules = ["Keep tests."]\n')
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
@@ -1438,6 +1499,258 @@ class MainTest(unittest.TestCase):
 
     def test_the_supervisor_starts_the_engine_driver(self):
         self.assertEqual(supervisor.ENGINE, (str(Path(engine.__file__).resolve()),))
+
+    def test_failed_release_preflight_keeps_running_and_retries_before_teardown(self):
+        import pages
+        install = self.root / "install"
+        old, current = install / "versions/old", install / "versions/new"
+        old.mkdir(parents=True)
+        (current / "scripts").mkdir(parents=True)
+        (current / "chief_of_stuff.py").touch()
+        (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
+        (install / "current").symlink_to(current)
+        data = self.root / "data"
+        python = data / "venv-new/bin/python"
+        errors, stops = io.StringIO(), []
+        serving = threading.Event()
+        now = mock.Mock(return_value=1000)
+        ticks = iter((1010, 1020, 1060))
+        passed = mock.Mock(side_effect=lambda **_kw: self.assertTrue(serving.wait(2)))
+
+        def sleep(_interval):
+            now.return_value = next(ticks)
+
+        def serve(_root, stop):
+            stops.append(stop)
+            serving.set()
+            stop.wait()
+
+        def prepare(*_args, **_kwargs):
+            with self.assertRaises(supervisor.ServiceError):
+                with supervisor.lock(data / "supervisor.lock"):
+                    pass
+            if passed.call_count < 3:
+                raise supervisor.ServiceError("pip offline")
+            self.assertFalse(stops[0].is_set(), "preflight must happen before board teardown")
+            with self.assertRaises(supervisor.ServiceError):
+                with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"):
+                    pass
+            return python
+
+        with mock.patch.object(supervisor, "RELEASE", old), \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=prepare) as preflight, \
+             mock.patch.object(pages, "supervise", side_effect=serve), \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass", passed), \
+             mock.patch.object(engine.time, "sleep", side_effect=sleep), \
+             mock.patch.object(engine.time, "time", now), \
+             mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(passed.call_count, 3, "backoff must leave engine passes running")
+        self.assertEqual(preflight.call_args_list, [mock.call(data, release=current, timeout=60)] * 2)
+        execv.assert_called_once_with(str(python), [
+            str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
+        self.assertTrue(stops[0].is_set())
+        self.assertIn("pip offline", errors.getvalue())
+
+    def test_failed_preflight_backoff_survives_restart_and_changes_with_pins_or_release(self):
+        current = self.root / "next"
+        (current / "scripts").mkdir(parents=True)
+        (current / "scripts/engine.py").touch()
+        requirements = current / "requirements.txt"
+        requirements.write_text("example==1\n")
+        data = self.root / "data"
+        errors = io.StringIO()
+        with mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=supervisor.ServiceError("pip offline")) as prepare, \
+             mock.patch.object(engine.time, "time") as now, contextlib.redirect_stderr(errors):
+            now.return_value = 1000
+            self.assertIsNone(engine._prepare_handoff(current))
+            # A new interpreter reads the same persisted retry deadline, rather than trying pip again.
+            probe = "import engine; from pathlib import Path; from unittest.mock import Mock; " \
+                    f"engine.supervisor.data_dir = lambda: Path({str(data)!r}); " \
+                    "engine.time.time = lambda: 1010; " \
+                    "engine.supervisor.ensure_venv = Mock(side_effect=AssertionError('retried')); " \
+                    f"assert engine._prepare_handoff(Path({str(current)!r})) is None; " \
+                    "engine.supervisor.ensure_venv.assert_not_called()"
+            result = subprocess.run([sys.executable, "-c", probe], cwd=Path(engine.__file__).parent,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            now.return_value = 1060
+            self.assertIsNone(engine._prepare_handoff(current))
+            now.return_value = 1179
+            self.assertIsNone(engine._prepare_handoff(current))
+            self.assertEqual(prepare.call_count, 2, "second failure backs off for 120 seconds")
+            now.return_value = 1180
+            self.assertIsNone(engine._prepare_handoff(current))
+            requirements.write_text("example==2\n")
+            self.assertIsNone(engine._prepare_handoff(current))
+            other = self.root / "other"
+            (other / "scripts").mkdir(parents=True)
+            (other / "scripts/engine.py").touch()
+            (other / "requirements.txt").write_bytes(requirements.read_bytes())
+            self.assertIsNone(engine._prepare_handoff(other))
+            self.assertEqual(prepare.call_count, 5, "new pins and a different release retry immediately")
+        self.assertEqual(errors.getvalue().count("pip offline"), 3, "unchanged failures are logged once per target")
+
+    def test_preflight_does_not_wait_for_another_workspace_supervisor_lock(self):
+        current = self.root / "next"
+        (current / "scripts").mkdir(parents=True)
+        (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
+        data = self.root / "data"
+        with supervisor.lock(data / "supervisor.lock"), \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(supervisor, "ensure_venv") as prepare, \
+             mock.patch.object(supervisor, "lock", wraps=supervisor.lock) as locked:
+            # Inspect before entering to make a blocking-lock regression fail without hanging the suite.
+            def check_lock(path, wait=False):
+                self.assertFalse(wait, "the pass loop must not wait for the global lock")
+                return locked._mock_wraps(path, wait=wait)
+            locked.side_effect = check_lock
+            self.assertIsNone(engine._prepare_handoff(current))
+            self.assertFalse(locked.call_args.kwargs.get("wait", False))
+        prepare.assert_not_called()
+
+    def test_once_runs_the_working_release_when_update_preflight_fails(self):
+        errors = io.StringIO()
+        current = self.root / "next"
+        (current / "scripts").mkdir(parents=True)
+        (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
+        with mock.patch.object(supervisor, "current_release", return_value=current), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=supervisor.ServiceError("pip offline")) as preflight, \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        passed.assert_called_once()
+        self.assertEqual(preflight.call_args.kwargs, {"release": current, "timeout": 60})
+        execv.assert_not_called()
+
+    def test_loop_relaunches_the_installed_release_when_the_pointer_moves(self):
+        newer = self.root / "install/versions/2.0.0-abc"
+        (newer / "scripts").mkdir(parents=True)
+        (newer / "scripts/engine.py").touch()
+        (newer / "requirements.txt").write_text("example==1\n")
+        python = self.root / "data/venv-new/bin/python"
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=python) as preflight, \
+             mock.patch.object(engine.os, "execv") as execv, \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("update ignored")]) as sleep:
+            self.assertEqual(engine.main(["--root", str(self.root), "--interval", "5"]), 0)
+        self.assertEqual(passed.call_count, 1)
+        sleep.assert_called_once_with(5.0)
+        preflight.assert_called_once_with(self.root / "data", release=newer, timeout=60)
+        execv.assert_called_once_with(str(python), [
+            str(python), str(newer / "scripts/engine.py"), "--root", str(self.root), "--interval", "5.0"])
+
+    def test_stale_launch_hands_off_before_opening_the_workspace_or_migrating(self):
+        import pages
+        install = self.root / "install"
+        old, current = install / "versions/old", install / "versions/current"
+        old.mkdir(parents=True)
+        (current / "scripts").mkdir(parents=True)
+        (current / "chief_of_stuff.py").touch()
+        (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
+        (install / "current").symlink_to(current)
+        python = self.root / "data/venv-new/bin/python"
+        with mock.patch.object(supervisor, "RELEASE", old), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=python) as preflight, \
+             mock.patch.object(engine.startup, "workspace_forge") as workspace, \
+             mock.patch.object(engine.store_access, "migrated_store", side_effect=RuntimeError("unknown revision")) as migrated, \
+             mock.patch.object(pages, "supervise") as serving, \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.os, "execv") as execv:
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        workspace.assert_not_called()
+        migrated.assert_not_called()
+        serving.assert_not_called()
+        passed.assert_not_called()
+        preflight.assert_called_once_with(self.root / "data", release=current, timeout=60)
+        execv.assert_called_once_with(str(python), [
+            str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
+
+    def test_loop_keeps_running_while_the_installed_release_is_its_own(self):
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.supervisor, "current_release", return_value=engine.supervisor.RELEASE), \
+             mock.patch.object(engine.os, "execv") as execv, \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(passed.call_count, 2)
+        execv.assert_not_called()
+
+    def test_handoff_waits_for_unrecorded_page_child_cleanup(self):
+        import pages
+        started = threading.Event()
+        children = []
+        real_popen = subprocess.Popen
+        newer = self.root / "next"
+        (newer / "scripts").mkdir(parents=True)
+        (newer / "scripts/engine.py").touch()
+        (newer / "requirements.txt").write_text("example==1\n")
+        board = self.root / "pages"
+
+        def start(*_a, **_kw):
+            proc = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            children.append(proc)
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            started.set()
+            return proc
+
+        def passed(**_kw):
+            self.assertTrue(started.wait(2), "page server startup never began")
+
+        def handoff(*_args):
+            self.assertIsNotNone(children[0].returncode, "exec preceded detached child cleanup")
+            self.assertFalse((board / pages.PID).exists())
+            with supervisor.lock(supervisor.state_dir(self.root) / "pages-supervisor.lock"):
+                pass
+
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass", side_effect=passed), \
+             mock.patch.object(supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=Path(sys.executable)), \
+             mock.patch.object(pages, "read_config", return_value=SimpleNamespace(pages_dir=str(board), board_url="http://127.0.0.1:1/")), \
+             mock.patch.object(pages, "from_config", return_value=(board, 1)), \
+             mock.patch.object(pages.subprocess, "Popen", side_effect=start), \
+             mock.patch.object(pages, "_who", side_effect=lambda _port: (threading.Event().wait(0.25), None)[1]), \
+             mock.patch.object(engine.time, "sleep"), \
+             mock.patch.object(engine.os, "execv", side_effect=handoff) as execv:
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        execv.assert_called_once()
+
+    def test_subcommands_delegate_to_supervisor_with_only_the_flags_it_accepts(self):
+        for argv, expected in ((["--root", str(self.root), "install"], ["--root", str(self.root), "install"]),
+                               (["status"], ["--root", str(Path(".")), "status"]),
+                               (["--interval", "5", "--once", "uninstall", "--root", str(self.root)],
+                                ["--root", str(self.root), "uninstall"])):
+            with self.subTest(argv=argv), \
+                 mock.patch.object(engine.supervisor, "main", return_value=0) as sup:
+                self.assertEqual(engine.main(argv), 0)
+                sup.assert_called_once_with(expected)
+
+    def test_loop_supervises_the_page_server_and_stops_it_on_exit(self):
+        import pages
+        seen = []
+        with mock.patch.object(pages, "supervise", side_effect=lambda root, stop: seen.append((root, stop))), \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass"), \
+             mock.patch.object(engine.time, "sleep", side_effect=KeyboardInterrupt):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], self.root)
+        self.assertTrue(seen[0][1].is_set())
 
 
 if __name__ == "__main__":

@@ -235,6 +235,11 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(record["started_at"], NOW.isoformat())
         self.assertTrue(record["session_id"])
 
+    def test_a_successful_launch_clears_the_quota_wait(self):
+        self.db.set_resume(KEY, {"quota": {"reset": "later", "retry_at": NOW.isoformat()}})
+        self.launched()
+        self.assertNotIn("quota", self.db.resume(KEY))
+
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \

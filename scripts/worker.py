@@ -21,7 +21,7 @@ import supervisor
 from settings import load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
-from model_port import Failure, Request, retry_at
+from model_port import RETRYABLE, Failure, Request, retry_at
 from shell_setup import teardown
 
 _runners: dict[str, Any] = {}
@@ -338,7 +338,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 if reply.retryable:
                     outcome = reply.kind
                     reason = reply.message
-                    stops = sum(s.outcome == outcome for s in store.segments(key)) + 1
+                    stops = 1  # consecutive retryable stops in this stage; a stage change or other outcome restarts the backoff
+                    for previous in reversed(store.segments(key)):
+                        if previous.ended_at is None:
+                            continue  # The current attempt is still open until collection finishes.
+                        if previous.stage != segment.stage or previous.outcome not in RETRYABLE:
+                            break
+                        stops += 1
                     data["quota"] = {"reset": reason, "retry_at": retry_at(reason, now, stops).isoformat()}
                     store.set_resume(key, data)
                 else:
