@@ -512,6 +512,16 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(self.db.items()[0].human_review)
         self.assertEqual(self.launched, [])
 
+    def test_legacy_unverified_release_without_an_owner_returns_to_a_human_hold(self):
+        self.pending_release(held=False)
+        data = self.db.resume(KEY)
+        data.pop("launcher_hold")
+        self.db.set_resume(KEY, data)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.launched, [])
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.assertTrue(self.db.resume(KEY)["pending_hold"])
+
     def test_slot_race_does_not_release_the_hold(self):
         self.pending_release()
         with mock.patch.object(engine.slots, "claim", side_effect=ValueError("slot taken")):
