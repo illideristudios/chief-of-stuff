@@ -1,7 +1,7 @@
 # chief-of-stuff policy and workflow (design decisions 12 and 13), read by settings.load_policy.
 #
-# PLACEHOLDER CONTENT. The personas, their roles and models, the default trio and the topic tags below are stand-ins:
-# their content is Open for Zach (design decisions 5 and 5a). The shape is what is settled.
+# The default decision trio uses the three Sonnet personas requested by the architect.
+# Reviewer profiles and topic tags remain placeholders for Zach (design decisions 5 and 5a).
 #
 # Every policy field starts from [policy] and is overridden, in order, by the persona's, the stage's and the room's own
 # `policy` table, so a value set for one stage or room holds only there. A standing approval is a policy exception and
