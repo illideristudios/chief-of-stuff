@@ -130,6 +130,16 @@ def fixture_files(case: Path, suffix: str) -> list[Path]:
 
 
 class CaseLintTest(unittest.TestCase):
+    def test_guard_examples_use_no_real_container_runtime(self):
+        # Architecture §11: launcher examples use invented names, including in guard tests.
+        retired_runtime = "dock" + "er"
+        found = []
+        for relative in ("scripts/guard_commands.py", "evals/test_guard_commands.py", "evals/test_cases.py"):
+            for number, line in enumerate((EVALS.parent / relative).read_text().splitlines(), 1):
+                if re.search(rf"\b{retired_runtime}\b", line):
+                    found.append(f"{relative}:{number}")
+        self.assertEqual(found, [])
+
     def test_retired_deploy_provider_is_absent_outside_archives(self):
         # C20 names the open gap. Only the architect edits architecture/compliance.md.
         self.assertLessEqual(set(retired_provider_files(EVALS.parent)), {"architecture/compliance.md"})
