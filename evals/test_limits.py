@@ -128,6 +128,24 @@ class Sources(unittest.TestCase):
             self.assertEqual(mapped.call_count, 1)
         self.assertEqual(third[0].used, 10)
 
+    def test_limits_and_workers_share_decoded_transcript_records(self):
+        import workers_page
+        tree = Path.home() / "work"
+        import re
+        project = re.sub(r"[^A-Za-z0-9]", "-", str(tree.resolve()))
+        self.write(f".claude/projects/{project}/session.jsonl", [
+            {"type": "assistant", "timestamp": NOW.isoformat(), "message": {
+                "id": "message", "usage": {"input_tokens": 12}}},
+            {"type": "rate_limit_event", "timestamp": NOW.isoformat(), "rate_limit_info": {
+                "rateLimitType": "five_hour", "utilization": .85,
+                "resetsAt": (NOW + timedelta(hours=2)).timestamp()}}])
+        import json
+        with patch("limits_probe._now", return_value=NOW), patch("json.loads", wraps=json.loads) as decoded:
+            self.assertEqual(limits_probe.read("claude", "")[0].used, 85)
+            scans = decoded.call_count
+            self.assertEqual(workers_page.activity(tree), (NOW, 12))
+            self.assertEqual(decoded.call_count, scans)
+
     def test_unknown_event_keeps_an_unexpired_numeric_limit(self):
         known = {"type": "rate_limit_event", "timestamp": (NOW - timedelta(minutes=2)).isoformat(),
                  "rate_limit_info": {"rateLimitType": "five_hour", "utilization": .85,

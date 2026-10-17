@@ -138,6 +138,40 @@ class GatherTest(unittest.TestCase):
             self.assertEqual(self.gather().changed, ((KEY, None),))
         read.assert_not_called()
 
+    def test_symlink_loop_is_unknown_and_a_valid_symlink_is_resolved_before_reading(self):
+        tree = self.trees / "loop"
+        tree.symlink_to(tree)
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["tree"] = str(tree)
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(engine_facts, "_tree_facts") as read:
+            self.assertEqual(self.gather().changed, ((KEY, None),))
+            read.assert_not_called()
+        tree.unlink()
+        target = self.trees / "real"
+        target.mkdir()
+        tree.symlink_to(target)
+        with mock.patch.object(engine_facts, "_tree_facts", return_value=(None, None, None)) as read:
+            self.gather()
+            read.assert_called_once_with(target.resolve())
+
+    def test_missing_baseline_is_distinct_from_an_unreadable_tree_and_recovers_durable_head(self):
+        tree = self.trees / "review"
+        tree.mkdir()
+        run = self.root / "run"
+        run.mkdir()
+        self.db.replace_file_ownership(KEY, [(".", "read")])
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"].update(tree=str(tree), run_dir=str(run))
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(engine_facts, "_tree_facts", return_value=(TreeState("HEAD", 0, 2, 0), False, NOW)), \
+             mock.patch.object(engine_facts.git_trees, "git", return_value=(0, "launch-head")):
+            facts = self.gather(SimpleNamespace(blocked_by=lambda: {}))
+            self.assertNotIn(KEY, facts.unreadable)
+            self.assertEqual(dict(facts.changed)[KEY], None)
+            (run / "starting_head").write_text("launch-head\n")
+            self.assertEqual(dict(self.gather().changed)[KEY], False)
+
     def test_read_only_changes_are_relative_to_starting_head_in_a_real_detached_tree(self):
         from evals import git_taint
         cache = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -159,6 +193,7 @@ class GatherTest(unittest.TestCase):
         (tree / "file").write_text("feature")
         git("commit", "-am", "feature")
         head = git("rev-parse", "HEAD")
+        git("update-ref", "refs/remotes/origin/feature", head)
         git("checkout", "--detach")
         self.db.replace_file_ownership(KEY, [(".", "read")])
         data = self.db.resume(KEY)
@@ -167,10 +202,11 @@ class GatherTest(unittest.TestCase):
         facts = self.gather(SimpleNamespace(blocked_by=lambda: {}))
         self.assertEqual(dict(facts.changed)[KEY], False)
         self.assertGreater(dict(facts.trees)[KEY].off_origin, 0)
-        self.assertIsNone(dict(facts.trees)[KEY].unpushed)
+        self.assertEqual(dict(facts.trees)[KEY].unpushed, 0)
         (tree / "file").write_text("changed during review")
         git("commit", "-am", "review changed a file")
         self.assertEqual(dict(self.gather().changed)[KEY], True)
+        self.assertEqual(dict(self.gather().trees)[KEY].unpushed, 1)
         git("reset", "--hard", head)
         (tree / "untracked").write_text("left behind")
         self.assertEqual(dict(self.gather().changed)[KEY], True)

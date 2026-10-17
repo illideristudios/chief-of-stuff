@@ -73,10 +73,21 @@ class StageCompletionRegressionTest(unittest.TestCase):
         for branch in ("feature", "(detached)"):
             with self.subTest(branch=branch):
                 verdict = completion.abandoned(
-                    False, report="done", tree=TreeState(branch, 0, 3, None), on_main=False,
+                    False, report="done", tree=TreeState(branch, 0, 3, 0), on_main=False,
                     tree_name="review-tree", tree_claims=(orphans.Claim("worker", False, "exited"),),
                     landing_required=False)
                 self.assertEqual(verdict, completion.Verdict("done", ""))
+
+    def test_untouched_published_premerge_tree_can_retry_after_a_missing_or_failed_report(self):
+        for report in (None, "failed"):
+            verdict = completion.abandoned(False, report=report, tree=TreeState("HEAD", 0, 3, 0),
+                tree_name="review", tree_claims=(orphans.Claim("worker", False, "exited"),), landing_required=False)
+            self.assertEqual(verdict, completion.Verdict("failed", "worker gone"))
+
+    def test_unknown_push_evidence_does_not_certify_premerge_done(self):
+        verdict = completion.abandoned(False, report="done", tree=TreeState("HEAD", 0, 3, None), landing_required=False)
+        self.assertTrue(verdict.human_review)
+        self.assertIn("unknown", verdict.reason)
 
     def test_premerge_done_still_holds_uncommitted_or_unpushed_work(self):
         for tree in (TreeState("feature", 1, 3, None), TreeState("feature", 0, 3, 1)):

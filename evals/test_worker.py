@@ -258,6 +258,14 @@ class WorkerTest(unittest.TestCase):
             self.launch()
         self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["starting_head"], "head")
 
+    def test_collect_recovers_starting_head_for_an_existing_run_record(self):
+        run = self.launched()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"].pop("starting_head")
+        self.db.set_resume(KEY, data)
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"].get("starting_head"), "head")
+
     def test_reviewed_head_round_trips_through_run_and_collected_result(self):
         run = self.launched("review")
         record = self.db.resume(KEY)["runs"]["review-1"]
