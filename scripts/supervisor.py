@@ -135,9 +135,17 @@ def version() -> str:
 
 
 def current_release() -> Path:
-    """The release the install pointer names now. A tree not run from `<install>/versions/` is its own current."""
+    """Follow `current` only when it is a symlink beside `versions/`; otherwise return RELEASE."""
     pointer = RELEASE.parent.parent / "current"
-    return pointer.resolve() if RELEASE.parent.name == "versions" and pointer.is_symlink() else RELEASE
+    try:
+        if RELEASE.parent.name == "versions" and pointer.is_symlink():
+            selected = pointer.resolve(strict=True)
+            if not (selected / "chief_of_stuff.py").is_file():
+                raise ServiceError(f"missing entry file: {selected / 'chief_of_stuff.py'}")
+            return selected
+    except (OSError, RuntimeError, ServiceError) as exc:
+        print(f"engine: cannot follow current release {pointer}: {exc}; keeping {RELEASE}", file=sys.stderr, flush=True)
+    return RELEASE
 
 
 def _venv_python_runs(python: Path) -> bool:

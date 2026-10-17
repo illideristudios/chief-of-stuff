@@ -449,7 +449,13 @@ class EnsureTest(unittest.TestCase):
     def test_cancellation_interrupts_waiting_for_the_ensure_lock(self):
         stop = threading.Event()
         finished = threading.Event()
+        attempted = threading.Event()
         errors = []
+        real_lock = pg.supervisor.lock
+
+        def lock(*args, **kwargs):
+            attempted.set()
+            return real_lock(*args, **kwargs)
 
         def ensure():
             try:
@@ -459,10 +465,12 @@ class EnsureTest(unittest.TestCase):
             finally:
                 finished.set()
 
-        with pg.supervisor.lock(self.dir / ".ensure.lock"), \
+        with real_lock(self.dir / ".ensure.lock"), \
+             mock.patch.object(pg.supervisor, "lock", side_effect=lock), \
              mock.patch.object(pg.subprocess, "Popen") as popen:
             thread = threading.Thread(target=ensure, daemon=True)
             thread.start()
+            self.assertTrue(attempted.wait(2), "ensure never tried to acquire the held lock")
             stop.set()
             self.assertTrue(finished.wait(2), "shutdown stayed blocked on the ensure lock")
             thread.join(timeout=2)

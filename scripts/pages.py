@@ -476,15 +476,15 @@ def _who(port: int) -> str | None:
 def is_pages_serve(pid: int, port: int | None = None) -> bool:
     """True when `pid`'s command line is `pages.py serve`, and on `port` when given. A reused pid is someone else's."""
     try:
-        command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-    except OSError:
+        command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=1).stdout
+    except (OSError, subprocess.TimeoutExpired):
         return False  # cannot verify identity: do not signal
     if "pages.py serve" not in command:
         return False
     return port is None or bool(re.search(rf"--port {port}(\s|$)", command))
 
 
-def _stop(pages_dir: Path, port: int) -> None:
+def _stop(pages_dir: Path, port: int, stop: threading.Event | None = None) -> None:
     """Stop the older pages server on the port. Only the pid file's process, and only when it runs
     `pages.py serve` on this port: a reused pid is someone else's."""
     try:
@@ -495,20 +495,35 @@ def _stop(pages_dir: Path, port: int) -> None:
         raise PagesError(f"an older pages server answers on port {port}, but pid {pid} is not it; stop it by hand")
     os.kill(pid, signal.SIGTERM)
     for _ in range(30):
+        if stop is not None and stop.is_set():
+            return
         if _who(port) is None:
             return
-        time.sleep(0.1)
+        if stop is None:
+            time.sleep(0.1)
+        else:
+            stop.wait(0.1)
     raise PagesError(f"the older pages server (pid {pid}) is still answering on port {port}")
 
 
-def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> str:
+def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, stop: threading.Event | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
-    moves to another port: the URL is the board's address, and a board that wanders is a board nobody has open."""
-    with supervisor.lock(pages_dir / ".ensure.lock", wait=True):
-        return _ensure(pages_dir, port, log, root)
+    moves to another port. Returns `pages: serving`, `pages: started`, `pages: restarted` or `pages: stopped`; raises PagesError."""
+    with contextlib.ExitStack() as stack:
+        while True:
+            if stop is not None and stop.is_set():
+                return "pages: stopped"
+            try:
+                stack.enter_context(supervisor.lock(pages_dir / ".ensure.lock", wait=stop is None))
+                break
+            except supervisor.ServiceError:
+                if stop is None:
+                    raise
+                stop.wait(0.1)
+        return _ensure(pages_dir, port, log, root, stop)
 
 
-def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None) -> str:
+def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
     """Probe, replace and start under the same lock, including concurrent CLI ensures.
 
     Returns "pages: serving", "pages: started" or "pages: restarted"; raises PagesError when the port is not ours
@@ -520,30 +535,42 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None) -> str:
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
         if _version(who) >= _version(f"{SERVER}/{VERSION}"):
             return "pages: serving"
-        _stop(pages_dir, port)
+        _stop(pages_dir, port, stop)
         restart = True
+    if stop is not None and stop.is_set():
+        return "pages: stopped"
     pages_dir.mkdir(parents=True, exist_ok=True)
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [sys.executable, str(Path(__file__).resolve()), "serve", "--dir", str(pages_dir), "--port", str(port)]
     with log.open("a") as out:
         proc = subprocess.Popen(argv + (["--root", str(root.resolve())] if root is not None else []),
                                 stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
-    for _ in range(30):
-        if (_who(port) or "").startswith(SERVER):
-            (pages_dir / PID).write_text(str(proc.pid))  # .pid names only a server that answered (#248)
-            return "pages: restarted" if restart else "pages: started"
-        if proc.poll() is not None:
-            break
-        time.sleep(0.1)
-    if proc.poll() is None:  # failed start must not leave a detached server with no pid file (#493)
-        with contextlib.suppress(OSError):
-            proc.terminate()
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+    recorded = False
+    try:
+        for _ in range(30):
+            if stop is not None and stop.is_set():
+                return "pages: stopped"
+            if (_who(port) or "").startswith(SERVER):
+                (pages_dir / PID).write_text(str(proc.pid))  # .pid names only a server that answered (#248)
+                recorded = True
+                return "pages: restarted" if restart else "pages: started"
+            if proc.poll() is not None:
+                break
+            if stop is None:
+                time.sleep(0.1)
+            else:
+                stop.wait(0.1)
+        raise PagesError(f"the pages server did not come up on port {port}; see {log}")
+    finally:
+        if not recorded and proc.poll() is None:  # failed or cancelled start owns its unrecorded child
             with contextlib.suppress(OSError):
-                proc.kill()
-    raise PagesError(f"the pages server did not come up on port {port}; see {log}")
+                proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                proc.wait(timeout=1)
 
 
 def from_config(root: Path) -> tuple[Path, int]:
@@ -567,7 +594,7 @@ def supervise(root: Path, stop: threading.Event) -> None:
                     cfg = read_config(root)
                     if cfg.pages_dir or cfg.board_url:
                         pages_dir, port = from_config(root)
-                        status = ensure(pages_dir, port, supervisor.state_dir(root) / "pages.log", root)
+                        status = ensure(pages_dir, port, supervisor.state_dir(root) / "pages.log", root, stop=stop)
                     else:
                         status = "pages: serving"  # nothing to serve; poll for a board added later
                     last_error = None
@@ -584,7 +611,7 @@ def supervise(root: Path, stop: threading.Event) -> None:
                 if stop.wait(delay):
                     return
     except supervisor.ServiceError:
-        return  # Another engine already supervises this workspace's board.
+        print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

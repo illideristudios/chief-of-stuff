@@ -4,8 +4,10 @@ import contextlib
 from dataclasses import replace
 import io
 import json
+import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1537,6 +1539,42 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         self.assertEqual(passed.call_count, 2)
         execv.assert_not_called()
+
+    def test_handoff_waits_for_unrecorded_page_child_cleanup(self):
+        import pages
+        started = threading.Event()
+        children = []
+        real_popen = subprocess.Popen
+        newer = self.root / "next"
+        board = self.root / "pages"
+
+        def start(*_a, **_kw):
+            proc = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            children.append(proc)
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            started.set()
+            return proc
+
+        def passed(**_kw):
+            self.assertTrue(started.wait(2), "page server startup never began")
+
+        def handoff(*_args):
+            self.assertIsNotNone(children[0].returncode, "exec preceded detached child cleanup")
+            self.assertFalse((board / pages.PID).exists())
+            with supervisor.lock(supervisor.state_dir(self.root) / "pages-supervisor.lock"):
+                pass
+
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass", side_effect=passed), \
+             mock.patch.object(supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(pages, "read_config", return_value=SimpleNamespace(pages_dir=str(board), board_url="http://127.0.0.1:1/")), \
+             mock.patch.object(pages, "from_config", return_value=(board, 1)), \
+             mock.patch.object(pages.subprocess, "Popen", side_effect=start), \
+             mock.patch.object(pages, "_who", side_effect=lambda _port: (threading.Event().wait(0.25), None)[1]), \
+             mock.patch.object(engine.time, "sleep"), \
+             mock.patch.object(engine.os, "execv", side_effect=handoff) as execv:
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        execv.assert_called_once()
 
     def test_subcommands_delegate_to_supervisor_with_only_the_flags_it_accepts(self):
         for argv, expected in ((["--root", str(self.root), "install"], ["--root", str(self.root), "install"]),

@@ -467,11 +467,17 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     return actions
 
 
+def _handoff(release: Path, root: Path, interval: float, once: bool) -> None:
+    os.execv(sys.executable, [sys.executable, str(release / "chief_of_stuff.py"), "engine",
+                              "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run passes until stopped, or one with --once; `install`, `uninstall` and `status` manage the LaunchAgent.
 
-    Exits 0 when stopped, 1 when a --once pass failed, 2 when startup refused. When the install pointer
-    moves to a newer release, the loop re-executes that release's `engine`, which rebuilds the venv if needed."""
+    Exits 0 when stopped, 1 when a --once pass failed, 2 on startup or driver errors (including failed exec).
+    A different valid install pointer, including rollback, hands off before startup or after a pass;
+    that release's CLI selects its dependency venv. Invalid pointers are logged and retried."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=Path("."), help="workspace holding store.db and CLAUDE.md")
     ap.add_argument("--interval", type=float, default=60, help="seconds between passes (default 60)")
@@ -486,6 +492,9 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     newer = None
     try:
+        if (installed := supervisor.current_release()) != supervisor.RELEASE:
+            _handoff(installed, root, args.interval, args.once)
+            return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
             text, config, source = startup.workspace_forge(root)
             if source is None:
@@ -538,11 +547,10 @@ def main(argv: list[str] | None = None) -> int:
             finally:
                 stop_pages.set()
                 if page_thread is not None and page_thread.ident is not None:
-                    page_thread.join(timeout=5)  # a daemon blocked in ensure's flock cannot hold the exit
+                    page_thread.join()  # cancellable ensure reaps an unrecorded child before handoff
                 db.engine.dispose()
         if newer is not None:  # after the lock and board thread are released, so the new release can take them
-            os.execv(sys.executable, [sys.executable, str(newer / "chief_of_stuff.py"), "engine",
-                                      "--root", str(root), "--interval", str(args.interval)])
+            _handoff(newer, root, args.interval, args.once)
         return 0
     except KeyboardInterrupt:
         return 0
