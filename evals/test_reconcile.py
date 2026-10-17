@@ -64,6 +64,13 @@ class ReconcileTest(unittest.TestCase):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
                               {} if findings is None else {item.issue_key: findings}, **kwargs)
 
+    def test_merge_waits_for_answered_but_blocked_decision(self):
+        from types import SimpleNamespace
+        dec = SimpleNamespace(topic="scope", question="Choose", answer="Yes", status="blocked", blocked_reason="conflict")
+        actions = self.plan(replace(Item(), stage="merge", review_state="approved", merge_state="ready"),
+                            history=[Segment("review")], findings={}, decisions={KEY: [dec]})
+        self.assertEqual(actions, [reconcile.Wait(KEY, "decision pending")])
+
     def test_closed_items_and_any_running_segment_get_no_actions(self):
         self.assertEqual(self.plan(replace(Item(), forge_state="closed")), [])
         self.assertEqual(self.plan(history=[Segment("review", ended_at=None)]), [])

@@ -510,17 +510,42 @@ class EngineTest(unittest.TestCase):
         resume_dec = (self.db.resume(KEY) or {}).get("decisions", {}).get(str(dec.id), {})
         self.assertEqual(resume_dec.get("blocked_reason"), "merge conflicts")
 
-    def test_trio_gate_outcome_enters_decision_lifecycle_with_decided_by_trio(self):
+    def test_trio_consults_once_and_updates_one_row_for_consensus_and_split(self):
+        import model_port
+        for unanimous in (True, False):
+            with self.subTest(unanimous=unanimous):
+                gate = f"gate-{unanimous}"
+                self.p = policy.parse({
+                    "policy": {"trio": ["one", "two", "three"]},
+                    "personas": {n: {"role": "advises", "model": "example"} for n in ("one", "two", "three")},
+                    "stages": {"implement": {}},
+                    "default_workflow": "standard",
+                    "workflows": {"standard": {"start": "implement"}},
+                })
+                model = mock.Mock(return_value=model_port.Reply("", {
+                    "vote": "adopt" if unanimous else "concern", "choice": "adopt", "reasoning": "Evidence"
+                }, "", 0, 1))
+                with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, gate, "Split module?")]):
+                    self.run_pass(trio_port=model)
+                    self.run_pass(trio_port=model)
+                decs = [d for d in self.db.decisions(KEY) if d.topic == gate]
+                self.assertEqual(len(decs), 1)
+                self.assertEqual(model.call_count, 3)
+                self.assertEqual(decs[0].status, "answered" if unanimous else "open")
+                self.assertEqual(len(decs[0].record["verdicts"]), 3)
+
+    def test_default_agent_has_no_declared_type(self):
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
+
+    def test_pending_redispatch_runs_even_after_completed_stage(self):
         self.db.sync_from_forge(self.forge.snapshots())
-        outcome = SimpleNamespace(status="decided", rationale="Consensus reached.", escalated_reason=None, votes=())
-        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "plan", "Split module?")]), \
-             mock.patch.object(engine.trio_gate, "consult", return_value=outcome):
-            self.run_pass(trio_port=mock.Mock())
-        decs = self.db.decisions(KEY)
-        self.assertEqual(len(decs), 1)
-        self.assertEqual(decs[0].status, "answered")
-        self.assertEqual(decs[0].decided_by, "trio")
-        self.assertEqual(decs[0].answer, "Consensus reached.")
+        self.db.record_segment(KEY, "implement", 1, (NOW - timedelta(hours=2)).isoformat(),
+                               (NOW - timedelta(hours=1)).isoformat(), "done")
+        self.db.set_resume(KEY, {"redispatch": {"stage": "implement", "persona": "builder", "attempt": 2}})
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 2, "builder")])
+        self.assertNotIn("redispatch", self.db.resume(KEY))
 
 
 class MainTest(unittest.TestCase):

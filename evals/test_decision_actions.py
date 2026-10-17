@@ -51,11 +51,11 @@ class DecisionActionsTest(unittest.TestCase):
         self.assertTrue(da.is_closed(tr.decision))
 
     def test_from_trio_decided_enters_lifecycle_as_answered_by_trio(self) -> None:
-        outcome = SimpleNamespace(status="decided", rationale="Two of three agreed to split.", escalated_reason=None)
+        outcome = SimpleNamespace(unanimous=True, recommendation="Split")
         tr = da.from_trio(make_decision(), outcome, answered_at=ANSWERED_AT)
         self.assertEqual(tr.decision.status, "answered")
         self.assertEqual(tr.decision.decided_by, "trio")
-        self.assertEqual(tr.decision.answer, "Two of three agreed to split.")
+        self.assertEqual(tr.decision.answer, "Split")
         self.assertEqual(tr.decision.answered_at, ANSWERED_AT)
         self.assertEqual(tr.store_write.decided_by, "trio")
         self.assertEqual(tr.store_write.status, "answered")
@@ -134,6 +134,20 @@ class DecisionActionsTest(unittest.TestCase):
         self.assertTrue(da.is_closed(tr.decision))
         self.assertEqual(tr.store_write.status, "answered")
         self.assertEqual(tr.store_write.blocked_reason, "")
+
+    def test_blank_and_duplicate_answers_are_rejected(self):
+        for record, text in ((make_decision(), "  "), (make_decision(status="answered"), "Again")):
+            with self.assertRaises(ValueError):
+                da.answer(record, text)
+
+    def test_closed_reroutes_and_reversals_do_not_change_when_waiting(self):
+        for status in ("reversed", "re-routed"):
+            rec = make_decision(status=status, answer="Change course")
+            self.assertIsNone(da.meet_action(rec, reconcile.Wait(KEY, "no slots")).store_write)
+            with self.assertRaises(ValueError):
+                da.reverse(rec, "Again")
+            with self.assertRaises(ValueError):
+                da.reroute(rec, "plan")
 
 
 if __name__ == "__main__":
