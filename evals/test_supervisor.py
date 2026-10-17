@@ -111,10 +111,33 @@ class CurrentReleaseTest(SupervisorTest):
                     actual = supervisor.current_release()
                 pointer.unlink()
                 self.assertEqual(actual, old)
-                self.assertIn("current", errors.getvalue())
+                if target.name == "incomplete":
+                    self.assertIn(f"missing entry file: {target / 'chief_of_stuff.py'}", errors.getvalue())
+                elif target.name == "missing":
+                    self.assertIn(f"No such file or directory: '{target}'", errors.getvalue())
+                else:
+                    self.assertRegex(errors.getvalue(), rf"(?:[Ll]oop|Too many levels of symbolic links).*{pointer}")
 
 
 class VenvTest(SupervisorTest):
+    def test_prepares_selected_release_pins_without_changing_the_running_release(self):
+        old_python = supervisor.ensure_venv(self.data)
+        current = self.release.parent / "next"
+        current.mkdir()
+        (current / "requirements.txt").write_text("SQLAlchemy==2.0.55\n")
+        self.pip_fails = True
+        with self.assertRaisesRegex(supervisor.ServiceError, "No matching distribution"):
+            supervisor.ensure_venv(self.data, release=current)
+        self.assertTrue(old_python.is_file())
+        self.assertEqual(supervisor.RELEASE, self.release)
+        self.pip_fails = False
+        new_python = supervisor.ensure_venv(self.data, release=current)
+        self.assertNotEqual(old_python, new_python)
+        self.assertIn([str(new_python), "-m", "pip", "install", "--disable-pip-version-check",
+                       "-r", str(current / "requirements.txt")], self.calls)
+        self.assertEqual(supervisor.ensure_venv(self.data, release=current), new_python)
+        self.assertEqual(supervisor.ensure_venv(self.data), old_python)
+
     def test_changed_base_python_identity_builds_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
         for version, tag in (("3.13.1", "cpython-313"), ("3.13.1", "cpython-314")):

@@ -1495,6 +1495,66 @@ class MainTest(unittest.TestCase):
     def test_the_supervisor_starts_the_engine_driver(self):
         self.assertEqual(supervisor.ENGINE, (str(Path(engine.__file__).resolve()),))
 
+    def test_failed_release_preflight_keeps_running_and_retries_before_teardown(self):
+        import pages
+        install = self.root / "install"
+        old, current = install / "versions/old", install / "versions/new"
+        old.mkdir(parents=True)
+        (current / "scripts").mkdir(parents=True)
+        (current / "chief_of_stuff.py").touch()
+        (current / "scripts/engine.py").touch()
+        (install / "current").symlink_to(current)
+        data = self.root / "data"
+        python = data / "venv-new/bin/python"
+        errors, stops = io.StringIO(), []
+        serving = threading.Event()
+        passed = mock.Mock(side_effect=lambda **_kw: self.assertTrue(serving.wait(2)))
+
+        def serve(_root, stop):
+            stops.append(stop)
+            serving.set()
+            stop.wait()
+
+        def prepare(*_args, **_kwargs):
+            if passed.call_count < 2:
+                raise supervisor.ServiceError("pip offline")
+            self.assertFalse(stops[0].is_set(), "preflight must happen before board teardown")
+            with self.assertRaises(supervisor.ServiceError):
+                with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"):
+                    pass
+            return python
+
+        with mock.patch.object(supervisor, "RELEASE", old), \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=prepare) as preflight, \
+             mock.patch.object(pages, "supervise", side_effect=serve), \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass", passed), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, None, KeyboardInterrupt]), \
+             mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(passed.call_count, 2, "a refused update must not starve engine passes")
+        self.assertEqual(preflight.call_args_list, [mock.call(data, release=current)] * 3)
+        execv.assert_called_once_with(str(python), [
+            str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
+        self.assertTrue(stops[0].is_set())
+        self.assertIn("pip offline", errors.getvalue())
+
+    def test_once_runs_the_working_release_when_update_preflight_fails(self):
+        errors = io.StringIO()
+        current = self.root / "next"
+        (current / "scripts").mkdir(parents=True)
+        (current / "scripts/engine.py").touch()
+        with mock.patch.object(supervisor, "current_release", return_value=current), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=supervisor.ServiceError("pip offline")) as preflight, \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        passed.assert_called_once()
+        self.assertEqual(preflight.call_args.kwargs, {"release": current})
+        execv.assert_not_called()
+
     def test_loop_relaunches_the_installed_release_when_the_pointer_moves(self):
         newer = Path("/installs/versions/2.0.0-abc")
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
