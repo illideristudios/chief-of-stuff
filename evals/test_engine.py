@@ -838,7 +838,7 @@ class MainTest(unittest.TestCase):
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
         path = self.root / "settings.toml"
-        path.write_text(path.read_text() + 'rules = ["Keep tests."]\n')
+        path.write_text(path.read_text().replace('[workers]\n', '[workers]\nrules = ["Keep tests."]\n'))
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
@@ -866,7 +866,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         self.assertEqual(run.call_count, 2)
-        # Changes on disk during either pass cannot change its launch snapshot.
+        # The engine passes one snapshot; test_worker exercises the launch after an on-disk edit.
         for version, launch in enumerate(launches, 1):
             config = launch.keywords["config"]
             self.assertEqual(config.workers.rules, (f"Rule {version}.",))
@@ -914,6 +914,63 @@ class MainTest(unittest.TestCase):
                     self.assertIn("implement", errors.getvalue())
                 else:
                     passed.assert_called_once()
+
+    def test_bad_reload_keeps_the_last_good_snapshot_and_still_runs_the_pass(self):
+        path = self.root / "settings.toml"
+        original = path.read_text()
+        for problem in ("missing", "empty", "truncated", "unreadable"):
+            with self.subTest(problem=problem):
+                path.write_text(original + 'max_concurrency = 2\nrules = ["Keep tests."]\n'
+                                '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
+                configs = []
+
+                def passed(**kwargs):
+                    config = kwargs["launch"].keywords["config"]
+                    configs.append(config)
+                    self.assertIs(kwargs["workers"], config.workers)
+                    self.assertEqual(kwargs["max_concurrency"], 2)
+                    if len(configs) != 1:
+                        return
+                    if problem == "missing":
+                        path.unlink()
+                    elif problem == "unreadable":
+                        path.chmod(0)
+                    else:
+                        path.write_text("" if problem == "empty" else "[workers")
+
+                errors = io.StringIO()
+                try:
+                    with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+                         mock.patch.object(engine, "run_pass", side_effect=passed) as run, \
+                         mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+                         contextlib.redirect_stderr(errors):
+                        self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+                finally:
+                    if path.exists():
+                        path.chmod(0o600)
+                self.assertEqual(run.call_count, 2)
+                self.assertIs(configs[0], configs[1])
+                self.assertEqual(configs[1].workers.rules, ("Keep tests.",))
+                self.assertEqual(configs[1].stages["implement"].skills, ("original-skill",))
+                self.assertIn("settings reload failed", errors.getvalue())
+
+    def test_once_bad_reload_runs_on_the_valid_startup_snapshot(self):
+        path = self.root / "settings.toml"
+        original = engine.startup.workspace_forge
+
+        def startup(root):
+            result = original(root)
+            path.write_text("[workers")
+            return result
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.startup, "workspace_forge", side_effect=startup), \
+             mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        self.assertEqual(passed.call_count, 1)
+        self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
+        self.assertIn("settings reload failed", errors.getvalue())
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()

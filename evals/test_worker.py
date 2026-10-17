@@ -136,10 +136,10 @@ class WorkerTest(unittest.TestCase):
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- Settings: `settings.toml`\n- Agent: builder task\n")
         path = self.root / "settings.toml"
-        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nrules = ["Keep tests."]\n'
+        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nclaude_as_profile = "secondary"\nrules = ["Keep tests."]\n'
                         '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
         config = engine.settings.load(self.root, "settings.toml")
-        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nrules = ["Changed rule."]\n'
+        path.write_text('[lanes.code]\nstages = ["implement"]\n[workers]\nclaude_as_profile = "other"\nrules = ["Changed rule."]\n'
                         '[stages.implement]\nagent = "other"\nskills = ["changed-skill"]\n')
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
@@ -147,12 +147,32 @@ class WorkerTest(unittest.TestCase):
             worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
                           trees=self.trees, policies=self.p, forge=self.forge, config=config, clock=lambda: NOW)
         request = start.call_args.args[0]
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
         self.assertEqual(request.agent, "builder")
         self.assertEqual(build.call_args.args[5], "builder")
         self.assertIn("Skills: load and follow original-skill", request.prompt)
         self.assertIn("- Keep tests.\n", request.prompt)
         self.assertNotIn("Changed rule.", request.prompt)
         self.assertNotIn("changed-skill", request.prompt)
+
+    def test_launch_without_a_snapshot_uses_the_configured_profile(self):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch()
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
+
+    def test_launch_explicit_empty_profile_uses_default_login(self):
+        config = engine.settings.Settings(workers=engine.settings.Workers(claude_as_profile="secondary"))
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge, config=config,
+                          claude_as_profile="", clock=lambda: NOW)
+        self.assertEqual(start.call_args.kwargs["claude_as_profile"], "")
 
     def test_implement_assignment_requires_delivery_before_reporting_done(self):
         prompt = worker.dispatch_prompt.compose_issue(self.db.items()[0], "title", "body", "implement", self.persona)
