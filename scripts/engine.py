@@ -143,6 +143,7 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
                               "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
         data["trio_retries"] = retries
         store.set_resume(key, data)
+        return None
     elif retry_key in retries:
         retries.pop(retry_key)
         if not retries:
@@ -179,13 +180,31 @@ def _link_replacement_asks(store: Any, key: str, replacements: list) -> None:
         pending = decision_actions.replacement_ask(origin, segment, store.decisions(key), store.asks(key))
         if pending is None:
             continue
-        row, ask = pending
-        ask_id = ask.id if ask is not None else store.add_ask(
-            key, segment.stage, segment.attempt, "", row.question,
-            list(row.record["decision"]["options"]), row.record["decision"]["context"])
-        if row.record.get("answer_ask_id") != ask_id:
-            store.add_decision(key, row.topic, row.question, record={**row.record, "answer_ask_id": ask_id},
-                               decided_by=row.decided_by)
+        spec, ask, prior = pending
+        ask_id = ask.id if ask is not None else store.add_ask(key, **spec)
+        update = decision_actions.link_ask(prior, ask_id)
+        if update != prior:
+            store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record)
+
+
+def _settle_asks(store: Any, key: str) -> None:
+    for ask in store.asks(key):
+        rows = store.decisions(key)
+        linked = decision_actions.recover_ask_link(rows, ask)
+        if linked is not None:
+            store.add_decision(key, linked.topic, linked.question, linked.answer, linked.decided_by, linked.record)
+            rows = store.decisions(key)
+        answer = decision_actions.committed_ask_answer(rows, ask)
+        if answer is not None:
+            store.answer_ask(ask.id, answer)
+        elif ask.answer:
+            settled = decision_actions.answer_ask(rows, ask)
+            if settled is not None:
+                store.add_decision(key, settled.topic, settled.question, settled.answer,
+                                   settled.decided_by, settled.record)
+        else:
+            continue
+        _clear_interrupt(store, key, "ambiguity", scope=decision_actions.ask_scope(rows, ask))
 
 
 def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
@@ -198,16 +217,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                                                      tuple(edge.gate for edge in workflow.edges if edge.gate))
         # Repair an interrupted ask/link write before accepting any direct answer.
         _link_replacement_asks(store, key, replacements)
+        _settle_asks(store, key)
         asks = store.asks(key)
-        for ask in asks:
-            if not ask.answer:
-                continue
-            rows = store.decisions(key)
-            settled = decision_actions.answer_ask(rows, ask)
-            if settled is not None:
-                store.add_decision(key, settled.topic, settled.question, settled.answer,
-                                   settled.decided_by, settled.record)
-            _clear_interrupt(store, key, "ambiguity", scope=decision_actions.ask_scope(rows, ask))
         if model is None:
             continue
         for ask in (ask for ask in asks if not ask.answer):
@@ -235,6 +246,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                     resolved, policies.personas, model, at, context=context,
                     instance=prior.get("instance", ""), clock=clock)
         _link_replacement_asks(store, key, replacements)
+        _settle_asks(store, key)
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:

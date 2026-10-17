@@ -263,6 +263,7 @@ class GateTest(unittest.TestCase):
         row = SimpleNamespace(topic=origin.topic, question=origin.question, answer=None,
                               decided_by="zach", record=record)
         spec, existing, pending = decision_actions.replacement_ask(origin, segment, [row], [])
+        self.assertIsInstance(pending, decision_actions.DecisionUpdate)
         self.assertIsNone(existing)
         self.assertEqual(spec, dict(stage="implement", attempt=2, session_id="", question=row.question,
                                     options=list(OPTIONS), context=context))

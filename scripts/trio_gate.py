@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
-from decision_actions import identity, retryable_failure
+from decision_actions import DecisionUpdate, identity, preserve_ask_link, retryable_failure
 from model_port import Failure, Model, Reply, Request
 from policy import Persona, Policy, PolicyError
 
@@ -90,10 +90,12 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
     unanimous = (all(v["vote"] == "adopt" for v in verdicts)
                  and len({v["choice"] for v in verdicts}) == 1)
     recommendation = verdicts[0]["choice"] if unanimous else None
-    store.add_decision(decision.issue_key, topic=decision.topic, question=decision.question,
-                       answer=recommendation, decided_by="trio" if unanimous else "zach",
-                       record={"decision": described, "verdicts": verdicts,
-                               "recommendation": recommendation, "unanimous": unanimous})
+    update = preserve_ask_link(store.decisions(decision.issue_key), DecisionUpdate(
+        decision.topic, decision.question, recommendation, "trio" if unanimous else "zach",
+        {"decision": described, "verdicts": verdicts,
+         "recommendation": recommendation, "unanimous": unanimous}))
+    store.add_decision(decision.issue_key, update.topic, update.question, update.answer,
+                       update.decided_by, update.record)
     return Outcome(recommendation, unanimous, "" if unanimous else decision.question)
 
 
@@ -131,7 +133,9 @@ def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas:
         return consult(decision, policy, personas, model, store)
     except (PolicyError, ValueError) as exc:
         described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
-        store.add_decision(decision.issue_key, topic=decision.topic, question=decision.question,
-                           answer=None, decided_by="zach",
-                           record={"decision": described, "error": str(exc), "unanimous": False})
+        update = preserve_ask_link(earlier, DecisionUpdate(
+            decision.topic, decision.question, None, "zach",
+            {"decision": described, "error": str(exc), "unanimous": False}))
+        store.add_decision(decision.issue_key, update.topic, update.question, update.answer,
+                           update.decided_by, update.record)
         return Outcome(None, False, str(exc))

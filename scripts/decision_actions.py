@@ -127,6 +127,40 @@ def replacements(decisions: Sequence[Any], history: Sequence[Any], start: str,
     return result
 
 
+def _ask_link(row: Any, decisions: Sequence[Any]) -> int | None:
+    """A consultation inherits a link only within the same unreversed decision context."""
+    record = row.record if isinstance(row.record, dict) else {}
+    if is_reversed(row) or is_restarted(row):
+        return None
+    if record.get("answer_ask_id") is not None:
+        return record["answer_ask_id"]
+    prior = record.get("decision") or {}
+    for earlier in reversed(decisions):
+        if identity(earlier) != identity(row):
+            continue
+        earlier_record = earlier.record if isinstance(earlier.record, dict) else {}
+        payload = earlier_record.get("decision") or {}
+        if (is_reversed(earlier) or is_restarted(earlier)
+                or payload.get("context", "") != prior.get("context", "")
+                or tuple(payload.get("options") or ()) != tuple(prior.get("options") or ())):
+            return None
+        if earlier_record.get("answer_ask_id") is not None:
+            return earlier_record["answer_ask_id"]
+    return None
+
+
+def link_ask(row: Any, ask_id: int) -> DecisionUpdate:
+    """Attach an ask without changing the recorded answer or the trio's verdicts."""
+    return DecisionUpdate(row.topic, row.question, row.answer, row.decided_by,
+                          {**row.record, "answer_ask_id": ask_id})
+
+
+def preserve_ask_link(decisions: Sequence[Any], update: DecisionUpdate) -> DecisionUpdate:
+    """Carry the link into the same durable write as a consultation's new answer."""
+    ask_id = _ask_link(update, decisions)
+    return link_ask(update, ask_id) if ask_id is not None else update
+
+
 def ask_decision(decisions: Sequence[Any], ask: Any) -> Any | None:
     """Find only the decision this ask can answer, including a replacement's explicit link."""
     for row in reversed(tuple(latest(decisions).values())):
@@ -134,12 +168,26 @@ def ask_decision(decisions: Sequence[Any], ask: Any) -> Any | None:
         prior = record.get("decision")
         if not isinstance(prior, dict):
             continue
-        linked = record.get("answer_ask_id")
+        linked = _ask_link(row, decisions)
         matches = linked == ask.id if linked is not None else identity(row) == ("ask", ask.question, f"ask-{ask.id}")
         if (matches and row.question == ask.question and prior.get("context", "") == ask.context
                 and tuple(prior.get("options") or ()) == tuple(ask.options)):
             return row
     return None
+
+
+def recover_ask_link(decisions: Sequence[Any], ask: Any) -> DecisionUpdate | None:
+    """Repair a historical link hidden by an already committed consultation update."""
+    row = ask_decision(decisions, ask)
+    if row is not None and row.record.get("answer_ask_id") != ask.id and _ask_link(row, decisions) == ask.id:
+        return link_ask(row, ask.id)
+    return None
+
+
+def committed_ask_answer(decisions: Sequence[Any], ask: Any) -> str | None:
+    """An unanswered ask receives its associated decision's already committed answer."""
+    row = ask_decision(decisions, ask)
+    return row.answer if not ask.answer and row is not None and row.answer else None
 
 
 def answer_ask(decisions: Sequence[Any], ask: Any) -> DecisionUpdate | None:
@@ -163,10 +211,12 @@ def replacement_context(row: Any, segment: Any) -> str:
             f"\nDecision instance: {json.dumps(identity(row))}")
 
 
-def replacement_ask(row: Any, segment: Any, decisions: Sequence[Any], asks: Sequence[Any]) -> tuple[Any, Any] | None:
-    """An unresolved replacement needs its own answerable ask, linked to the original decision."""
+def replacement_ask(row: Any, segment: Any, decisions: Sequence[Any], asks: Sequence[Any]
+                    ) -> tuple[dict[str, Any], Any, DecisionUpdate] | None:
+    """Describe a human ask and its decision update only for a settled disagreement."""
     pending = latest(decisions).get(identity(row))
-    if pending is None or pending.answer or is_reversed(pending) or is_restarted(pending):
+    if (pending is None or pending.answer or is_reversed(pending) or is_restarted(pending)
+            or retryable_failure(pending.record)):
         return None
     prior = pending.record.get("decision") or {}
     context = replacement_context(row, segment)
@@ -174,4 +224,7 @@ def replacement_ask(row: Any, segment: Any, decisions: Sequence[Any], asks: Sequ
         return None
     existing = next((ask for ask in asks if ask.question == pending.question and ask.context == context
                      and tuple(ask.options) == tuple(prior.get("options") or ())), None)
-    return pending, existing
+    spec = {"stage": segment.stage, "attempt": segment.attempt, "session_id": "",
+            "question": pending.question, "options": list(prior.get("options") or ()), "context": context}
+    update = DecisionUpdate(pending.topic, pending.question, pending.answer, pending.decided_by, pending.record)
+    return spec, existing, update

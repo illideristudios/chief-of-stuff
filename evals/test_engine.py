@@ -747,7 +747,7 @@ class EngineTest(unittest.TestCase):
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         self.run_pass()
         self.finish("implement", 2)
-        split = self._votes([("concern", "Keep")] * 3)
+        split = self._votes([("concern", "Keep")] * 6)
         self.run_pass(model=split)
         self.assertIsNone(self.db.decisions(KEY)[-1].answer)
         self.run_pass(model=split)
@@ -762,7 +762,8 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("interrupt", self.db.resume(KEY))
         self.finish("review", 2)
         self.findings(2)
-        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(self.run_pass(model=split), [reconcile.Merge(KEY)])
+        self.assertEqual(split.n, 3)
         self.assertEqual(len(self.forge.merges), 1)
         self.run_pass(model=split)
         self.assertEqual(split.n, 3)
@@ -1136,7 +1137,7 @@ class EngineTest(unittest.TestCase):
             "decision": {"options": ["Split", "Keep"], "context": "original"}})
         rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
-        model = self._votes([("concern", "Keep")] * 3)
+        model = self._votes([("concern", "Keep")] * 6)
         self.run_pass(model=model)
         self.finish("implement")
         self.run_pass(model=model)
@@ -1153,7 +1154,8 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
         self.finish("review")
         self.findings()
-        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
+        self.assertEqual(model.n, 3)
 
     def _retryable_replacement(self):
         import decision_actions
