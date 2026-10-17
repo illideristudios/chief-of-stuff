@@ -14,6 +14,7 @@ from typing import Any
 
 import cleanup
 import clock as engine_clock
+import dispatch_prompt
 import engine_merge
 import forge
 import issue_gate
@@ -155,16 +156,48 @@ class HoldReleaseFailed(ForgeError):
     """A hold release that failed and was already logged; the dispatch error would repeat it."""
 
 
+def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) -> None:
+    """Retry pending suite labels; only a published label's explicit removal accepts its segment."""
+    observed = {row["issue_key"]: row.get("human_review") for row in snapshots}
+    for item in store.items():
+        key = item.issue_key
+        data = _resume(store, key)
+        if "suite_hold" not in data:
+            continue
+        try:
+            action = reconcile.suite_hold_action(item, data["suite_hold"], store.segments(key),
+                                                  observed=observed.get(key))
+            if action in ("retire", "accept"):
+                store.finish_suite_hold(key, accept=action == "accept")
+                if action == "accept":
+                    store.add_log(key, "suite hold released: accepted completion", at)
+                continue
+            store.set_human_review(key, True)
+            if action == "publish":
+                error = forge.add_human_hold(int(key.rpartition("#")[2]))
+                if error:
+                    raise ForgeError(error)
+                data["suite_hold"]["published"] = True
+                store.set_resume(key, data)
+        except Exception as exc:
+            # A corrupt record or one unavailable forge operation must not halt unrelated work.
+            store.set_human_review(key, True)
+            message = f"suite hold: {exc}"
+            logged = store.log(key)
+            if not logged or logged[-1].message != message:
+                store.add_log(key, message, at)
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, require_green: bool = False) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     _record_limits(workers)
-    worker.collect(store, root, clock, trees)
+    worker.collect(store, root, clock, trees, require_green=require_green)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -184,6 +217,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     now = clock()
     at = now.isoformat()
+    _sync_suite_holds(forge, store, snapshots, at)
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         key = item.issue_key
@@ -360,6 +394,7 @@ def main(argv: list[str] | None = None) -> int:
             unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:
                 raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
+            dispatch_prompt.validate_worker_rules(root, config, policies)
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
             db = store_access.migrated_store(root, engine_owned=True)
@@ -372,13 +407,15 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("no [repos] clone matches the workspace backlog")
             launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
                              clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules)
+                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
+                             require_green=config.workers.require_green_tests)
             try:
                 while True:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
+                                 require_green=config.workers.require_green_tests)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

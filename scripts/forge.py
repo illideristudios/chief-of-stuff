@@ -601,7 +601,7 @@ class Forge:
                 if error:
                     raise ForgeError(f"project status: {error}")
             snap["stage"] = self._stage(issue, statuses)
-            snap["human_review"] = self.kanban.human_review_label in issue.labels
+            snap["human_review"] = self.kanban.human_review_label in kanban._canonical(self.kanban, issue.labels)
             snap["stage_mark"] = self.mark_for_stage(snap["stage"])
         if self.approver:
             snap["review_state"] = request.approval if request else ""
@@ -639,7 +639,7 @@ class Forge:
                     "forge_state": "open" if one.state == backlog.OPEN else "closed"}
             if self.kanban is not None:
                 snap["stage"] = self._stage(one, statuses if self.kanban.github_project and self.github else None)
-                snap["human_review"] = self.kanban.human_review_label in one.labels
+                snap["human_review"] = self.kanban.human_review_label in kanban._canonical(self.kanban, one.labels)
                 snap["stage_mark"] = self.mark_for_stage(snap["stage"])
             if self.approver:
                 snap["review_state"] = r.approval if r else ""

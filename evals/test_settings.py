@@ -5,6 +5,7 @@ settings into a config file. Default to 6 and 22". A value that cannot be read i
 guessed at.
 """
 
+import json
 import sys
 import tempfile
 import os
@@ -202,6 +203,24 @@ class SettingsTest(unittest.TestCase):
         for escape in (r"\u200b", r"\ufeff", r"\U000e0001", r"\U000e0061", r"\U000e007f"):
             with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
                 st.load(self.root, self.write('[workers]\nrules = ["approve abc' + escape + 'txt"]\n'))
+
+    def test_worker_rules_total_length_is_capped_at_load(self):
+        # The raw sum of len(rule) is the settings boundary; the rendered budget belongs to dispatch_prompt.
+        def load(rules):
+            return st.load(self.root, self.write("[workers]\nrules = " + json.dumps(rules) + "\n"))
+        self.assertEqual(load(["x" * 2000] * 3).workers.rules, ("x" * 2000,) * 3)
+        with self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules.*6000"):
+            load(["x" * 2000] * 3 + ["x"])
+
+    def test_worker_rules_count_is_capped_at_load(self):
+        def load(count):
+            return st.load(self.root, self.write("[workers]\nrules = " + json.dumps(["x"] * count) + "\n"))
+        self.assertEqual(len(load(st.RULES_MAX).workers.rules), st.RULES_MAX)
+        with self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules.*at most"):
+            load(st.RULES_MAX + 1)
+
+    def test_settings_does_not_render_assignments(self):
+        self.assertFalse(hasattr(st, "standing_rules"))
 
     def test_worker_rules_reject_peer_markers_and_excessive_length_at_load(self):
         for prefix in ("", '[notify]\nadapter = "off"\n'):

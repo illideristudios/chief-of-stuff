@@ -136,7 +136,10 @@ class ChannelMigrationTest(unittest.TestCase):
             db = store.Store(path)
             try:
                 db.upsert_item(KEY, title="Before upgrade", stage="review")
-                db.record_segment(KEY, "review", 1, "before", runtime="claude")
+                # Seed the historical schema without asking today's ORM to write newer columns.
+                with db.engine.begin() as conn:
+                    conn.exec_driver_sql("INSERT INTO segment (issue_key, stage, attempt, started_at, runtime) "
+                                         "VALUES (?, 'review', 1, 'before', 'claude')", (KEY,))
                 store.migrate(path)
                 self.assertEqual(db.items()[0].title, "Before upgrade")
                 self.assertEqual(db.segments(KEY)[0].runtime, "claude")

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -20,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_prompt as dp  # noqa: E402
 import inbox  # noqa: E402
 import make_repo  # noqa: E402
+import settings  # noqa: E402
 from settings import Settings, Stage, Workers, Workflow  # noqa: E402
 from evals.rules_text import one_shot_paragraph, rules_text, sections, skill_body  # noqa: E402
 
@@ -648,6 +650,39 @@ class PromptCharacterBoundsTest(unittest.TestCase):
         (self.root / "daily" / "2026-09-18-tracker.md").write_text(large_tracker)
         body = dp.compose(self.root, "2026-09-18", item)
         self.assertLessEqual(len(body), dp.BODY_CAP)
+
+    def test_rendered_rule_budget_boundaries_for_both_assignment_paths(self):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "\n## Architecture\n- Canonical document: `design/ARCHITECTURE.md`\n")
+        row = SimpleNamespace(issue_key="k" * dp.LINE_CAP, title="t" * dp.LINE_CAP)
+        persona = SimpleNamespace(role="builder", rules=("p" * 1000,))
+        # The largest sets settings accepts: the most rules, and few long ones, both at the raw total cap.
+        for rules in (["x" * (settings.RULES_TOTAL_CAP // settings.RULES_MAX)] * settings.RULES_MAX,
+                      ["x" * 2400] * 2 + ["x" * (settings.RULES_TOTAL_CAP - 4800)]):
+            width = len(rules[0])
+            path = self.root / "rules.toml"
+            path.write_text("[workers]\nrules = " + json.dumps(rules) + "\nrequire_green_tests = true\n")
+            loaded = settings.load(self.root, path)
+            for stage in ("plan", "implement", "fix", "review"):
+                with self.subTest(width=width, stage=stage):
+                    prompt = dp.compose_issue(row, "T", "B", stage, persona, root=self.root,
+                                              skills=("testing",), rules=loaded.workers.rules, require_green=True)
+                    self.assertLessEqual(len(prompt.split("\n## Forge issue\n")[0]), dp.BODY_CAP)
+                    self.assertIn("Rule: " + persona.rules[0], prompt)
+            prompt = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                                one_shot=True, settings=loaded)
+            self.assertLessEqual(len(prompt), dp.BODY_CAP)
+            self.assertIn("Architecture:", prompt)
+
+    def test_one_shot_rule_budget_includes_the_complete_assignment(self):
+        loaded = Settings(workers=Workers(rules=("x",) * 1000, require_green_tests=True))
+        prompt = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                            one_shot=True, settings=loaded)
+        with mock.patch.object(dp, "BODY_CAP", len(prompt)):
+            self.assertEqual(dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                                        one_shot=True, settings=loaded), prompt)
+        with mock.patch.object(dp, "BODY_CAP", len(prompt) - 1), self.assertRaisesRegex(dp.RefusedError, "over the"):
+            dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                       one_shot=True, settings=loaded)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
         item = "Security audit " + ("x" * 2000)
@@ -1369,9 +1404,9 @@ class StandingWorkerRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
             self.compose()
 
-    def test_rules_count_toward_the_assignment_size_limit(self):
+    def test_rules_over_the_total_cap_refuse_dispatch(self):
         self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
-        with self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
+        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
             self.compose()
 
     def test_named_dispatch_preserves_literal_placeholder_in_rules(self):

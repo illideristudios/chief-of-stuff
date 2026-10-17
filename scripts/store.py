@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing, contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -53,6 +54,7 @@ class Segment(Base):
     started_at: Mapped[str] = mapped_column(String)
     ended_at: Mapped[str | None] = mapped_column(String, nullable=True)
     outcome: Mapped[str | None] = mapped_column(String, nullable=True)
+    required_human_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     runtime: Mapped[str] = mapped_column(String, default="", server_default="")
     model: Mapped[str] = mapped_column(String, default="", server_default="")
     effort: Mapped[str] = mapped_column(String, default="", server_default="")
@@ -109,6 +111,7 @@ class Report(WorkerRecord, Base):
     outcome: Mapped[str] = mapped_column(String)
     summary: Mapped[str] = mapped_column(String)
     findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    suite: Mapped[Any] = mapped_column(JSON, nullable=True)
 
 
 class Ask(WorkerRecord, Base):
@@ -117,6 +120,15 @@ class Ask(WorkerRecord, Base):
     options: Mapped[list[str]] = mapped_column(JSON)
     context: Mapped[str] = mapped_column(String)
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+def _run_result(data: dict, stage: str, attempt: int, outcome: str, ended_at: str) -> None:
+    """The shared collected-result layout, used by completion and suite acceptance."""
+    runs = data.get("runs")
+    record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+    if isinstance(record, dict) and stage == "review":
+        record["result"] = {"reviewed_head": record.get("reviewed_head"),
+                            "outcome": outcome, "ended_at": ended_at}
 
 
 def migration_config(path: Path | str, metadata, versions: Path | None = None) -> Config:
@@ -214,15 +226,23 @@ class Store:
         done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome), ("runtime", runtime),
                                   ("model", model), ("effort", effort), ("agent_type", agent_type))
                 if v is not None}
+        if outcome == "human_review":
+            done["required_human_review"] = True
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
 
     def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
-        """Complete only an existing open segment, without altering its start or actor."""
+        """Atomically complete an open segment and its collected result, preserving start and actor."""
         with self.session() as s:
-            s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
-                                           Segment.attempt == attempt, Segment.ended_at.is_(None))
-                      .values(ended_at=ended_at, outcome=outcome))
+            changed = s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                                     Segment.attempt == attempt, Segment.ended_at.is_(None))
+                                .values(ended_at=ended_at, outcome=outcome,
+                                        **({"required_human_review": True} if outcome == "human_review" else {})))
+            resume = s.get(Resume, issue_key)
+            if changed.rowcount and resume is not None and isinstance(resume.data, dict):
+                data = deepcopy(resume.data)
+                _run_result(data, stage, attempt, outcome, ended_at)
+                resume.data = data
 
     def drop_segment(self, issue_key: str, stage: str, attempt: int) -> None:
         """Remove a segment that never started (a reservation whose launch failed)."""
@@ -269,12 +289,34 @@ class Store:
             row = s.get(Resume, issue_key)
             return row.data if row else None
 
+    def finish_suite_hold(self, issue_key: str, *, accept: bool) -> None:
+        """Atomically retire the hold, optionally accepting its segment and collected run result.
+
+        The Use Case decides when this transition is allowed. Keep the historical review marker
+        and actor/timing fields when accepting; callers never edit the worker result layout.
+        """
+        with self.session() as s:
+            resume = s.get(Resume, issue_key)
+            data = deepcopy(resume.data)
+            hold = data.pop("suite_hold")
+            if accept:
+                segment = s.scalar(select(Segment).where(Segment.issue_key == issue_key,
+                                   Segment.stage == hold["stage"], Segment.attempt == hold["attempt"]))
+                if segment is None:
+                    raise ValueError("suite hold segment not found")
+                _run_result(data, segment.stage, segment.attempt, "done", segment.ended_at)
+                segment.outcome = "done"
+                segment.required_human_review = True
+            # Assign a fresh object so SQLAlchemy persists the nested JSON transition.
+            resume.data = data
+
     # Worker reports are append-only, including late reports from older attempts.
     def add_report(self, issue_key: str, stage: str, attempt: int, session_id: str,
-                   outcome: str, summary: str, findings: list[dict[str, Any]]) -> int:
+                   outcome: str, summary: str, findings: list[dict[str, Any]], suite: Any = None) -> int:
         with self.session() as s:
             row = Report(issue_key=issue_key, stage=stage, attempt=attempt, session_id=session_id,
-                         outcome=outcome, summary=summary, findings=findings, created_at=self._stamp())
+                         outcome=outcome, summary=summary, findings=findings, suite=suite,
+                         created_at=self._stamp())
             s.add(row)
             s.flush()
             return row.id

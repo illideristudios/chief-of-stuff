@@ -15,6 +15,7 @@ import dispatch_prompt
 import guard_binding
 import make_worktree
 import process_status
+import reconcile
 import supervisor
 from settings import load as load_settings
 from workspace import settings_path
@@ -108,7 +109,7 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", rules: tuple[str, ...] = (),
+           claude_as_profile: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
            clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
@@ -123,14 +124,16 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    defaults = load_settings(root, settings_path(text)).stages.get(stage)
+    loaded = load_settings(root, settings_path(text))
+    defaults = loaded.stages.get(stage)
     agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
-                                               skills=defaults.skills if defaults else (), rules=rules)
+                                               skills=defaults.skills if defaults else (), rules=rules,
+                                               require_green=require_green)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -228,8 +231,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None) -> None:
-    """Finish every exited or lost open segment, using only the engine's run directory."""
+            trees: Path | None = None, *, require_green: bool = False) -> None:
+    """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     for segment in store.segments():
         if segment.ended_at is not None:
             continue
@@ -298,14 +301,22 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 if not reports:
                     reason = "worker stopped without reporting an outcome"
                 elif reports[-1].outcome == "done":
-                    outcome = "done"
+                    raw = reports[-1].suite if isinstance(reports[-1].suite, dict) else {}
+                    counts = dispatch_prompt.suite_counts(raw)
+                    if reconcile.suite_holds(counts, require_green=require_green):
+                        outcome = "human_review"
+                        shown = ", ".join(
+                            f"{name}={counts[name] if counts[name] is not None else 'missing or invalid'}"
+                            for name in dispatch_prompt.SUITE_KEYS)
+                        reason = f"suite is not green; Suite: {shown}; worker said: {reports[-1].summary}"
+                        store.set_human_review(key, True)
+                        data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
+                                              "published": False}
+                        store.set_resume(key, data)
+                    else:
+                        outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
-            if segment.stage == "review":
-                # This attempt's collected result always names the SHA pinned at launch.
-                record["result"] = {"reviewed_head": record.get("reviewed_head"),
-                                    "outcome": outcome, "ended_at": now.isoformat()}
-                store.set_resume(key, data)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)

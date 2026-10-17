@@ -72,6 +72,21 @@ class ReconcileTest(unittest.TestCase):
                         expected = "replace" if restore and state == "open" and stage else "drop_stage"
                         self.assertEqual(action, expected)
 
+    def test_suite_hold_lifecycle_is_decided_from_facts(self):
+        hold = {"stage": "implement", "attempt": 1, "published": True}
+        history = [Segment("implement", outcome="human_review")]
+        decide = reconcile.suite_hold_action
+        self.assertEqual(decide(Item(), hold, history, observed=False), "accept")
+        for observed in (True, None):
+            self.assertEqual(decide(Item(), hold, history, observed=observed), "wait")
+        self.assertEqual(decide(Item(), {**hold, "published": False}, history, observed=False), "publish")
+        self.assertEqual(decide(Item(forge_state="closed"), hold, history, observed=False), "retire")
+        for invalid_history in ([], [Segment("implement", ended_at=None, outcome="human_review")],
+                                [Segment("implement", outcome="done")]):
+            with self.subTest(history=invalid_history):
+                with self.assertRaisesRegex(ValueError, "completed human-review segment"):
+                    decide(Item(), hold, invalid_history, observed=False)
+
     def plan(self, item=Item(), history=(), findings=None, slots=4, **kwargs):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
                               {} if findings is None else {item.issue_key: findings}, **kwargs)
@@ -690,6 +705,18 @@ class ReconcileTest(unittest.TestCase):
         for slots, now in ((-1, NOW), (1, NOW.replace(tzinfo=None))):
             with self.subTest(slots=slots, now=now), self.assertRaises(ValueError):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
+
+
+class SuiteHoldTest(unittest.TestCase):
+    def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):
+        green = {"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0}
+        self.assertFalse(reconcile.suite_holds(green, require_green=True))
+        self.assertFalse(reconcile.suite_holds({**green, "passed": 0}, require_green=False))
+        self.assertFalse(reconcile.suite_holds({}, require_green=False))
+        for counts in ({**green, "passed": 0}, {**green, "failed": 1}, {**green, "skipped": 2},
+                       {**green, "xfailed": 1}, {**green, "passed": None}, {}):
+            with self.subTest(counts=counts):
+                self.assertTrue(reconcile.suite_holds(counts, require_green=True))
 
 
 if __name__ == "__main__":

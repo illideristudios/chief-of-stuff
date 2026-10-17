@@ -24,6 +24,7 @@ import runtimes
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
 from md import cells as _cells, is_separator as _is_separator
+from reconcile import suite_holds
 from model_port import quota_reset
 from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
@@ -380,9 +381,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         status = "human_review"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
     # Git/worktree violations take precedence over the suite gate.
-    if status == "done" and settings.workers.require_green_tests and (
-            any(value is None for value in counts.values()) or counts["passed"] == 0
-            or any(counts[key] for key in ("failed", "skipped", "xfailed"))):
+    if status == "done" and suite_holds(counts, require_green=settings.workers.require_green_tests):
         status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     quota = ""
     if status == "human_review" and not changes and not actual and commits == NO_COMMITS:
