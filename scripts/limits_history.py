@@ -9,7 +9,7 @@ from pathlib import Path
 from alembic import command
 from alembic.migration import MigrationContext
 from alembic.script import ScriptDirectory
-from sqlalchemy import Float, Integer, String, UniqueConstraint, create_engine, select
+from sqlalchemy import Float, Integer, String, UniqueConstraint, create_engine, event, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
@@ -49,7 +49,12 @@ def _stamp(value: datetime) -> str:
 class LimitsHistory:
     def __init__(self, path: Path | str | None = None):
         self.path = Path(path) if path is not None else history_path()
-        self.engine = create_engine(f"sqlite:///{self.path}", connect_args={"timeout": 30})
+        self.engine = create_engine(f"sqlite:///{self.path}", connect_args={"timeout": 30, "isolation_level": None})
+
+        @event.listens_for(self.engine, "begin")
+        def _begin(conn) -> None:  # noqa: ANN001 - SQLAlchemy connection
+            # Serialize the check and insert across workspace engines sharing this account history, as store.Store does.
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
 
     def _migrate(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -64,12 +69,11 @@ class LimitsHistory:
                 command.upgrade(cfg, "head")
 
     def record(self, readings: list[Reading]) -> None:
+        """Insert readings; an unknown whose reason matches the latest stored row for its series is skipped."""
         if not readings:
             return
         self._migrate()
         with Session(self.engine) as session, session.begin():
-            # Serialize the check and insert across workspace engines sharing this account history.
-            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             for r in readings:
                 if r.unknown:
                     latest = session.scalar(select(LimitReading).where(
@@ -84,12 +88,13 @@ class LimitsHistory:
 
     def readings(self, runtime: str, account: str, since: datetime) -> list[Reading]:
         """Read since an inclusive aware timestamp (naive raises); a missing file returns []."""
+        since_stamp = _stamp(since)
         if not self.path.exists():
             return []
         with Session(self.engine) as session:
             rows = session.scalars(select(LimitReading).where(
                 LimitReading.runtime == runtime, LimitReading.account == account,
-                LimitReading.read_at >= _stamp(since)).order_by(LimitReading.read_at, LimitReading.id)).all()
+                LimitReading.read_at >= since_stamp).order_by(LimitReading.read_at, LimitReading.id)).all()
             return [Reading(r.runtime, r.account, r.limit, r.used, r.cap, r.unit,
                             datetime.fromisoformat(r.resets_at) if r.resets_at else None,
                             datetime.fromisoformat(r.read_at), r.unknown) for r in rows]

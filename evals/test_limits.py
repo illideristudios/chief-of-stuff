@@ -217,6 +217,21 @@ class History(unittest.TestCase):
             self.assertIn(other_limit, db.readings("codex", "", NOW))
             self.assertEqual(db.readings("claude", "", NOW), [other_runtime])
 
+    def test_a_skipped_unknown_leaves_no_write_lock_for_another_writer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "limits.sqlite"
+            a, b = limits_history.LimitsHistory(path), limits_history.LimitsHistory(path)
+            self.addCleanup(a.engine.dispose)
+            self.addCleanup(b.engine.dispose)
+            unknown = reading(None, cap=None, resets_at=None, unknown="read in 1.1")
+            a.record([unknown])
+            a.record([replace(unknown, read_at=NOW + timedelta(minutes=1))])
+            with b.engine.connect() as conn:
+                conn.connection.driver_connection.execute("PRAGMA busy_timeout=100")
+            known = reading(20, read_at=NOW + timedelta(minutes=2))
+            b.record([known])
+            self.assertEqual(b.readings("codex", "", NOW), [unknown, known])
+
     def test_separate_migrations_account_queries_and_source_dedup(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state/limits.sqlite"
@@ -247,6 +262,8 @@ class History(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             db = limits_history.LimitsHistory(Path(tmp) / "limits.sqlite")
             self.addCleanup(db.engine.dispose)
+            with self.assertRaises(ValueError):
+                db.readings("codex", "", NOW.replace(tzinfo=None))
             db.record([reading(30, read_at=NOW.astimezone(timezone(timedelta(hours=-5))))])
             self.assertEqual(db.readings("codex", "", NOW), [reading(30)])
             self.assertEqual(db.readings("codex", "", NOW + timedelta(seconds=1)), [])

@@ -484,7 +484,8 @@ class MainTest(unittest.TestCase):
         (self.root / "settings.toml").write_text(
             '[kanban]\nstages = ["In progress", "In review", "Merging"]\n'
             'human_review_label = "Human review"\n'
-            '[kanban.map]\nplan = 0\nimplement = 0\nfix = 0\nreview = 1\nmerge = 2\n')
+            '[kanban.map]\nplan = 0\nimplement = 0\nfix = 0\nreview = 1\nmerge = 2\n'
+            '[workers]\nclaude_as_profile = "secondary"\n')
 
     def test_once_refuses_a_held_workspace_lock_before_opening_the_forge(self):
         errors = io.StringIO()
@@ -503,7 +504,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_count, 1)
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
-        self.assertEqual(passed.call_args.kwargs["workers"], engine.settings.Workers())
+        self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
         sleep.assert_not_called()
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
