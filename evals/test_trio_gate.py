@@ -252,6 +252,36 @@ class GateTest(unittest.TestCase):
         self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
         self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), ask))
 
+    def test_pending_interrupts_follow_decision_state_and_context(self):
+        import decision_actions
+        gate = decision_actions.DecisionUpdate("plan", "Gate?", None, "zach", {
+            "retry_exhausted": 8, "error": "gate unavailable",
+            "decision": {"context": "implement-1", "options": ["approve", "hold"]}})
+        ask = decision_actions.DecisionUpdate("ask", "Parser?", None, "zach", {
+            "retry_exhausted": 8, "error": "parser unavailable",
+            "decision": {"instance": "ask-1", "context": "ctx", "options": ["Split", "Keep"]}})
+        gate_interrupt = {"kind": "ambiguity", "reason": "gate unavailable", "decision": {
+            "topic": "plan", "question": "Gate?", "instance": "", "context": "implement-1"}}
+        ask_interrupt = {"kind": "ambiguity", "reason": "parser unavailable", "decision": {
+            "topic": "ask", "question": "Parser?", "instance": "ask-1", "context": "ctx"}}
+        choose = decision_actions.pending_interrupt
+        self.assertEqual(choose([gate, ask], gate_interrupt), gate_interrupt)
+        for update in (replace(gate, answer="approve"),
+                       replace(gate, record={**gate.record, "reversed": True}),
+                       replace(gate, record={**gate.record, "restarted": "implement"}),
+                       replace(gate, record={**gate.record, "decision": {
+                           **gate.record["decision"], "context": "implement-2"}}, answer="approve"),
+                       replace(gate, record=None)):
+            with self.subTest(update=update):
+                self.assertEqual(choose([gate, update, ask], gate_interrupt), ask_interrupt)
+                self.assertIsNone(choose([gate, update], gate_interrupt))
+        # A split still waits for a person; an explicit hold still blocks its gate.
+        for pending in (replace(gate, record={"decision": gate.record["decision"]}),
+                        replace(gate, answer="hold", record={"decision": gate.record["decision"]})):
+            self.assertEqual(choose([pending, ask], gate_interrupt), gate_interrupt)
+        limit = {"kind": "limit", "reason": "reached spend_usd limit", "stage": "implement"}
+        self.assertEqual(choose([ask], limit), limit)
+
     def test_replacement_ask_specification_and_link_are_decision_updates(self):
         import decision_actions
         from types import SimpleNamespace

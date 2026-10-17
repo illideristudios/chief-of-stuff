@@ -706,6 +706,37 @@ class EngineTest(unittest.TestCase):
         self.run_pass(model=model)
         self.assertEqual(model.n, 3)
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+
+    def test_a_superseded_capped_gate_does_not_hide_a_later_capped_ask(self):
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        for _ in range(8):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        stale = self.db.resume(KEY)["interrupt"]
+        self.assertEqual(stale["decision"]["context"], "implement-1")
+        self.db.record_segment(KEY, "implement", 2, self.now.isoformat(), self.now.isoformat(), "done")
+        model = self._votes([("adopt", "approve")] * 3)
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        # Simulate reopening a store whose old gate interrupt survived its later approval.
+        self.db.set_resume(KEY, {**self.db.resume(KEY), "interrupt": stale})
+        ask_id = self.db.add_ask(KEY, "implement", 2, "s2", "Which parser?", ["Split", "Keep"], "ctx")
+        for _ in range(8):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        self.assertEqual(failed.call_count, 48)
+        interrupt = self.db.resume(KEY)["interrupt"]
+        self.assertEqual(interrupt["decision"], {"topic": "ask", "question": "Which parser?",
+                                                "instance": f"ask-{ask_id}", "context": "ctx"})
+        self.assertEqual(interrupt["reason"], "trio unavailable after 8 attempts: Which parser?")
+        self.db.answer_ask(ask_id, "Keep")
+        self.run_pass(model=failed)
+        self.assertNotIn("interrupt", self.db.resume(KEY))
 
     def test_a_capped_gate_regains_a_lost_interrupt_without_another_consultation(self):
         self._trio()
@@ -755,6 +786,8 @@ class EngineTest(unittest.TestCase):
             self.now += timedelta(hours=2)
         logged = sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY))
         interrupt = self.db.resume(KEY)["interrupt"]
+        self.assertEqual(interrupt["decision"], {"topic": "ask", "question": "Which parser?",
+                                                "instance": f"ask-{first}", "context": ""})
         for _ in range(3):
             self.run_pass(model=failed)
         self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), logged)
