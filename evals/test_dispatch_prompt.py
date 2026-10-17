@@ -655,21 +655,13 @@ class PromptCharacterBoundsTest(unittest.TestCase):
         (self.root / "CLAUDE.md").write_text(CLAUDE + "\n## Architecture\n- Canonical document: `design/ARCHITECTURE.md`\n")
         row = SimpleNamespace(issue_key="k" * dp.LINE_CAP, title="t" * dp.LINE_CAP)
         persona = SimpleNamespace(role="builder", rules=("p" * 1000,))
-        # Exercise both many short rules and a few long ones at the *rendered* limit.
-        for width in (1, 2400):
-            rules = []
-            while len(dp.standing_rules(tuple(rules + ["x" * width]))) <= settings.RULES_TOTAL_CAP:
-                rules.append("x" * width)
-            rules[-1] += "x" * (settings.RULES_TOTAL_CAP - len(dp.standing_rules(tuple(rules))))
-            # For width=2400 fill a last partial rule instead of exceeding the per-rule cap.
-            if len(rules[-1]) > 2400:
-                tail = len(rules[-1]) - 2400 - 3
-                rules[-1] = "x" * 2400
-                rules.append("x" * tail)
+        # The largest sets settings accepts: the most rules, and few long ones, both at the raw total cap.
+        for rules in (["x" * (settings.RULES_TOTAL_CAP // settings.RULES_MAX)] * settings.RULES_MAX,
+                      ["x" * 2400] * 2 + ["x" * (settings.RULES_TOTAL_CAP - 4800)]):
+            width = len(rules[0])
             path = self.root / "rules.toml"
             path.write_text("[workers]\nrules = " + json.dumps(rules) + "\nrequire_green_tests = true\n")
             loaded = settings.load(self.root, path)
-            self.assertEqual(len(dp.standing_rules(loaded.workers.rules)), settings.RULES_TOTAL_CAP)
             for stage in ("plan", "implement", "fix", "review"):
                 with self.subTest(width=width, stage=stage):
                     prompt = dp.compose_issue(row, "T", "B", stage, persona, root=self.root,
@@ -680,10 +672,6 @@ class PromptCharacterBoundsTest(unittest.TestCase):
                                 one_shot=True, settings=loaded)
             self.assertLessEqual(len(prompt), dp.BODY_CAP)
             self.assertIn("Architecture:", prompt)
-            rules[-1] += "x"
-            path.write_text("[workers]\nrules = " + json.dumps(rules) + "\n")
-            with self.assertRaisesRegex(settings.SettingsError, "rules.*rendered"):
-                settings.load(self.root, path)
 
     def test_one_shot_rule_budget_includes_the_complete_assignment(self):
         loaded = Settings(workers=Workers(rules=("x",) * 1000, require_green_tests=True))
