@@ -1,7 +1,7 @@
 """The issue-keyed store: one row per forge issue, written by upsert only.
 
 The forge is the source of truth. The forge-owned columns of a `WorkItem` (title, stage, forge/review/merge state, and the
-human-review flag when kanban is configured) are a cache `sync_from_forge` can rebuild; segments, decisions, ownership, log,
+human-review flag when kanban is configured) and declared file ownership are rebuildable; segments, decisions, tree ownership, log,
 and resume are the engine's own and are never touched by a sync. Omitted snapshot fields keep their stored values.
 The schema lives in `migrations/`, not in `create_all`: `migrate` is the one place
 it changes, and a test holds these models to what the migrations build.
@@ -278,6 +278,21 @@ class Store:
 
     def ownership(self, issue_key: str) -> list[Ownership]:
         return self._all(select(Ownership).where(Ownership.issue_key == issue_key).order_by(Ownership.path))
+
+    def replace_file_ownership(self, issue_key: str, scopes: list[tuple[str, str]]) -> None:
+        """Replace the forge's declaration atomically, retaining engine worktree registrations.
+
+        Older workers registered absolute tree paths as write rows; adopt those as tree rows too.
+        Declared file paths are always repository-relative.
+        """
+        with self.session() as s:
+            for row in s.scalars(select(Ownership).where(Ownership.issue_key == issue_key)).all():
+                if row.mode == "tree" or Path(row.path).is_absolute():
+                    row.mode = "tree"
+                else:
+                    s.delete(row)
+            s.flush()
+            s.add_all(Ownership(issue_key=issue_key, path=path, mode=mode) for path, mode in scopes)
 
     # decisions and log (append-only)
     def add_decision(self, issue_key: str, topic: str, question: str, answer: str | None = None,

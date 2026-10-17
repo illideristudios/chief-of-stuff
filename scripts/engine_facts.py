@@ -119,6 +119,8 @@ def _trees_dir(root: Path, trees: Path) -> str:
 
 
 def _in_trees(root: Path, trees: Path, path: str) -> bool:
+    if not Path(path).is_absolute():
+        return False  # file scopes remain scopes even when Worktrees: .
     try:
         return (root / path).resolve().is_relative_to(trees.resolve())
     except OSError:
@@ -135,7 +137,8 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
     read_only: list[str] = []
     for item in store.items():
         # worker.launch also records the worktree path here; that is a tree claim, not a file scope.
-        rows = [row for row in store.ownership(item.issue_key) if not _in_trees(root, trees, row.path)]
+        rows = [row for row in store.ownership(item.issue_key)
+                if row.mode != "tree" and not _in_trees(root, trees, row.path)]
         claims.extend(readiness.Claim(item.issue_key, row.path, row.mode) for row in rows)
         if rows and all(row.mode == "read" for row in rows):
             read_only.append(item.issue_key)

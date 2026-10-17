@@ -21,6 +21,7 @@ import forge
 import issue_gate
 import limits_history
 import limits_probe
+import ownership
 import policy
 import reconcile
 import settings
@@ -200,6 +201,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     _record_limits(workers)
     worker.collect(store, root, clock, trees, require_green=require_green, teardown_command=teardown_command)
     snapshots = list(forge.snapshots())
+    scopes = {}
+    for row in snapshots:
+        got = forge.issue(int(row["issue_key"].rpartition("#")[2]))
+        if not got.ok or got.issue is None:
+            raise ForgeError(f"ownership of {row['issue_key']}: {got.error or 'issue not found'}")
+        scopes[row["issue_key"]] = ownership.issue_scopes(got.issue.body)
     board = getattr(forge, "kanban", None)
     if board is not None:
         stored_stages = {item.issue_key: item.stage for item in store.items()}
@@ -211,6 +218,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     and board.stage_map[observed] == board.stage_map[stored]):
                 row["stage"] = stored
     store.sync_from_forge(snapshots)
+    for key, declared in scopes.items():
+        store.replace_file_ownership(key, declared)
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:

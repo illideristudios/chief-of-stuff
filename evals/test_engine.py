@@ -298,7 +298,9 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.items()[0].forge_state, "open")
 
     def test_one_failed_action_does_not_stop_the_next(self):
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
+                                "body": "## File ownership\n- write: `docs/`"})
         self.launch = mock.Mock(side_effect=[RuntimeError("spawn failed"), ("model", "low")])
         self.run_pass()
         self.assertEqual(self.launch.call_args_list[-1].args, (OTHER, "implement", 1, "builder"))
@@ -345,7 +347,9 @@ class EngineTest(unittest.TestCase):
                 self.assertIn("interrupt", self.db.resume(KEY))
 
     def test_free_slots_cap_dispatches_including_existing_workers(self):
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
+                                "body": "## File ownership\n- write: `docs/`"})
         self.run_pass(max_concurrency=1)
         self.assertEqual([call[0] for call in self.launched], [KEY])
         self.assertEqual(self.db.log(OTHER)[-1].message, "wait: no free worker slots")

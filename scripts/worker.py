@@ -121,7 +121,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
     if existing is not None:
-        store.set_ownership(issue_key, existing["tree"])
+        store.set_ownership(issue_key, existing["tree"], "tree")
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
@@ -150,7 +150,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             raise RuntimeError("prepared review tree is unreadable")
         if request_head.branch != branch:
             raise RuntimeError("request branch changed since the refused start")
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
         if prepared_review.get("head") != request_head.head or head[1] != request_head.head:
             # Retain the obsolete tree under cleanup ownership; build the new head in a fresh checkout.
             tree_name = f"{tree_name}-{uuid.uuid4()}"
@@ -160,7 +160,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
         if code or actual != branch or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
     elif not prepared_review:
         started = any(name.startswith(f"{stage}-") for name in data.get("runs", {}))
         # A failed start before any worker (such as an unreadable issue) left no tree to lose.
@@ -171,7 +171,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         made = make_worktree.build(root, clone or root, str(trees), tree_name, branch,
                                    agent, from_branch=from_branch)
         tree = made.path
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
         if stage != "review":
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
             data.update(worktree=str(tree), work_branch=branch)

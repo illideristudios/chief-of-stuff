@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import ownership
+
 SETUP = ("Name the forge with a `Backlog:` line under `## Coordinator` in the workspace's CLAUDE.md, one of:\n"
          "- Backlog: GitHub issues; repo OWNER/NAME\n"
          "- Backlog: GitLab; host https://HOST; project GROUP/NAME; token env CHIEF_OF_STUFF_GITLAB_TOKEN\n"
@@ -43,8 +45,10 @@ def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None 
         if found.issue.state == "closed":
             return Started(refused=f"issue #{issue} is closed; reopen it before starting work")
         title = found.issue.title
+        body = found.issue.body
         if not commit:
             return Started(preview=f"would start: {forge.key(issue)} {title}")
     key = forge.key(issue)
     store.upsert_item(key, title=title)
+    store.replace_file_ownership(key, ownership.issue_scopes(body))
     return Started(issue_key=key)

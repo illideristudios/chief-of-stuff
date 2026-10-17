@@ -46,6 +46,30 @@ def cell(text: str, keys: set[str]) -> str | None:
     return next((row.paths for row in parse("\n".join(_section(text, HEADING))) if row.context in keys), None)
 
 
+def issue_scopes(body: str) -> list[tuple[str, str]]:
+    """Issue `## File ownership`: `| Mode | Paths |` or `- write: paths` / `- read-only: paths`.
+
+    Reuse the tracker row reader. Missing, empty or malformed declarations conservatively own the repository.
+    Paths are literal repository-relative paths, just as for the tracker's overlap rule.
+    """
+    scopes: dict[str, str] = {}
+    for row in parse("\n".join(_section(body, HEADING))):
+        mode = row.context.strip().lower()
+        if mode == "mode":
+            continue
+        if mode not in ("write", "read", "read-only"):
+            return [(".", "write")]
+        paths = _paths(row.paths)
+        if not paths:
+            return [(".", "write")]
+        for path in paths:
+            if path.startswith("/") or ".." in path.split("/") or any(c in path for c in "*?[]"):
+                return [(".", "write")]
+            # A duplicate write cannot be narrowed by a later read row.
+            scopes[path] = "write" if mode == "write" or scopes.get(path) == "write" else "read"
+    return list(scopes.items()) or [(".", "write")]
+
+
 def read_only(paths: str) -> bool:
     """A cell that starts with the word `none`, not the start of a path, owns nothing, so it changes nothing (#57)."""
     return bool(_NONE.match(paths.strip()))

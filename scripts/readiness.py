@@ -47,6 +47,8 @@ def _conflict(issue_key: str, claims: Sequence[Claim], running: Sequence[str]) -
     for other in running:
         if other == issue_key:
             continue
+        if issue_key.rpartition("#")[0] != other.rpartition("#")[0]:
+            continue  # relative paths belong to their issue's repository
         theirs = [c.path for c in claims if c.issue_key == other and c.mode != "read"]
         if theirs and ownership.overlaps(mine_cell, _cell(theirs)):
             return f"file ownership conflict with {other}"
