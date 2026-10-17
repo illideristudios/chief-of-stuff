@@ -382,14 +382,19 @@ def _forge_denied(args: list[str], client: str, protected: tuple[str, ...], dept
 
 
 NESTED_WORD = re.compile(r"(?<![\w.-])(?:gh|glab|git|hub|sh|bash|zsh|dash|eval)(?![\w.])")
-# shortcut: inline --body/-b/--message/-m only; a body file is not read. Upgrade when workers comment from files.
+BODY_FILE_FLAGS = {"--body-file", "-F", "--file", "--editor", "-e"}
 
 
 def _architect_marker(flags: list[str]) -> bool:
-    """True when a visible comment body starts with the architect reply or request marker."""
+    """True when a comment body is hidden from the guard or starts with the architect reply or request marker.
+
+    A body read from a file, stdin or an editor cannot be inspected here, so those forms count as a marker.
+    """
     i = 0
     while i < len(flags):
         name, sep, inline = flags[i].partition("=")
+        if name in BODY_FILE_FLAGS:
+            return True
         if name in {"--body", "-b", "--message", "-m"}:
             text = inline if sep else ""
             if not sep and i + 1 < len(flags):
@@ -399,6 +404,8 @@ def _architect_marker(flags: list[str]) -> bool:
                 return True
         i += 1
     return False
+
+
 # GitLab quick actions run from note text; a leading /word on a line changes forge state.
 GLAB_QUICK_ACTION = re.compile(r"(?m)^\s*/\w+")
 

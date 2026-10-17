@@ -224,6 +224,22 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
     return Review(key, attempt) if stage == "review" else Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
+def wants_architect(policies: Policies, stages: set[str], completed: Sequence[Segment], room: str | None) -> bool:
+    """Whether merging consults the architect: the review stage, a stage that ran, or a panel member sets `architect`."""
+    ran = {"review" if "review" in stages else "merge"} | {s.stage for s in completed}
+    found = [_policy(policies, stage, room) for stage in sorted(ran) if stage in policies.stages]
+    if "review" in stages:
+        found += [policies.resolve(name, "review", room) for name in _reviewers(policies, room)]
+    return any(p.architect for p in found)
+
+
+def consults_architect(policies: Policies, history: Sequence[Segment], issue_type: str | None, room: str | None) -> bool:
+    """`wants_architect` for an item, so a driver reads the reply exactly when `_merge` would ask for it."""
+    workflow = policies.workflow_for(issue_type)
+    stages = {workflow.start} | {e.target for e in workflow.edges}
+    return wants_architect(policies, stages, [s for s in history if s.started_at and s.ended_at], room)
+
+
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
            room: str | None, now: datetime, counts: Sequence[dict] | None, edges: Sequence[Edge],
            decisions: Sequence[Decision], head: str | None, reply: ArchitectReply | None,
@@ -258,15 +274,9 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         return Wait(key, "review has not run")
     if counts is None:
         return Wait(key, "review findings are unknown")
-    review_stage = "review" if "review" in stages else "merge"
     if counts:  # already filtered by each reporting persona's effective policy
         return Wait(key, "blocking review findings")
-    work_stages = {review_stage} | {s.stage for s in completed if s.stage in policies.stages}
-    consult_policies = [_policy(policies, stage, room) for stage in sorted(work_stages)]
-    if "review" in stages:
-        consult_policies += [policies.resolve(name, "review", room) for name in _reviewers(policies, room)]
-    consult = next((p for p in consult_policies if p.architect), None)
-    if consult is not None:
+    if wants_architect(policies, stages, completed, room):
         if reply is None:
             return _consult(key, head, (), requested)
         if reply.status != "APPROVED":
@@ -355,10 +365,16 @@ def _reviewers(policies: Policies, room: str | None) -> tuple[str, ...]:
     return resolved.reviewers or (policies.stages["review"].persona,)
 
 
+def request_token(head: str, findings: Sequence[dict]) -> str:
+    """Names one architect request: the forge head plus the findings it asks about, so no clock is compared."""
+    keys = "\n".join(sorted(f["finding_key"] for f in findings))
+    return f"{head}@{hashlib.sha1(keys.encode()).hexdigest()[:8]}"
+
+
 def _consult(key: str, head: str | None, findings: Sequence[dict], requested: Sequence[str]) -> Action:
     if not head:
         return Wait(key, "change head is unknown")
-    if head in requested:
+    if request_token(head, findings) in requested:
         return Wait(key, "waiting for the architect")
     return Consult(key, head, list(findings))
 
@@ -426,13 +442,11 @@ def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[di
     consult = next((p for name in _reviewers(policies, room)
                     if (p := policies.resolve(name, "review", room)).architect), None)
     if consult is not None:
-        # No reply for this forge head: one request, listing only findings with no disposition.
-        # A reply that leaves a finding undisposed waits; it does not post a second request for the same head.
+        # One request per head and set of undisposed findings. Findings a later panel adds are new keys, so they
+        # earn a new request even at the same head; an unchanged set waits for the reply to it.
         undisposed = [f for f in findings if "disposition" not in f]
-        if reply is None:
+        if reply is None or undisposed:
             return [_consult(item.issue_key, head, undisposed, requested)]
-        if undisposed:
-            return [Wait(item.issue_key, "architect left a review finding undisposed")]
     finding = pending[0]
     tries = [s for s in fixes if s.finding_key == finding["finding_key"] and s.outcome not in RETRYABLE]
     if len(tries) > _policy(policies, edge.target, room).retry_limit:
@@ -442,17 +456,9 @@ def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[di
                      finding["finding_key"], dict(finding))]
 
 
-def _after_panel(reply: ArchitectReply, panel: Sequence[Segment]) -> bool:
-    """A verdict counts when it does not predate the panel. Dispositions are not dropped for this."""
-    if not reply.created_at:
-        return False
-    started = [_time(s.started_at) for s in panel if s.started_at]
-    return not started or _time(reply.created_at) >= min(started)
-
-
 def _unexplained(item: WorkItem, history: Sequence[Segment], panel: Sequence[Segment], head: str | None) -> bool:
-    """The forge head moved off the panel, and no done fix in this round recorded that forge head."""
-    if not head or not panel or item.human_review or item.forge_state == "closed":
+    """The forge head moved off the panel at the review stage, and no done fix in this round recorded that forge head."""
+    if not head or not panel or item.stage != "review" or item.human_review or item.forge_state == "closed":
         return False
     if any(s.started_at and not s.ended_at for s in history):
         return False
@@ -538,8 +544,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         reply = (architect_replies or {}).get(key)
         dispositions = reply.dispositions if reply else {}
         # Approval counts only for this forge head. Dispositions apply by finding key whatever head they came from.
-        verdict = reply if (reply and head and reply.reviewed_head == head and reply.status in ("APPROVED", "CHANGES")
-                            and _after_panel(reply, panel)) else None
+        verdict = reply if (reply and head and reply.reviewed_head == head
+                            and reply.status in ("APPROVED", "CHANGES")) else None
         if findings is not None:
             findings = [{**{k: v for k, v in f.items() if k != "disposition"},
                          **({"disposition": dispositions[f["finding_key"]]}

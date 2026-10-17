@@ -351,16 +351,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = reports[-1].outcome, reports[-1].summary
             if segment.finding_key and outcome == "done":
                 # The head a fix produced is the forge's, read after the worker exits. The worktree HEAD is not it.
-                produced = ""
-                if forge is not None:
-                    try:
-                        request = forge.closing_request(key)
-                        produced = (getattr(request, "head", None) or "").strip()
-                    except ForgeError:
-                        produced = ""
+                # An unreadable head leaves the segment open: the next pass reads it again, and nothing is recorded.
+                try:
+                    produced = (getattr(forge.closing_request(key), "head", None) or "").strip() if forge is not None else ""
+                except ForgeError:
+                    produced = ""
                 if not produced:
-                    outcome = "failed"
-                    raise RuntimeError("completed fix head is unreadable")
+                    continue
                 store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
                                      reviewed_head=produced)
             if segment.stage == "review":

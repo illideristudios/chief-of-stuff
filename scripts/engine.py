@@ -341,14 +341,15 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 data = _resume(store, key)
                 _, posted = engine_facts.architect_comments(forge.change_comments(request.number))
                 known = list(dict.fromkeys([*posted, *data.get("architect_requests", [])]))
-                if action.head not in known:
-                    body = (f"Architect review requested: {action.head}\n\n"
+                token = reconcile.request_token(action.head, action.findings)
+                if token not in known:
+                    body = (f"Architect review requested: {token}\n\n"
                             "Dispose of each finding and reply with `Architect: APPROVED <sha>` or "
                             "`Architect: CHANGES <sha>`. Include a JSON block with a `dispositions` object "
                             "mapping each finding_key to fix, file, keep or discard.\n\n"
                             + "```json\n" + json.dumps({"findings": list(action.findings)}, indent=2) + "\n```")
                     forge.comment_change(request.number, body)
-                    known.append(action.head)
+                    known.append(token)
                 data["architect_requests"] = known
                 store.set_resume(key, data)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):

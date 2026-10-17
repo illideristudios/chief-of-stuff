@@ -327,19 +327,20 @@ class ReconcileTest(unittest.TestCase):
         review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
         self.assertNotIn(reconcile.Merge(KEY), self.plan(item, [implement, review], []))
 
-    def test_required_architect_consultation_accepts_only_a_current_head_reply_after_the_panel(self):
+    def test_required_architect_consultation_accepts_only_a_current_head_approval(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         item = replace(Item(), stage="merge", merge_state="ready")
         history = [Segment("implement", started_at=NOW - timedelta(hours=3)),
                    Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)]
         self.assertEqual(self.plan(item, history, []), [reconcile.Consult(KEY, "head", [])])
         for reply in (reconcile.ArchitectReply("old", "APPROVED", NOW.isoformat(), {}),
-                      reconcile.ArchitectReply("head", "APPROVED", (NOW - timedelta(hours=2)).isoformat(), {}),
                       reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(), {})):
             with self.subTest(reply=reply):
                 self.assertNotIn(reconcile.Merge(KEY), self.plan(item, history, [], architect_replies={KEY: reply}))
-        self.assertEqual(self.plan(item, history, [], architect_replies={KEY: reconcile.ArchitectReply(
-            "head", "APPROVED", NOW.isoformat(), {})}), [reconcile.Merge(KEY)])
+        # The approval is bound to the head, not to a clock: one read before the panel ended still counts.
+        for when in (NOW, NOW - timedelta(hours=2)):
+            self.assertEqual(self.plan(item, history, [], architect_replies={KEY: reconcile.ArchitectReply(
+                "head", "APPROVED", when.isoformat(), {})}), [reconcile.Merge(KEY)])
 
     def test_implement_stage_and_persona_architect_policy_require_a_reply(self):
         item = replace(Item(), stage="merge", merge_state="ready")
