@@ -1503,6 +1503,7 @@ class MainTest(unittest.TestCase):
         (current / "scripts").mkdir(parents=True)
         (current / "chief_of_stuff.py").touch()
         (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
         (install / "current").symlink_to(current)
         data = self.root / "data"
         python = data / "venv-new/bin/python"
@@ -1516,7 +1517,10 @@ class MainTest(unittest.TestCase):
             stop.wait()
 
         def prepare(*_args, **_kwargs):
-            if passed.call_count < 2:
+            with self.assertRaises(supervisor.ServiceError):
+                with supervisor.lock(data / "supervisor.lock"):
+                    pass
+            if passed.call_count < 3:
                 raise supervisor.ServiceError("pip offline")
             self.assertFalse(stops[0].is_set(), "preflight must happen before board teardown")
             with self.assertRaises(supervisor.ServiceError):
@@ -1530,21 +1534,81 @@ class MainTest(unittest.TestCase):
              mock.patch.object(pages, "supervise", side_effect=serve), \
              mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass", passed), \
-             mock.patch.object(engine.time, "sleep", side_effect=[None, None, KeyboardInterrupt]), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, None, None, KeyboardInterrupt]), \
+             mock.patch.object(engine.time, "time", side_effect=[1000, 1010, 1020, 1060]), \
              mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
-        self.assertEqual(passed.call_count, 2, "a refused update must not starve engine passes")
-        self.assertEqual(preflight.call_args_list, [mock.call(data, release=current)] * 3)
+        self.assertEqual(passed.call_count, 3, "backoff must leave engine passes running")
+        self.assertEqual(preflight.call_args_list, [mock.call(data, release=current)] * 2)
         execv.assert_called_once_with(str(python), [
             str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
         self.assertTrue(stops[0].is_set())
         self.assertIn("pip offline", errors.getvalue())
+
+    def test_failed_preflight_backoff_survives_restart_and_changes_with_pins_or_release(self):
+        current = self.root / "next"
+        (current / "scripts").mkdir(parents=True)
+        (current / "scripts/engine.py").touch()
+        requirements = current / "requirements.txt"
+        requirements.write_text("example==1\n")
+        data = self.root / "data"
+        errors = io.StringIO()
+        with mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=supervisor.ServiceError("pip offline")) as prepare, \
+             mock.patch.object(engine.time, "time") as now, contextlib.redirect_stderr(errors):
+            now.return_value = 1000
+            self.assertIsNone(engine._prepare_handoff(current))
+            # A new interpreter reads the same persisted retry deadline, rather than trying pip again.
+            probe = "import engine; from pathlib import Path; " \
+                    f"engine.supervisor.data_dir = lambda: Path({str(data)!r}); " \
+                    "engine.time.time = lambda: 1010; " \
+                    "engine.supervisor.ensure_venv = lambda *a, **k: (_ for _ in ()).throw(AssertionError('retried')); " \
+                    f"assert engine._prepare_handoff(Path({str(current)!r})) is None"
+            result = subprocess.run([sys.executable, "-c", probe], cwd=Path(engine.__file__).parent,
+                                    capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            now.return_value = 1060
+            self.assertIsNone(engine._prepare_handoff(current))
+            now.return_value = 1179
+            self.assertIsNone(engine._prepare_handoff(current))
+            self.assertEqual(prepare.call_count, 2, "second failure backs off for 120 seconds")
+            now.return_value = 1180
+            self.assertIsNone(engine._prepare_handoff(current))
+            requirements.write_text("example==2\n")
+            self.assertIsNone(engine._prepare_handoff(current))
+            other = self.root / "other"
+            (other / "scripts").mkdir(parents=True)
+            (other / "scripts/engine.py").touch()
+            (other / "requirements.txt").write_bytes(requirements.read_bytes())
+            self.assertIsNone(engine._prepare_handoff(other))
+            self.assertEqual(prepare.call_count, 5, "new pins and a different release retry immediately")
+        self.assertEqual(errors.getvalue().count("pip offline"), 3, "unchanged failures are logged once per target")
+
+    def test_preflight_does_not_wait_for_another_workspace_supervisor_lock(self):
+        current = self.root / "next"
+        (current / "scripts").mkdir(parents=True)
+        (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
+        data = self.root / "data"
+        with supervisor.lock(data / "supervisor.lock"), \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(supervisor, "ensure_venv") as prepare, \
+             mock.patch.object(supervisor, "lock", wraps=supervisor.lock) as locked:
+            # Inspect before entering to make a blocking-lock regression fail without hanging the suite.
+            def check_lock(path, wait=False):
+                self.assertFalse(wait, "the pass loop must not wait for the global lock")
+                return locked._mock_wraps(path, wait=wait)
+            locked.side_effect = check_lock
+            self.assertIsNone(engine._prepare_handoff(current))
+            self.assertFalse(locked.call_args.kwargs.get("wait", False))
+        prepare.assert_not_called()
 
     def test_once_runs_the_working_release_when_update_preflight_fails(self):
         errors = io.StringIO()
         current = self.root / "next"
         (current / "scripts").mkdir(parents=True)
         (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
         with mock.patch.object(supervisor, "current_release", return_value=current), \
              mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
              mock.patch.object(supervisor, "ensure_venv", side_effect=supervisor.ServiceError("pip offline")) as preflight, \
@@ -1560,6 +1624,7 @@ class MainTest(unittest.TestCase):
         newer = self.root / "install/versions/2.0.0-abc"
         (newer / "scripts").mkdir(parents=True)
         (newer / "scripts/engine.py").touch()
+        (newer / "requirements.txt").write_text("example==1\n")
         python = self.root / "data/venv-new/bin/python"
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
@@ -1583,6 +1648,7 @@ class MainTest(unittest.TestCase):
         (current / "scripts").mkdir(parents=True)
         (current / "chief_of_stuff.py").touch()
         (current / "scripts/engine.py").touch()
+        (current / "requirements.txt").write_text("example==1\n")
         (install / "current").symlink_to(current)
         python = self.root / "data/venv-new/bin/python"
         with mock.patch.object(supervisor, "RELEASE", old), \
@@ -1620,6 +1686,7 @@ class MainTest(unittest.TestCase):
         newer = self.root / "next"
         (newer / "scripts").mkdir(parents=True)
         (newer / "scripts/engine.py").touch()
+        (newer / "requirements.txt").write_text("example==1\n")
         board = self.root / "pages"
 
         def start(*_a, **_kw):

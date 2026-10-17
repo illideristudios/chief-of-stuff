@@ -138,6 +138,25 @@ class VenvTest(SupervisorTest):
         self.assertEqual(supervisor.ensure_venv(self.data, release=current), new_python)
         self.assertEqual(supervisor.ensure_venv(self.data), old_python)
 
+    def test_same_pins_update_never_rebuilds_the_running_interpreters_venv(self):
+        python = supervisor.ensure_venv(self.data)
+        marker = python.parent.parent / ".installed"
+        current = self.release.parent / "next"
+        current.mkdir()
+        (current / "requirements.txt").write_bytes((self.release / "requirements.txt").read_bytes())
+        self.pip_fails = True
+        for failure in ("probe timeout", "missing marker"):
+            with self.subTest(failure=failure):
+                if failure == "missing marker":
+                    marker.unlink(missing_ok=True)
+                self.calls.clear()
+                with mock.patch.object(supervisor.sys, "executable", str(python)), \
+                     mock.patch.object(supervisor, "_venv_python_runs", return_value=False), \
+                     self.assertRaisesRegex(supervisor.ServiceError, "running interpreter"):
+                    supervisor.ensure_venv(self.data, release=current)
+                self.assertTrue(python.is_file(), "the launchd interpreter must survive failed preflight")
+                self.assertFalse(any("pip" in call or call[1:3] == ["-m", "venv"] for call in self.calls))
+
     def test_changed_base_python_identity_builds_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
         for version, tag in (("3.13.1", "cpython-313"), ("3.13.1", "cpython-314")):
