@@ -164,7 +164,7 @@ class VenvTest(SupervisorTest):
         generation.rename(legacy)
         adopted = supervisor.ensure_venv(self.data)
         self.assertEqual(adopted, pointer / "bin/python")
-        self.assertEqual(pointer.readlink(), legacy_name)
+        self.assertEqual(pointer.readlink(), Path(legacy_name))
         supervisor.install(self.root, ENGINE, self.jobs)
         self.assertEqual(self.job()["ProgramArguments"][0], str(adopted))
         (legacy / "bin/python").unlink()

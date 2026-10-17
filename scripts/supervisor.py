@@ -162,7 +162,8 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
     Callers hold supervisor.lock. The total preparation budget includes shell lookup and all subprocesses.
     Published generations stay at their original paths: other workspaces and launchd may still use them.
     The returned interpreter is reached through the `venv-<key>.current` symlink, so a LaunchAgent that
-    recorded it follows every later repair without being reinstalled.
+    recorded it follows every later repair of the same pins and base Python without being reinstalled.
+    A running engine follows that link through sys.prefix, including a repair another workspace published.
     """
     deadline = time.monotonic() + timeout
 
@@ -195,10 +196,19 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
     except OSError:
         name = ""  # not a symlink: a cache miss, replaced by the build below
     if name.startswith(legacy) and Path(name).name == name:
-        # The pointer is a symlink, so a LaunchAgent recording its path follows every later repair.
-        launch = data / legacy if name == legacy else pointer
-        if (data / name / ".installed").exists() and _venv_python_runs(launch / "bin/python", timeout=remaining(30)):
-            return launch / "bin/python"
+        target = data / name
+        launch = pointer if pointer.is_symlink() else target
+        if (target / ".installed").exists() and _venv_python_runs(launch / "bin/python", timeout=remaining(30)):
+            if not pointer.is_symlink():
+                # A pre-pointer directory has no link; publish one so a recorded LaunchAgent follows later repairs.
+                staged = data / f".{pointer.name}.{time.monotonic_ns()}"
+                try:
+                    os.symlink(name, staged)
+                    os.replace(staged, pointer)
+                except BaseException:
+                    staged.unlink(missing_ok=True)
+                    raise
+            return pointer / "bin/python"
     data.mkdir(parents=True, exist_ok=True)
     building = Path(tempfile.mkdtemp(dir=data, prefix=f"{legacy}-"))
     python = building / "bin/python"

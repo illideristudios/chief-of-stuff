@@ -72,6 +72,10 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
     tasks = parse_tracker(tracker_text).tasks
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
     running = []
+    try:
+        session_logs.retain_activity(claude_account, [trees / w.tree for w in sources.workers if w.tree])
+    except (ValueError, OSError):
+        pass
     for w in sources.workers:
         t = by_name.get(w.task.strip().casefold())
         last, tokens = activity(trees / w.tree, account=claude_account) if w.tree else (None, 0)

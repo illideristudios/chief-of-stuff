@@ -73,10 +73,14 @@ def _activity(raw: dict) -> dict | None:
     return event
 
 
+def _slug(tree: Path) -> str:
+    return re.sub(r"[^A-Za-z0-9]", "-", str(tree.resolve()))
+
+
 def _logs(account: str, tree: Path | None) -> list[Path]:
     """The account's transcripts (one worker tree's, when given), forgetting cached files that no longer exist."""
     root = claude_home(account) / "projects"
-    scope = root if tree is None else root / re.sub(r"[^A-Za-z0-9]", "-", str(tree.resolve()))
+    scope = root if tree is None else root / _slug(tree)
     logs = list(scope.rglob("*.jsonl") if tree is None else scope.glob("*.jsonl"))
     live = set(logs)
     with _scan_lock:
@@ -91,6 +95,19 @@ def limit_events(account: str = ""):
     for log in _logs(account, None):
         for n, event in _records("limit", log, lambda line: "rate_limit" in line, _limit):
             yield log, n, event
+
+
+def retain_activity(account: str, trees) -> None:
+    """Drop activity entries for worker trees this render did not ask for.
+
+    The page server never scans the account root, and an ended worker's transcript stays on disk, so the
+    entry would otherwise live until the process restarts.
+    """
+    root = claude_home(account) / "projects"
+    keep = {root / _slug(Path(tree)) for tree in trees}
+    with _scan_lock:
+        for key in [k for k in _scans if k[0] == "activity" and k[1].parent not in keep]:
+            del _scans[key]
 
 
 def activity_events(account: str, tree: Path):
