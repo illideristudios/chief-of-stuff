@@ -153,6 +153,19 @@ class EngineTest(unittest.TestCase):
                     self.assertNotIn("pending_review", self.db.resume(KEY))
                 self.forge.rows[0].update(stage="implement", forge_state="open")
 
+    def test_closing_an_issue_clears_pending_review_even_when_completed_stages_tie(self):
+        self.completed_review(held=True)
+        self.run_pass(review_stages={"implement"})
+        self.db.record_segment(KEY, "review", 1, started_at=(NOW - timedelta(hours=1)).isoformat())
+        self.db.end_segment(KEY, "review", 1, NOW.isoformat(), "done")
+        self.forge.rows[0].update(forge_state="closed", human_review=False)
+        self.run_pass(review_stages={"implement"})
+        resume = self.db.resume(KEY)
+        self.assertNotIn("pending_review", resume)
+        self.assertNotIn("pending_review_applied", resume)
+        self.assertNotIn("interrupt", resume)
+        self.assertFalse(resume.get("reviewed_stages"))
+
     def test_architect_consultation_and_a_blank_stage_still_release_the_same_attempt(self):
         self.completed_review(held=True)
         self.run_pass(review_stages={"implement"})

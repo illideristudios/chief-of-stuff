@@ -177,9 +177,8 @@ class StageReviewTest(unittest.TestCase):
 
     def test_unnamed_row_keeps_its_completed_review_hold_and_since(self):
         import flow_chart
-        # Legacy trackers have no Name column; the launcher identifies these rows by item.
-        text = "\n".join("|" + "|".join(line.split("|")[2:]) if line.startswith("|") else line
-                         for line in TRACKER.splitlines())
+        # A row with no Name value is identified by item in the launcher's log.
+        text = TRACKER.replace("| Review plan | Review plan |", "| | Review plan |")
         task = parse_tracker(text).tasks[2]
         self.assertEqual(task.name, "")
         lanes = {"code": settings.Lane(("plan",))}
