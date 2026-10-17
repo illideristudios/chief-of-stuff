@@ -400,7 +400,7 @@ def ownership_report(workspaces: list[dict]) -> str:
                 lines += ['```markdown', row['section'].rstrip(), '```', '']
             else:
                 lines += ['Existing valid declaration retained without changes.', '']
-    return '\n'.join(lines) + '\n'
+    return '\n'.join(lines).rstrip() + '\n'
 
 
 def apply_ownership(plan: dict, plan_text: str, approval_pr: str, plan_path: str, gh, validate) -> list[dict]:
