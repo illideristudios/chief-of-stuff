@@ -14,13 +14,16 @@ could not be asked. A caller can branch on it without parsing. Every target gets
 line even when it fails: a missing line would read as a healthy service. No `Settings:` line is no
 settings line, and a settings file that is not there is `absent, defaults`: not a fault, and not ok.
 Settings that name no runtime, or did not load, get no runtimes line.
-Missing files from init's inventory are advice only and do not affect the exit code.
+Init's output files that are missing or not regular files get one `workspace file <name> missing (advice); <command>`
+(or `not a file`, or `unreadable`) line each, printed after the runtimes line and before the targets, with or without a
+`Settings:` line. They are advice only and do not affect the exit code.
 A usage fault (no config at the path, a `Health:` line that is not a target) is stderr and exit 2.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shlex
 import sys
@@ -32,11 +35,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from md import section
-from init_workspace import WORKSPACE_FILES
 from runtimes import RUNTIMES
 from settings import ModelEntry, SettingsError, load as load_settings
 from shell_setup import ShellError, resolve
-from workspace import settings_path
+from workspace import WORKSPACE_FILES, settings_path
 
 HEALTH = re.compile(r"^\s*(?:[-*]\s*)?Health:\s*(.+?)\s*$", re.MULTILINE)
 SCHEMES = ("http", "https")
@@ -118,21 +120,29 @@ def check_runtimes(models: dict[str, tuple[ModelEntry, ...]]) -> tuple[list[str]
 
 
 def missing_workspace_files(config: Path, settings: str | None) -> list[str]:
-    """Read init's outputs as data; respect configured paths and never install anything."""
+    """Advice lines for init's outputs that are not regular files; respects configured paths and installs nothing.
+
+    `config` and (with a `Settings:` line) `settings` take their configured paths; a malformed settings name
+    (ValueError) is left to `check_settings`.
+    """
     root = config.parent
     paths = {"config": config, "settings": root / settings} if settings else {"config": config}
     lines = []
     for key, item in WORKSPACE_FILES.items():
         path = paths.get(key, root / item.name)
         try:
-            path.stat()
-        except (FileNotFoundError, NotADirectoryError):
-            command = item.command.format(root=shlex.quote(str(root)))
-            name = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
-            lines.append(f"workspace file {name} missing (advice); {command}")
-        except (OSError, ValueError):
-            # Inaccessible or invalid settings paths are diagnosed by check_settings.
+            if path.is_file():
+                continue
+            exists = os.path.lexists(path)  # a dangling symlink exists; `install` refuses it too
+        except ValueError:
             continue
+        except OSError as exc:
+            lines.append(f"workspace file {item.name} unreadable (advice); {exc.strerror or exc}")
+            continue
+        name = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+        command = item.command.format(root=shlex.quote(str(root.resolve())))
+        fix = f"move it aside, then {command}" if exists else command
+        lines.append(f"workspace file {name} {'not a file' if exists else 'missing'} (advice); {fix}")
     return lines
 
 

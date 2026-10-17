@@ -8,9 +8,12 @@ fake would skip all three. The parsing tests and the settings tests with no `Hea
 import contextlib
 import io
 import json
+import os
 import re
 import shlex
+import shutil
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,7 +26,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import probe_health as ph  # noqa: E402
-import init_workspace as init  # noqa: E402
+import workspace  # noqa: E402
 import install_model_guidance as guidance  # noqa: E402
 import runtimes  # noqa: E402
 import test_shell_setup  # noqa: E402
@@ -201,7 +204,7 @@ class WorkspaceFilesTest(unittest.TestCase):
         self.assertEqual(len(found), 1, lines)
         self.assertIn("missing", found[0])
         self.assertIn("advice", found[0])
-        command = f"chief-of-stuff models --root {shlex.quote(str(self.root))}"
+        command = f"chief-of-stuff models --root {shlex.quote(str(self.root.resolve()))}"
         self.assertIn(command, found[0])
         self.assertEqual(code, 0, "missing init files do not add failed checks")
         self.assertFalse((self.root / guidance.NAME).exists(), "health only advises")
@@ -220,8 +223,8 @@ class WorkspaceFilesTest(unittest.TestCase):
 
     def test_health_reads_new_init_file_data_without_its_own_list(self):
         guidance.install(self.root)
-        extra = init.WorkspaceFile("new-release.md", "chief-of-stuff models --root {root}")
-        with mock.patch.dict(init.WORKSPACE_FILES, {"future": extra}):
+        extra = workspace.WorkspaceFile("new-release.md", "chief-of-stuff models --root {root}")
+        with mock.patch.dict(workspace.WORKSPACE_FILES, {"future": extra}):
             code, lines = self.health()
         self.assertEqual(code, 0)
         self.assertEqual(len([line for line in lines if "new-release.md" in line]), 1, lines)
@@ -235,6 +238,46 @@ class WorkspaceFilesTest(unittest.TestCase):
         code, lines = self.health()
         self.assertEqual(code, 0)
         self.assertFalse(any(line.startswith("workspace file ") for line in lines), lines)
+
+    def test_a_non_file_at_an_inventory_path_is_advice_to_move_it_aside(self):
+        path = self.root / guidance.NAME
+        for make in (path.mkdir, lambda: path.symlink_to(self.root / "gone"), lambda: os.mkfifo(path)):
+            with self.subTest(make=make):
+                make()
+                code, lines = self.health()
+                found = [line for line in lines if guidance.NAME in line]
+                self.assertEqual(len(found), 1, lines)
+                self.assertIn("not a file (advice)", found[0])
+                self.assertIn("move it aside, then chief-of-stuff models --root", found[0])
+                self.assertEqual(code, 0)
+                shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
+
+    def test_an_unreadable_inventory_path_is_reported_not_dropped(self):
+        is_file = Path.is_file
+
+        def denied(path):
+            if path.name == guidance.NAME:
+                raise PermissionError(13, "Permission denied")
+            return is_file(path)
+
+        with mock.patch.object(Path, "is_file", denied):
+            code, lines = self.health()
+        self.assertTrue(any(guidance.NAME in line and "Permission denied" in line for line in lines), lines)
+        self.assertEqual(code, 0)
+
+    def test_the_advised_root_is_absolute(self):
+        old = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, old)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ph.main(["--config", "CLAUDE.md"])
+        self.assertIn(f"--root {shlex.quote(str(self.root.resolve()))}", out.getvalue())
+
+    def test_health_does_not_load_the_init_and_forge_import_graph(self):
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        probe = f"import sys; sys.path.insert(0, {str(scripts)!r}); import probe_health; sys.exit('init_workspace' in sys.modules or 'forge' in sys.modules)"
+        self.assertEqual(subprocess.run([sys.executable, "-I", "-c", probe]).returncode, 0)
 
 
 TOML = "chief-of-stuff.toml"
@@ -277,7 +320,7 @@ class SettingsCheckTest(unittest.TestCase):
     """
 
     def run_health(self, block: str, toml: str | bytes | None = None, *, text: str | None = None, setup=None) -> tuple[int, list[str], str]:
-        """Exit code, stdout lines and stderr of one `health` run over a workspace holding `block`.
+        """Exit code, stdout lines (minus `workspace file ` advice) and stderr of one `health` run over a workspace holding `block`.
 
         `text` replaces the whole CLAUDE.md; `setup(root)` runs once the files are written, before health does.
         What `setup` returns, if anything, is called once health is done, so the temp dir can be removed.
@@ -584,7 +627,7 @@ class RuntimeCheckTest(unittest.TestCase):
                                           SettingsCheckTest.settings_line)
 
     def health(self, block: str, toml: str | None, present=(), raises: Exception | None = None):
-        """Exit code, stdout lines, stderr, and the binaries `resolve` was asked for, in order."""
+        """Exit code, stdout lines (minus `workspace file ` advice), stderr, and the binaries `resolve` was asked for, in order."""
         def found(program=None, **_kw):
             if raises:
                 raise raises

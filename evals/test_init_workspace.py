@@ -19,7 +19,7 @@ import install_model_guidance as guidance  # noqa: E402
 import engine  # noqa: E402
 import issue_gate  # noqa: E402
 import forge  # noqa: E402
-from workspace import parse_coordinator  # noqa: E402
+from workspace import WORKSPACE_FILES, WorkspaceFile, parse_coordinator  # noqa: E402
 from settings import _models, load as load_settings, load_policy, workflow_stages  # noqa: E402
 
 
@@ -76,14 +76,13 @@ class InitWorkspaceTest(unittest.TestCase):
         self.assertIsNotNone(settings.kanban)
         self.assertEqual(set(settings.kanban.stage_map), {"plan", "implement", "review", "fix", "merge"})
 
-    def test_file_inventory_is_the_data_init_uses_to_create_its_files(self):
-        with mock.patch.dict(init.WORKSPACE_FILES, {
-            "config": init.WorkspaceFile("workspace.md", "chief-of-stuff init --help"),
-            "settings": init.WorkspaceFile("engine.toml", "chief-of-stuff init --help"),
+    def test_config_and_settings_names_come_from_the_file_inventory(self):
+        with mock.patch.dict(WORKSPACE_FILES, {
+            "config": WorkspaceFile("workspace.md", "chief-of-stuff init --help"),
+            "settings": WorkspaceFile("engine.toml", "chief-of-stuff init --help"),
         }):
             self.assertEqual(self.run_init()[0], 0)
-            self.assertEqual({p.name for p in self.root.iterdir()},
-                             {item.name for item in init.WORKSPACE_FILES.values()})
+            self.assertEqual({p.name for p in self.root.iterdir()}, {"workspace.md", "engine.toml", guidance.NAME})
             config = parse_coordinator((self.root / "workspace.md").read_text(), date.today())
             self.assertEqual(config.settings_path, "engine.toml")
 

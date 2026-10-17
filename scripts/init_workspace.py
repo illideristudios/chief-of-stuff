@@ -7,7 +7,6 @@ import argparse
 import re
 import sys
 import tomllib
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -17,29 +16,14 @@ import backlog  # noqa: E402
 from forge import project_option_ids  # noqa: E402
 import issue_gate  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
-from install_model_guidance import NAME as GUIDANCE_NAME, destination as guidance_destination, install as install_guidance
-from workspace import ConfigError, parse_coordinator
+from install_model_guidance import destination as guidance_destination, install as install_guidance
+from workspace import WORKSPACE_FILES, ConfigError, parse_coordinator
 from settings import (Kanban, SettingsError, kanban_from_table, load as load_settings, load_policy,
                       unmapped_stages, workflow_stages)
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 COORDINATOR = re.compile(r"(?m)^## Coordinator\s*$")
-
-
-@dataclass(frozen=True)
-class WorkspaceFile:
-    name: str
-    command: str
-
-
-# Init's outputs, also read by health for older workspaces. Init needs user/forge inputs;
-# --help explains those rather than suggesting an incomplete command that would fail.
-WORKSPACE_FILES = {
-    "config": WorkspaceFile("CLAUDE.md", "chief-of-stuff init --help"),
-    "settings": WorkspaceFile("chief-of-stuff.toml", "chief-of-stuff init --help"),
-    "models": WorkspaceFile(GUIDANCE_NAME, "chief-of-stuff models --root {root}"),
-}
 
 
 class InitError(ValueError):
