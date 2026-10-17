@@ -4,7 +4,7 @@ The forge is the source of truth and the store a cache rebuilt from `snapshots`.
 requests with their CI and review state (merge_ready.py over forge_review.py), and the user's review threads (review_threads.py);
 it creates issues (backlog.py), writes stage back as labels or a GitHub Project Status (kanban.py), and merges verified heads
 (merge_approved.py). Writes preview unless `commit=True`. A read that fails raises ForgeError: an empty answer would read as an
-empty forge.
+empty forge. Pipeline and branch-head reads also use this adapter.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 import backlog
 import forge_review
@@ -356,6 +356,22 @@ def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, st
 
 
 @dataclass(frozen=True)
+class Pipeline:
+    """Status follows forge_review; a head without CI has id=None, status='none', url=''."""
+    id: int | None  # None when the branch head has no pipeline
+    ref: str
+    sha: str
+    status: str
+    url: str
+
+
+def _github_check(row: dict) -> dict:
+    # Adapt REST workflow runs to the CheckRun shape understood by the shared status aggregator.
+    return {"__typename": "CheckRun", "status": row["status"].upper(),
+            "conclusion": (row.get("conclusion") or "").upper()}
+
+
+@dataclass(frozen=True)
 class Forge:
     home: Backlog | GitHubBacklog
     approver: str = ""                 # the user's forge username: whose approval and review threads count
@@ -393,6 +409,101 @@ class Forge:
 
     def issue(self, number: int) -> backlog.Read:
         return backlog.read_one(self.home, number, token=self.token, gh=self.gh)
+
+    def _pipeline_read(self, path: str):
+        if self.github:
+            row, error = _gh_json(self.gh, ["api", f"repos/{self.home.repo}/{path}"])
+        else:
+            token = self._token()
+            if not token:
+                raise ForgeError(self.home.missing_token)
+            row, _, error = backlog._call("GET", f"{self.home.api()}/{path}", token, backlog.TIMEOUT)
+        if error:
+            raise ForgeError(error)
+        return row
+
+    def _pipeline(self, row: dict) -> Pipeline:
+        if not isinstance(row, dict):
+            raise ValueError("pipeline has unreadable id, ref, SHA, status or URL")
+        ref, sha, url = (row.get(k) for k in (
+            ("head_branch", "head_sha", "html_url") if self.github else ("ref", "sha", "web_url")))
+        status, number = row.get("status"), row.get("id")
+        if (type(number) is not int or number <= 0
+                or any(not isinstance(v, str) or not v.strip() for v in (ref, sha, url, status))
+                or (self.github and row.get("conclusion") is not None
+                    and not isinstance(row.get("conclusion"), str))):
+            raise ValueError("pipeline has unreadable id, ref, SHA, status or URL")
+        if self.github:
+            status = forge_review.github_pipeline([_github_check(row)])
+        else:
+            status = forge_review.gitlab_pipeline_status(status)
+        return Pipeline(number, ref, sha, status, url)
+
+    def pipeline(self, pipeline_id: int) -> Pipeline:
+        """Return one normalized pipeline/run in this repository; unreadable responses raise ForgeError."""
+        try:
+            if type(pipeline_id) is not int or pipeline_id <= 0:
+                raise ValueError("pipeline id must be a positive integer")
+            path = "actions/runs" if self.github else "pipelines"
+            return self._pipeline(self._pipeline_read(f"{path}/{pipeline_id}"))
+        except ForgeError:
+            raise
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"pipeline: {exc}") from exc
+
+    def branch_head(self, ref: str) -> Pipeline:
+        """Return head CI (all GitHub workflows), or status='none'; unreadable heads raise ForgeError."""
+        try:
+            if not isinstance(ref, str) or not ref.strip() or ref != ref.strip() or ref in (".", ".."):
+                raise ValueError("branch ref must be a nonblank, trimmed name other than '.' or '..'")
+            path = "branches" if self.github else "repository/branches"
+            branch = self._pipeline_read(f"{path}/{quote(ref, safe='')}")
+            commit = branch.get("commit") if isinstance(branch, dict) else None
+            sha = commit.get("sha" if self.github else "id") if isinstance(commit, dict) else None
+            if not isinstance(sha, str) or not sha.strip():
+                raise ValueError("branch has no readable head SHA")
+            if branch.get("name") != ref:
+                raise ValueError("branch name does not match the requested ref")
+            if self.github:
+                query = urlencode({"branch": ref, "head_sha": sha, "per_page": backlog.PER_PAGE})
+                payload = self._pipeline_read(f"actions/runs?{query}")
+                rows = payload.get("workflow_runs") if isinstance(payload, dict) else None
+            else:
+                query = urlencode({"ref": ref, "sha": sha, "order_by": "id", "sort": "desc", "per_page": 1})
+                rows = self._pipeline_read(f"pipelines?{query}")
+            if not isinstance(rows, list):
+                raise ValueError("pipeline list is unreadable")
+            if self.github:
+                # Single-page reads trust total_count, else fail closed at PER_PAGE; only each workflow's highest-ID run attests to its current head state.
+                total = payload.get("total_count")
+                truncated = total > len(rows) if type(total) is int else len(rows) >= backlog.PER_PAGE
+                if truncated:
+                    raise ValueError("pipeline list was truncated")
+            if not rows:
+                return Pipeline(None, ref, sha, "none", "")
+            if self.github:
+                workflows = {}
+                for row in rows:
+                    run = self._pipeline(row)
+                    if run.sha != sha or run.ref != ref:
+                        raise ValueError("latest pipeline does not match the requested branch head")
+                    workflow = row.get("workflow_id")
+                    if type(workflow) is not int or workflow <= 0:
+                        raise ValueError("pipeline has no readable workflow id")
+                    if workflow not in workflows or run.id > workflows[workflow][0].id:
+                        workflows[workflow] = (run, row)
+                latest = max((run for run, row in workflows.values()), key=lambda run: run.id)
+                status = forge_review.github_pipeline([_github_check(row) for run, row in workflows.values()])
+                return Pipeline(latest.id, ref, sha, status, latest.url)
+            latest = self._pipeline(rows[0])
+            # The transport's filters cannot attest to this head unless the returned pipeline agrees.
+            if latest.sha != sha or latest.ref != ref:
+                raise ValueError("latest pipeline does not match the requested branch head")
+            return latest
+        except ForgeError:
+            raise
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"branch head: {exc}") from exc
 
     def requests(self) -> list[merge_ready.Request]:
         """Open pull or merge requests with their merge verdict (#419) and the approver's approval."""
