@@ -309,12 +309,14 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
            look_log: list[tuple[date, str]] | None = None,
-           review_stages: Container[str] = frozenset()) -> str:
+           review_stages: Container[str] = frozenset(),
+           review_log: list[tuple[date, str]] | None = None) -> str:
     """The board page, the Flow artboard's sections: header, tiles, BUILD (the stage columns), the MERGE ORDER,
     DECISIONS and WORKERS panels, and the Flow charts. `stage_log` is (day, tracker text) for the earlier days the
     Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
-    `look_log` the earlier days back to it that `stage_log` does not reach; review_stages marks completed review holds."""
+    `look_log` the earlier days back to it that `stage_log` does not reach; review_stages marks completed review holds.
+    `review_log` is every tracker the completion evidence is read from, independent of the chart window."""
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
     tracker = parse_tracker(tracker_text)
@@ -335,15 +337,17 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     stages = {t: effective_stage(t, sources, lanes or {}) for t in tasks}
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
-    flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
-                  for m in tracker_log.moves(text, day, zone)]
-    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, review_stages, moves=flow_moves)
+    chart_days = [*(stage_log or []), (tracker_day or today, tracker_text)]
+    flow_moves = tracker_log.day_moves(chart_days, zone)
+    review_days = review_log if review_log is not None else [*(look_log or []), *chart_days]
+    review_moves = tracker_log.day_moves(review_days, zone)
+    earlier = [t for _, text in review_days for t in parse_tracker(text).tasks]
+    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, review_stages,
+                       moves=review_moves, earlier=earlier)
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, review_stages)
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols)}</section>\n')
-    look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
-    began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks,
-                       [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks])
+    began = hold_began(held, review_moves, pending_refs, sources.home, tasks, earlier)
     since = looked or datetime.combine(today, time(), zone)
     shown = since.astimezone(zone)  # a look on another day names its day
     went = went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == today else f"{shown:%a %H:%M}"
@@ -469,12 +473,15 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
     trackers = [(d, path) for d, path in daily_trackers(root, cfg) if min(reach, since_day) <= d < tracker_day]
     stage_log = [(d, path.read_text()) for d, path in trackers if reach <= d]
     look_log = [(d, path.read_text()) for d, path in trackers if d < reach]
+    review_log = [(d, path.read_text()) for d, path in daily_trackers(root, cfg) if d < tracker_day]
+    review_log.append((tracker_day, tracker_text))
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
                   sources=board_sources.load(out.parent), answered=len(decision_rows(tracker_text)),
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone), stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
-                  looked=looked, look_log=look_log, review_stages=settings.review_stages())
+                  looked=looked, look_log=look_log, review_stages=settings.review_stages(),
+                  review_log=review_log)
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 

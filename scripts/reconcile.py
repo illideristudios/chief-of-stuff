@@ -198,6 +198,23 @@ def review_gate(stage: str, attempt: int) -> str:
     return f"review_after:{stage}:{attempt}"
 
 
+def review_attempt(history: Sequence[Segment], stage: str, workflow: Workflow
+                   ) -> tuple[tuple[Segment, ...], Segment | None, bool]:
+    """Completed workflow attempts, the latest, and whether two stages tie at its start.
+
+    An empty stage is the workflow start. An architect segment counts only when the workflow names architect.
+    While the item is in merge, an earlier merge segment is left out.
+    """
+    stage = stage or workflow.start
+    named = {workflow.start} | {e.target for e in workflow.edges}
+    completed = tuple(s for s in history if s.started_at and s.ended_at
+                      and (s.stage != "architect" or "architect" in named)
+                      and (stage != "merge" or s.stage != "merge"))
+    latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
+    tied = bool(latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1)
+    return completed, (None if tied else latest), tied
+
+
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
           decisions: Sequence[Decision], review_stages: Container[str], reviewed: Container[str]) -> Action | None:
@@ -211,11 +228,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
         return Wait(key, "stage is outside the workflow")
-    # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
-    completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
-                      and (stage != "merge" or s.stage != "merge"))
-    latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
-    if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
+    completed, latest, tied = review_attempt(history, item.stage, workflow)
+    if tied:
         return Wait(key, "segments tie at the latest start")
     if latest and latest.stage == stage and latest.outcome == "done" and stage in review_stages:
         gate = review_gate(stage, latest.attempt)

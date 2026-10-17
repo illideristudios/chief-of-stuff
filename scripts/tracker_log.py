@@ -11,6 +11,7 @@ reworded formatter fails there until its pattern follows.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
@@ -120,10 +121,11 @@ def approved_closes(text: str) -> set[str]:
     return {m[4] for line in _log_lines(text) if (m := APPROVED_CLOSE.match(line))}
 
 
-def moves(text: str, day: date, zone: ZoneInfo) -> list[Move]:
+def moves(text: str, day: date, zone: ZoneInfo, pending: dict[str, str] | None = None) -> list[Move]:
     """The `stage:` and one-shot launcher lines of the tracker's `## Log`, stamped on `day`. A launcher move names
-    the task key of its worker's active started line; a relaunch is a stop boundary, not a working stage."""
-    out, task_of = [], {}
+    the task key of its worker's active started line; a relaunch is a stop boundary, not a working stage.
+    `pending` carries a worker's open launch into a later day."""
+    out, task_of = [], {} if pending is None else pending
     for line in _log_lines(text):
         m = STAGE.match(line) or STARTED.match(line) or ENDED.match(line) or RELAUNCH.match(line)
         if not m or int(m[1]) >= 24 or int(m[2]) >= 60:
@@ -141,16 +143,30 @@ def moves(text: str, day: date, zone: ZoneInfo) -> list[Move]:
                 head, separator, _ = line[m.end(3):].rpartition(suffix)
                 if head + separator != RELAUNCHED.format(task=task_of[m[3]]):
                     continue
-            stage = RELAUNCH_STAGE if m.re is RELAUNCH else "pr" if m[4].startswith("completed") else "review"
+            review = REVIEW_COMPLETED.match(line)
+            if m.re is RELAUNCH:
+                stage = RELAUNCH_STAGE
+            elif review:
+                stage = review[1]
+            else:
+                stage = "pr" if m[4].startswith("completed") else "review"
             out.append(Move(at, task_of.pop(m[3]), stage, True, line, m[3]))
     return out
 
 
-def review_completions(moves: list[Move]) -> dict[str, tuple[str, datetime]]:
-    """Latest launcher-confirmed review completion by task name; a later move or attempt invalidates it."""
+def day_moves(days: Sequence[tuple[date, str]], zone: ZoneInfo) -> list[Move]:
+    """Moves across trackers, oldest first, so a launch and its completion can fall on different days."""
+    pending: dict[str, str] = {}
+    return [m for day, text in days for m in moves(text, day, zone, pending)]
+
+
+def review_completions(moves: list[Move], aliases: Mapping[str, str] | None = None) -> dict[str, tuple[str, datetime]]:
+    """Latest launcher-confirmed review completion by canonical task; a later move or attempt invalidates it."""
+    aliases = aliases or {}
     completed = {}
     for move in sorted(moves, key=lambda m: m.at):
-        name = move.name.strip().casefold()
+        folded = move.name.strip().casefold()
+        name = aliases.get(folded, folded)
         completed.pop(name, None)
         if move.launch and (match := REVIEW_COMPLETED.match(move.line)):
             completed[name] = (match[1], move.at)

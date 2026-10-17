@@ -187,17 +187,21 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
 def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
-           pending_refs: Container[str] = frozenset(), review_stages: Container[str] = frozenset()) -> str | None:
+           pending_refs: Container[str] = frozenset(), review_stages: Container[str] = frozenset(),
+           review_log: list[tuple[date, str]] | None = None) -> str | None:
     """The page, or None when no task in `trackers` names issue `number`. `cfg` resolves a task's due (the board's
     deadlines); review_stages marks completed review holds; `graph`, `pages` and `root` draw Architecture."""
     ref = f"#{number}"
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
-    known = [t for _, text in trackers for t in parse_tracker(text).tasks]
+    log = tracker_log.day_moves(sorted(trackers), now.tzinfo)
+    review_days = sorted(review_log) if review_log is not None else sorted(trackers)
+    review_moves = tracker_log.day_moves(review_days, now.tzinfo) if review_log is not None else log
+    earlier = [t for _, text in review_days for t in parse_tracker(text).tasks]
+    known = [t for _, text in [*review_days, *trackers] for t in parse_tracker(text).tasks]
     mine = [t for t in known if issue_number(t.issue) == number]
     if not mine:
         return None
     keys = set().union(*map(names, mine))
-    log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
     ends = {t.item: end for t in parse_tracker(trackers[-1][1]).tasks
@@ -205,8 +209,9 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
-    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs, review_stages, moves=log))
-    rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
+    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs, review_stages,
+                                 moves=review_moves, earlier=earlier))
+    rows = [(s, r) for s, r in flow_chart.build(review_moves, known, lanes or {}, held, ends, now,
                                                 ended=forge_ends(known, sources, now.tzinfo))
             if issue_number(r.ref) == number]
     log = [m for m in log if m.name.strip().casefold() in keys]
@@ -236,8 +241,6 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             workers.setdefault(started[2], []).append([replace(m, stage=stage), started, None])
             what[m] = f"{escape(stage)} started · {escape(started[2])} · {escape(started[4])}"
         elif (w := tracker_log.ENDED.match(m.line)) and (runs := workers.get(w[3])):
-            # ponytail: an end pairs with a start on the same day's tracker (tracker_log.moves); a run over midnight
-            # loses its end and counts nothing, pair across days if that shows up.
             runs[-1][2] = m
             what[m] = f"ended {escape(ENDED.get(m.stage, 'ended'))} · {escape(w[3])} · {escape(runs[-1][1][4])}"
     steps = "\n".join(f'      <div class="step"><span class="when">{_clock(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'
@@ -324,6 +327,8 @@ def write(root: Path, pages_dir: Path, number: int) -> Path | None:
     cfg, now, trackers, settings = inputs(root)
     ctx = context(root, now.date().isoformat())
     pending = entries(pages_dir, ctx) if ctx else []
+    review_log = [(d, path.read_text()) for d, path in daily_trackers(root, cfg) if d <= now.date()]
     page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
-                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx), settings.review_stages())
+                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx),
+                  settings.review_stages(), review_log)
     return put(pages_dir / f"issue-{number}.html", page)

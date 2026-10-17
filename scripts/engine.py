@@ -103,9 +103,14 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         if not pending:
             continue
         history = store.segments(key)
-        latest = max(history, key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
-        current = (latest is not None and latest.ended_at and latest.outcome == "done"
-                   and latest.stage == row.get("stage")
+        issue_type = data.get("issue_type")
+        workflow = policies.workflow_for(issue_type if isinstance(issue_type, str) else None)
+        observed = row.get("stage") or ""
+        _, latest, tied = reconcile.review_attempt(history, observed, workflow)
+        if tied:
+            continue
+        norm = observed or workflow.start
+        current = (latest is not None and latest.outcome == "done" and latest.stage == norm
                    and pending == reconcile.review_gate(latest.stage, latest.attempt))
         approved = (row.get("forge_state") == "open" and current and data.get("pending_review_applied")
                     and row.get("human_review") is False)
@@ -124,6 +129,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
+            data = _resume(store, item.issue_key)
+            if any(k in data for k in ("pending_review", "pending_review_applied", "interrupt")):
+                data.pop("pending_review", None)
+                data.pop("pending_review_applied", None)
+                data.pop("interrupt", None)
+                store.set_resume(item.issue_key, data)
 
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():

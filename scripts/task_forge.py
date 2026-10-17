@@ -20,23 +20,30 @@ STAGE_REVIEW = "stage_review"
 REVIEW_LABEL = "needs your review"
 
 
+def _review_hold(task: Task, stage: str, *, workers: set[str], review_stages: Container[str],
+                 completed_review: bool) -> bool:
+    return bool(completed_review and task.kind == "waiting" and stage in review_stages
+                and task.shown_owner and task.shown_owner not in workers)
+
+
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
                home, lane, review_stages: Container[str] = frozenset(), completed_review: bool = False) -> str:
     """Return "" for done or forge-advanced tasks; "decision" for pending_refs; STAGE_REVIEW for a completed
     waiting stage in review_stages; stage for a kanban gate; task.shown_owner for a human wait, else "".
-    completed_review is launcher-confirmed completion evidence, never inferred from a waiting row.
+    completed_review is one-shot launcher evidence, never inferred from a waiting row or the engine store.
     A terminal stage ends the task unless its own completed result still requires review (#130, #240).
     """
     stage = task.stage.strip() if stage is None else stage
     if task.kind == "done" or stage != task.stage.strip():
         return ""
+    review_hold = _review_hold(task, stage, workers=workers, review_stages=review_stages,
+                               completed_review=completed_review)
+    if lane and lane.stages and stage == lane.stages[-1] and not review_hold:
+        return ""
     if task.issue.strip() and issue_key(task.issue, home) in pending_refs:
         return "decision"
-    if (completed_review and task.kind == "waiting" and stage in review_stages
-            and task.shown_owner and task.shown_owner not in workers):
+    if review_hold:
         return STAGE_REVIEW
-    if lane and lane.stages and stage == lane.stages[-1]:
-        return ""
     if kanban is not None and kanban.holds(stage):
         return stage
     if task.kind == "waiting" and task.shown_owner and task.shown_owner not in workers:
@@ -67,18 +74,48 @@ def effective_stage(task: Task, sources: board_sources.Sources, lanes: dict) -> 
     return stage
 
 
+def canonical_names(tasks: list[Task], earlier: list[Task] = (), home=None) -> dict[str, str]:
+    """Map a task's name, item and earlier names of the same issue to today's name."""
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip()}
+
+    def today(t: Task) -> Task | None:
+        return by_name.get(t.name.strip().casefold()) or (by_issue.get(issue_key(t.issue, home)) if t.issue.strip() else None)
+
+    out: dict[str, str] = {}
+
+    def bind(label: str, task: Task) -> None:
+        folded = label.strip().casefold()
+        canon = (task.name or task.item).strip().casefold()
+        if folded and canon:
+            out[folded] = canon
+
+    for t in tasks:
+        bind(t.name, t)
+        bind(t.item, t)
+    for t in earlier:
+        if cur := today(t):
+            bind(t.name, cur)
+            bind(t.item, cur)
+    return out
+
+
 def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources.Sources, lanes: dict,
-                pending_refs: Container[str], review_stages: Container[str] = frozenset(), *, moves: list[Move] = ()) -> dict[Task, str]:
+                pending_refs: Container[str], review_stages: Container[str] = frozenset(), *, moves: list[Move] = (),
+                earlier: list[Task] = ()) -> dict[Task, str]:
     """Each held task to its `hold_cause` at its effective stage, decided once: the BUILD flag, the NEEDS INPUT tile and
-    the Flow note all read it; review_stages require completed launcher moves (#228, #130)."""
+    the Flow note all read it. review_stages require completed one-shot launcher moves (#228, #130). An engine
+    pending_review lives in the store and is not a board hold."""
     workers = worker_names(sources)
-    completed = review_completions(moves)
+    aliases = canonical_names(tasks, earlier, sources.home)
+    completed = review_completions(moves, aliases)
     return {t: cause for t in tasks
             if (cause := hold_cause(t, kanban, effective_stage(t, sources, lanes), workers=workers,
                                     pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip()),
                                     review_stages=review_stages,
-                                    completed_review=any(completed.get(n.strip().casefold(), (None,))[0] == t.stage.strip()
-                                                         for n in (t.name, t.item))))}
+                                    completed_review=(completed.get(aliases.get(t.name.strip().casefold(),
+                                                                                t.name.strip().casefold()), (None,))[0]
+                                                      == t.stage.strip())))}
 
 
 def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[str, datetime | None], home,
@@ -105,8 +142,9 @@ def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[s
             continue
         staged |= set() if m.launch else {t}
         into[t, m.stage] = m.at
-    completed = {find[name]: at for name, (stage, at) in review_completions(moves).items()
-                 if name in find and find[name].stage.strip() == stage}
+    aliases = canonical_names(tasks, earlier, home)
+    completed = {t: at for name, (stage, at) in review_completions(moves, aliases).items()
+                 if (t := find.get(name)) is not None and t.stage.strip() == stage}
     return {t: pending_refs.get(issue_key(t.issue, home)) if cause == "decision" else
             completed.get(t) if cause == STAGE_REVIEW else into.get((t, cause))
             for t, cause in held.items()}

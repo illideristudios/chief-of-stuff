@@ -6,7 +6,8 @@ window, and an open task with an estimated end draws its remaining stages ahead 
 its lane's first stage with no move yet is queued: forecast only, after the running forecasts, in worker slots.
 Rows that share a tracker issue (a review loop's build/Review/Fix/Verify passes) merge into one row.
 Until a task's first `stage:` move, it moves on the one-shot launcher's lines: started → implement, completed → pr,
-HUMAN REVIEW NEEDED → review. A relaunch request ends its worker's bar without starting another stage.
+a `[review_after=<stage>]` completion stays at that stage, and HUMAN REVIEW NEEDED → review. A relaunch request
+ends its worker's bar without starting another stage. A hold stays held when that stage is the lane's last.
 A done task's last segment ends at its done time, not now.
 """
 
@@ -22,7 +23,7 @@ from fragment import esc
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
 # here as well, so `flow_chart.moves` still names it.
-from tracker_log import RELAUNCH_STAGE, Move, moves  # noqa: F401
+from tracker_log import ENDED, RELAUNCH_STAGE, Move, moves  # noqa: F401
 
 H = timedelta(hours=1)
 # (title, behind now, ahead of now), after the Flow artboard.
@@ -107,7 +108,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
         key = key_of(m)
         if not m.launch:
             first.setdefault(key, m.at)
-        elif m.stage == "implement":
+        elif m.stage == "implement" and not (m.launch and ENDED.match(m.line)):
             runs.setdefault(key, []).append([m.worker, m.at, None])
         elif run := next((r for r in reversed(runs.get(key, ())) if r[0] == m.worker and r[2] is None), None):
             run[2] = m.at
@@ -151,7 +152,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             if m.stage in terminal:
                 continue
             e = nxt.at if nxt else stop
-            if m.launch and m.stage == "implement":
+            if m.launch and m.stage == "implement" and not ENDED.match(m.line):
                 # Concurrent launches have separate boundaries and retain their own worker titles.
                 run = next(r for r in runs[key] if r[0] == m.worker and r[1] == m.at)
                 e = min(run[2] or stop, first.get(key, stop))
@@ -169,11 +170,11 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
         is_approved = bool(task and task.name.strip() in approved)
         if finish:
             status, note = word, f"{word} {at:%H:%M}"
-        elif last.stage in terminal:
-            status, note = "merged", f"merged {last.at:%H:%M}"
         elif is_held:
             segs.append(gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner(key, now, task)))
             status, note = "needs input", f"needs input · {held[task.name.strip()]}"
+        elif last.stage in terminal:
+            status, note = "merged", f"merged {last.at:%H:%M}"
         elif task and lane and last.stage in lane.stages and (end := ends.get(task.item)) and end > now:
             ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
             segs += _ahead(ahead, now, end, owner(key, now, task))
