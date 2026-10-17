@@ -2,16 +2,28 @@
 """Stand-in for `claude -p --input-format stream-json` in runner unit tests, and for `claude -p --output-format json`
 behind the model adapter (`one_answer`).
 
-Emits init, one assistant text, and a result per user line on stdin. Turn 2 writes `turn2.txt` in
-cwd so tests can check per-turn fixture snapshots. A user message containing SLEEP hangs; one containing
+Emits init, one assistant text, and a result per user line on stdin. `plugin list --json` is the worker clock preflight, not a conversation: it answers only for `--setting-sources user` and names an on-disk hook payload. Turn 2 writes `turn2.txt` in cwd so tests can check per-turn fixture snapshots. A user message containing SLEEP hangs; one containing
 BACKGROUND is followed by an unprompted notification turn; INLINE carries the notification inside its own turn; LINGER keeps the process alive after stdin closes.
 """
 
 import json
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
+
+
+if sys.argv[-3:] == ["plugin", "list", "--json"]:
+    if "--setting-sources" not in sys.argv or sys.argv[sys.argv.index("--setting-sources") + 1] != "user":
+        print("plugin list requires --setting-sources user", file=sys.stderr)
+        sys.exit(2)
+    payload = Path(tempfile.mkdtemp(prefix="fake-clock-"))
+    (payload / "hooks").mkdir()
+    (payload / "hooks" / "hooks.json").write_text("{}")
+    print(json.dumps([{"id": "datetime-inject@ai-additions", "version": "1.0.0",
+                       "scope": "user", "enabled": True, "installPath": str(payload)}]))
+    sys.exit(0)
 
 
 def one_answer(args):

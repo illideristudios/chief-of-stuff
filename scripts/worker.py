@@ -106,9 +106,14 @@ def _declared_agent(text: str, agent: str) -> str:
     return agent if agent in make_worktree.agent_types(text) else ""
 
 
+def require_clock(claude_as_profile: str = "", cwd: str | None = None) -> None:
+    claude_adapter.require_worker_clock(claude_as_profile, cwd)
+
+
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
+           claude_as_profile: str = "", clock: engine_clock.Clock = engine_clock.system,
+           clock_checked: bool = False) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -121,6 +126,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         store.set_ownership(issue_key, existing["tree"])
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
+    if not clock_checked:
+        require_clock(claude_as_profile, str(root))
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     defaults = load_settings(root, settings_path(text)).stages.get(stage)
     agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")

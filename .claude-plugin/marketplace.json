@@ -14,7 +14,17 @@
       "author": {
         "name": "Zach Gardner",
         "email": "locriani@gmail.com"
-      }
+      },
+      "dependencies": [
+        {
+          "name": "datetime-inject",
+          "marketplace": "ai-additions",
+          "version": "^1.0"
+        }
+      ]
     }
+  ],
+  "allowCrossMarketplaceDependenciesOn": [
+    "ai-additions"
   ]
 }

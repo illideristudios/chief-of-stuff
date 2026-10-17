@@ -32,6 +32,8 @@ claude plugin install chief-of-stuff@chief-of-stuff
 claude --agent chief-of-stuff
 ```
 
+The plugin declares `datetime-inject@ai-additions` at `^1.0` as a dependency, so installation also installs the clock. Engine workers check before launch that it is installed and enabled at user scope in their Claude account, including the selected `claude_as_profile`. A missing, disabled, or incompatible clock refuses the launch. The clock plugin supplies one bracketed timestamp per prompt; chief-of-stuff ships no clock hook. To check delivery with two real worker prompts, run `CHIEF_CLOCK_LIVE=1 CHIEF_CLOCK_PROFILE=secondary python3 -m unittest evals.test_worker_clock.LiveClockTest -v` from a checkout with the Python requirements installed (omit `CHIEF_CLOCK_PROFILE` for the default account).
+
 The launcher starts even when the selected CLI does not expose the configured `Calendar tool:`. The coordinator reports the missing tool, leaves calendar facts unverified, and continues work that does not depend on the calendar. To enable calendar reads, configure an equivalent calendar tool in that CLI.
 
 If a workspace requires workers to use only the configured `User:` name, add `- Identity: user-name-only` to its `## Coordinator` block. Without that line, assignments make no claim about aliases or names found in workspace files.

@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -23,22 +25,119 @@ from shell_setup import ShellError, clean_env, login_argv, resolve
 RUNTIME = runtimes.get("claude")
 
 
-def command(request: Request, claude_as_profile: str = "") -> list[str]:
-    """Resolve the registry's host through shell setup and build exact login argv."""
+class ClockError(ShellError):
+    """The host is present and the worker clock is not usable. Not a missing binary."""
+
+
+def command(request: Request, claude_as_profile: str = "", *, check_clock: bool = True) -> list[str]:
+    """Resolve the host, refuse an unusable worker clock, and build exact login argv."""
     if request.session_id and not request.resume and not _is_uuid(request.session_id):
         raise ShellError(f"session_id {request.session_id!r} must be a UUID to start a session")
+    binary, lead = _host(claude_as_profile)
+    if request.worker and check_clock:
+        _check_clock(binary, lead, request.cwd)
+    return login_argv(argv(request, binary, lead))
+
+
+def require_worker_clock(claude_as_profile: str = "", cwd: str | None = None) -> None:
+    """Refuse before a worker launch creates a run directory or claims a slot."""
+    binary, lead = _host(claude_as_profile)
+    _check_clock(binary, lead, cwd)
+
+
+def _host(claude_as_profile: str) -> tuple[str, list[str]]:
     program, lead = runtimes.program(RUNTIME.name, claude_as_profile)
     binary = resolve(program)
     if not binary:
         why = f"; claude_as_profile {claude_as_profile!r} needs it" if claude_as_profile else ""
         raise ShellError(f"`{program}` is not on the login shell's PATH{why}")
-    return login_argv(argv(request, binary, lead))
+    return binary, lead
+
+
+def _check_clock(binary: str, lead: list[str], cwd: str | None) -> None:
+    """Unbilled preflight in the worker's account. Workers load user settings only, never project plugins."""
+    try:
+        code, out, err = _inventory(login_argv([binary, *lead, "--setting-sources", "user", "plugin", "list", "--json"]), cwd)
+        if code:
+            detail = err.strip()
+            raise ValueError(f"plugin list exited {code}" + (f": {detail}" if detail else ""))
+        plugins = json.loads(out)
+        if not isinstance(plugins, list) or any(not isinstance(p, dict) for p in plugins):
+            raise ValueError("plugin list must be an array of objects")
+    except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
+        raise ClockError(f"worker clock preflight failed: {exc}") from None
+    clock = next((p for p in plugins if p.get("id") == "datetime-inject@ai-additions"
+                  and p.get("scope") == "user" and p.get("enabled") is True), None)
+    if clock is None:
+        raise ClockError("worker requires datetime-inject@ai-additions installed and enabled at user scope "
+                         "in its Claude account; install/enable it there before retrying")
+    if not _payload(clock.get("installPath")):
+        raise ClockError("worker requires datetime-inject@ai-additions installed at user scope with its hook "
+                         "payload on disk; reinstall it in its Claude account")
+    spec = _declared_clock()
+    if not _in_range(str(clock.get("version", "")), spec):
+        raise ClockError(f"worker requires datetime-inject@ai-additions version {spec}; update it in its Claude account")
+
+
+def _inventory(argv: list[str], cwd: str | None) -> tuple[int, str, str]:
+    """Read plugin list from a file. A pipe truncates past 64KiB on affected Claude Code versions."""
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        proc = subprocess.Popen(argv, env=clean_env(), cwd=cwd, stdin=subprocess.DEVNULL,
+                                stdout=stdout, stderr=stderr, start_new_session=True)
+        try:
+            code = proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            # The login shell execs the host, which can fork; kill the group, not only the child.
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        stdout.seek(0)
+        stderr.seek(0)
+        return code, stdout.read().decode(), stderr.read().decode()
+
+
+def _payload(path: object) -> bool:
+    # shortcut: payload is hooks/hooks.json; a renamed hook file needs this path updated.
+    return isinstance(path, str) and path != "" and (Path(path) / "hooks" / "hooks.json").is_file()
+
+
+def _declared_clock() -> str:
+    manifest = json.loads((Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json").read_text())
+    dep = next((item for item in manifest.get("dependencies", [])
+                if item.get("name") == "datetime-inject" and item.get("marketplace") == "ai-additions"), None)
+    version = dep.get("version") if isinstance(dep, dict) else None
+    if not isinstance(version, str):
+        raise ClockError("worker requires datetime-inject@ai-additions declared in plugin.json")
+    return version
+
+
+def _in_range(version: str, spec: str) -> bool:
+    # shortcut: caret ranges only, the form plugin.json declares; another operator needs a semver library.
+    declared = re.fullmatch(r"\^(\d+)\.(\d+)(?:\.(\d+))?", spec)
+    got = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?", version)
+    if not declared or not got:
+        return False
+    major, minor = int(declared[1]), int(declared[2])
+    patch = int(declared[3]) if declared[3] is not None else 0
+    numbers = (int(got[1]), int(got[2]), int(got[3]))
+    if major > 0:
+        return (major, minor, patch) <= numbers < (major + 1, 0, 0)
+    if minor > 0:
+        return (0, minor, patch) <= numbers < (0, minor + 1, 0)
+    return (0, 0, patch) <= numbers < (0, 0, patch + 1)
 
 
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
           env: dict[str, str] | None = None) -> subprocess.Popen:
     """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
-    prepared = command(request, claude_as_profile)
+    # The launch port checks the clock before it creates this directory.
+    prepared = command(request, claude_as_profile, check_clock=False)
     (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
                                                     "session_id": request.session_id,
                                                     "env": env or {}}))
@@ -97,6 +196,8 @@ def call(request: Request, *, claude_as_profile: str = "") -> Reply | Failure:
         return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
     try:
         prepared = command(request, claude_as_profile)
+    except ClockError as exc:
+        return Failure("clock", str(exc))
     except ShellError as exc:
         return Failure("missing_program", str(exc))
     try:

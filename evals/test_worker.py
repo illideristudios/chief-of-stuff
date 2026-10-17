@@ -49,6 +49,19 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
+        self.clock_patch = mock.patch.object(claude_adapter, "require_worker_clock", create=True)
+        self.clock = self.clock_patch.start()
+        self.addCleanup(self.clock_patch.stop)
+
+    def test_a_refused_clock_cuts_no_tree_and_leaves_no_run_dir(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with mock.patch.object(worker.make_worktree, "build") as build, \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+                self.launch()
+        build.assert_not_called()
+        start.assert_not_called()
+        self.assertFalse((supervisor.state_dir(self.root) / "runs").exists())
 
     def launch(self, stage="implement", attempt=1):
         return worker.launch(KEY, stage, attempt, None, store=self.db, root=self.root,
@@ -590,6 +603,8 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments()[0].outcome, "failed")
 
     def test_real_detached_adapter_is_adopted_and_collected_after_engine_restart(self):
+        self.clock_patch.stop()
+        self.addCleanup(self.clock_patch.start)
         fake = Path(__file__).parent / "fixtures" / "fake_claude.py"
         cli = self.root / "fake-cli"
         cli.write_text(f"#!{sys.executable}\nimport time, runpy\ntime.sleep(0.5)\n"

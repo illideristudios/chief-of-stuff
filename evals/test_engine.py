@@ -206,6 +206,23 @@ class EngineTest(unittest.TestCase):
                 self.run_pass()
         self.assertEqual(self.db.items()[0].forge_state, "open")
 
+    def test_a_repeated_dispatch_failure_is_logged_once(self):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual([log.message for log in self.db.log(KEY)], ["dispatch failed: spawn failed"])
+
+    def test_a_clock_refusal_is_logged_once_and_claims_no_slot(self):
+        def before():
+            self.assertEqual(list(self.db.segments()), [])
+            raise RuntimeError("clock refused")
+
+        self.run_pass(before=before)
+        self.run_pass(before=before)
+        self.assertEqual(list(self.db.segments()), [])
+        self.assertEqual(self.launched, [])
+        self.assertEqual([log.message for log in self.db.log(KEY)], ["dispatch failed: clock refused"])
+
     def test_one_failed_action_does_not_stop_the_next(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         self.launch = mock.Mock(side_effect=[RuntimeError("spawn failed"), ("model", "low")])
@@ -500,6 +517,12 @@ class MainTest(unittest.TestCase):
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         sleep.assert_not_called()
+        with mock.patch.object(engine.worker, "require_clock", create=True) as clock, \
+             mock.patch.object(engine.worker, "launch", return_value=("m", "")) as launch:
+            passed.call_args.kwargs["before"]()
+            passed.call_args.kwargs["launch"]("github:example/repo#1", "implement", 1, None)
+        clock.assert_called_once_with("", str(self.root))
+        self.assertTrue(launch.call_args.kwargs["clock_checked"])
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()
