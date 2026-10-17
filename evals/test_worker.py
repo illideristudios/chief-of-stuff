@@ -846,6 +846,37 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(), [])
         self.assertEqual(slots.running(self.db), 0)
 
+    def test_an_interrupt_after_started_json_is_renamed_on_the_next_pass(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        self.addCleanup(lambda: proc.poll() is not None or proc.kill())
+
+        def spawn(request, run_dir, **kwargs):
+            (run_dir / "started.json").write_text(json.dumps({
+                "pid": proc.pid, "runner_pid": proc.pid, "session_id": request.session_id}))
+            return proc
+
+        calls = {"n": 0}
+
+        def identity(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise KeyboardInterrupt
+            return None
+
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=spawn), \
+             mock.patch.object(worker.process_status, "identity", side_effect=identity):
+            with self.assertRaises(KeyboardInterrupt):
+                slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                            max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        self.assertTrue((run / "started.json").is_file())
+        self.assertEqual(len(self.db.segments()), 1)
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.segments(), [])
+        self.assertEqual(len(list(run.parent.glob(f"{run.name}-canceled-*"))), 1)
+        self.assertFalse(run.exists())
+
     def orphans(self, worktrees, **spec):
         import shutil
         from evals import make_repo
@@ -867,85 +898,105 @@ class WorkerTest(unittest.TestCase):
             {"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "merged": False},
             {"name": "issue-1-implement-2", "branch": "work/issue-1-implement-2", "merged": False}])
 
-    def test_an_answered_conflict_keeps_one_tree_instead_of_asking_again(self):
-        from evals import git_taint as taint
+    def test_abort_starts_fresh_from_main_and_does_not_ask_again(self):
+        from evals import git_taint as taint, make_repo
         with taint.private_git_views(self.root / "private-views"):
             clone = self.diverged()
             with self.assertRaisesRegex(RuntimeError, "diverged"):
                 self.launch_in(clone, attempt=3)
-            asked = self.db.decisions(KEY)
-            self.db.add_decision(KEY, "conflict", asked[0].question, answer="keep one branch/worktree")
-            request = self.launch_in(clone, attempt=3)
-            self.assertIn(Path(request.cwd).name, ("issue-1-implement-1", "issue-1-implement-2"))
-            self.assertEqual(len(self.db.decisions(KEY)), 2)
-            self.assertEqual(len(self.db.asks(KEY)), 1)
-
-    def test_an_answered_conflict_that_says_abort_stops_without_asking_again(self):
-        from evals import git_taint as taint
-        with taint.private_git_views(self.root / "private-views"):
-            clone = self.diverged()
-            with self.assertRaisesRegex(RuntimeError, "diverged"):
-                self.launch_in(clone, attempt=3)
+            kept = make_repo.git(["rev-parse", "HEAD"], self.trees / "issue-1-implement-1")
             self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="abort")
-            with mock.patch.object(worker.claude_adapter, "start") as start:
-                with self.assertRaisesRegex(RuntimeError, "abort"):
-                    self.launch_in(clone, attempt=3)
-            start.assert_not_called()
-            self.assertEqual(len(self.db.decisions(KEY)), 2)
+            request = self.launch_in(clone, attempt=3)
+            self.assertNotIn(Path(request.cwd).name, ("issue-1-implement-1", "issue-1-implement-2"))
+            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.trees / "issue-1-implement-1"), kept)
             self.assertEqual(len(self.db.asks(KEY)), 1)
+            self.assertNotIn(worker.dispatch_prompt.RECOVERY, request.prompt)
 
-    def test_answered_abort_stops_dispatch_on_consecutive_engine_passes(self):
+    def test_abort_starts_fresh_on_the_next_engine_pass(self):
         from evals import git_taint as taint
         from evals.test_engine import FakeForge
         with taint.private_git_views(self.root / "private-views"):
             clone = self.diverged()
             forge = FakeForge()
+
             def launch(key, stage, attempt, persona):
                 return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root,
                                      trees=self.trees, policies=self.p, forge=self.forge, clone=clone, clock=lambda: NOW)
+
             def run():
                 return engine.run_pass(forge=forge, store=self.db, policies=self.p, root=self.root,
-                                       trees=self.trees, launch=launch, clock=lambda: NOW)
-            with mock.patch.object(engine.cleanup, "execute", return_value=0), \
-                 mock.patch.object(worker.claude_adapter, "start") as start:
+                                       trees=self.trees, launch=launch, workers=engine.settings.Workers(),
+                                       clock=lambda: NOW)
+
+            with mock.patch.object(engine, "_record_limits"), \
+                 mock.patch.object(engine.cleanup, "execute", return_value=0), \
+                 mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+                 mock.patch.object(worker.process_status, "identity", return_value="start"):
                 run()
                 self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="abort")
-                for _ in range(3):
-                    actions = run()
-                    self.assertFalse(any(isinstance(a, (reconcile.Dispatch, reconcile.Review)) for a in actions))
-            start.assert_not_called()
-            self.assertEqual(self.db.segments(), [])
+                actions = run()
+            self.assertTrue(any(isinstance(a, reconcile.Dispatch) for a in actions))
+            self.assertEqual(start.call_count, 1)
 
-    def test_a_keep_answer_that_cannot_be_applied_opens_a_pending_decision(self):
+    def test_hold_waits_and_resumes_once_the_conflict_is_gone(self):
+        import shutil
         from evals import git_taint as taint, make_repo
         with taint.private_git_views(self.root / "private-views"):
-            clone = self.orphans([{"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1"}])
-            orphan = self.trees / "issue-1-implement-1"
-            make_repo.git(["checkout", "--detach"], orphan)
-            make_repo.git(["branch", "-D", "work/issue-1-implement-1"], clone)
-            with self.assertRaises(RuntimeError):
-                self.launch_in(clone)
-            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="keep")
-            with self.assertRaises(RuntimeError):
-                self.launch_in(clone)
-            self.assertTrue(reconcile._decision_pending(self.db.decisions(KEY)))
-            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[-1].question, answer="keep")
-            with self.assertRaises(RuntimeError):
-                self.launch_in(clone)
+            clone = self.diverged()
+            with self.assertRaisesRegex(RuntimeError, "diverged"):
+                self.launch_in(clone, attempt=3)
+            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="hold")
+            with mock.patch.object(worker.claude_adapter, "start") as start:
+                with self.assertRaisesRegex(RuntimeError, "held"):
+                    self.launch_in(clone, attempt=3)
+            start.assert_not_called()
+            self.assertEqual(len(self.db.asks(KEY)), 1)
+            shutil.rmtree(self.trees / "issue-1-implement-2")
+            make_repo.git(["branch", "-D", "work/issue-1-implement-2"], clone)
+            request = self.launch_in(clone, attempt=3)
+            self.assertEqual(Path(request.cwd).name, "issue-1-implement-1")
+
+    def test_an_abort_prefix_is_not_the_abort_option(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.diverged()
+            with self.assertRaisesRegex(RuntimeError, "diverged"):
+                self.launch_in(clone, attempt=3)
+            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question,
+                                 answer="abort the old one, keep work/issue-1-implement-2")
+            with mock.patch.object(worker.claude_adapter, "start") as start:
+                with self.assertRaises(RuntimeError) as caught:
+                    self.launch_in(clone, attempt=3)
+            self.assertNotIn("aborted", str(caught.exception))
+            start.assert_not_called()
             self.assertTrue(reconcile._decision_pending(self.db.decisions(KEY)))
 
-    def test_a_prior_keep_answer_does_not_apply_to_changed_orphan_heads(self):
+    def test_hold_stays_settled_when_the_orphan_heads_change(self):
         from evals import git_taint as taint, make_repo
         with taint.private_git_views(self.root / "private-views"):
             clone = self.diverged()
             with self.assertRaises(RuntimeError):
                 self.launch_in(clone)
-            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="keep")
-            orphan = self.trees / "issue-1-implement-2"
-            make_repo.git(["commit", "--allow-empty", "-m", "new work"], orphan)
-            with self.assertRaisesRegex(RuntimeError, "diverged"):
-                self.launch_in(clone)
-            self.assertIsNone(self.db.decisions(KEY)[-1].answer)
+            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="hold")
+            make_repo.git(["commit", "--allow-empty", "-m", "new work"], self.trees / "issue-1-implement-2")
+            with mock.patch.object(worker.claude_adapter, "start") as start:
+                with self.assertRaisesRegex(RuntimeError, "held"):
+                    self.launch_in(clone)
+            start.assert_not_called()
+            self.assertEqual(len(self.db.asks(KEY)), 1)
+            self.assertFalse(reconcile._decision_pending(self.db.decisions(KEY)))
+
+    def test_a_checked_out_branch_is_not_also_a_branch_only_candidate(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([{"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1",
+                                   "merged": False}])
+            orphan = self.trees / "issue-1-implement-1"
+            side = make_repo.git(["commit-tree", make_repo.git(["rev-parse", "HEAD^{tree}"], clone), "-m", "side"], clone)
+            make_repo.git(["update-ref", "refs/remotes/origin/work/issue-1-implement-1", side], clone)
+            request = self.launch_in(clone)
+            self.assertEqual(Path(request.cwd).resolve(), orphan.resolve())
+            self.assertEqual(self.db.asks(KEY), [])
 
     def test_merge_head_without_unmerged_index_entries_requires_a_decision(self):
         from evals import git_taint as taint, make_repo
@@ -1261,6 +1312,9 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(len(self.db.decisions(KEY)), 1)
             self.assertIsNone(self.db.decisions(KEY)[0].answer)
             self.assertEqual(len(self.db.asks(KEY)), 1)
+            self.assertEqual(self.db.asks(KEY)[0].options, ["abort", "hold"])
+            self.assertNotIn("Candidates", self.db.asks(KEY)[0].question)
+            self.assertNotIn(sha_a, self.db.asks(KEY)[0].question)
             self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "Ask")
 
     def stop_git_mock(self):
