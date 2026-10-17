@@ -573,6 +573,8 @@ class EngineTest(unittest.TestCase):
         (tree / "extra").write_text("unlanded work")
         git("add", ".")
         git("commit", "-m", "extra work")
+        git("update-ref", "refs/remotes/origin/extra", git("rev-parse", "HEAD"))
+        self.assertEqual(engine.engine_facts._tree_facts(tree)[0].unpushed, 0)
         self.run_pass()
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
         self.assertTrue(self.db.items()[0].human_review)
