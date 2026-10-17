@@ -123,6 +123,7 @@ class EngineTest(unittest.TestCase):
             "run_dir": str(supervisor.state_dir(self.root) / "runs" / f"{key.rpartition('#')[2]}-{stage}-{attempt}"),
             "tree": str(self.trees / "fake"), "starting_head": "starting-head",
         }}
+        data.pop("quota", None)  # Match worker._save_run when a launch succeeds.
         self.db.set_resume(key, data)
         return "used-model", "high"
 
@@ -1274,6 +1275,59 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
 
+    def _exit_worker(self, stage: str, attempt: int, stderr: str, exit_code: int = 1) -> None:
+        run_dir = Path(self.db.resume(KEY)["runs"][f"{stage}-{attempt}"]["run_dir"])
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "stdout").write_text("")
+        (run_dir / "stderr").write_text(stderr)
+        (run_dir / "exit.json").write_text(f'{{"exit_code": {exit_code}}}')
+
+    def test_quota_and_outage_wait_with_backoff_persist_across_restart_and_never_ask(self):
+        # 1. Four consecutive outages exceed retry_limit (3) yet back off exponentially, persist across store reopen,
+        # log wait once, never Ask or Escalate, and dispatch again when retry_at passes.
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        for attempt, minutes in ((1, 1), (2, 2), (3, 4), (4, 8)):
+            self._exit_worker("implement", attempt, "503 Service Unavailable: overloaded")
+            expected_retry = self.now + timedelta(minutes=minutes)
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+            self.assertEqual(self.db.segments(KEY)[-1].outcome, "unknown")
+            self.assertEqual(datetime.fromisoformat(self.db.resume(KEY)["quota"]["retry_at"]), expected_retry)
+            self.assertNotIn("interrupt", self.db.resume(KEY))
+            # Reopen store to prove the quota wait survives an engine restart.
+            self.db.engine.dispose()
+            self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+            self.addCleanup(self.db.engine.dispose)
+            self.now = expected_retry - timedelta(seconds=1)
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+            self.assertEqual(len(self.launched), attempt)
+            self.now = expected_retry
+            self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", attempt + 1)])
+            self.assertNotIn("quota", self.db.resume(KEY))
+
+        wait_logs = [entry.message for entry in self.db.log(KEY) if entry.message.startswith("wait: ")]
+        self.assertEqual(wait_logs, ["wait: quota reset pending"])
+        self.assertFalse(any(entry.message.startswith(("ask:", "escalate:")) for entry in self.db.log(KEY)))
+
+        # 2. Quota with an explicit reset time waits until that reset and then dispatches.
+        self.now = datetime(2000, 1, 1, 14, 0, tzinfo=timezone.utc)
+        self._exit_worker("implement", 5, "429 quota exceeded; resets at 5pm.")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.db.segments(KEY)[-1].outcome, "quota")
+        self.assertEqual(self.db.resume(KEY)["quota"]["retry_at"], "2000-01-01T17:00:00+00:00")
+        self.now = datetime(2000, 1, 1, 16, 59, tzinfo=timezone.utc)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+        self.now = datetime(2000, 1, 1, 17, 0, tzinfo=timezone.utc)
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 6)])
+        self.assertNotIn("quota", self.db.resume(KEY))
+
+        # 3. Completing implement resets retryable backoff: review's first outage backs off 1m, not 32m.
+        self.finish("implement", attempt=6, outcome="done")
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self._exit_worker("review", 1, "503 Service Unavailable: overloaded")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(datetime.fromisoformat(self.db.resume(KEY)["quota"]["retry_at"]),
+                         self.now + timedelta(minutes=1))
+
 
 class MainTest(unittest.TestCase):
     def setUp(self):
@@ -1303,7 +1357,7 @@ class MainTest(unittest.TestCase):
         settings_path.write_text(settings_path.read_text() + 'teardown = "exit 7"\n')
         fake = FakeForge()
         with mock.patch.object(engine.forge, "for_workspace", return_value=fake), \
-             mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep") as sleep:
+             mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("plugin update ignored")]) as sleep:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         self.assertTrue((self.root / "store.db").is_file())
         self.assertEqual(passed.call_count, 1)
@@ -1438,6 +1492,35 @@ class MainTest(unittest.TestCase):
 
     def test_the_supervisor_starts_the_engine_driver(self):
         self.assertEqual(supervisor.ENGINE, (str(Path(engine.__file__).resolve()),))
+
+    def test_loop_exits_cleanly_when_plugin_version_changes_so_launchd_restarts_it(self):
+        versions = iter(["1.0.0", "1.0.1"])
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.supervisor, "version", side_effect=lambda: next(versions)), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("plugin update ignored")]) as sleep:
+            self.assertEqual(engine.main(["--root", str(self.root), "--interval", "5"]), 0)
+        self.assertEqual(passed.call_count, 1)
+        sleep.assert_called_once_with(5)
+
+    def test_subcommands_delegate_to_supervisor(self):
+        for argv in (["--root", str(self.root), "install"], ["status"], ["uninstall", "--root", str(self.root)]):
+            with self.subTest(argv=argv), \
+                 mock.patch.object(engine.supervisor, "main", return_value=0) as sup:
+                self.assertEqual(engine.main(argv), 0)
+                sup.assert_called_once_with(argv)
+
+    def test_loop_supervises_the_page_server_and_stops_it_on_exit(self):
+        import pages
+        seen = []
+        with mock.patch.object(pages, "supervise", side_effect=lambda root, stop: seen.append((root, stop))), \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass"), \
+             mock.patch.object(engine.time, "sleep", side_effect=KeyboardInterrupt):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][0], self.root)
+        self.assertTrue(seen[0][1].is_set())
 
 
 if __name__ == "__main__":

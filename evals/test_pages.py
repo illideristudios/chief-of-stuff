@@ -447,6 +447,30 @@ class EnsureTest(unittest.TestCase):
         self.assertIsNone(other.poll())
         self.assertIsNone(old.poll())
 
+    def test_concurrent_ensures_start_one_server(self):
+        self.addCleanup(self.stop)
+        barrier = threading.Barrier(4)
+        results: list[str] = []
+        errors: list[Exception] = []
+
+        def run():
+            barrier.wait(timeout=5)
+            try:
+                results.append(pg.ensure(self.dir, self.port, self.log))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), ["pages: serving", "pages: serving", "pages: serving", "pages: started"])
+        pid = int((self.dir / ".pid").read_text())
+        self.assertTrue(pg.is_pages_serve(pid, self.port))
+        self.assertEqual(get(self.port, "/").status, 200)
+
 
 OLD_SERVER = """import functools, http.server, sys
 class H(http.server.SimpleHTTPRequestHandler):
@@ -1326,6 +1350,112 @@ class ConfiguredWorkersTest(_Renders, unittest.TestCase):
     def test_pages_workers_sets_how_many_render_at_once(self):
         # Rule: "N comes from the workspace settings TOML `[pages] workers`, a positive whole number".
         self.assert_up_to(2)
+
+
+class SuperviseTest(unittest.TestCase):
+    """#735 (folded into #634): the engine's supervisor keeps the board's page server alive (H4), with backoff on
+    failed starts, and there is no second LaunchAgent."""
+
+    def setUp(self):
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
+        self.port = free_port()
+        self.pages = self.root / "pages"
+        self.pages.mkdir()
+        (self.pages / f"{datetime.now().date().isoformat()}-board.html").write_text("<p>board</p>")
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:{self.port}/; dir `pages/`\n")
+
+    def stop_server(self):
+        pid_file = self.pages / ".pid"
+        if pid_file.is_file():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+
+    def test_restarts_a_killed_page_server_without_an_agent_or_second_launch_agent(self):
+        self.addCleanup(self.stop_server)
+        stop = threading.Event()
+        with mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg, "RETRY_MIN", 0.05):
+            thread = threading.Thread(target=pg.supervise, args=(self.root, stop), daemon=True)
+            thread.start()
+            self.addCleanup(lambda: thread.join(timeout=5))
+            self.addCleanup(stop.set)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline and pg._who(self.port) is None:
+                time.sleep(0.05)
+            self.assertEqual(get(self.port, "/").status, 200)
+            first_pid = int((self.pages / ".pid").read_text())
+            os.kill(first_pid, signal.SIGTERM)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline and pg.is_pages_serve(first_pid, self.port):
+                time.sleep(0.05)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline:
+                if (self.pages / ".pid").is_file() and int((self.pages / ".pid").read_text()) != first_pid:
+                    if pg._who(self.port) is not None:
+                        break
+                time.sleep(0.05)
+            second_pid = int((self.pages / ".pid").read_text())
+            self.assertNotEqual(second_pid, first_pid)
+            self.assertEqual(get(self.port, "/").status, 200)
+            stop.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+    def test_backs_off_failed_and_flapping_starts_up_to_sixty_seconds_then_resets_when_serving(self):
+        waits: list[float] = []
+        stop = threading.Event()
+        outcomes = iter([
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            "pages: started",
+            "pages: restarted",
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            "pages: serving",
+            pg.PagesError("port busy"),
+        ])
+
+        def fake_ensure(*_a, **_k):
+            item = next(outcomes)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def fake_wait(seconds: float) -> bool:
+            waits.append(seconds)
+            if len(waits) >= 9:
+                stop.set()
+                return True
+            return False
+
+        with mock.patch.object(pg, "ensure", side_effect=fake_ensure), \
+             mock.patch.object(stop, "wait", side_effect=fake_wait):
+            pg.supervise(self.root, stop)
+        self.assertEqual(waits, [1, 2, 4, 8, 16, 32, 60, pg.POLL, 1])
+
+    def test_does_nothing_when_board_is_disabled_or_supervisor_lock_is_held(self):
+        import supervisor
+        stop = threading.Event()
+        with supervisor.lock(supervisor.state_dir(self.root) / "pages-supervisor.lock"), \
+             mock.patch.object(pg, "ensure") as ensured:
+            pg.supervise(self.root, stop)
+        ensured.assert_not_called()
+
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: none\n")
+        stop2 = threading.Event()
+        with mock.patch.object(pg, "ensure") as ensured, \
+             mock.patch.object(stop2, "wait", side_effect=lambda _s: (stop2.set(), True)[1]):
+            pg.supervise(self.root, stop2)
+        ensured.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -217,6 +217,51 @@ class AgentTest(SupervisorTest):
              self.assertRaisesRegex(supervisor.ServiceError, "macOS"):
             supervisor.install(self.root, ENGINE, self.jobs)
 
+    def test_install_defaults_to_the_release_engine_and_restarts_on_version_path_or_pins_update(self):
+        self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: started")
+        first_venv = supervisor.ensure_venv(self.data)
+        self.assertEqual(self.job()["ProgramArguments"],
+                         [str(first_venv), str(self.release / "scripts/engine.py")])
+        self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: serving")
+
+        # 1. Plugin version update restarts the engine LaunchAgent.
+        self.publish("1.0.1", "SQLAlchemy==2.0.54\n")
+        self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: restarted")
+        self.assertEqual(self.job()["EnvironmentVariables"]["CHIEF_OF_STUFF_VERSION"], "1.0.1")
+
+        # 2. Dependency pins update builds a new venv and restarts the engine LaunchAgent.
+        self.publish("1.0.1", "SQLAlchemy==2.0.55\n")
+        self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: restarted")
+        second_venv = supervisor.ensure_venv(self.data)
+        self.assertNotEqual(second_venv, first_venv)
+        self.assertEqual(self.job()["ProgramArguments"],
+                         [str(second_venv), str(self.release / "scripts/engine.py")])
+
+        # 3. Release path update restarts the engine LaunchAgent on the new release's engine.py.
+        next_release = self.release.parent / "release-1.0.2"
+        (next_release / ".claude-plugin").mkdir(parents=True)
+        (next_release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": "1.0.2"}))
+        (next_release / "requirements.txt").write_text("SQLAlchemy==2.0.55\n")
+        with mock.patch.object(supervisor, "RELEASE", next_release):
+            self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: restarted")
+            self.assertEqual(self.job()["ProgramArguments"],
+                             [str(second_venv), str(next_release / "scripts/engine.py")])
+            self.assertEqual(self.job()["EnvironmentVariables"]["CHIEF_OF_STUFF_VERSION"], "1.0.2")
+
+    def test_cli_install_status_and_uninstall_manage_the_default_engine(self):
+        with mock.patch.object(supervisor, "job_path",
+                               side_effect=lambda name, jobs_dir=None: (jobs_dir or self.jobs) / f"{name}.plist"):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                self.assertEqual(supervisor.main(["--root", str(self.root), "install"]), 0)
+                self.assertEqual(supervisor.main(["--root", str(self.root), "status"]), 0)
+                self.assertEqual(supervisor.main(["--root", str(self.root), "uninstall"]), 0)
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "engine: started")
+        self.assertIn("installed: true", out.getvalue())
+        self.assertIn("loaded: true", out.getvalue())
+        self.assertEqual(lines[-1], "engine: stopped")
+
     def test_cli_reports_errors_without_a_traceback(self):
         errors = io.StringIO()
         with mock.patch.object(supervisor, "install", side_effect=supervisor.ServiceError("cannot install engine")), \
