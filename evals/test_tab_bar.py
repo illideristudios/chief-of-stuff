@@ -141,18 +141,17 @@ def served(pending: int, answered: int, lead_counts: bool = False) -> dict[str, 
         for s in slugs:
             (pages / f"decision-{s}.json").write_text(decision(s))
         if lead_counts:
-            import board_sources as bs
-            from dataclasses import replace
-            tracker = root / "daily" / f"{day}-tracker.md"
-            text = tracker.read_text().replace("| Robin | open |", "| unassigned | open |")
-            text = text.replace("- 00:01 opened the day", "- 00:01 opened the day\n- 00:04 one-shot impl-1: HUMAN REVIEW NEEDED — check. Changes: a.py.")
-            text = text.replace("\n## Log", f"| Await choice | Await choice | Robin | open | {day} |  | S |  |  | #110 | c |\n\n## Log")
-            tracker.write_text(text + "\n## File ownership\n\n| context | paths |\n|---|---|\n| Cap uploads | `src/a/` |\n")
-            alpha = json.loads(decision("alpha"))
-            (pages / "decision-alpha.json").write_text(json.dumps({**alpha, "holds": ["#110"], "asked": "00:00"}))
-            milestone = bs.Milestone("Release", "https://forge/m/1", datetime.now(ZoneInfo(ZONE)).date() - timedelta(days=1), "open", 1)
-            issue = bs.Issue("#109", "https://forge/i/109", "Uploads", "open", (), milestone=milestone)
-            bs._write(pages / bs.CACHE, replace(bs.EMPTY, issues={"#109": issue}))
+            import store
+            path = root / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            try:
+                db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
+                db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
+                db.add_decision("github:example/repo#110", "scope", "First choice")
+                db.add_decision("github:example/repo#110", "design", "Second choice")
+            finally:
+                db.engine.dispose()
         server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
@@ -299,13 +298,12 @@ class LeadCountsTest(unittest.TestCase):
             with self.subTest(page=page):
                 got = tabs(html)
                 expected = {"Workers": ("1", "need"), "Dispatch": ("1", "ready"),
-                            "Epics": ("1 late", "late"), "Decisions": ("2", "pending"),
-                            "Since you last looked": ("1", "needs input since")}
+                            "Decisions": ("2", "pending")}
                 for label, (count, why) in expected.items():
                     found = badges(got[label])
                     self.assertEqual([b.all_text() for b in found], [count], f"{page}: {label}")
                     self.assertIn(why, found[0].attrs["title"])
-                for label in ("Board", "Limits"):
+                for label in ("Board", "Limits", "Epics", "Since you last looked"):
                     self.assertEqual(badges(got[label]), [])
                 self.assertNotIn("href", got["Dispatch"].attrs)
                 self.assertNotIn("href", got["Epics"].attrs)

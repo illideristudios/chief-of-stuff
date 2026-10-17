@@ -143,13 +143,18 @@ class PanelTest(unittest.TestCase):
                 if suffix:
                     self.assertIn("First source proof" if key == KEY else "Other source proof", body)
 
-    def test_store_items_are_visible_with_tracker_rows_and_closed_holds_are_ignored(self):
+    def test_closed_holds_are_ignored(self):
         self.db.upsert_item(OTHER, title="Closed repository", forge_state="closed", human_review=True)
         self.db.add_decision(OTHER, "design", "Closed question")
-        tracker = "| Task | Owner | State | Since | Due | Checklist | Name | Lane | Stage | Issue |\n|---|---|---|---|---|---|---|---|---|---|\n| Legacy | unassigned | open | | | | Legacy | build | implement | #99 |\n"
         cfg = fixtures.parse_coordinator(fixtures.CLAUDE_MD, today=NOW.date())
-        tasks, holds, _, _ = render_board._tasks_from_store(self.db, cfg, {}, None, NOW.date())
+        _, holds, _, _ = render_board._tasks_from_store(self.db, cfg, {}, None, NOW.date())
         self.assertFalse(holds)
+
+    def test_store_items_are_visible_with_real_tracker_rows(self):
+        from tracker import parse_tracker
+        tracker = "## Tasks\n\n| Item | Owner | State | Since | Due | Checklist |\n|---|---|---|---|---|---|\n| Legacy | unassigned | open | | | |\n"
+        self.assertEqual(len(parse_tracker(tracker).tasks), 1)
+        cfg = fixtures.parse_coordinator(fixtures.CLAUDE_MD, today=NOW.date())
         body = render_board.render(tracker, cfg, NOW, db=task_forge.page_data(self.db))
         self.assertIn("First repository", body)
 
