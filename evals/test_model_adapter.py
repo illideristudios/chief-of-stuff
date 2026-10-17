@@ -351,6 +351,15 @@ class CallTest(unittest.TestCase):
         received = json.loads(got.text)
         self.assertEqual({name: received.get(name) for name in names}, expected)
         self.assertNotIn("UNRELATED_SECRET", received)
+        run_dir = self.dir / (names[0] + "-worker")
+        run_dir.mkdir()
+        with mock.patch.dict(os.environ, {**expected, "UNRELATED_SECRET": "drop"}), \
+             mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+            process = claude_adapter.start(Request(prompt="p", session_id=SID), run_dir)
+            self.assertEqual(process.wait(timeout=5), 0)
+        received = json.loads(json.loads((run_dir / "stdout").read_text())["result"])
+        self.assertEqual({name: received.get(name) for name in names}, expected)
+        self.assertNotIn("UNRELATED_SECRET", received)
 
     def test_oauth_authentication(self):
         self.assert_auth_mode(["CLAUDE_CODE_OAUTH_TOKEN"])
@@ -384,6 +393,42 @@ class CallTest(unittest.TestCase):
         self.assertEqual(process.communicate.call_count, 2)
         self.assertIsNotNone(process.communicate.call_args.kwargs.get("timeout"))
 
+    def test_keyboard_interrupt_reaps_a_real_detached_process(self):
+        ready = self.dir / "ready"
+        self.cli.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nimport time\n"
+                            f"Path({str(ready)!r}).touch()\ntime.sleep(30)\n")
+        popen = subprocess.Popen
+        processes = []
+        def launch(*args, **kwargs):
+            process = popen(*args, **kwargs)
+            processes.append(process)
+            communicate = process.communicate
+            interrupted = False
+            def interrupt_once(*args, **kwargs):
+                nonlocal interrupted
+                if not interrupted:
+                    interrupted = True
+                    deadline = time.monotonic() + 3
+                    while not ready.exists() and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    self.assertTrue(ready.exists())
+                    raise KeyboardInterrupt
+                return communicate(*args, **kwargs)
+            process.communicate = interrupt_once
+            return process
+        started = time.monotonic()
+        try:
+            with mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=launch):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.call("p")
+            self.assertLess(time.monotonic() - started, 5)
+            self.assertEqual(processes[0].returncode, -signal.SIGKILL)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=1)
+
     def test_timeout_drain_is_bounded_even_when_an_escaped_child_holds_a_pipe(self):
         capture = self.dir / "escaped-child"
         capture.write_text(f"#!{sys.executable}\nimport subprocess,sys\n"
@@ -394,7 +439,7 @@ class CallTest(unittest.TestCase):
         started = time.monotonic()
         try:
             with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
-                got = claude_adapter.call(Request(prompt="p", timeout_s=0.2), artifacts=artifacts)
+                got = claude_adapter.call(Request(prompt="p", timeout_s=0.5), artifacts=artifacts)
             self.assertLess(time.monotonic() - started, 5)
             self.assertEqual(got.kind, "unknown")
             self.assertTrue(json.loads((artifacts / "exit.json").read_text())["timed_out"])
@@ -404,6 +449,13 @@ class CallTest(unittest.TestCase):
                     os.kill(int((artifacts / "stdout").read_text().strip()), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+    def test_truncated_utf8_output_is_saved_and_classified(self):
+        self.cli.write_text(f"#!{sys.executable}\nimport os,time\nos.write(1,b'partial: \\xe2')\ntime.sleep(30)\n")
+        artifacts = self.dir / "truncated-output"
+        got = claude_adapter.call(Request(prompt="p", timeout_s=0.5), artifacts=artifacts)
+        self.assertEqual(got.kind, "unknown")
+        self.assertIn("partial:", (artifacts / "stdout").read_text())
 
     def test_extra_options_do_not_depend_on_the_prompt_being_the_last_two_tokens(self):
         with mock.patch.object(claude_adapter, "argv", return_value=[str(self.cli), '--', 'p', '--future']), \

@@ -866,21 +866,23 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                 cli = base / "claude"
                 init = self.reply().events[0]
                 result = {"type": "result", "is_error": False, "result": "done"}
+                assistant = {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
                 cli.write_text(f"#!{sys.executable}\n" +
                     "import json,sys,time\n" +
                     "message=json.loads(sys.stdin.readline())\n" +
                     "assert message['message']['content']=='go'\n" +
                     f"print(json.dumps({init!r}),flush=True)\n" +
                     ("print(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" if mode == "inline" else "") +
-                    f"print(json.dumps({result!r}),flush=True)\n" +
+                    f"print(json.dumps({assistant!r}),flush=True)\nprint(json.dumps({result!r}),flush=True)\n" +
                     ("time.sleep(0.1)\nprint(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" +
-                     f"print(json.dumps({result!r}),flush=True)\n" if mode == "delayed" else "") +
+                     f"print(json.dumps({assistant!r}),flush=True)\nprint(json.dumps({result!r}),flush=True)\n" if mode == "delayed" else "") +
                     "assert not sys.stdin.read(), 'wait must not send a prompt'\n")
                 cli.chmod(0o755)
                 spec = {"timeout_seconds": 3, "turns": [{"prompt": "go", "graders": []},
                         {"wait_seconds": wait, "graders": [{"type": "regex", "pattern": "done"}]}]}
                 started = time.monotonic()
-                with unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
+                with unittest.mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}), \
+                     unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
                     results, error, meta = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None,
                                                          base / "calls", "America/Chicago")
                 self.assertIsNone(error)
@@ -1345,6 +1347,13 @@ class UnmeasuredVerdictTest(unittest.TestCase):
         self.assertIn("=> stale-clock: UNMEASURED", out)
         self.assertNotIn("=> stale-clock: RED", out)
         self.assertEqual(code, 2, "an unmeasured sweep is not a pass")
+
+    def test_unreached_turn_is_unmeasured_in_the_sweep(self):
+        out, code = self.run_main([("T2: ran", None, "turn not reached")], None)
+        self.assertIn("UNREACHED", out)
+        self.assertIn("=> stale-clock: UNMEASURED", out)
+        self.assertNotIn("FAIL", out)
+        self.assertEqual(code, 2)
 
     def test_a_graded_failure_still_reads_red(self) -> None:
         out, code = self.run_main([("a grader", False, "because")], None)
