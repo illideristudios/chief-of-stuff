@@ -117,9 +117,9 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
     actor = policies.personas[name]
-    located = _run_dir(root, issue_key, stage, attempt)
+    run_dir = _run_dir(root, issue_key, stage, attempt)
     data = _resume(store, issue_key)
-    existing = _existing_run(data, located, stage, attempt, trees, clock)
+    existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
     if existing is not None:
         store.set_ownership(issue_key, existing["tree"])
         _save_run(store, issue_key, stage, attempt, existing)
@@ -183,14 +183,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             code, actual_head = make_worktree.git(["rev-parse", "HEAD"], tree)
             if code or actual_head != request_head.head:
                 raise RuntimeError("prepared review tree does not match the request head")
-    if located.resolve().is_relative_to(tree.resolve()):
+    if run_dir.resolve().is_relative_to(tree.resolve()):
         raise RuntimeError("engine run directory must be outside the worker tree")
     # Read before touching evidence: an unreadable forge refuses the start, never launches with defaults only.
     protected = tuple(dict.fromkeys((*guard_binding.DEFAULT_PROTECTED_BRANCHES, *forge.protected_branches())))
     # A failed start may be retried at the same attempt. Preserve its evidence under a unique sibling.
-    if located.exists():
-        located.rename(located.with_name(f"{located.name}-refused-{uuid.uuid4()}"))
-    located.mkdir(parents=True)
+    if run_dir.exists():
+        run_dir.rename(run_dir.with_name(f"{run_dir.name}-refused-{uuid.uuid4()}"))
+    run_dir.mkdir(parents=True)
     session_id = str(uuid.uuid4())
     plugin = guard_binding.guard_plugin_dir()
     if plugin is None:
@@ -203,14 +203,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
-    runner = claude_adapter.start(request, located, claude_as_profile=claude_as_profile, env=env)
+    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
     try:
         deadline = time.monotonic() + 5
-        while not (located / "started.json").exists():
+        while not (run_dir / "started.json").exists():
             if runner.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError("could not verify worker start: adapter did not start a host")
             time.sleep(0.01)
-        pid = json.loads((located / "started.json").read_text())["pid"]
+        pid = json.loads((run_dir / "started.json").read_text())["pid"]
         while True:
             identity = process_status.identity(pid, session_id, host=True)
             runner_identity = process_status.identity(runner.pid, session_id)
@@ -221,7 +221,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             time.sleep(0.01)
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
-                  "run_dir": str(located), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
+                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
@@ -234,7 +234,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             except Exception:
                 pass
         raise
-    _runners[str(located)] = runner
+    _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
 
 
@@ -255,9 +255,9 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             record = runs.get(f"{segment.stage}-{segment.attempt}")
             if record is None and trees is not None:
                 # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.
-                located = _run_dir(root, key, segment.stage, segment.attempt)
+                run_dir = _run_dir(root, key, segment.stage, segment.attempt)
                 try:
-                    record = _existing_run(data, located, segment.stage, segment.attempt, trees, clock)
+                    record = _existing_run(data, run_dir, segment.stage, segment.attempt, trees, clock)
                 except RuntimeError:
                     # command.json without started.json (or incomplete identity): keep the reservation open.
                     continue
@@ -271,13 +271,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     or any(not isinstance(record.get(field), str) or not record[field]
                            for field in ("session_id", "run_dir", "tree"))):
                 raise ValueError("incomplete run identity")
-            located = _run_dir(root, key, segment.stage, segment.attempt)
-            if Path(record["run_dir"]).resolve() != located or located.is_relative_to(Path(record["tree"]).resolve()):
+            run_dir = _run_dir(root, key, segment.stage, segment.attempt)
+            if Path(record["run_dir"]).resolve() != run_dir or run_dir.is_relative_to(Path(record["tree"]).resolve()):
                 raise ValueError("run record is outside the engine evidence directory")
-            runner = _runners.get(str(located))
+            runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
-                _runners.pop(str(located))
-            if not (located / "exit.json").exists():
+                _runners.pop(str(run_dir))
+            if not (run_dir / "exit.json").exists():
                 if not isinstance(record.get("identity"), str) or not record["identity"]:
                     raise ValueError("incomplete run identity")
                 try:
@@ -292,10 +292,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     continue
             for error in teardown(root, Path(record["tree"]), Path(record["tree"]).name, teardown_command):
                 store.add_log(key, f"worker teardown failed: {error}", now.isoformat())
-            if not (located / "exit.json").exists():
+            if not (run_dir / "exit.json").exists():
                 raise ValueError("missing adapter exit record")
-            code = _exit_code(located)
-            reply = claude_adapter.classify(code, (located / "stdout").read_text(), (located / "stderr").read_text())
+            code = _exit_code(run_dir)
+            reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
             if isinstance(reply, Failure):
                 if reply.retryable:
                     outcome = reply.kind

@@ -490,10 +490,11 @@ def main(argv_in: list[str] | None = None) -> int:
             # Local on purpose: it rebinds the `one_shot` flag above to the module, and an interactive
             # launch never loads the runner.
             import one_shot
+            from shell_setup import teardown
             return one_shot.run(root=Path(args.root).resolve(), day=args.date, task=args.task,
                                 cwd=Path(args.cwd), name=args.title, runtime=args.runtime,
                                 agent_type=args.agent_type, model=args.model, effort=args.effort,
-                                dry_run=args.dry_run, timeout_minutes=args.timeout_minutes)
+                                dry_run=args.dry_run, timeout_minutes=args.timeout_minutes, teardown=teardown)
         except (ValueError, OSError, dispatch_prompt.RefusedError, ShellError, SettingsError) as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 1

@@ -52,7 +52,7 @@ COMMANDS = {
     "tick": "scripts/flow.py",
 }
 # Commands whose scripts import store (SQLAlchemy/Alembic). Add cleanup/engine when they join COMMANDS.
-STORE_BACKED = frozenset({"audit", "performance", "work", "limits"})
+STORE_BACKED = frozenset({"performance", "work", "limits"})
 
 
 def wrapper_text(current: Path) -> str:
