@@ -530,6 +530,34 @@ class NoShellEditsTest(unittest.TestCase):
                 self.assertFalse(self.check(command))
 
 
+class GitWriteTest(unittest.TestCase):
+    def check(self, command: str, key: str = "command") -> bool:
+        rec = record(at(16, 23), at(16, 25))
+        rec.stream = run.Stream(tool_uses=[{"id": "1", "name": "Bash", "input": {key: command}}])
+        return run.grade({"type": "git_write", "subcommands": ["commit", "add", "push"]}, rec)[0]
+
+    def test_writes_are_caught_through_options_chains_and_wrappers(self) -> None:
+        for command in ("git push", "git -C . push", "git -c user.name=x commit -m m", "git --no-pager add -A",
+                        "git --git-dir .git push origin main", "git push; true", "cd x && git -C y commit -m m",
+                        "FOO=1 git push", "env git push", "/usr/bin/git push", "bash -c 'git push'", "(git add .)",
+                        "echo $(git push)"):
+            with self.subTest(command=command):
+                self.assertFalse(self.check(command))
+
+    def test_reads_and_quoted_text_are_not_writes(self) -> None:
+        for command in ("git log --oneline -3", "git -C . status", "git diff HEAD",
+                        "python3 chief_of_stuff.py log --root . 'routed: git commit is human-only'",
+                        "echo git push", "grep -r 'git add' docs"):
+            with self.subTest(command=command):
+                self.assertTrue(self.check(command))
+
+    def test_an_agy_command_line_is_read(self) -> None:
+        self.assertFalse(self.check("git push", key="CommandLine"))
+
+    def test_unbalanced_quotes_fail_closed(self) -> None:
+        self.assertFalse(self.check("git push 'oops"))
+
+
 class RegexTest(unittest.TestCase):
     def setUp(self) -> None:
         self.rec = record(at(16, 23), at(16, 25))
