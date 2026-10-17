@@ -977,6 +977,79 @@ class EngineTest(unittest.TestCase):
             inputs = engine._planning_inputs(self.db, self.db.items(), self.forge, self.now.isoformat(), self.p, "frank")
         self.assertEqual(inputs["architect_replies"][KEY].status, "APPROVED")
 
+    def test_identity_failure_does_not_assign_an_old_reply_to_a_new_same_head_request(self):
+        import json
+        self.prepare_architect_consult()
+        first, = self.run_pass(architect_login="frank")
+        first_key = first.findings[0]["finding_key"]
+        self.forge.comments.append(SimpleNamespace(author="frank", time=self.now.isoformat(),
+            body="Architect: CHANGES " + first.head[:7] + "\n" + json.dumps({"dispositions": {first_key: "keep"}})))
+        self.findings(counts={"important": 2})
+        second, = self.run_pass(architect_login="frank")
+        self.assertIsInstance(second, reconcile.Consult)
+        self.assertEqual(len(second.findings), 1)
+        self.assertNotEqual(second.findings[0]["finding_key"], first_key)
+        with mock.patch.object(self.forge, "login", side_effect=ForgeError("identity offline")):
+            inputs = engine._planning_inputs(self.db, self.db.items(), self.forge, self.now.isoformat(), self.p, "frank")
+        reply = inputs["architect_replies"][KEY]
+        self.assertEqual(reply.dispositions, {first_key: "keep"})
+        self.assertEqual(reply.request_token, "")
+        self.assertEqual(reconcile.plan(self.db.items(), policies=self.p, free_slots=1, now=self.now, **inputs),
+                         [reconcile.Wait(KEY, "waiting for the architect")])
+
+    def test_lost_response_with_fenced_finding_evidence_is_confirmed_without_reposting(self):
+        self.prepare_architect_consult()
+        report = self.db.reports(KEY)[0]
+        findings = [dict(f, evidence="Example: ```python\nraise ValueError()\n```") for f in report.findings]
+        self.db.add_report(KEY, report.stage, report.attempt, report.session_id, "done", "Reviewed", findings)
+        post = self.forge.comment_change
+        def lost_response(number, body):
+            post(number, body)
+            raise ForgeError("response lost", retryable=True)
+        with mock.patch.object(self.forge, "comment_change", side_effect=lost_response):
+            self.assertIsInstance(self.run_pass(architect_login="frank")[0], reconcile.Consult)
+        self.assertEqual(self.run_pass(architect_login="frank"), [reconcile.Wait(KEY, "waiting for the architect")])
+        self.assertEqual(len(self.forge.comments), 1)
+        self.assertNotIn("architect_pending_requests", self.db.resume(KEY))
+        self.assertEqual(len(self.db.resume(KEY)["architect_requests"]), 1)
+
+    def test_consult_readback_is_a_fact_and_engine_commits_confirmed_or_absent_intents(self):
+        self.prepare_architect_consult()
+        post = self.forge.comment_change
+        def lost_response(number, body):
+            post(number, body)
+            raise ForgeError("response lost", retryable=True)
+        with mock.patch.object(self.forge, "comment_change", side_effect=lost_response):
+            self.run_pass(architect_login="frank")
+        before = self.db.resume(KEY)
+        token, = before["architect_pending_requests"]
+        for posted in (True, False):
+            if not posted:
+                self.forge.comments.clear()
+            with mock.patch.object(self.db, "set_resume", wraps=self.db.set_resume) as write:
+                inputs = engine._planning_inputs(self.db, self.db.items(), self.forge, self.now.isoformat(), self.p, "frank")
+            self.assertEqual(self.db.resume(KEY), before)
+            write.assert_not_called()
+            self.assertEqual(inputs["consult_postings"][KEY], {token: posted})
+            action, = reconcile.plan(self.db.items(), policies=self.p, free_slots=1, now=self.now, **inputs)
+            self.assertIsInstance(action, reconcile.Wait if posted else reconcile.Consult)
+        # With the item held, an absent intent must still be retired by the engine.
+        self.forge.rows[0]["human_review"] = True
+        self.assertEqual(self.run_pass(architect_login="frank"), [reconcile.Wait(KEY, "human review")])
+        self.assertNotIn("architect_pending_requests", self.db.resume(KEY))
+        self.assertNotIn(token, self.db.resume(KEY).get("architect_requests", {}))
+
+    def test_pending_consult_intent_is_dropped_when_the_head_and_stage_move(self):
+        self.prepare_architect_consult()
+        with mock.patch.object(self.forge, "comment_change", side_effect=ForgeError("not sent", retryable=True)):
+            self.run_pass(architect_login="frank")
+        self.assertTrue(self.db.resume(KEY)["architect_pending_requests"])
+        self.forge.rows[0].update(stage="implement", human_review=True)
+        with mock.patch.object(self.forge, "closing_request", return_value=SimpleNamespace(number=10, head="b" * 40)):
+            self.assertEqual(self.run_pass(architect_login="frank"), [reconcile.Wait(KEY, "human review")])
+        self.assertNotIn("architect_pending_requests", self.db.resume(KEY))
+        self.assertEqual(self.forge.comments, [])
+
     def test_uncertain_architect_post_is_recovered_after_restart_without_duplicate(self):
         self.prepare_architect_consult()
         post = self.forge.comment_change

@@ -1490,6 +1490,10 @@ class ForgeRetryabilityTest(unittest.TestCase):
         for message, retryable in (("gh: Too Many Requests (HTTP 429)", True),
                                    ("gh: Server Error (HTTP 503)", True),
                                    ("HTTP 503: Service Unavailable (https://api.github.com/graphql)", True),
+                                   ("gh: HTTP 503: Service Unavailable (https://api.github.com/graphql)", True),
+                                   ("gh: HTTP 429: Too Many Requests (https://api.github.com/graphql)", True),
+                                   ('gh: Get "https://api.github.com/graphql": dial tcp: connection refused', True),
+                                   ("gh: API rate limit already exceeded for user ID 123.", True),
                                    ("HTTP 404: Not Found (https://api.github.com/repos/example/app/pulls/512)", False),
                                    ("gh: You have exceeded a secondary rate limit (HTTP 403)", True),
                                    ('Get "https://api.github.com/graphql": read tcp: connection reset by peer', True),
@@ -1505,6 +1509,18 @@ class ForgeRetryabilityTest(unittest.TestCase):
         with self.assertRaises(forge.ForgeError) as raised:
             source.closing_request("github:example/project#1", [])
         self.assertFalse(raised.exception.retryable)
+
+    def test_graphql_rate_limits_remain_retryable_through_fix_head_lookup(self):
+        source = forge.Forge(backlog.GitHubBacklog("example/project"))
+        for kind, retryable in (("RATE_LIMITED", True), ("FORBIDDEN", False)):
+            for code in (0, 1):
+                with self.subTest(kind=kind, code=code), mock.patch.object(backlog.subprocess, "run",
+                        return_value=SimpleNamespace(returncode=code,
+                            stdout=json.dumps({"errors": [{"type": kind, "message": "request refused"}]}),
+                            stderr="gh: request refused" if code else "")):
+                    with self.assertRaises(forge.ForgeError) as raised:
+                        source.closing_request("github:example/project#1")
+                    self.assertEqual(raised.exception.retryable, retryable)
 
     def test_permanent_errors_with_transport_looking_resource_names_do_not_retry(self):
         import merge_ready
