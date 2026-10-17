@@ -202,7 +202,7 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
              mock.patch.object(worker.claude_adapter, "cancel"), \
-             mock.patch.object(worker.time, "monotonic", side_effect=[0, 10]), \
+             mock.patch.object(worker.time, "monotonic", side_effect=[0, 10, 11]), \
              mock.patch.object(worker.process_status, "identity", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "verify"):
                 slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
@@ -575,7 +575,7 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.claude_adapter, "cancel"):
-            with mock.patch.object(worker.time, "monotonic", side_effect=[0, 10]), \
+            with mock.patch.object(worker.time, "monotonic", side_effect=[0, 10, 11]), \
                  mock.patch.object(worker.process_status, "identity", return_value=None), \
                  self.assertRaises(RuntimeError):
                 self.launch("review")

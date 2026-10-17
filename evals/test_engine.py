@@ -160,9 +160,9 @@ class EngineTest(unittest.TestCase):
         def facts(store, key, *, trees, repo):
             if key == KEY:
                 raise RuntimeError("clone lock")
-            return set()
+            return {"decisions": [], "conflict": None, "readable": False}
 
-        with mock.patch.object(engine.engine_facts, "held_stages", side_effect=facts):
+        with mock.patch.object(engine.engine_facts, "recovery", side_effect=facts):
             actions = self.run_pass()
         self.assertEqual(actions, [
             reconcile.Wait(KEY, "orphan recovery held"),

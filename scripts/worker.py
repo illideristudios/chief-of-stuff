@@ -212,32 +212,36 @@ def _common(repo: Path) -> Path | None:
         return None
 
 
-def _status(tree: Path, common: Path) -> tuple[bool, bool] | None:
-    """(uncommitted work, unresolved merge conflicts), or None when git cannot say. Engine metadata is not work.
+def _status(tree: Path, common: Path) -> tuple[bool, bool]:
+    """(uncommitted work, unresolved merge conflicts). Read failures retry the next pass. Engine metadata is not work.
     Read raw: git_trees.git strips the first line's leading space, which belongs to its status column."""
     try:
         out = git_view.run(["status", "--porcelain"], tree, env=git_trees.audit_env(),
                            timeout=git_trees.GIT_TIMEOUT, expected_common=common)
-    except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
-        return None
+    except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("cannot read orphan status; retrying recovery") from exc
     if out.returncode:
-        return None
+        raise RuntimeError("cannot read orphan status; retrying recovery")
     lines = [line for line in out.stdout.splitlines() if line and line[3:] != ".chief-of-stuff" and not line[3:].startswith(".chief-of-stuff/")]
     return bool(lines), any(line[:2] in {"UU", "AA", "DD", "AU", "UA", "DU", "UD"} for line in lines)
 
 
 def _read_tree(path: Path, common: Path) -> completion.OrphanTree:
-    branch_code, branch = make_worktree.git(["symbolic-ref", "--short", "HEAD"], path, expected_common=common)
+    branch_code, branch = make_worktree.git(["rev-parse", "--abbrev-ref", "HEAD"], path, expected_common=common)
     head_code, head = make_worktree.git(["rev-parse", "HEAD"], path, expected_common=common)
     status = _status(path, common)
-    if branch_code or head_code or status is None or not branch or not head:
+    if branch_code or head_code or not branch or not head:
+        raise RuntimeError("cannot read orphan HEAD; retrying recovery")
+    if branch == "HEAD":
         return completion.OrphanTree(str(path), "", "", unreadable=True)
     # Private Git views intentionally omit merge state; read only the validated metadata entry.
     layout = git_view.locate(path, expected_common=common)
     merging = (layout.gitdir / "MERGE_HEAD").exists()
     code, count = make_worktree.git(["rev-list", "--count", f"{git_trees.REF}..HEAD"], path, expected_common=common)
+    if code or not count.isdecimal():
+        raise RuntimeError("cannot read orphan history; retrying recovery")
     return completion.OrphanTree(str(path), branch, head, dirty=status[0], conflicted=status[1] or merging,
-                                 ahead=int(count) if code == 0 and count.isdecimal() else None)
+                                 ahead=int(count))
 
 
 def _read_branches(number: int, data: dict, repo: Path, common: Path,
@@ -250,8 +254,9 @@ def _read_branches(number: int, data: dict, repo: Path, common: Path,
             names.extend(ref.removeprefix(strip) for ref in out.splitlines()
                          if ref and not ref.removeprefix(strip).startswith(f"work/issue-{number}-review-"))
     found = []
+    quarantined = _quarantined_branches(repo, number, common)
     for name in dict.fromkeys(names):
-        if name in checked_out or name in _quarantined_branches(repo, number, common):
+        if name in checked_out or name in quarantined:
             continue
         for ref in (f"refs/heads/{name}", f"refs/remotes/origin/{name}"):
             code, sha = make_worktree.git(["rev-parse", "--verify", "-q", ref], repo, expected_common=common)
@@ -261,7 +266,7 @@ def _read_branches(number: int, data: dict, repo: Path, common: Path,
 
 
 def _with_ancestry(found: list[completion.OrphanTree], repo: Path, common: Path) -> list[completion.OrphanTree]:
-    """Each candidate with which of the others' heads its history holds; an unanswerable comparison is unreadable."""
+    """Each candidate with which of the others' heads its history holds; failed reads retry the pass."""
     heads = {c.head for c in found if not c.unreadable}
     if len(heads) < 2:
         return found
@@ -270,14 +275,15 @@ def _with_ancestry(found: list[completion.OrphanTree], repo: Path, common: Path)
         if c.unreadable:
             out.append(c)
             continue
-        held, failed = set(), False
+        held = set()
         for other in heads - {c.head}:
-            code, _ = git_trees.git(["merge-base", "--is-ancestor", other, c.head], repo, expected_common=common)
+            result = git_trees.git(["merge-base", "--is-ancestor", other, c.head], repo, expected_common=common)
+            code, _ = result
             if code == 0:
                 held.add(other)
-            elif code != 1:  # 1 is a real answer: not an ancestor
-                failed = True
-        out.append(replace(c, ancestors=frozenset(held), unreadable=failed))
+            elif code != 1 or isinstance(result, git_trees.ReadFailure):
+                raise RuntimeError("cannot read orphan ancestry; retrying recovery")
+        out.append(replace(c, ancestors=frozenset(held)))
     return out
 
 
@@ -337,9 +343,10 @@ def _quarantined_branches(repo: Path, number: int, common: Path) -> set[str]:
     names: set[str] = set()
     code, out = make_worktree.git(["for-each-ref", "--format=%(refname)", f"refs/quarantine/{number}/"],
                                  repo, expected_common=common)
-    if code == 0:
-        for ref in out.splitlines():
-            marker = "/heads/"
+    if code:
+        raise RuntimeError("cannot read quarantine refs; preserving work")
+    for ref in out.splitlines():
+        for marker in ("/heads/", "/remotes/origin/"):
             if marker in ref:
                 names.add(ref.split(marker, 1)[1])
     code, listed = make_worktree.git_trusted(["worktree", "list", "--porcelain"], repo)
@@ -456,7 +463,7 @@ def _assert_stopped(run: Path) -> None:
 
 def _abort_workers_gone(root: Path, number: int) -> None:
     """A released slot or a cancellation marker is not proof that its worker stopped.
-    A pre-start (command.json, no started.json) never ran: quarantine it and move on."""
+    Only a canceled pre-start is known not to have an untracked host."""
     runs = supervisor.state_dir(root) / "runs"
     for run in runs.glob(f"{number}-*"):
         try:
@@ -465,6 +472,8 @@ def _abort_workers_gone(root: Path, number: int) -> None:
             elif any(mark in run.name for mark in ("-canceled-", "-quarantine-", "-refused-")):
                 continue
             elif (run / "command.json").is_file() and not (run / "exit.json").is_file():
+                if not (run / "canceled").is_file():
+                    raise RuntimeError("worker start is unverified; preserving its evidence")
                 run.rename(run.with_name(f"{run.name}-quarantine-{uuid.uuid4().hex}"))
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             raise RuntimeError(f"cannot quarantine orphaned work with live or unverified worker {run.name}: {exc}") from exc
@@ -493,7 +502,7 @@ def _finish_quarantine(issue_key: str, number: int, agent: str, data: dict, stor
     if not fresh.is_dir():
         fresh = make_worktree.build(root, repo, str(trees), plan["fresh"], branch, agent).path
     common = _common(repo)
-    code, head = make_worktree.git(["rev-parse", git_trees.REF], repo, expected_common=common)
+    code, head = make_worktree.git(["rev-parse", "HEAD"], fresh, expected_common=common)
     if code or not head:
         raise RuntimeError("abort replacement base is unreadable")
     try:
@@ -501,7 +510,14 @@ def _finish_quarantine(issue_key: str, number: int, agent: str, data: dict, stor
     except RuntimeError:
         if fresh.is_dir():
             with make_worktree.clone_lock(repo) as common:
-                _move_tree(repo, trees, fresh, str(number), f"{plan['stamp']}-rejected")
+                rejected = {"stamp": f"{plan['stamp']}-rejected", "paths": [str(fresh)],
+                            "refs": [f"refs/heads/{branch}"]}
+                _apply_quarantine(repo, trees, number, rejected, common)
+        # Keep the old plan until the rejected tree and refs are safe; then persist a unique replacement.
+        stamp = uuid.uuid4().hex
+        plan.update(stamp=stamp, fresh=f"issue-{number}-replacement-{stamp}",
+                    branch=f"work/issue-{number}-replacement-{stamp}")
+        store.set_resume(issue_key, data)
         raise
     store.set_ownership(issue_key, str(fresh))
     data.update(worktree=str(fresh), work_branch=branch)

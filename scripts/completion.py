@@ -55,7 +55,7 @@ def _preferring(candidates: Sequence[OrphanTree], preferred: str | None) -> Orph
     return next((c for c in candidates if preferred and c.path == preferred), candidates[0])
 
 
-def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None) -> Recovery | Conflict | None:
+def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None) -> Recovery | Conflict | Quarantine | None:
     """None without candidates. Otherwise the commit to resume from and the tree or branch that holds it, or the
     conflict that needs the user. Uncommitted work is never put behind a fast-forward or beside other uncommitted work."""
     if not candidates:
@@ -78,3 +78,11 @@ def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None) 
     trees = [c for c in candidates if c.path]
     at_tip = [c for c in trees if c.head == tip] or trees or [c for c in candidates if c.head == tip]
     return _reuse(_preferring(dirty or at_tip, preferred), tip)
+
+
+def held_stages(decisions: Sequence[tuple[str, str, str | None]], *, conflict: str | None,
+                readable: bool) -> set[str]:
+    """Only the latest hold on the current conflict applies; unreadable facts keep holds in place."""
+    latest = {question: answer for topic, question, answer in decisions if topic == "conflict" and question}
+    return {question.partition("\n")[0] for question, answer in latest.items()
+            if answer == "hold" and (not readable or question.partition("\n")[2] == conflict)}

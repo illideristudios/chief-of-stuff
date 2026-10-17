@@ -14,6 +14,7 @@ from typing import Any
 
 import cleanup
 import clock as engine_clock
+import completion
 import engine_facts
 import engine_merge
 import forge
@@ -134,7 +135,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     holds: dict[str, set[str] | None] = {}
     for item in items:
         try:
-            holds[item.issue_key] = engine_facts.held_stages(store, item.issue_key, trees=trees, repo=clone)
+            holds[item.issue_key] = completion.held_stages(
+                **engine_facts.recovery(store, item.issue_key, trees=trees, repo=clone))
         except Exception as exc:
             store.add_log(item.issue_key, f"recovery facts failed: {exc}", at)
             holds[item.issue_key] = None
