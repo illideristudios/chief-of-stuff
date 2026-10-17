@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import uuid
 from pathlib import Path
@@ -149,27 +150,42 @@ class StartTest(unittest.TestCase):
             self.assertEqual(names[0], "command.json")
             self.assertTrue((run_dir / "command.json").is_file())
 
-    def test_a_failed_spawn_record_stops_the_host_before_publishing_exit(self):
+    def test_a_failed_spawn_record_stops_the_host_and_its_children_before_publishing_exit(self):
         with tempfile.TemporaryDirectory() as tmp:
             run = Path(tmp)
-            (run / "command.json").write_text(json.dumps({"argv": ["fake"], "cwd": tmp, "session_id": SID, "env": {}}))
-            process = mock.Mock(pid=4242)
-            order = []
-            process.send_signal.side_effect = lambda sig: order.append(("signal", sig))
-            process.wait.side_effect = lambda timeout=None: order.append("wait") or 0
-            real = claude_adapter._write
-            def writing(run_dir, name, record):
-                if name == "spawn.json":
-                    raise OSError("disk full")
-                order.append(name)
-                real(run_dir, name, record)
-            with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process), \
-                 mock.patch.object(claude_adapter, "_write", side_effect=writing):
-                claude_adapter._worker(run)
-            self.assertLess(order.index(("signal", signal.SIGTERM)), order.index("exit.json"))
-            self.assertLess(order.index("wait"), order.index("exit.json"))
-            self.assertEqual(json.loads((run / "exit.json").read_text())["exit_code"], 127)
-            self.assertFalse((run / "started.json").exists())
+            child_pid = run / "child.pid"
+            child = "import time; time.sleep(60)"
+            host = ("import pathlib, subprocess, sys, time\n"
+                    f"c = subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+                    f"pathlib.Path({str(child_pid)!r}).write_text(str(c.pid))\n"
+                    "time.sleep(60)\n")
+            (run / "command.json").write_text(json.dumps({"argv": [sys.executable, "-c", host], "cwd": tmp,
+                                                          "session_id": SID, "env": {}}))
+            (run / "spawn.json").mkdir()  # the record cannot be published: replace() onto a directory fails
+            os.mkfifo(run / "spawn.tmp")  # and the write blocks until the host has spawned its child
+            runner = subprocess.Popen([sys.executable, str(ROOT / "scripts" / "claude_adapter.py"), "--worker",
+                                       str(run), SID], start_new_session=True, stderr=subprocess.DEVNULL)
+
+            def alive(pid):
+                state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout
+                return bool(state.strip()) and not state.startswith("Z")
+            try:
+                deadline = time.monotonic() + 15
+                while not child_pid.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                (run / "spawn.tmp").read_bytes()
+                while not (run / "exit.json").exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue((run / "exit.json").exists())
+                self.assertFalse(alive(int(child_pid.read_text())))
+                self.assertEqual(json.loads((run / "exit.json").read_text())["exit_code"], 127)
+                self.assertFalse((run / "started.json").exists())
+            finally:
+                try:
+                    os.killpg(runner.pid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    pass
+                runner.wait()
 
     def test_a_reused_or_foreign_process_group_is_not_the_worker(self):
         from datetime import datetime
@@ -189,6 +205,32 @@ class StartTest(unittest.TestCase):
             with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError("not ours")):
                 self.assertFalse(claude_adapter.group_alive(10))
                 self.assertFalse(claude_adapter.spawn_alive(run))
+
+    def test_a_late_born_child_keeps_the_group_but_a_new_leader_does_not(self):
+        from datetime import datetime
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            start = 1_700_000_000
+            (run / "runner-spawn.json").write_text(json.dumps({"pid": 10, "pgid": 10, "start_time": start}))
+
+            def listed(*members):
+                lines = [f"10 {pid} S {datetime.fromtimestamp(birth).strftime('%a %b %d %H:%M:%S %Y')}"
+                         for pid, birth in members]
+                return mock.Mock(returncode=0, stdout="\n".join(lines) + "\n")
+            cases = ((listed((11, start + 600)), True),  # leader gone, a tool child born minutes later still writes
+                     (listed((10, start - 30), (11, start + 600)), True),  # time.time() was sampled well after birth
+                     (listed((10, start + 3600)), False))  # pid 10 was reused by a new group leader
+            for output, alive in cases:
+                with self.subTest(alive=alive), mock.patch.object(claude_adapter.os, "killpg"), \
+                     mock.patch.object(claude_adapter.subprocess, "run", return_value=output):
+                    self.assertIs(claude_adapter.spawn_alive(run), alive)
+
+    def test_the_process_table_is_read_in_the_c_locale(self):
+        probe = mock.Mock(returncode=0, stdout="")
+        with mock.patch.object(claude_adapter.os, "killpg"), \
+             mock.patch.object(claude_adapter.subprocess, "run", return_value=probe) as run:
+            claude_adapter.group_alive(10)
+        self.assertEqual(run.call_args.kwargs["env"]["LC_ALL"], "C")
 
 
 class CancelTest(unittest.TestCase):

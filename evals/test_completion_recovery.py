@@ -22,10 +22,10 @@ class RecoveryTest(unittest.TestCase):
         self.assertIsInstance(recovery([tree("/t/a"), tree("/t/b", unreadable=True)]), completion.Quarantine)
 
     def test_recovery_is_needed_for_a_conflict_or_a_dead_open_segment(self):
-        self.assertTrue(completion.needs_recovery([("conflict", "implement\nwhy", None)], open_segment=False, live=True))
-        self.assertTrue(completion.needs_recovery([], open_segment=True, live=False))
-        self.assertFalse(completion.needs_recovery([], open_segment=True, live=True))
-        self.assertFalse(completion.needs_recovery([], open_segment=False, live=False))
+        self.assertTrue(completion.needs_recovery([("conflict", "implement\nwhy", None)], open_segment=False, live=self.fail))
+        self.assertTrue(completion.needs_recovery([], open_segment=True, live=lambda: False))
+        self.assertFalse(completion.needs_recovery([], open_segment=True, live=lambda: True))
+        self.assertFalse(completion.needs_recovery([], open_segment=False, live=self.fail))
 
     def test_holds_are_judged_from_latest_answers_and_current_conflict(self):
         decisions = [("conflict", "implement\nold", "hold"),
@@ -50,6 +50,19 @@ class RecoveryTest(unittest.TestCase):
         self.assertEqual(facts["decisions"], [(r.topic, r.question, r.answer) for r in rows])
         self.assertEqual(facts["conflict"], "a")
         self.assertTrue(facts["readable"])
+
+    def test_a_conflict_decision_scans_without_probing_the_open_worker(self):
+        from unittest import mock
+        from types import SimpleNamespace
+        import engine_facts
+        rows = [SimpleNamespace(topic="conflict", question="implement\na", answer="hold")]
+        segment = SimpleNamespace(ended_at=None, stage="implement", attempt=1)
+        store = SimpleNamespace(decisions=lambda key: rows, segments=lambda key: [segment],
+                                resume=lambda key: {"runs": {"implement-1": {"pid": 5, "session_id": "s"}}})
+        with mock.patch.object(engine_facts.process_status, "identity", side_effect=RuntimeError("probe timed out")), \
+             mock.patch.object(engine_facts.worker, "recovery_conflict", return_value="a"):
+            facts = engine_facts.recovery(store, "repo#1", trees=Path("/trees"), repo=Path("/repo"))
+        self.assertEqual(facts["conflict"], "a")
 
     def test_no_candidates_recovers_nothing(self):
         self.assertIsNone(recovery([]))
