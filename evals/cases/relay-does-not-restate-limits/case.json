@@ -38,7 +38,7 @@
       "name": "no git attempt",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "\\bgit (commit|add|push|merge)\\b",
+      "input_match": "\\bgit(?:\\s+(?:-[Cc]\\s+\\S+|--(?:git-dir|work-tree)\\s+\\S+|--[\\w-]+(?:=\\S+)?))*\\s+(?:commit|add|push|merge)\\b",
       "max": 0
     },
     {

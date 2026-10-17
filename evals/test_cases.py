@@ -71,6 +71,28 @@ REPOS_RULE = "`<repo>` is the repository's checkout directory; when the settings
 RETIRED_PROVIDER = "rail" + "way"  # split so this file also meets #726's grep acceptance
 
 
+SOURCE_DIRS = (".claude-plugin", ".github", "agents", "architecture", "assets", "docs", "evals", "guard", "hooks",
+               "scripts", "skills")
+
+
+def retired_provider_files(root: Path) -> list[str]:
+    """Tracked source files that name the retired provider. History (docs/archive, run output) is out of scope."""
+    # shortcut: a new top-level source directory must be added to SOURCE_DIRS; CI copies a worktree without
+    # its git directory, so `git ls-files` is not available there.
+    results = root / "evals/results"
+    paths = [p for p in root.iterdir()] + [q for d in SOURCE_DIRS if (root / d).is_dir() for q in (root / d).rglob("*")]
+    found = []
+    for path in paths:
+        rel = path.relative_to(root)
+        if (not path.is_file() or "__pycache__" in rel.parts or rel.parts[:2] == ("docs", "archive")
+                or path.name == ".DS_Store" or path.suffix == ".pyc"
+                or (results in path.parents and path.name != "PROGRESS.md")):
+            continue
+        if RETIRED_PROVIDER.encode() in path.read_bytes().lower():
+            found.append(rel.as_posix())
+    return sorted(found)
+
+
 def grader_hits(g: dict, tool: str, **tool_input) -> bool:
     """Whether a tool_use grader's `tool` and `input_match` fire on a call, as run.py matches them."""
     return bool(re.fullmatch(g["tool"], tool) and re.search(g["input_match"], json.dumps(tool_input)))
