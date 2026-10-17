@@ -125,8 +125,12 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     rounds = attempt - 1 - sum(s.stage == stage and s.outcome in RETRYABLE for s in history)
     if stage == "review":
-        # Completed review rounds belong to the fix loop; only failed reviews spend retries.
-        rounds = sum(s.stage == stage and s.outcome == "failed" for s in history)
+        # Completed review rounds belong to the fix loop; only failures since the last completed review spend retries.
+        rounds = 0
+        for s in sorted((s for s in history if s.stage == stage), key=lambda s: s.attempt, reverse=True):
+            if s.outcome == "done":
+                break
+            rounds += s.outcome == "failed"
     elif any(e.target == stage for e in workflow.next("review")):
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)
@@ -211,11 +215,11 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
         return Wait(key, "human review" if item.human_review else "segments tie at the latest start")
     if item.human_review:
-        # Only an interrupted/failed run at this stage can release an extra launcher hold.
-        # Human outcomes, completed work and stage-required holds still need a human's release.
+        # Only a failed launch, whose hold the engine restored itself, can release an extra hold.
+        # Quota and unknown exits, human outcomes, completed work and stage-required holds need a human.
         if (item.stage and stage not in hold_stages and latest and latest.stage == stage
                 and launcher_hold.get("stage") == stage and launcher_hold.get("attempt") == latest.attempt
-                and latest.outcome in (*RETRYABLE, "failed")):
+                and latest.outcome == "failed"):
             if launcher_hold.get("release_failures", 0) > _policy(policies, stage, room).retry_limit:
                 return Escalate(key, f"hold release retry limit reached for {stage}")
             return _work(key, stage, workflow, history, policies, room)

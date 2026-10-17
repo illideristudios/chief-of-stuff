@@ -372,13 +372,17 @@ class EngineTest(unittest.TestCase):
         self.assert_relaunch_releases_hold("review")
 
     def assert_relaunch_releases_hold(self, stage):
-        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "needs human", "bug"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         gh.issues[1]["labels"][0]["name"] = board.label_for(stage)
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.sync_from_forge(self.forge.snapshots())
-        self.db.record_segment(KEY, stage, 1, NOW.isoformat(), NOW.isoformat(), "quota")
-        self.db.set_resume(KEY, {"keep": "context", "launcher_hold": {"stage": stage, "attempt": 1}})
+        self.db.set_resume(KEY, {"keep": "context"})
+        # A failed start is the real transition: it restores the hold and records the ownership.
+        with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
+            self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": stage, "attempt": 1})
+        self.assertIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
 
         def launch(key, launched_stage, attempt, persona):
             self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
@@ -402,7 +406,7 @@ class EngineTest(unittest.TestCase):
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.sync_from_forge(self.forge.snapshots())
-        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "quota")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "failed")
         self.db.set_resume(KEY, {"launcher_hold": {"stage": "implement", "attempt": 1}})
         self.run_pass()
         self.assertTrue(self.db.items()[0].human_review)
@@ -432,7 +436,7 @@ class EngineTest(unittest.TestCase):
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.sync_from_forge(self.forge.snapshots())
-        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "quota")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "failed")
         self.db.set_resume(KEY, {"launcher_hold": {"stage": "implement", "attempt": 1}})
         real_gh = gh.__call__
 
