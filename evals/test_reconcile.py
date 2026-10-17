@@ -304,6 +304,7 @@ class ReconcileTest(unittest.TestCase):
         reversed_decisions = {KEY: [Decision(None, record={"reversed": True})]}
         actions = self.plan(item, [Segment("review")], {}, decisions=reversed_decisions)
         self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        reversed_decisions[KEY].append(Decision(None, record={"restarted": "implement"}))
         # After the restarted start stage finishes, the workflow advances to review and merge instead of looping.
         restarted_history = [Segment("review", started_at=NOW - timedelta(hours=3), ended_at=NOW - timedelta(hours=2)),
                              Segment("implement", started_at=NOW - timedelta(hours=1), ended_at=NOW)]
@@ -311,6 +312,9 @@ class ReconcileTest(unittest.TestCase):
                          [reconcile.Review(KEY, 2)])
         reviewed_history = [*restarted_history,
                             Segment("review", 2, started_at=NOW + timedelta(minutes=1), ended_at=NOW + timedelta(minutes=2))]
+        self.assertEqual(self.plan(item, reviewed_history, {}, decisions=reversed_decisions),
+                         [reconcile.Wait(KEY, "decision pending")])
+        reversed_decisions[KEY].append(Decision("replacement"))
         self.assertEqual(self.plan(item, reviewed_history, {}, decisions=reversed_decisions),
                          [reconcile.Merge(KEY)])
 

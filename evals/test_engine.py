@@ -591,6 +591,7 @@ class EngineTest(unittest.TestCase):
     def test_retryable_gate_consultation_is_retried_on_the_next_pass(self):
         self._trio()
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, stage="implement")
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
         failed = mock.Mock(return_value=model_port.Failure("unknown", "temporarily unavailable"))
         self.assertEqual(self.run_pass(model=failed), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])

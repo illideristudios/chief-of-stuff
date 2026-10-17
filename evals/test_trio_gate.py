@@ -239,7 +239,9 @@ class GateTest(unittest.TestCase):
         first, second = self.store.decisions(KEY)
         self.assertEqual(first.answer, "Split the parser")
         self.assertIsNone(second.answer)
-        self.assertEqual(second.record, {"reversed": True, "recommendation": "Split the parser"})
+        self.assertTrue(second.record["reversed"])
+        self.assertEqual(second.record["recommendation"], "Split the parser")
+        self.assertEqual(second.record["decision"]["options"], list(OPTIONS))
         with self.assertRaisesRegex(ValueError, "adopted"):
             decision_actions.reverse(self.store.decisions(KEY), self.decision.topic, self.decision.question)
         restarted = decision_actions.restarted(self.store.decisions(KEY), "implement")
