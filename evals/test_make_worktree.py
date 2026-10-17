@@ -990,6 +990,16 @@ class FreshBaseTest(CloneCase):
         self.build()
         self.assertEqual(rev(self.clone, "main"), local_main)
 
+    def test_origin_main_branches_and_tags_cannot_shadow_the_remote_base(self):
+        stale = rev(self.clone)
+        make_repo.git(["branch", "origin/main", stale], self.clone)
+        make_repo.git(["tag", "origin/main", stale], self.clone)
+        remote_head = advance_remote(self.root)
+        made = self.build()
+        self.assertEqual(rev(made.path), remote_head)
+        self.assertEqual(rev(self.clone, "refs/heads/origin/main"), stale)
+        self.assertEqual(rev(self.clone, "refs/tags/origin/main"), stale)
+
     def test_the_new_branch_has_no_upstream_so_a_bare_push_cannot_target_main(self):
         advance_remote(self.root)
         made = self.build()
@@ -1038,6 +1048,21 @@ class FetchFailureTest(CloneCase):
     def test_no_origin_refuses_and_creates_nothing(self):
         self.no_origin()
         self.assert_refused_with_nothing_made(self.refuse_build())
+
+    def test_the_refusal_includes_the_reported_age_of_local_main(self):
+        real_git = mw.git
+
+        def read(args, *a, **kw):
+            if args == ["log", "-1", "--format=%h %cr", "refs/heads/main"]:
+                return 0, "abc1234 age-from-git"
+            return real_git(args, *a, **kw)
+
+        with mock.patch.object(mw, "git", side_effect=read), \
+                mock.patch.object(git_trees, "fetch_base", return_value="offline"):
+            message = self.refuse_build()
+        self.assertIn("local main (abc1234 age-from-git)", message)
+        self.assertFalse(self.tree.exists())
+        self.assertEqual(self.branches(), "")
 
     def test_an_origin_at_a_path_that_does_not_exist_refuses_and_creates_nothing(self):
         self.dead_origin()
@@ -1401,10 +1426,9 @@ class BaseRefTest(unittest.TestCase):
     def test_a_clean_fetch_cuts_from_the_fetched_remote_ref(self):
         self.assertEqual(mw.base_ref("", False), "refs/remotes/origin/main")
 
-    def test_from_local_cuts_from_local_main_whatever_the_fetch_said(self):
+    def test_from_local_cuts_from_the_local_branch(self):
         """Not the bare `main`: a tag called `main` would shadow it. The full ref names the branch alone."""
         self.assertEqual(mw.base_ref("", True), "refs/heads/main")
-        self.assertEqual(mw.base_ref("fatal: could not read from remote", True), "refs/heads/main")
 
     def test_a_failed_fetch_without_from_local_is_refused(self):
         with self.assertRaises(mw.RefusedError):

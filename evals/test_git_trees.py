@@ -304,6 +304,18 @@ class FetchBaseTest(Repo):
                 self.assertIsInstance(err, str)
                 self.assertTrue(err.strip())
 
+    def test_a_fetch_timeout_names_its_bound_and_a_way_to_keep_the_remote_base(self) -> None:
+        for timeout in (7, 30):
+            with self.subTest(timeout=timeout), patch.object(
+                git_trees.subprocess, "run", side_effect=subprocess.TimeoutExpired(
+                    ["git", "-C", str(self.clone), "fetch"], timeout,
+                ),
+            ):
+                err = git_trees.fetch_base(self.clone, timeout=timeout)
+            self.assertIn(f"timed out after {timeout}s", err)
+            self.assertIn("fetch origin manually, then retry", err)
+            self.assertNotIn(str(self.clone), err)
+
     def test_the_error_never_carries_the_exceptions_text(self) -> None:
         """#49 round 9, 5: a timeout's text repeats its command, which holds the tree's path; the error is printed."""
         cmd = ["git", "-C", str(self.clone), "fetch", "-q", "origin"]
