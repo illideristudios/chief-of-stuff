@@ -104,7 +104,7 @@ On the engine path, file ownership is declared on the issue, because the forge i
 - **Where it is declared.** An issue states the paths it owns and their mode (write, or read-only) in a section of its body.
 - **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
 - **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
-- **Workers declare nothing.** They report what they changed, and the read-only rule judges that report. They never grant themselves a scope.
+- **Workers declare nothing.** They report what they changed, and `completion.py` judges that report against the issue's declared scope. A read-only run that changed anything, or a write run that changed a path outside its declared write paths, is held for human review with the paths named. They never grant themselves a scope. The write-scope half follows from the ownership rule below: the engine runs issues side by side because their declared scopes do not overlap, so a run that writes outside its scope breaks that guarantee for every other run.
 - **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (Zach, 2026-10-17).
 - **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
 
@@ -117,6 +117,13 @@ D(I) := I may be dispatched      R(I) := I conflicts with every running write in
 ∀I: W(I) → S(I) ∧ R(I)  [the whole repository only when declared]
 intake refuses ¬S       [issue_gate.py; the issue forms]
 ∴ the engine serializes a repository only for an issue that asked for the whole of it, and an undeclared issue waits instead of blocking everyone
+
+P(r) := run r is dispatched in parallel with others      O(r) := r changed only paths inside its declared write scope
+H(r) := r is held for human review, paths named
+
+P(r) is sound only if ∀r: O(r)      [parallel runs rely on non-overlapping declared scopes]
+∀r: ¬O(r) → H(r)                    [completion.py; architect 2026-10-17, from the rule above]
+∴ a run that writes outside its scope is held, so no parallel run is overwritten unnoticed
 ```
 
 ## 9. Agent performance
