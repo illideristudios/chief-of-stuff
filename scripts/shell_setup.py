@@ -119,7 +119,7 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                 if isinstance(exc, subprocess.TimeoutExpired) or child.poll() is None:
                     try:
                         os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
+                    except OSError:
                         pass
                     try:
                         child.wait(timeout=1)
