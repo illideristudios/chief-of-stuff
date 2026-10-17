@@ -29,7 +29,7 @@ import store_access
 import supervisor
 import worker
 from forge_port import ForgeError
-from workspace import worktrees_dir
+from workspace import settings_path, worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 
@@ -405,17 +405,20 @@ def main(argv: list[str] | None = None) -> int:
                 selected = next(iter(config.repos.values()))
             if not selected and config.repos:
                 raise ValueError("no [repos] clone matches the workspace backlog")
-            launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                             clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
-                             require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
             try:
                 while True:
                     failed = False
                     try:
+                        # Every launch in this pass shares rules and stage defaults, even if the file changes.
+                        launch_config = settings.load(root, settings_path(text))
+                        launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
+                                         clone=root / selected if selected else root, config=launch_config,
+                                         claude_as_profile=launch_config.workers.claude_as_profile)
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
-                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+                                 launch=launch, workers=launch_config.workers,
+                                 max_concurrency=launch_config.workers.max_concurrency,
+                                 require_green=launch_config.workers.require_green_tests,
+                                 teardown_command=launch_config.workers.teardown)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

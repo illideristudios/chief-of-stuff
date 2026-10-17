@@ -854,22 +854,25 @@ class MainTest(unittest.TestCase):
 
         write_settings(1)
         launches = []
+        worker_configs = []
 
         def passed(**kwargs):
             launches.append(kwargs["launch"])
+            worker_configs.append(kwargs["workers"])
             write_settings(len(launches) + 1)
-            # A change on disk during a pass must not change its launch snapshot.
-            config = launches[-1].keywords["config"]
-            self.assertEqual(config.workers.rules, (f"Rule {len(launches)}.",))
-            self.assertEqual(config.stages["implement"].agent, f"builder{len(launches)}")
-            self.assertEqual(config.stages["implement"].skills, (f"skill{len(launches)}",))
-            self.assertIs(kwargs["workers"], config.workers)
 
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass", side_effect=passed) as run, \
              mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         self.assertEqual(run.call_count, 2)
+        # Changes on disk during either pass cannot change its launch snapshot.
+        for version, launch in enumerate(launches, 1):
+            config = launch.keywords["config"]
+            self.assertEqual(config.workers.rules, (f"Rule {version}.",))
+            self.assertEqual(config.stages["implement"].agent, f"builder{version}")
+            self.assertEqual(config.stages["implement"].skills, (f"skill{version}",))
+            self.assertIs(worker_configs[version - 1], config.workers)
         self.assertIsNot(launches[0].keywords["config"], launches[1].keywords["config"])
 
     def test_loaded_suite_policy_reaches_collect_and_launch(self):

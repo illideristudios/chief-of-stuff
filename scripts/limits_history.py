@@ -87,10 +87,9 @@ class LimitsHistory:
                 session.execute(insert(LimitReading).values(**values).on_conflict_do_nothing())
 
     def readings(self, runtime: str, account: str, since: datetime) -> list[Reading]:
-        """Read since an inclusive aware timestamp (naive raises); a missing file returns []."""
+        """Read since an inclusive aware timestamp (naive raises), migrating under the shared lock first."""
         since_stamp = _stamp(since)
-        if not self.path.exists():
-            return []
+        self._migrate()
         with Session(self.engine) as session:
             rows = session.scalars(select(LimitReading).where(
                 LimitReading.runtime == runtime, LimitReading.account == account,
