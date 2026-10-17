@@ -101,7 +101,7 @@ class GateTest(unittest.TestCase):
         self.assertEqual((row.answer, row.decided_by), ("Split the parser", "trio"))
 
     def test_each_persona_gets_a_structured_request_with_its_model_effort_and_profile(self):
-        decision = replace(self.decision, options=(*OPTIONS, "Defer the decision"))
+        decision = replace(self.decision, options=(*OPTIONS, "Defer the decision"), context="parser context")
         self.consult([reply()] * 3, decision=decision)
         self.assertEqual(len(self.model.requests), 3)
         for request, name in zip(self.model.requests, DEFAULT):
@@ -110,6 +110,8 @@ class GateTest(unittest.TestCase):
                 self.assertIsInstance(request, model_port.Request)
                 self.assertEqual((request.model, request.effort), (persona.model, persona.effort or ""))
                 self.assertEqual((request.plugin_dirs, request.session_id, request.resume), ((), "", False))
+                self.assertEqual(request.timeout_s, trio_gate.TIMEOUT_S)
+                self.assertGreater(request.timeout_s, 0)
                 self.assertEqual(request.schema["type"], "object")
                 self.assertEqual(set(request.schema["required"]), {"vote", "choice", "reasoning"})
                 self.assertEqual(request.schema["properties"]["vote"]["enum"], ["adopt", "concern"])
@@ -124,6 +126,7 @@ class GateTest(unittest.TestCase):
                 self.assertIn(self.decision.question, request.prompt)
                 self.assertIn(self.decision.topic, request.prompt)
                 self.assertIn("design", request.prompt)
+                self.assertIn("parser context", request.prompt)
                 for option in decision.options:
                     self.assertIn(option, request.prompt)
                 self.assertIn("choose", request.prompt.lower())
@@ -227,15 +230,52 @@ class GateTest(unittest.TestCase):
             "recommendation": "Split the parser", "unanimous": True,
         })
 
-    def test_reopen_appends_an_unanswered_reversal_of_the_adopted_decision(self):
+    def test_decision_actions_reverse_and_restarted_manage_board_reversals(self):
+        import decision_actions
         self.consult([reply()] * 3)
-        trio_gate.reopen(self.store, KEY, self.decision.topic, self.decision.question)
+        rev = decision_actions.reverse(self.store.decisions(KEY), self.decision.topic, self.decision.question)
+        self.store.add_decision(KEY, topic=rev.topic, question=rev.question,
+                                answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
         first, second = self.store.decisions(KEY)
         self.assertEqual(first.answer, "Split the parser")
         self.assertIsNone(second.answer)
         self.assertEqual(second.record, {"reversed": True, "recommendation": "Split the parser"})
         with self.assertRaisesRegex(ValueError, "adopted"):
-            trio_gate.reopen(self.store, KEY, self.decision.topic, self.decision.question)
+            decision_actions.reverse(self.store.decisions(KEY), self.decision.topic, self.decision.question)
+        restarted = decision_actions.restarted(self.store.decisions(KEY), "implement")
+        self.assertEqual(len(restarted), 1)
+        self.store.add_decision(KEY, topic=restarted[0].topic, question=restarted[0].question,
+                                answer=restarted[0].answer, decided_by=restarted[0].decided_by,
+                                record=restarted[0].record)
+        self.assertEqual(decision_actions.restarted(self.store.decisions(KEY), "implement"), [])
+
+    def test_decide_reuses_matching_decision_and_reconsults_on_new_options_context_reversal_or_retryable_failure(self):
+        import decision_actions
+        model = FakeModel([reply()] * 12)
+        got = trio_gate.decide(self.decision, self.store.decisions(KEY), self.policy, PERSONAS, model, self.store)
+        self.assertEqual((got.recommendation, got.unanimous, len(model.requests)), ("Split the parser", True, 3))
+        # Exact same decision reuses the settled row without calling the model.
+        got = trio_gate.decide(self.decision, self.store.decisions(KEY), self.policy, PERSONAS, model, self.store)
+        self.assertEqual((got.recommendation, got.unanimous, len(model.requests)), ("Split the parser", True, 3))
+        # Refined options or new context reconsults the trio.
+        refined = replace(self.decision, options=("Keep the parser", "Delete the parser"))
+        got = trio_gate.decide(refined, self.store.decisions(KEY), self.policy, PERSONAS,
+                               FakeModel([reply(choice="Keep the parser")] * 3), self.store)
+        self.assertEqual((got.recommendation, got.unanimous), ("Keep the parser", True))
+        # A reversed or restarted row is unsettled and reconsults the trio.
+        rev = decision_actions.reverse(self.store.decisions(KEY), refined.topic, refined.question)
+        self.store.add_decision(KEY, topic=rev.topic, question=rev.question,
+                                answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
+        got = trio_gate.decide(refined, self.store.decisions(KEY), self.policy, PERSONAS,
+                               FakeModel([reply(choice="Delete the parser")] * 3), self.store)
+        self.assertEqual((got.recommendation, got.unanimous), ("Delete the parser", True))
+        # A retryable model failure (quota/unknown) is retried on the next pass; a non-retryable split stays settled.
+        q_dec = replace(self.decision, question="Retryable?")
+        trio_gate.decide(q_dec, self.store.decisions(KEY), self.policy, PERSONAS,
+                         FakeModel([model_port.Failure("quota", "429"), reply(), reply()]), self.store)
+        retry_model = FakeModel([reply()] * 3)
+        got = trio_gate.decide(q_dec, self.store.decisions(KEY), self.policy, PERSONAS, retry_model, self.store)
+        self.assertEqual((got.recommendation, got.unanimous, len(retry_model.requests)), ("Split the parser", True, 3))
 
     def test_invalid_selection_makes_no_model_calls_and_writes_no_decision(self):
         for resolved in (policy.Policy(), policy.Policy(trio=("reviewer", "reviewer", "architect")),

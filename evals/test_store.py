@@ -213,6 +213,17 @@ class StoreTest(unittest.TestCase):
         self.store.set_resume(KEY, {"next": "merge", "waiting_on": []})
         self.assertEqual(self.store.resume(KEY), {"next": "merge", "waiting_on": []})
 
+    def test_answer_ask_validates_options_and_single_answer(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        ask_id = self.store.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+        with self.assertRaises(ValueError):
+            self.store.answer_ask(ask_id, "Rewrite")
+        self.assertIsNone(self.store.asks(KEY)[0].answer)
+        self.store.answer_ask(ask_id, "Split")
+        self.assertEqual(self.store.asks(KEY)[0].answer, "Split")
+        with self.assertRaises(KeyError):
+            self.store.answer_ask(ask_id, "Split")
+
     def test_the_store_rebuilds_from_the_forge_and_sync_never_touches_engine_data(self) -> None:
         snapshots = [{"issue_key": KEY, "title": "x", "stage": "review", "forge_state": "open",
                       "review_state": "changes_requested", "merge_state": "blocked"}]

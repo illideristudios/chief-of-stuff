@@ -42,6 +42,7 @@ DRAWS_NOTHING = (
     "engine_merge",
     "issue_gate",
     "trio_gate",
+    "decision_actions",
     "performance",
     "performance_report",
     "limits", "limits_history", "limits_probe", "limits_cli",
@@ -207,7 +208,7 @@ CIRCLES: dict[str, frozenset[str]] = {
     }),
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
-        "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
+        "task_forge", "model_port", "issue_gate", "trio_gate", "decision_actions", "engine_merge", "forge_port",
         "reconcile", "guard_rules", "performance",
     }),
     "adapters": frozenset({

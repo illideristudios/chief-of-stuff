@@ -857,11 +857,28 @@ class WorkerTest(unittest.TestCase):
         self.report(run)
         (run / "stdout").write_text(json.dumps({"is_error": False, "result": "done", "total_cost_usd": 0.25}))
         (run / "stderr").write_text("")
-        (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0, "ended_at": (NOW + timedelta(minutes=1)).isoformat()}))
         with mock.patch.object(worker.process_status, "identity", return_value=None):
-            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=5))
         self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.25)
         self.assertEqual(self.db.resume(KEY)["time_minutes"], 1)
+        # A failed exit with total_cost_usd and a non-numeric prior spend still ends the segment and records spend.
+        self.db.record_segment(KEY, "review", 1, NOW.isoformat())
+        run2 = supervisor.state_dir(self.root) / "runs" / "1-review-1"
+        run2.mkdir(parents=True)
+        data = self.db.resume(KEY)
+        data["spend_usd"] = "corrupt"
+        data["runs"]["review-1"] = {"pid": 77, "runner_pid": 78, "session_id": "s2", "identity": "id",
+                                    "runner_identity": "rid", "run_dir": str(run2), "tree": str(self.tree),
+                                    "reviewed_head": "head"}
+        self.db.set_resume(KEY, data)
+        (run2 / "stdout").write_text(json.dumps({"is_error": True, "result": "boom", "total_cost_usd": 0.4}))
+        (run2 / "stderr").write_text("")
+        (run2 / "exit.json").write_text(json.dumps({"exit_code": 1}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=2))
+        self.assertEqual(self.db.segments(KEY)[-1].outcome, "failed")
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.4)
 
     def test_quota_reset_formats_and_backoff(self):
         from model_port import retry_at
