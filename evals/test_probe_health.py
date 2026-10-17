@@ -197,27 +197,21 @@ class WorkspaceFilesTest(unittest.TestCase):
         self.assertEqual(err.getvalue(), "")
         return code, out.getvalue().splitlines()
 
-    def test_missing_model_guidance_names_an_executable_install_command_once(self):
+    def test_missing_model_guidance_is_not_advised(self):
         code, lines = self.health()
-        found = [line for line in lines if guidance.NAME in line]
-        self.assertEqual(len(found), 1, lines)
-        self.assertIn("missing", found[0])
-        self.assertIn("advice", found[0])
-        command = f"chief-of-stuff models --root {shlex.quote(str(self.root.resolve()))}"
-        self.assertIn(command, found[0])
+        self.assertFalse(any(guidance.NAME in line or "models --root" in line for line in lines), lines)
         self.assertEqual(code, 0, "missing init files do not add failed checks")
-        self.assertFalse((self.root / guidance.NAME).exists(), "health only advises")
-        self.assertEqual(guidance.main(shlex.split(command)[2:]), 0)
-        _, after = self.health()
-        self.assertFalse(any(guidance.NAME in line for line in after), after)
+        self.assertFalse((self.root / guidance.NAME).exists(), "health does not install guidance")
 
-    def test_missing_settings_and_guidance_are_each_advised_without_failing(self):
+    def test_missing_settings_is_advised_without_failing_and_guidance_is_not(self):
         (self.root / "chief-of-stuff.toml").unlink()
         code, lines = self.health()
         advice = [line for line in lines if line.startswith("workspace file ")]
-        self.assertEqual(len(advice), 2, lines)
-        self.assertTrue(any("chief-of-stuff.toml" in line and "init --help" in line for line in advice))
-        self.assertTrue(any(guidance.NAME in line and "models --root" in line for line in advice))
+        self.assertEqual(
+            advice,
+            ["workspace file chief-of-stuff.toml missing (advice); chief-of-stuff init --help"],
+            lines,
+        )
         self.assertEqual(code, 0)
 
     def test_health_reads_new_init_file_data_without_its_own_list(self):
@@ -239,19 +233,22 @@ class WorkspaceFilesTest(unittest.TestCase):
         self.assertFalse(any(line.startswith("workspace file ") for line in lines), lines)
 
     def test_a_non_file_at_an_inventory_path_is_advice_to_move_it_aside(self):
-        path = self.root / guidance.NAME
-        for make in (path.mkdir, lambda: path.symlink_to(self.root / "gone"), lambda: os.mkfifo(path)):
-            with self.subTest(make=make):
-                make()
-                try:
-                    code, lines = self.health()
-                    found = [line for line in lines if guidance.NAME in line]
-                    self.assertEqual(len(found), 1, lines)
-                    self.assertIn("not a file (advice)", found[0])
-                    self.assertIn("move it aside, then chief-of-stuff models --root", found[0])
-                    self.assertEqual(code, 0)
-                finally:
-                    shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink(missing_ok=True)
+        extra = workspace.WorkspaceFile("side.md", "chief-of-stuff init --help")
+        path = self.root / "side.md"
+        with mock.patch.dict(workspace.WORKSPACE_FILES, {"side": extra}):
+            for make in (path.mkdir, lambda: path.symlink_to(self.root / "gone"), lambda: os.mkfifo(path)):
+                with self.subTest(make=make):
+                    make()
+                    try:
+                        code, lines = self.health()
+                        found = [line for line in lines if "side.md" in line]
+                        self.assertEqual(len(found), 1, lines)
+                        self.assertIn("not a file (advice)", found[0])
+                        self.assertIn("move it aside, then chief-of-stuff init --help", found[0])
+                        self.assertFalse(any(guidance.NAME in line for line in lines), lines)
+                        self.assertEqual(code, 0)
+                    finally:
+                        shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink(missing_ok=True)
 
     def test_an_unreadable_inventory_path_is_reported_not_dropped(self):
         locked = self.root / "locked"
@@ -265,12 +262,10 @@ class WorkspaceFilesTest(unittest.TestCase):
         advice = [line for line in lines if line.startswith("workspace file ")]
         self.assertEqual(
             advice,
-            [
-                "workspace file locked/custom.toml unreadable (advice); Permission denied",
-                f"workspace file {guidance.NAME} unreadable (advice); Permission denied",
-            ],
+            ["workspace file locked/custom.toml unreadable (advice); Permission denied"],
             lines,
         )
+        self.assertFalse(any(guidance.NAME in line for line in lines), lines)
         self.assertEqual(code, 1)
 
     def test_a_settings_name_with_a_nul_gets_no_duplicate_workspace_file_advice(self):
@@ -280,14 +275,17 @@ class WorkspaceFilesTest(unittest.TestCase):
         self.assertEqual([line for line in lines if line.startswith("workspace file ")], [], lines)
         self.assertEqual(code, 1)
 
-    def test_the_advised_root_is_absolute(self):
+    def test_the_advised_root_is_absolute_and_model_guidance_is_not_named(self):
+        extra = workspace.WorkspaceFile("new-release.md", "chief-of-stuff models --root {root}")
         old = os.getcwd()
         os.chdir(self.root)
         self.addCleanup(os.chdir, old)
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with mock.patch.dict(workspace.WORKSPACE_FILES, {"future": extra}), contextlib.redirect_stdout(out):
             ph.main(["--config", "CLAUDE.md"])
-        self.assertIn(f"--root {shlex.quote(str(self.root.resolve()))}", out.getvalue())
+        text = out.getvalue()
+        self.assertIn(f"--root {shlex.quote(str(self.root.resolve()))}", text)
+        self.assertNotIn(guidance.NAME, text)
 
     def test_health_does_not_load_the_init_and_forge_import_graph(self):
         scripts = Path(__file__).resolve().parent.parent / "scripts"
