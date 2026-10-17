@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Sequence
+from typing import Any, Collection, Sequence
 
 from model_port import RETRYABLE
 
@@ -99,6 +100,12 @@ class NeedsOwner:
     reason: str
 
 
+def _is_gate(row: Any, decision: dict[str, Any]) -> bool:
+    # Rows written before `gate` was explicit are recognised by their shape.
+    return bool(decision.get("gate", row.topic != "ask" and not decision.get("instance")
+                             and tuple(decision.get("options") or ()) == ("approve", "hold")))
+
+
 def needs_owner(rows: Sequence[Any]) -> NeedsOwner | None:
     """The latest row of one decision alone says whether it waits on the owner."""
     if not rows:
@@ -106,51 +113,86 @@ def needs_owner(rows: Sequence[Any]) -> NeedsOwner | None:
     row = rows[-1]
     record = row.record if isinstance(row.record, dict) else {}
     decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    gate = _is_gate(row, decision)
     # Older gate holds committed an answer before their separate interrupt write.
-    legacy_hold = (row.answer == "hold" and row.decided_by == "trio"
-                   and decision.get("gate", row.topic != "ask" and not decision.get("instance")
-                                    and tuple(decision.get("options") or ()) == ("approve", "hold")))
+    legacy_hold = row.answer == "hold" and row.decided_by == "trio" and gate
     if not legacy_hold and ((row.answer or "").strip() or row.decided_by != "zach"):
         return None
-    return NeedsOwner(identity(row), decision.get("stage", ""), decision.get("attempt", 0),
-                     str(record.get("error") or row.question))
+    stage, attempt = decision.get("stage", ""), decision.get("attempt", 0)
+    # A gate is judged on the segment it consulted, which older rows stored as the policy source.
+    scoped = re.fullmatch(r"(.+)-(\d+)", str(decision.get("context", ""))) if gate else None
+    if scoped:
+        stage, attempt = scoped[1], int(scoped[2])
+    return NeedsOwner(identity(row), stage, attempt, str(record.get("error") or row.question))
 
 
-def owner_waits(decisions: Sequence[Any], segments: Sequence[Any], asks: Sequence[Any],
-                start: str = "implement") -> list[NeedsOwner]:
-    """Active owner decisions, after settlements, newer attempts and reversal restarts."""
-    attempts = {}
-    for source in (*segments, *asks):
-        attempts[source.stage] = max(attempts.get(source.stage, 0), source.attempt)
+def _when(value: Any) -> datetime | None:
+    try:
+        return _time(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _restart_cutoff(decisions: Sequence[Any], segments: Sequence[Any], start: str) -> datetime | None:
+    """When the latest reversal restarted `start`; a malformed time skips that candidate."""
     restarts = []
     for row in decisions:
         record = row.record if isinstance(row.record, dict) else {}
         if not (is_reversed(row) or record.get("restarted")):
             continue
         attempt = record.get("restart_attempt")
-        created = getattr(row, "created_at", None)
-        candidates = [s for s in segments if s.stage == start and s.started_at and (
-            s.attempt == attempt if attempt is not None else created and _time(s.started_at) >= _time(created))]
-        if candidates:
-            restarts.append(min(_time(s.started_at) for s in candidates))
-    cutoff = max(restarts, default=None)
+        created = _when(getattr(row, "created_at", None))
+        starts = [_when(s.started_at) for s in segments if s.stage == start and s.started_at
+                  and (s.attempt == attempt if attempt is not None else created is not None)]
+        starts = [t for t in starts if t is not None and (attempt is not None or t >= created)]
+        if starts:
+            restarts.append(min(starts))
+    return max(restarts, default=None)
+
+
+def _superseded(scope: tuple[str, int], created: Any, segments: Sequence[Any], cutoff: datetime | None) -> bool:
+    """True when the decision's attempt began before the restart, so the restart redoes it."""
+    source = next((s for s in segments if (s.stage, s.attempt) == scope), None)
+    started = _when(source.started_at if source is not None else created)
+    return cutoff is not None and started is not None and started < cutoff
+
+
+def owner_waits(decisions: Sequence[Any], segments: Sequence[Any], asks: Sequence[Any],
+                start: str = "implement", passed: Collection[str] = ()) -> list[NeedsOwner]:
+    """Active owner decisions, after settlements, newer attempts, reversal restarts and passed gates."""
+    attempts = {}
+    for source in (*segments, *asks):
+        attempts[source.stage] = max(attempts.get(source.stage, 0), source.attempt)
+    cutoff = _restart_cutoff(decisions, segments, start)
     result = []
     # A later settlement applies to its identity even when it omits the old scope.
     for row in latest(decisions).values():
         pending = needs_owner([row])
-        if pending is None or pending.attempt < attempts.get(pending.stage, 0):
+        if pending is None or row.topic in passed or pending.attempt < attempts.get(pending.stage, 0):
             continue
-        source = next((s for s in segments if (s.stage, s.attempt) == (pending.stage, pending.attempt)), None)
-        started = source.started_at if source is not None else getattr(row, "created_at", None)
-        if cutoff is not None and started and _time(started) < cutoff:
+        if _superseded((pending.stage, pending.attempt), getattr(row, "created_at", None), segments, cutoff):
             continue
         result.append(pending)
     return result
 
 
-def pending_decisions(decisions: Sequence[Any], gates: Sequence[str]) -> bool:
-    """Ordinary decisions block merge; workflow gates are evaluated on their own edge."""
-    return any(not (row.answer or "").strip() and row.topic not in gates
+def pending_decisions(decisions: Sequence[Any], gates: Sequence[str], segments: Sequence[Any] = (),
+                      start: str = "implement") -> bool:
+    """Ordinary decisions block merge; workflow gates are evaluated on their own edge.
+
+    A decision from before a reversal restart is redone by the restart, but a reversed decision
+    itself stays blocking until its replacement is settled.
+    """
+    cutoff = _restart_cutoff(decisions, segments, start)
+
+    def blocks(row: Any) -> bool:
+        record = row.record if isinstance(row.record, dict) else {}
+        decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+        scope = (decision.get("stage", ""), decision.get("attempt", 0))
+        return (is_reversed(row) or bool(record.get("restarted"))
+                or not _superseded(scope, getattr(row, "created_at", None), segments, cutoff))
+
+    return any(not (row.answer or "").strip() and row.topic not in gates and blocks(row)
                for row in latest(decisions).values())
 
 

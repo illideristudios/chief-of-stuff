@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Collection
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -199,11 +199,12 @@ def _settle_asks(store: Any, key: str) -> None:
                                    settled.decided_by, settled.record)
 
 
-def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "implement") -> None:
+def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "implement",
+                              passed: Collection[str] = ()) -> None:
     """Derive one interrupt per decision attempt, changing only decision-scoped state."""
     key = item.issue_key
     desired = {}
-    pending_rows = (decision_actions.owner_waits(store.decisions(key), store.segments(key), store.asks(key), start)
+    pending_rows = (decision_actions.owner_waits(store.decisions(key), store.segments(key), store.asks(key), start, passed)
                     if item.forge_state != "closed" else ())
     for pending in pending_rows:
         scope = {"id": list(pending.decision_id), "stage": pending.stage, "attempt": pending.attempt}
@@ -431,7 +432,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         except Exception as exc:
             store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
     for item in store.items():
-        _sync_decision_interrupts(store, item, at, _workflow_for(policies, store, item).start)
+        workflow, state = _workflow_for(policies, store, item), _resume(store, item.issue_key)
+        passed = reconcile.passed_gates(workflow, policies, state.get("room"), now, state.get("waived_gates") or ())
+        _sync_decision_interrupts(store, item, at, workflow.start, passed)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions

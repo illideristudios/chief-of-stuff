@@ -16,7 +16,10 @@ def at(minutes):
     return (T0 + timedelta(minutes=minutes)).isoformat()
 
 
-def row(topic, question="Q?", answer=None, by="zach", minutes=0, **record):
+OWNER = "zach"  # the persisted decided_by value; #809 renames it
+
+
+def row(topic, question="Q?", answer=None, by=OWNER, minutes=0, **record):
     return NS(topic=topic, question=question, answer=answer, decided_by=by, created_at=at(minutes), record=record)
 
 
@@ -25,7 +28,7 @@ def seg(stage, attempt, minutes):
 
 
 def hold(stage="implement", attempt=1, context="implement-1", minutes=1):
-    return row("plan", "gate requires Zach's approval", minutes=minutes, recommendation="hold", decision={
+    return row("plan", "Gate?", minutes=minutes, recommendation="hold", decision={
         "stage": stage, "attempt": attempt, "context": context, "options": ["approve", "hold"], "gate": True})
 
 
@@ -65,7 +68,7 @@ class MalformedTimes(unittest.TestCase):
         naive = row("plan", "Rework?", by="", reversed=True)
         naive.created_at = "2000-01-01T00:00:00"
         segments = [NS(stage="implement", attempt=2, started_at="2000-01-01T00:10:00"), seg("implement", 1, 0)]
-        rows = [hold(), naive]
+        rows = [hold(stage="review", attempt=1, context="review-1"), naive]
         self.assertEqual(len(actions.owner_waits(rows, segments, [])), 1)
         self.assertTrue(actions.pending_decisions(rows, (), segments))
 

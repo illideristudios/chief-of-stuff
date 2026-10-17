@@ -122,14 +122,25 @@ def _policy(policies: Policies, stage: str, room: str | None) -> Policy:
     return policies.resolve(policies.stages[stage].persona, stage, room)
 
 
+def _approved(edge: Edge, policies: Policies, room: str | None, now: datetime) -> bool:
+    return any(a.gate == edge.gate and a.expires > now for a in _policy(policies, edge.source, room).approvals)
+
+
+def passed_gates(workflow: Workflow, policies: Policies, room: str | None, now: datetime,
+                 waived: Sequence[str] = ()) -> set[str]:
+    """Gates the owner no longer decides: waived, or under a live standing approval on every edge."""
+    edges = [e for e in workflow.edges if e.gate]
+    return {e.gate for e in edges
+            if e.gate in waived or all(_approved(x, policies, room, now) for x in edges if x.gate == e.gate)}
+
+
 def _gate(key: str, edge: Edge, policies: Policies, room: str | None, now: datetime,
           waived: Sequence[str] = (), decisions: Sequence[Decision] = (),
           latest: Segment | None = None) -> Ask | Wait | None:
     if edge.gate in waived:
         return None
     resolved = _policy(policies, edge.source, room)
-    if (edge.gate in resolved.zach_gates
-            and not any(a.gate == edge.gate and a.expires > now for a in resolved.approvals)):
+    if edge.gate in resolved.zach_gates and not _approved(edge, policies, room, now):
         context = f"{latest.stage}-{latest.attempt}" if latest is not None else ""
         row = next((d for d in reversed(decisions)
                     if d.topic == edge.gate and d.question == "gate requires Zach's approval"), None)
@@ -175,7 +186,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
            latest_segment: Segment | None = None) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
-    if decision_actions.pending_decisions(decisions, tuple(e.gate for e in workflow.edges if e.gate)):
+    if decision_actions.pending_decisions(decisions, tuple(e.gate for e in workflow.edges if e.gate), history, workflow.start):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
