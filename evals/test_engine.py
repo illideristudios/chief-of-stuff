@@ -922,7 +922,7 @@ class MainTest(unittest.TestCase):
         for problem in ("missing", "empty", "truncated", "unreadable"):
             with self.subTest(problem=problem):
                 if problem == "unreadable" and os.geteuid() == 0:
-                    continue  # root reads a mode-0 file, so the reload would succeed
+                    self.skipTest("root reads a mode-0 file, so the reload would succeed")
                 path.write_text(original + 'max_concurrency = 2\nrules = ["Keep tests."]\n'
                                 '[stages.implement]\nagent = "builder"\nskills = ["original-skill"]\n')
                 configs = []

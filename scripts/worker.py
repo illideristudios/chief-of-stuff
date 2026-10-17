@@ -229,13 +229,15 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
     except Exception:
-        claude_adapter.cancel(runner)
-        # The process is already up. collect() never sees a segment slots.claim drops on this failure.
-        for error in teardown(root, tree, tree.name, config.workers.teardown):
-            try:
-                store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
-            except Exception:
-                pass
+        try:
+            claude_adapter.cancel(runner)
+        finally:
+            # The process is already up. collect() never sees a segment slots.claim drops on this failure.
+            for error in teardown(root, tree, tree.name, config.workers.teardown):
+                try:
+                    store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                except Exception:
+                    pass
         raise
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""

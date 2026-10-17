@@ -413,7 +413,8 @@ def main(argv: list[str] | None = None) -> int:
                         # Every launch in this pass shares rules and stage defaults, even if the file changes.
                         reloaded_config = settings.load(root, settings_path(text))
                         if reloaded_config.kanban is None:
-                            raise settings.SettingsError(f"{settings_path(text)}: no [kanban] stage labels configured (file absent or empty)")
+                            raise settings.SettingsError(f"{settings_path(text)}: no [kanban] stage labels configured")
+                        dispatch_prompt.validate_worker_rules(root, reloaded_config, policies)
                         launch_config = reloaded_config
                     # Validation can also raise ValueError or OverflowError, which settings.load does not wrap.
                     except Exception as exc:
