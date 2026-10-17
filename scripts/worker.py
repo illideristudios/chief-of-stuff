@@ -270,8 +270,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False, finish: Callable | None = None) -> None:
+            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
+            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
+    facts = gather() if gather is not None else None
     for segment in store.segments():
         if segment.ended_at is not None:
             continue
@@ -365,7 +367,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             reason = f"unreadable worker run: {exc}"
         if finish is not None:
             try:
-                finish(segment, outcome, reason, now)
+                finish(segment, outcome, reason, now, facts=facts)
             except Exception as exc:
                 message = f"worker {segment.stage} attempt {segment.attempt} close failed: {exc}"
                 if not any(row.message == message for row in store.log(key)):
@@ -374,3 +376,4 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),
                       now.isoformat())
+    return facts

@@ -274,10 +274,10 @@ class EngineTest(unittest.TestCase):
         for others in ((), (Claim(OTHER, True, "running"),)):
             facts = reconcile.Facts(trees=((KEY, TreeState("work", 1, 2, 0)),),
                 tree_names=((KEY, "work"),), tree_claims=((KEY, (Claim(KEY, True, ""), *others)),))
-            with self.subTest(others=others), mock.patch.object(engine.engine_facts, "gather", return_value=facts), \
+            with self.subTest(others=others), \
                  mock.patch.object(engine, "_close_segment") as close:
-                engine._finish_worker(self.forge, self.db, self.root, self.trees, segment,
-                                      "failed", "exit 1", NOW, policies=self.p)
+                engine._finish_worker(self.forge, self.db, segment,
+                                      "failed", "exit 1", NOW, policies=self.p, facts=facts)
                 self.assertEqual(close.call_args.args[7], not bool(others))
 
     def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message):
@@ -509,10 +509,9 @@ class EngineTest(unittest.TestCase):
             facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),), changed=changed, unreadable=unreadable)
             planned = reconcile._abandoned(self.db.items()[0], segment, facts, self.p.workflow_for(None))
             with self.subTest(changed=changed, unreadable=unreadable), \
-                 mock.patch.object(engine.engine_facts, "gather", return_value=facts), \
                  mock.patch.object(engine, "_close_segment") as close:
-                engine._finish_worker(self.forge, self.db, self.root, self.trees, segment,
-                                      "failed", "", NOW, policies=self.p)
+                engine._finish_worker(self.forge, self.db, segment,
+                                      "failed", "", NOW, policies=self.p, facts=facts)
                 self.assertEqual((close.call_args.args[5], close.call_args.args[7]), (planned.outcome, planned.human_review))
                 if planned.human_review:
                     self.assertEqual(close.call_args.args[6], planned.reason)
@@ -539,7 +538,10 @@ class EngineTest(unittest.TestCase):
                  mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)), \
                  mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
                 segment = self.db.segments(KEY)[-1]
-                engine._finish_worker(self.forge, self.db, self.root, self.trees, segment, outcome, "retry later", NOW, policies=self.p)
+                facts = engine.engine_facts.gather(forge=self.forge, store=self.db, root=self.root,
+                                                  trees=self.trees, now=NOW)
+                engine._finish_worker(self.forge, self.db, segment, outcome, "retry later", NOW,
+                                      policies=self.p, facts=facts)
                 self.assertFalse(self.db.items()[0].human_review)
                 self.assertEqual(self.db.segments(KEY)[-1].outcome, outcome)
                 self.assertIn("retry later", self.db.log(KEY)[-1].message)

@@ -346,9 +346,6 @@ class LandingTest(unittest.TestCase):
         requests = mock.patch.object(forge.Forge, "requests", return_value=[])
         self.requests = requests.start()
         self.addCleanup(requests.stop)
-        call = mock.patch.object(forge.backlog, "_call", return_value=([], {}, ""))
-        call.start()
-        self.addCleanup(call.stop)
 
     def test_squash_landing_uses_the_merge_commit_and_current_main_pipeline(self):
         merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "squashed"}}
@@ -373,7 +370,8 @@ class LandingTest(unittest.TestCase):
         row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
                "merge_commit_sha": "merge", "squash_commit_sha": "squash", "sha": "head"}
         with mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
-             mock.patch.object(forge.Forge, "_pipeline_read", return_value={"id": "squash"}) as read:
+             mock.patch.object(forge.Forge, "_pipeline_read", side_effect=lambda path:
+                               [] if path.startswith("merge_requests?") else {"id": "squash"}) as read:
             key = adapter.key(3)
             self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], (True, True))
             self.assertIn("repository/merge_base?", read.call_args.args[0])
@@ -385,7 +383,8 @@ class LandingTest(unittest.TestCase):
         for base, expected in (("source-head", (True, True)), ("older", (False, False))):
             with self.subTest(base=base), \
                  mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
-                 mock.patch.object(forge.Forge, "_pipeline_read", return_value={"id": base}) as read:
+                 mock.patch.object(forge.Forge, "_pipeline_read", side_effect=lambda path:
+                                   [] if path.startswith("merge_requests?") else {"id": base}) as read:
                 key = adapter.key(3)
                 self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], expected)
                 self.assertIn("source-head", read.call_args.args[0])

@@ -608,6 +608,26 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}") from exc
 
+    def _open_closers(self) -> list[dict]:
+        """One bounded list of open closing identities, without CI, reviews or discussions."""
+        try:
+            if self.github:
+                rows, error = _gh_json(self.gh, [
+                    "pr", "list", "-R", self.home.repo, "--state", "open",
+                    "--limit", str(forge_review.REQUEST_LIMIT), "--json",
+                    "number,headRefOid,baseRefName,closingIssuesReferences"])
+                if error:
+                    raise ForgeError(error)
+            else:
+                rows = self._pipeline_read("merge_requests?" + urlencode({
+                    "state": "opened", "per_page": forge_review.REQUEST_LIMIT}))
+            if (not isinstance(rows, list) or len(rows) >= forge_review.REQUEST_LIMIT
+                    or any(not isinstance(row, dict) for row in rows)):
+                raise ValueError("expected a complete list of open closing identities")
+            return rows
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"open closers: {exc}") from exc
+
     def _merged_requests(self) -> list[dict]:
         """Recently merged requests (bounded by REQUEST_LIMIT), including landing evidence."""
         try:
@@ -663,33 +683,27 @@ class Forge:
             return found
         merged = self._merged_requests()
         newest = {}
-        for row in merged:
+        for row in [*merged, *self._open_closers()]:
+            if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
+                continue
             identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
             for ref in self._closed_refs(row):
                 key = self.key(int(ref[1:]))
-                if key in found and (key not in newest or identity[0] > newest[key][0]):
+                if key in found and (key not in newest or identity[0] >= newest[key][0]):
                     newest[key] = identity
-        for request in self.requests():
-            for ref in request.closes:
-                if not _LOCAL_CLOSE.fullmatch(ref):
-                    continue
-                key = self.key(int(ref[1:]))
-                if key in found and (key not in newest or request.number >= newest[key][0]):
-                    newest[key] = (request.number, request.head)
         for row in merged:
+            if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
+                continue
             identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
             mine = [self.key(int(ref[1:])) for ref in self._closed_refs(row)]
             mine = [key for key in mine if newest.get(key) == identity and identity[1]]
             if not mine:
                 continue
             try:
-                target = row.get("baseRefName" if self.github else "target_branch")
                 commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
                           row.get("squash_commit_sha") or row.get("merge_commit_sha") or row.get("sha"))
                 landed = None
-                if target != "main":
-                    landed = False if isinstance(target, str) and target else None
-                elif isinstance(commit, str) and commit:
+                if isinstance(commit, str) and commit:
                     if commit == pipeline.sha:
                         landed = True
                     elif self.github:

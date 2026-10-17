@@ -907,7 +907,7 @@ class WorkerTest(unittest.TestCase):
     def test_engine_syncs_forge_before_collecting_so_completion_uses_declared_ownership(self):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
-        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect")), \
+        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect") or kw["gather"]()), \
              mock.patch.object(engine, "_record_limits"), \
              mock.patch.object(engine.cleanup, "execute", return_value=0):
             engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,

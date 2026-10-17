@@ -227,16 +227,13 @@ def _close_segment(forge: Any, store: Any, key: str, stage: str, attempt: int,
                   (f": {reason}" if reason else ""), now.isoformat())
 
 
-def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any,
+def _finish_worker(forge: Any, store: Any, segment: Any,
                    outcome: str, reason: str, now: datetime, *, policies: policy.Policies,
-                   require_green: bool = False) -> None:
+                   facts: reconcile.Facts) -> None:
     """Close the exited run; the planner and cleanup gate merged-item completion on main CI."""
     key = segment.issue_key
     item = next((item for item in store.items() if item.issue_key == key), None)
     workflow = policies.workflow_for(_resume(store, key).get("issue_type") or getattr(item, "issue_type", None))
-    facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now,
-                                require_green=require_green)
-    _remember_verified(store, facts)
     verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
     held = verdict.human_review or reason.startswith("unreadable worker run:")
     if verdict.human_review:
@@ -293,8 +290,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
 
-    worker.collect(store, root, clock, trees, finish=partial(
-                       _finish_worker, forge, store, root, trees, policies=policies, require_green=require_green),
+    facts = worker.collect(store, root, clock, trees,
+                   gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
+                                  now=clock(), require_green=require_green),
+                   finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
 
     now = clock()
@@ -357,8 +356,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
-    facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now,
-                                require_green=require_green)
     _remember_verified(store, facts)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
