@@ -328,10 +328,12 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
+            # Durable exit evidence or confirmed death releases the workspace stack, even if completion waits.
+            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
+            data = _resume(store, key)  # Later quota/suite writes must retain the teardown marker.
             if not (run_dir / "exit.json").exists():
                 # The planner closes it from tree, report and orphan evidence.
                 continue
-            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
             code = _exit_code(run_dir)
             reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
             if isinstance(reply, Failure):
