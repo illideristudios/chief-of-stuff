@@ -98,6 +98,21 @@ def retired_provider_files(root: Path) -> list[str]:
     return sorted(found)
 
 
+GUARD_EXAMPLE_GLOBS = ("scripts/guard_*.py", "evals/test_guard_*.py", "evals/test_cases.py")
+
+
+def guard_example_files(root: Path) -> list[str]:
+    return sorted(p.relative_to(root).as_posix() for pattern in GUARD_EXAMPLE_GLOBS for p in root.glob(pattern))
+
+
+def guard_runtime_hits(root: Path) -> list[str]:
+    """`path:line:match` for each real container runtime name in a guard example file."""
+    runtimes = "|".join(("dock" + "er", "pod" + "man"))
+    return [f"{rel}:{n}:{m.group(0)}" for rel in guard_example_files(root)
+            for n, line in enumerate((root / rel).read_text(encoding="utf-8").splitlines(), 1)
+            if (m := re.search(rf"\b(?:{runtimes})\b", line, re.I))]
+
+
 def grader_hits(g: dict, tool: str, **tool_input) -> bool:
     """Whether a tool_use grader's `tool` and `input_match` fire on a call, as run.py matches them."""
     return bool(re.fullmatch(g["tool"], tool) and re.search(g["input_match"], json.dumps(tool_input)))
@@ -130,6 +145,29 @@ def fixture_files(case: Path, suffix: str) -> list[Path]:
 
 
 class CaseLintTest(unittest.TestCase):
+    def test_guard_examples_use_no_real_container_runtime(self):
+        # Architecture §11: launcher examples use invented names, including in guard tests.
+        self.assertEqual(guard_runtime_hits(EVALS.parent), [])
+
+    def test_guard_example_scan_covers_the_known_guard_files(self):
+        self.assertLessEqual({"scripts/guard_commands.py", "evals/test_guard_commands.py", "evals/test_cases.py"},
+                             set(guard_example_files(EVALS.parent)))
+
+    def test_guard_runtime_lint_rejects_known_runtimes_in_any_guard_file_and_case(self):
+        planted = ("scripts/guard_commands.py", "scripts/guard_new.py", "evals/test_guard_commands.py",
+                   "evals/test_guard_new.py", "evals/test_cases.py")
+        for runtime in ("dock" + "er", "pod" + "man"):
+            for name in (runtime, runtime.title(), runtime.upper()):
+                for relative in planted:
+                    with self.subTest(name=name, relative=relative), tempfile.TemporaryDirectory() as d:
+                        root = Path(d)
+                        for other in planted:
+                            (root / other).parent.mkdir(parents=True, exist_ok=True)
+                            (root / other).write_text("runner exec box git status\n", encoding="utf-8")
+                        self.assertEqual(guard_runtime_hits(root), [])
+                        (root / relative).write_text(f"x\n{name} exec box git status\n", encoding="utf-8")
+                        self.assertEqual(guard_runtime_hits(root), [f"{relative}:2:{name}"])
+
     def test_retired_deploy_provider_is_absent_outside_archives(self):
         # C20 names the open gap. Only the architect edits architecture/compliance.md.
         self.assertLessEqual(set(retired_provider_files(EVALS.parent)), {"architecture/compliance.md"})
@@ -2124,7 +2162,7 @@ class CaseLintTest(unittest.TestCase):
                         "chief-of-stuff worker --task 'Rate limit headers' --dry-run", "grep -rn steps notes/", "cat trees/rate-limit/.chief-of-stuff/one-shot.pid",
                         "cat daily/tracker.md; ls maps", "chief-of-stuff tracker tasks --not done",
                         "chief-of-stuff processes --root . # not ps or pgrep", "chief-of-stuff processes --root . && echo no ps needed",
-                        "grep -n 'ps ' agents/x.md", "docker ps -a", "git log --grep 'ps aux'", "echo ps", "ls pspdf", "psql -c x", "python3 ps.py",
+                        "grep -n 'ps ' agents/x.md", "runner ps -a", "git log --grep 'ps aux'", "echo ps", "ls pspdf", "psql -c x", "python3 ps.py",
                         "cat tps.log", "ls\ntpsx\n"):
             self.assertFalse(hit(listing, command), command)
 

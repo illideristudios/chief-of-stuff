@@ -457,7 +457,7 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
                            "ls-files", "ls-tree", "cat-file", "grep", "blame", "remote", "config", "worktree", "help",
                            "init", "clone", "describe", "reflog", "clean", "check-ignore", "update-index", "diff-tree"}:
             raise Unparsed()
-    # Unrecognised launchers may execute the remainder (e.g. docker exec). Inspect visible nested
+    # Unrecognised launchers may execute the remainder (e.g. runner exec box). Inspect visible nested
     # commands, but never treat an unknown wrapper as proof that a sensitive write is safe.
     if name not in {"echo", "printf", "git"}:
         for token in args:
