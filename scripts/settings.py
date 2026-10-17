@@ -3,7 +3,7 @@
 
 Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". Notification, lane, budget, and Kanban settings
-live here, along with suggested models and their rotations (#111) and stage launch defaults (#121).
+live here, along with suggested models and their rotations (#111), stage launch defaults (#121), and [limits].
 
 No `Settings:` line, no file, or no `[notify]` section is notify off, and nothing else changes. A value
 that is there and cannot be read is refused: a guessed day-open time is a notification at the wrong hour.
@@ -12,6 +12,7 @@ that is there and cannot be read is refused: a guessed day-open time is a notifi
 from __future__ import annotations
 
 import re
+import math
 import tomllib
 import unicodedata
 from dataclasses import dataclass, field
@@ -180,6 +181,20 @@ class Graph:
 
 
 @dataclass(frozen=True)
+class Limits:
+    warn_at: float = 0.8
+
+
+def _limits(table) -> Limits:
+    if not isinstance(table, dict):
+        raise SettingsError("[limits] is not a table")
+    value = table.get("warn_at", .8)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+        raise SettingsError("[limits] warn_at must be a fraction between 0 and 1")
+    return Limits(float(value))
+
+
+@dataclass(frozen=True)
 class Settings:
     notify: Notify = field(default_factory=Notify)
     lanes: dict[str, Lane] = field(default_factory=dict)
@@ -195,6 +210,7 @@ class Settings:
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
     repos: dict[str, str] = field(default_factory=dict)
     stages: dict[str, Stage] = field(default_factory=dict)
+    limits: Limits = field(default_factory=Limits)
 
 
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
@@ -516,17 +532,18 @@ def load(root: Path, settings_path: str | None) -> Settings:
     graph = _graph(data["graph"]) if "graph" in data else None
     pages = _pages(data["pages"]) if "pages" in data else Pages()
     repos = _repos(data["repos"]) if "repos" in data else {}
+    limits = _limits(data["limits"]) if "limits" in data else Limits()
     budgets = data.get("budgets", {})
     if not isinstance(budgets, dict) or not set(budgets) <= {"S", "M", "L", "XL"}:
         raise SettingsError(f"{settings_path}: [budgets] is a table of S, M, L, XL")
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, limits=limits)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, limits=limits)
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:

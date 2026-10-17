@@ -96,6 +96,9 @@ class EngineTest(unittest.TestCase):
         identity = mock.patch.object(engine.worker.process_status, "identity", return_value="fake-start")
         identity.start()
         self.addCleanup(identity.stop)
+        limits = mock.patch.object(engine, "_record_limits")
+        limits.start()
+        self.addCleanup(limits.stop)
 
     def launch(self, key, stage, attempt, persona):
         self.launched.append((key, stage, attempt, persona))
@@ -111,7 +114,8 @@ class EngineTest(unittest.TestCase):
 
     def run_pass(self, **kwargs):
         return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                               trees=self.trees, launch=self.launch, clock=lambda: self.now, **kwargs)
+                               trees=self.trees, launch=self.launch, workers=engine.settings.Workers(),
+                               clock=lambda: self.now, **kwargs)
 
     def finish(self, stage, attempt=1, outcome="done"):
         seg = next(s for s in self.db.segments(KEY) if s.stage == stage and s.attempt == attempt)
@@ -480,7 +484,8 @@ class MainTest(unittest.TestCase):
         (self.root / "settings.toml").write_text(
             '[kanban]\nstages = ["In progress", "In review", "Merging"]\n'
             'human_review_label = "Human review"\n'
-            '[kanban.map]\nplan = 0\nimplement = 0\nfix = 0\nreview = 1\nmerge = 2\n')
+            '[kanban.map]\nplan = 0\nimplement = 0\nfix = 0\nreview = 1\nmerge = 2\n'
+            '[workers]\nclaude_as_profile = "secondary"\n')
 
     def test_once_refuses_a_held_workspace_lock_before_opening_the_forge(self):
         errors = io.StringIO()
@@ -499,6 +504,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_count, 1)
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
+        self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
         sleep.assert_not_called()
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):

@@ -10,7 +10,7 @@ Install one command from this checkout:
 python3 chief_of_stuff.py install --bin-dir /usr/local/bin
 ```
 
-This writes a stable launcher in `/usr/local/bin` and a versioned release under `~/.local/share/chief-of-stuff/`. The system directory needs write permission only when first installing or explicitly replacing a different launcher; later installs update the user-owned `current` pointer. Use `--dry-run` to preview the paths without writing. The command routes a fixed set of operations: `start`, `init`, `models`, `worktree`, `worker`, `audit`, `processes`, `result`, `board`, `inbox`, `backlog`, `kanban`, `pipeline`, `notify`, `health`, `pages`, `decision`, `log`, `merge-approved`, `merge-ready`, `review-threads`, `sources`, `tracker`, and `tick`. Use `chief-of-stuff <command> --help` for each command's options.
+This writes a stable launcher in `/usr/local/bin` and a versioned release under `~/.local/share/chief-of-stuff/`. The system directory needs write permission only when first installing or explicitly replacing a different launcher; later installs update the user-owned `current` pointer. Use `--dry-run` to preview the paths without writing. The command routes a fixed set of operations: `start`, `init`, `models`, `worktree`, `worker`, `audit`, `processes`, `result`, `board`, `inbox`, `backlog`, `kanban`, `pipeline`, `notify`, `health`, `pages`, `decision`, `log`, `merge-approved`, `merge-ready`, `review-threads`, `sources`, `tracker`, `limits`, and `tick`. Use `chief-of-stuff <command> --help` for each command's options.
 
 For a new workspace, create a minimal `## Coordinator` block and settings file, then launch a coordinator:
 
@@ -45,10 +45,20 @@ Enabled notifications have an independent macOS user service, ensured before coo
 For a GitHub `Backlog:` line, the pinned `chief-of-stuff backlog --create <title> --body <text> --commit` files issues through `gh` without a personal plugin. It supports native `--parent` and `--blocked-by` relationships. Writes preview by default; a workspace can still set its own issue content rules. See [backlog setup](docs/backlog.md) for GitHub and GitLab configuration.
 
 An optional `[workflow] architecture_reviewer = "<session-name>"` in the workspace TOML routes filed architecture findings to that session. Without it, no particular person or agent is assumed.
+
 An optional `[workflow] reviewer_session = "<session-name>"` routes pull requests to a named reviewer. Without it, the coordinator asks the user how to review a pull request instead of inventing a reviewer session.
 
 Every reviewer reports in one shape, [`skills/review-pipeline/review-report.md`](skills/review-pipeline/review-report.md), whatever its runtime, because Triage reads each finding's axis, severity, confidence and suggestion off it. Every worker assignment points a reviewing worker at it.
+
 `[workflow] delivery = "pull-request"` and `merge_owner = "user"` preserve the existing delivery path by default. Set `delivery = "branch"` for branch handoff without an automatic PR step, or `merge_owner = "worker"` to let the owning worker merge a reviewed PR after the coordinator confirms required approvals. Branch delivery still needs integration into main and a suite run there before a code task is marked done.
+
+## Runtime limits
+
+`chief-of-stuff limits --root /path/to/workspace` reads and records account limits without starting a model session or making a network call. Each engine pass records one reading; a failed reading does not stop the pass.
+
+Claude uses structured `rate_limit_event`/`rate_limit_info` or system `rate_limit`/`rateLimitInfo` transcript records, including model caps when present. Native assistant `rate_limit` errors also establish 100% usage when they explicitly report a cap hit and a reset clock with a timezone. Usage before that hit remains unknown unless a numeric event is available. It reads the workspace's `[workers] claude_as_profile` under `$CLAUDE_AS_PROFILES_DIR` (default `~/.claude-profiles`), or `$CLAUDE_CONFIG_DIR` (default `~/.claude`) for the default login. Transcript token counts are not account limits. Missing, malformed, or expired events show unknown with a reason. Codex, Cursor, and Antigravity show unknown with the reason `read in 1.1`.
+
+`[limits] warn_at` (default `0.8`, a fraction from `0` to `1`) configures the near-cap judgement; dispatch enforcement and board display are planned for M5 and M6. History is shared across workspaces at `$XDG_STATE_HOME/chief-of-stuff/limits.sqlite` (default `~/.local/state/chief-of-stuff/limits.sqlite`) and queries always select a runtime and account. Repeated source events and consecutive identical unknown statuses do not create fresh observations. Burn rates compare observations within one reset window. `LimitsHistory.readings(runtime, account, since)` exposes history for future dispatch-runtime queries.
 
 ## Workers
 

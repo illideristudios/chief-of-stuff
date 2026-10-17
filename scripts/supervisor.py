@@ -187,12 +187,17 @@ def install(root: Path, engine: tuple[str, ...] = ENGINE, jobs_dir: Path | None 
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = str(log_path)
+        # launchd does not inherit the installing shell. The probe and history read these paths.
+        env = {"CLAUDE_PLUGIN_DATA": str(data), "CHIEF_OF_STUFF_VERSION": version()}
+        for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "XDG_STATE_HOME"):
+            if os.environ.get(name):
+                env[name] = os.environ[name]
         desired = {"Label": label("engine", root),
                    # Not resolved: the venv python is a symlink, and resolving it would leave the venv.
                    "ProgramArguments": [str(ensure_venv(data)), *engine],
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
                    # The version makes an updated plugin a changed job, which load_agent restarts.
-                   "EnvironmentVariables": {"CLAUDE_PLUGIN_DATA": str(data), "CHIEF_OF_STUFF_VERSION": version()},
+                   "EnvironmentVariables": env,
                    "StandardOutPath": log, "StandardErrorPath": log}
         return "engine: " + load_agent(desired, jobs_dir)
 

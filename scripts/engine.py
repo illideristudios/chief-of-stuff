@@ -17,6 +17,8 @@ import clock as engine_clock
 import engine_merge
 import forge
 import issue_gate
+import limits_history
+import limits_probe
 import policy
 import reconcile
 import settings
@@ -69,14 +71,27 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
     store.set_resume(key, data)
 
 
+def _record_limits(workers: settings.Workers) -> None:
+    """A failed reading never stops the pass."""
+    try:
+        history = limits_history.LimitsHistory()
+        try:
+            history.record(limits_probe.read_all(workers))
+        finally:
+            history.engine.dispose()
+    except Exception as exc:
+        print(f"engine: limits reading failed: {exc}", file=sys.stderr, flush=True)
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
-             launch: Launch, clock: engine_clock.Clock = engine_clock.system,
+             launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
+    _record_limits(workers)
     worker.collect(store, root, clock, trees)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
@@ -206,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)
