@@ -648,17 +648,61 @@ class EngineTest(unittest.TestCase):
         self.run_pass(max_concurrency=0)
         self.assertNotIn("interrupt", self.db.resume(KEY))
 
-    def test_retryable_trio_failures_stop_at_a_cap_and_exhaust_once(self):
+    def test_retryable_trio_failures_stop_at_a_durable_cap_without_escalating(self):
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
         self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
         failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
-        for _ in range(engine.MAX_TRIO_RETRIES + 3):
+        for _ in range(8):
             self.run_pass(model=failed)
             self.now += timedelta(hours=2)
-        self.assertEqual(failed.call_count, 3 * engine.MAX_TRIO_RETRIES)
-        self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "exhausted")
-        self.assertEqual(sum(e.message.startswith("exhausted:") for e in self.db.log(KEY)), 1)
+        self.assertEqual(failed.call_count, 24)
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+        self.addCleanup(self.db.engine.dispose)
+        for _ in range(3):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        self.assertEqual(failed.call_count, 24)
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which backend?", ["Local", "Remote"], "")
+        model = self._votes([("adopt", "Local")] * 3)
+        self.run_pass(model=model)
+        self.assertEqual([a.answer for a in self.db.asks(KEY)], [None, "Local"])
+        self.assertEqual(model.n, 3)
+        self.db.answer_ask(self.db.asks(KEY)[0].id, "Split")
+        self.run_pass(model=model)
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "Split")
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+
+    def test_retryable_gate_failures_stop_at_a_cap_without_repeated_interrupts(self):
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        for _ in range(11):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        self.assertEqual(failed.call_count, 24)
+        self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), 1)
+        self.assertNotIn("waived_gates", self.db.resume(KEY))
+        # A later crossing gets a fresh retry budget.
+        self.db.record_segment(KEY, "implement", 2, self.now.isoformat(), self.now.isoformat(), "done")
+        model = self._votes([("adopt", "approve")] * 3)
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
+
+    def test_retryable_replacement_failures_stop_at_a_cap_without_a_human_ask_or_ping(self):
+        failed = self._retryable_replacement()
+        for _ in range(10):
+            self.now += timedelta(hours=2)
+            self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 24)
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
 
     def test_answered_short_ask_clears_its_ambiguity(self):
         self._trio()
