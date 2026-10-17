@@ -163,5 +163,17 @@ def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
     return Failure("error", said or f"exit {exit_code}")
 
 
+def inferred_exit(stdout: str, stderr: str) -> int | None:
+    """The exit code a runner that died before writing exit.json would have had, from what the host left; else None."""
+    try:
+        envelope = json.loads(stdout)
+    except ValueError:
+        envelope = None
+    if isinstance(envelope, dict) and isinstance(envelope.get("is_error"), bool):
+        return 1 if envelope["is_error"] else 0
+    failure = classify(1, stdout, stderr)
+    return 1 if isinstance(failure, Failure) and failure.kind == "quota" else None
+
+
 if __name__ == "__main__":
     _worker(Path(sys.argv[2]))

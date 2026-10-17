@@ -55,6 +55,7 @@ DRAWS_NOTHING = (
 
     "slots",
     "reconcile",
+    "completion",
     "cleanup",
     "engine",
     "worker",
@@ -208,7 +209,7 @@ CIRCLES: dict[str, frozenset[str]] = {
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
         "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
-        "reconcile", "guard_rules", "performance",
+        "reconcile", "completion", "guard_rules", "performance",
     }),
     "adapters": frozenset({
         "fragment", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",

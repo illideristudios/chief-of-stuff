@@ -886,6 +886,7 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(self.db.asks(KEY), [])
 
     def test_engine_metadata_alone_is_not_uncommitted_work_but_a_lookalike_name_is(self):
+        import shutil
         from evals import git_taint as taint, make_repo
         files = {".chief-of-stuff/x": "1\n", "a.chief-of-stuff": "1\n"}
         with taint.private_git_views(self.root / "private-views"):
@@ -897,6 +898,7 @@ class WorkerTest(unittest.TestCase):
             (orphan / ".chief-of-stuff" / "x").write_text("2\n")
             self.assertNotIn(worker.dispatch_prompt.RECOVERY, self.launch_in(clone).prompt)
             self.db.set_resume(KEY, known)
+            shutil.rmtree(worker._run_dir(self.root, KEY, "implement", 1))
             (orphan / "a.chief-of-stuff").write_text("2\n")
             self.assertIn(worker.dispatch_prompt.RECOVERY, self.launch_in(clone).prompt)
 

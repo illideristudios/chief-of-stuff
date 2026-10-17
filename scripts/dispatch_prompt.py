@@ -235,8 +235,8 @@ ISSUE_JOBS = {"implement": "Implement the issue and verify it with tests.",
               "fix": "Fix the findings on the existing work branch and verify the changes.",
               "review": "Review the request head; report findings and evidence without changing the code."}
 RECOVERY = ("Recovery: Keep this worktree, its branch and its inherited commits; inspect `git status` and `git log`, "
-            "preserve valid uncommitted and committed work, run the tests, push the branch and open or update the "
-            "pull/merge request without asking. Stop and ask only on a genuine conflict.")
+            "preserve valid uncommitted and committed work, run the tests and finish the delivery below without "
+            "asking. Stop and ask only on a genuine conflict.")
 
 
 # A read-only task is told so in place of its delivery rule; the launcher only checks afterwards that it left no commit or changed file (#57).
