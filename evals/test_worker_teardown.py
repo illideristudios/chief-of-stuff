@@ -249,6 +249,6 @@ class WorkerTeardownTest(unittest.TestCase):
             clock.now.return_value = one_shot.datetime.fromisoformat("2026-09-18T12:00:00+00:00")
             self.assertEqual(adopt_one_shots.main(["--root", str(self.root)]), 0)
         self.assertFalse((self.root / "cleanup.log").exists())
-        self.assertEqual(decode(out.getvalue())["task"], "Security audit")
+        self.assertEqual(decode(out.getvalue())[0]["task"], "Security audit")
         self.assertEqual(self.report()["status"], "done")
         self.assertNotIn("| worker01 | running", self.fx.tracker.read_text())

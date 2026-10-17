@@ -8,12 +8,11 @@ import json
 import os
 import re
 import shlex
-import signal
 import subprocess
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable, NamedTuple
+from typing import Callable
 
 import backlog
 import dispatch_prompt
@@ -31,9 +30,8 @@ from model_port import quota_reset
 from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
-from tracker import Task, parse_tracker
-from tracker_log import (RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line,
-                         started_line, teardown_failed_line, timed_out_line)
+from tracker import parse_tracker
+from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -343,65 +341,21 @@ def write_report(root: Path, cwd: Path, report: dict) -> dict:
     return report
 
 
-class _TaskLookup(NamedTuple):
-    text: str = ""
-    rows: tuple[Task, ...] = ()
-    error: OSError | ValueError | None = None
-
-    @property
-    def row(self) -> Task | None:
-        return self.rows[0] if len(self.rows) == 1 else None
-
-
-def _lookup_task(path: Path, task: str, *, allow_missing: bool = False) -> _TaskLookup:
-    """Read one tracker's task, keeping unreadable evidence separate from clean absence."""
-    try:
-        text = path.read_text()
-    except FileNotFoundError as exc:
-        return _TaskLookup(error=None if allow_missing else exc)
-    except (OSError, ValueError) as exc:
-        return _TaskLookup(error=exc)
-    return _TaskLookup(text, tuple(row for row in parse_tracker(text).tasks if row.item.strip() == task))
-
-
 def _launch_row_running(launch: Path, task: str, name: str) -> bool:
     """The launch-day row the midnight rollover carried over is still running under this worker (#576)."""
-    found = _lookup_task(launch, task)
-    if found.error is not None:
-        raise found.error
-    row = found.row
-    return row is not None and row.kind == "running" and row.owner.strip().lower() == name.lower()
-
-
-def _pending_run(root: Path, cfg, day: str, task: str, name: str) -> bool:
-    """Whether reconciliation still owns a running row, including its midnight rollover twin."""
-    launch = root / cfg.tracker_path(day)
-    end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
-    found = _lookup_task(end, task, allow_missing=end != launch)
-    if found.error is not None:
-        return True  # an unreadable tracker cannot authorize discarding recovery evidence
-    if found.rows:
-        row = found.row
-        if row is None or row.owner.strip().lower() != name.lower():
-            return False
-        if row.kind == "running":
-            return True
-        if end == launch or row.kind != "open":
-            return False
-    found = _lookup_task(launch, task)
-    row = found.row
-    return found.error is not None or (row is not None and row.kind == "running"
-                                      and row.owner.strip().lower() == name.lower())
+    try:
+        rows = [row for row in parse_tracker(launch.read_text()).tasks if row.item.strip() == task]
+    except OSError:
+        return False
+    return len(rows) == 1 and rows[0].kind == "running" and rows[0].owner.strip().lower() == name.lower()
 
 
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
               before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
-              *, adopted: bool = False, expected_common: Path | None = None,
-              teardown_errors: list[str] | None = None) -> dict:
+              *, adopted: bool = False, expected_common: Path | None = None) -> dict:
     """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
-    errors = list(teardown_errors or [])
     if expected_common is None:
         commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
         expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
@@ -415,10 +369,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     launch = path
     end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
     carried = False
-    found = _lookup_task(end, task, allow_missing=end != launch)
-    if found.error is not None:
-        raise found.error
-    if found.rows:
+    if end.exists() and any(row.item.strip() == task for row in parse_tracker(end.read_text()).tasks):
         # The midnight rollover carries a still-running launch-day row over as the end day's open twin (#576):
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
@@ -461,17 +412,16 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     # The tracker keeps only 500 characters: its git excerpts must leave room for both facts.
     log_summary = (f"{suite}; Commits from this run: {_brief(commits)[:100]}; " +
                    (f"Working tree: {_brief(actual)[:100]}" if actual else "Working tree clean") + f"; {changes}")
-    found = _lookup_task(path, task)
-    if found.error is not None:
-        raise found.error
-    row = found.row
+    rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
+    row = rows[0] if len(rows) == 1 else None
+    errors = []
     if row is None or row.owner.strip().lower() != name.lower() or (
             # The rollover twin is the same row, open (#576); any other drift from running is a changed row.
             row.kind != "running" and not (carried and row.kind == "open")):
         report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
                   "changes": summary, **counts,
-                  "errors": errors + [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
+                  "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
         return write_report(root, cwd, report)
     if adopted:
         # #99: the launcher died before reconciling this run; the report, the Log line and any
@@ -487,24 +437,6 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 errors.append(f"review hold: {error}")
         else:
             errors.append("review hold: workspace has no [kanban] configuration")
-    try:
-        update_tracker(path, task, name, cfg.user, status, reason, log_summary,
-                       tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
-    except (OSError, ValueError) as exc:
-        errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
-        report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
-                  "reason": reason, "changes": summary, **counts, "errors": errors}
-        return write_report(root, cwd, report)
-    # Publish warnings and review comments only after the row moves. An adoption retry
-    # cannot repeat them while a tracker write is failing; setting the review hold is idempotent.
-    for error in (teardown_errors or []):
-        try:
-            tracker_write.edit(path, lambda text: tracker_write.append_log(
-                text, teardown_failed_line(tracker_write.stamp(cfg.zone), name, task,
-                                           _brief(error.removeprefix('teardown: '))), create=True))
-        except (OSError, ValueError) as exc:
-            errors.append(f"teardown: could not log cleanup failure: {exc}")
-    if status == "human_review" and ref:
         home = (backlog.GitHubBacklog(ref.repo) if ref.host == backlog.GITHUB else
                 cfg.backlog.sibling(ref.repo)
                 if isinstance(cfg.backlog, backlog.Backlog) else None)
@@ -513,6 +445,11 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             commented = backlog.comment(home, ref.number, body, commit=True)
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")
+    try:
+        update_tracker(path, task, name, cfg.user, status, reason, log_summary,
+                       tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
+    except (OSError, ValueError) as exc:
+        errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
               "reason": reason, "changes": summary, **counts, "errors": errors}
     return write_report(root, cwd, report)
@@ -529,54 +466,6 @@ def trees_lock(trees: Path):
         os.close(lock)
 
 
-def _pidfile_line(pidfile: Path) -> str | None:
-    """The first line of a regular pid file, or None when it is missing, a symlink, or unreadable."""
-    try:
-        if pidfile.parent.is_symlink():
-            return None
-        data = git_view.read_regular(pidfile, PIDFILE_MAX, nofollow=True)
-    except OSError:
-        return None
-    if not data:
-        return None
-    return (data.decode(errors="replace").splitlines() or [""])[0]
-
-
-def _pidfile_pid(pidfile: Path) -> int | None:
-    """The pid in a regular pid file, or None when it is missing, a symlink, or unreadable."""
-    line = _pidfile_line(pidfile)
-    if line is None:
-        return None
-    pid, _, _ = line.partition(" ")
-    if pid.isascii() and pid.isdecimal() and (value := int(pid)) > 0:
-        return value
-    return None
-
-
-def _write_pidfile(trees: Path, cwd: Path, text: str, replace: set[int]) -> bool:
-    """Under the worktrees lock, write only when the pid file is absent or still names `replace`."""
-    with trees_lock(trees):
-        pidfile = cwd / PIDFILE
-        if pidfile.parent.is_symlink() or pidfile.is_symlink():
-            return False
-        current = _pidfile_pid(pidfile)
-        if pidfile.exists() and current not in replace:
-            return False
-        pidfile.parent.mkdir(exist_ok=True)
-        if pidfile.parent.is_symlink() or pidfile.is_symlink():
-            return False
-        pidfile.write_text(text)
-        return True
-
-
-def _unlink_own_pidfile(trees: Path, cwd: Path, pid: int) -> None:
-    with trees_lock(trees):
-        with suppress(OSError):
-            pidfile = cwd / PIDFILE
-            if _pidfile_pid(pidfile) == pid:
-                pidfile.unlink()
-
-
 @contextmanager
 def slot(trees: Path, cwd: Path, task: str, cap: int | None):
     """Claim a worker slot under the Worktrees dir's lock, so two sessions launching at once cannot both
@@ -586,28 +475,12 @@ def slot(trees: Path, cwd: Path, task: str, cap: int | None):
         if cap is not None and len(busy) >= cap:
             raise ValueError(f"{len(busy)} one-shot workers running; [workers] max_concurrency is {cap} "
                              "(list them: chief-of-stuff processes --root <workspace>)")
-        pidfile = cwd / PIDFILE
-        line = _pidfile_line(pidfile)
-        held = _pidfile_pid(pidfile)
-        # A live detached worker's pid is the adoption marker; do not replace it.
-        # A dead pid for another task is the same marker, waiting for adopt().
-        if line is not None and held is not None and held != os.getpid():
-            if process_exists(held):
-                raise ValueError(f"{cwd.name} already has a live one-shot worker (pid {held})")
-            if line.partition(" ")[2].strip() != task.strip():
-                raise ValueError(f"{cwd.name} still holds an unreconciled one-shot run")
-        if pidfile.parent.is_symlink() or pidfile.is_symlink():
-            raise ValueError(f"{cwd.name} pid file is a symlink")
-        pidfile.parent.mkdir(exist_ok=True)
-        if pidfile.parent.is_symlink() or pidfile.is_symlink():
-            raise ValueError(f"{cwd.name} pid file is a symlink")
-        pidfile.write_text(f"{os.getpid()} {task}\n")
-    recovery = {"pending": False}
+        (cwd / PIDFILE).parent.mkdir(exist_ok=True)
+        (cwd / PIDFILE).write_text(f"{os.getpid()} {task}\n")
     try:
-        yield recovery
+        yield
     finally:
-        if not recovery["pending"]:
-            _unlink_own_pidfile(trees, cwd, os.getpid())
+        (cwd / PIDFILE).unlink(missing_ok=True)
 
 
 def _clear_stale_dispatch(cwd: Path, task: str) -> None:
@@ -662,21 +535,16 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
         raise ValueError(f"no worktree at {cwd}")
     trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
     _clear_stale_dispatch(cwd, task)
-    with slot(trees, cwd, task, workers.max_concurrency) as recovery:
-        try:
-            return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv,
-                           timeout_minutes, common, teardown, workers.teardown, trees=trees)
-        finally:
-            recovery["pending"] = _pending_run(root, cfg, chosen_day, task, name)
+    with slot(trees, cwd, task, workers.max_concurrency):
+        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv,
+                       timeout_minutes, common, teardown, workers.teardown)
 
 
 def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, runtime: str, model: str,
             effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None,
-            teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: [], cleanup: str = "",
-            *, trees: Path | None = None) -> int:
+            teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: [], cleanup: str = "") -> int:
     # Same clean login-shell path as interactive sessions; auth and user PATH come from shell setup.
     # Everything that can refuse runs before anything is written; a refused row takes its dispatch back.
-    trees = trees if trees is not None else root / worktrees_dir((root / "CLAUDE.md").read_text())
     launch_argv, tree = login_argv(argv), _tree_note(root, cwd, expected_common)
     before_head = git_head(cwd, strict=True, expected_common=expected_common)
     written = dispatch_prompt.write_dispatch(cwd, body)
@@ -699,41 +567,35 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
             pass
     env = clean_env()
     env["CHIEF_OF_STUFF_WORKSPACE"] = str(root.resolve())
-    env["CHIEF_OF_STUFF_WORKER"] = name
     for log in ("worker-stdout.log", "worker-stderr.log"):
         (logs / log).write_text("")  # a fresh run's worker logs start empty; a retried run appends
-    worker_pids: list[int] = []
-    exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes, worker_pids, trees=trees)
+    teardown_errors = []
     try:
-        teardown_errors = teardown(root, cwd, name, cleanup)
-        if exit_code == 124 and not (cwd / RESULT).exists():
-            # The first timeout relaunches the run once, into the same tree with its partial commits
-            # (#110): the Log line is the once-per-row marker the second timeout finds, a result the
-            # killed worker wrote mid-window goes so only the second run's evidence is read, and the
-            # second wait gets a doubled timeout.
-            tracker = root / cfg.tracker_path(chosen_day)
-            if not timed_out_before(tracker, name):
-                tracker_write.edit(tracker, lambda text: tracker_write.append_log(
-                    text, timed_out_line(tracker_write.stamp(cfg.zone), name, timeout_minutes, task)))
-                with suppress(OSError):
-                    (cwd / RESULT).unlink(missing_ok=True)
-                exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2, worker_pids, trees=trees)
-                teardown_errors.extend(teardown(root, cwd, name, cleanup))
-        report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
-                           read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common,
-                           teardown_errors=teardown_errors)  # held to what it was told
+        exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes)
     finally:
-        # Keep unfinished runs discoverable. With no spawned child, the launcher is
-        # the recovery marker and becomes adoptable when it exits. Completed or reassigned rows release it.
-        if _pending_run(root, cfg, chosen_day, task, name):
+        teardown_errors.extend(teardown(root, cwd, name, cleanup))
+    if exit_code == 124 and not (cwd / RESULT).exists():
+        # The first timeout relaunches the run once, into the same tree with its partial commits
+        # (#110): the Log line is the once-per-row marker the second timeout finds, a result the
+        # killed worker wrote mid-window goes so only the second run's evidence is read, and the
+        # second wait gets a doubled timeout.
+        tracker = root / cfg.tracker_path(chosen_day)
+        if not timed_out_before(tracker, name):
+            tracker_write.edit(tracker, lambda text: tracker_write.append_log(
+                text, timed_out_line(tracker_write.stamp(cfg.zone), name, timeout_minutes, task)))
             with suppress(OSError):
-                launcher_copy(root, cwd).unlink(missing_ok=True)
-            if worker_pids:
-                with suppress(OSError):
-                    _write_pidfile(trees, cwd, f"{worker_pids[-1]} {task}\n", {os.getpid(), worker_pids[-1]})
+                (cwd / RESULT).unlink(missing_ok=True)
+            try:
+                exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
+            finally:
+                teardown_errors.extend(teardown(root, cwd, name, cleanup))
+    report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
+                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common)  # held to what it was told
+    if teardown_errors:
+        report["errors"].extend(teardown_errors)
+        report = write_report(root, cwd, report)
     print(toon_encode(report))
-    return 0 if report["status"] == "done" and not any(
-        not error.startswith("teardown:") for error in report["errors"]) else 1
+    return 0 if report["status"] == "done" and not report["errors"] else 1
 
 
 def timed_out_before(tracker: Path, name: str) -> bool:
@@ -744,51 +606,34 @@ def timed_out_before(tracker: Path, name: str) -> bool:
     return any((m := TIMED_OUT.match(line)) and m.group(3) == name for line in tracker.read_text().splitlines())
 
 
-def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: str, timeout_minutes: int,
-                worker_pids: list | None = None, *, trees: Path | None = None) -> int:
+def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: str, timeout_minutes: int) -> int:
     """Run the worker once, to completion or out of time: its exit code, 124 when the wait ran out,
     127 when it could not start. The worker runs in a session of its own: the coordinator's restart
     kills the launcher and the row, not the run, and the restarted coordinator adopts the finished
     run from the tree's evidence (#99). The pid file names the worker, the pid that is actually in
     this tree; `processes` reads the same file either way."""
-    trees = trees if trees is not None else cwd.parent
     worker = None
     try:
         with (logs / "worker-stdout.log").open("a") as stdout, (logs / "worker-stderr.log").open("a") as stderr:
             worker = subprocess.Popen(launch_argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                       stdout=stdout, stderr=stderr, start_new_session=True)
             try:
-                if not _write_pidfile(trees, cwd, f"{worker.pid} {task}\n", {os.getpid()}):
-                    raise OSError("pid file names another worker")
+                (cwd / PIDFILE).write_text(f"{worker.pid} {task}\n")
             except OSError:
-                with suppress(ProcessLookupError):
-                    os.killpg(worker.pid, signal.SIGKILL)  # no untracked worker may survive
+                worker.kill()  # a live worker with no pid file would race a fresh launch into this tree
                 worker.wait()
                 raise
             return worker.wait(timeout=timeout_minutes * 60)
     except subprocess.TimeoutExpired:
         if worker is not None:
-            with suppress(ProcessLookupError):
-                os.killpg(worker.pid, signal.SIGKILL)
+            worker.kill()
             worker.wait()
         with (logs / "worker-stderr.log").open("a") as stderr:
             stderr.write(f"One-shot run timed out after {timeout_minutes} minutes\n")
         return 124
     except OSError as exc:
-        with suppress(OSError), (logs / "worker-stderr.log").open("a") as stderr:
-            stderr.write(f"Could not start worker: {exc}\n")
+        (logs / "worker-stderr.log").open("a").write(f"Could not start worker: {exc}\n")
         return 127
-    finally:
-        if worker_pids is not None and worker is not None:
-            worker_pids.append(worker.pid)
-        # The launcher owns the tree throughout cleanup, retry setup and reconciliation.
-        # A still-running worker keeps its own pid so adoption can find it (#99).
-        if worker is None or worker.poll() is not None:
-            with suppress(OSError):
-                replace = {os.getpid()}
-                if worker is not None:
-                    replace.add(worker.pid)
-                _write_pidfile(trees, cwd, f"{os.getpid()} {task}\n", replace)
 
 
 ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's running row
@@ -796,32 +641,30 @@ ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's
 
 def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tuple[str, str] | None:
     """The day and worker name of `task`'s running row in the latest of `days` whose tracker holds one
-    and whose File ownership names this tree; None when every tracker was readable or absent
-    and none says running here. An unreadable tracker raises, preserving recovery evidence (#99)."""
+    and whose File ownership names this tree; None when no recent tracker says running here (#99)."""
     tree = f"worktree `{cwd.resolve().name}`"
     for day in days:  # latest first
-        found = _lookup_task(root / cfg.tracker_path(day), task, allow_missing=True)
-        if found.error is not None:
-            raise found.error
-        row = found.row
-        if row is None or row.kind != "running" or not row.owner.strip():
+        try:
+            text = (root / cfg.tracker_path(day)).read_text()
+        except OSError:
             continue
-        owned = ownership.cell(found.text, dispatch_prompt.task_keys(task, dispatch_prompt.task_name(found.text, task)))
+        rows = [row for row in parse_tracker(text).tasks if row.item.strip() == task]
+        if len(rows) != 1 or rows[0].kind != "running" or not rows[0].owner.strip():
+            continue
+        owned = ownership.cell(text, dispatch_prompt.task_keys(task, dispatch_prompt.task_name(text, task)))
         if owned is None or tree not in owned:
             continue  # the row's running work lives in some other tree
-        return day, row.owner.strip()
+        return day, rows[0].owner.strip()
     return None
 
 
-def adopt(root: Path, day: str | None = None, *,
-          teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: []) -> list[dict]:
+def adopt(root: Path, day: str | None = None) -> list[dict]:
     """Reconcile the one-shot runs whose launcher died before reconciling them (#99): a tree whose
     pid file names a worker that is gone, whose task row still says running under that worker, and
     whose launcher report copy was never written, is reconciled from its own evidence - the result
     file, the changed files, the work already in the tree. A worker still alive is left to finish;
     the next sweep adopts it. The day is a tracker day, not the zone's today; with none given,
-    adoption looks back through ADOPT_LOOKBACK days. Tracker read failures preserve that tree's
-    marker and are raised after the remaining trees have been processed."""
+    adoption looks back through ADOPT_LOOKBACK days."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
     commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
@@ -829,70 +672,19 @@ def adopt(root: Path, day: str | None = None, *,
     days = [day] if day else [(datetime.now(cfg.zone).date() - timedelta(days=n)).isoformat()
                               for n in range(ADOPT_LOOKBACK)]
     adopted = []
-    failures = []
     for cwd, pid, task in pidfile_runs(trees):
         if process_exists(pid):
             continue  # a worker still running is still working on its row
         if launcher_copy(root, cwd).exists():
-            _unlink_own_pidfile(trees, cwd, pid)
             continue  # a copy is there: a reconcile already answered for this tree's latest run
-        try:
-            found = _running_row(root, cfg, task, cwd, days)
-        except (OSError, ValueError) as exc:
-            failures.append(exc)
-            continue
+        found = _running_row(root, cfg, task, cwd, days)
         if found is None:
-            _unlink_own_pidfile(trees, cwd, pid)
             continue
-        # Recheck under the launch/cleanup lock before taking the dead worker's slot.
-        pidfile = cwd / PIDFILE
-        claimed = False
         row_day, name = found
-        try:
-            with trees_lock(trees):
-                current = next(((held_pid, held_task) for tree, held_pid, held_task in pidfile_runs(trees) if tree == cwd), None)
-                if current != (pid, task) or process_exists(pid) or launcher_copy(root, cwd).exists():
-                    continue
-                if pidfile.parent.is_symlink() or pidfile.is_symlink():
-                    continue
-                try:
-                    pidfile.write_text(f"{os.getpid()} {task}\n")
-                except OSError:
-                    continue
-                claimed = True
-            stale = cwd / dispatch_prompt.DISPATCH_FILE
-            body = stale.read_text() if stale.is_file() else ""
-            # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
-            report = reconcile(root, row_day, task, name, cwd, 0,
-                               read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
-                               expected_common=commons.get(cwd.resolve()),
-                               teardown_errors=teardown(root, cwd, name, settings.workers.teardown))
-            adopted.append(report)
-        except BaseException as exc:
-            # Preserve the dead worker evidence so a later sweep can retry interrupted adoption.
-            if claimed and _pending_run(root, cfg, row_day, task, name):
-                with suppress(OSError):
-                    _write_pidfile(trees, cwd, f"{pid} {task}\n", {os.getpid(), pid})
-            elif claimed:
-                _unlink_own_pidfile(trees, cwd, os.getpid())
-            if isinstance(exc, (OSError, ValueError)):
-                failures.append(exc)
-            else:
-                raise
-        else:
-            errors = report["errors"]
-            unfinished = _pending_run(root, cfg, row_day, task, name) and (not launcher_copy(root, cwd).exists()
-                          or any(str(error).startswith((dispatch_prompt.TRACKER_ERROR, "report copy:"))
-                                 for error in errors))
-            if unfinished:
-                with suppress(OSError):
-                    launcher_copy(root, cwd).unlink(missing_ok=True)
-                with suppress(OSError):
-                    _write_pidfile(trees, cwd, f"{pid} {task}\n", {os.getpid(), pid})
-            else:
-                _unlink_own_pidfile(trees, cwd, os.getpid())
-    if len(failures) == 1:
-        raise failures[0]
-    if failures:
-        raise OSError("adoption tracker failures: " + "; ".join(str(exc) for exc in failures))
+        stale = cwd / dispatch_prompt.DISPATCH_FILE
+        body = stale.read_text() if stale.is_file() else ""
+        # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
+        adopted.append(reconcile(root, row_day, task, name, cwd, 0,
+                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
+                                 expected_common=commons.get(cwd.resolve())))
     return adopted

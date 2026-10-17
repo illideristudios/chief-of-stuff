@@ -77,13 +77,6 @@ class RoundTripTest(unittest.TestCase):
         self.assertIsNone(tl.ENDED.match(line))
         self.assertIsNone(tl.RELAUNCH.match(line))
 
-    def test_a_teardown_failure_line_names_the_worker_task_and_error(self):
-        line = tl.teardown_failed_line("10:20", "worker01", "Security audit", "cleanup exited 7")
-        self.assertEqual(line, "- 10:20 one-shot worker01: teardown failed: cleanup exited 7, task Security audit")
-        for pattern in (tl.STAGE, tl.STARTED, tl.ENDED, tl.RELAUNCH):
-            self.assertIsNone(pattern.match(line))
-        self.assertEqual(tl.moves(f"## Log\n\n{line}\n", DAY, CT), [])
-
     def test_an_ended_line_does_not_double_a_reasons_final_period(self):
         for reason, tail in (("Resets in 3h46m46s.", "Resets in 3h46m46s."), ("fixed the cap", "fixed the cap."), ("", ".")):
             with self.subTest(reason=reason):

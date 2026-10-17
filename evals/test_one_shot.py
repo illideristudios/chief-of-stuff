@@ -45,7 +45,7 @@ def worker_popen_only(agent: str, *, timeout: bool = False, launched: list | Non
         if launched is not None:
             launched.append(kwargs.get("cwd"))
         if timeout:
-            worker = mock.Mock(pid=999999999)
+            worker = mock.Mock()
             worker.wait.side_effect = [subprocess.TimeoutExpired(argv, 1), 0]  # the kill's wait
             return worker
         return real([sys.executable, "-c", "pass"], *args, **kwargs)  # a worker that merely exits
@@ -859,7 +859,7 @@ class RunTest(unittest.TestCase):
             if argv[0] == "git":  # the launcher's own reads run for real
                 return real_popen(argv, *args, **kwargs)
             trees.append(kwargs.get("cwd"))
-            worker = mock.Mock(returncode=0, pid=999999999)
+            worker = mock.Mock(returncode=0)
             if first:
                 first = False
                 worker.wait.side_effect = [subprocess.TimeoutExpired(argv, 1), 0]  # the kill's wait
@@ -1896,15 +1896,11 @@ class RunTest(unittest.TestCase):
 
     def test_a_tree_holding_another_task_s_dispatch_still_refuses_it(self):
         # #138: only the same task may relaunch into its own stopped tree.
-        # The dead pid stays: overwriting it would drop the adoption marker.
         self._stopped_tree(task="Export header")
-        pidfile = self.tree / one_shot.PIDFILE
-        held = pidfile.read_text()
         before = self.tracker.read_text()
-        with self.assertRaisesRegex(ValueError, "unreconciled"):
+        with self.assertRaisesRegex(ValueError, "already holds a dispatch"):
             self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False))
         self.assertEqual(self.tracker.read_text(), before)
-        self.assertEqual(pidfile.read_text(), held)
 
     def test_a_restarted_coordinator_adopts_a_finished_one_shots_run(self):
         # #99: the worker runs in its own session, so a coordinator restart kills the launcher and
