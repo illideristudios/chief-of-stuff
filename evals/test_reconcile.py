@@ -759,6 +759,35 @@ class ReconcileTest(unittest.TestCase):
         action = self.plan(history=[Segment("implement", ended_at=None)], facts=facts)[0]
         self.assertEqual(action, reconcile.Close(KEY, "implement", 1, "done", "not on main", True))
 
+    def test_a_red_suite_holds_only_when_completion_did_not(self):
+        import readiness
+        from tree_state import TreeState
+        red = {"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0}
+        suite = (((KEY, "implement", 1), red, "reported done"),)
+        report = (readiness.Report(KEY, "done", "implement", 1),)
+        open_seg = [Segment("implement", ended_at=None)]
+        held = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
+                               trees=((KEY, TreeState("work", 3, 0, 0)),), changed=((KEY, True),),
+                               suites=suite, require_green=True)
+        action = self.plan(history=open_seg, facts=held)[0]
+        self.assertEqual(action.outcome, "done")
+        self.assertTrue(action.human_review)
+        self.assertFalse(action.suite_hold)
+        self.assertIn("uncommitted", action.reason)
+        clean = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
+                                changed=((KEY, False),), suites=suite, require_green=True)
+        action = self.plan(history=open_seg, facts=clean)[0]
+        self.assertEqual(action, reconcile.Close(
+            KEY, "implement", 1, "human_review",
+            "suite is not green; Suite: passed=0, failed=1, skipped=0, xfailed=0; worker said: reported done",
+            True, True))
+        missing = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report, changed=((KEY, False),),
+                                  suites=(((KEY, "implement", 1),
+                                           {"passed": None, "failed": None, "skipped": None, "xfailed": None},
+                                           "reported done"),),
+                                  require_green=True)
+        self.assertTrue(self.plan(history=open_seg, facts=missing)[0].suite_hold)
+
 
 class SuiteHoldTest(unittest.TestCase):
     def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):

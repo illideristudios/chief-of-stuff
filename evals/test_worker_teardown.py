@@ -175,6 +175,89 @@ class WorkerTeardownTest(unittest.TestCase):
         self.assertEqual(shell_setup.teardown(self.root, self.tree, "worker01", command), [])
         self.assertEqual(log.read_text(), f"{self.root.resolve()} {self.tree.resolve()} worker01 trusted\n")
 
+    def test_cancel_failure_still_tears_down_and_keeps_the_start_error(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        calls = []
+        with mock.patch.object(worker.make_worktree, "build", return_value=type("Tree", (), {"path": fx.tree})()), \
+             mock.patch.object(worker.claude_adapter, "start", return_value=mock.Mock(pid=78, poll=lambda: 0)), \
+             mock.patch.object(worker.claude_adapter, "cancel", side_effect=RuntimeError("runner survived SIGKILL")), \
+             mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker, "teardown", side_effect=lambda *args: calls.append(args) or []):
+            with self.assertRaisesRegex(RuntimeError, "could not verify worker start"):
+                worker.launch(engine_fixtures.KEY, "implement", 1, None, store=fx.db, root=fx.root,
+                              trees=fx.trees, policies=fx.p, forge=fx.forge, clock=lambda: engine_fixtures.NOW,
+                              teardown_command="down")
+        self.assertEqual(calls, [(fx.root, fx.tree, fx.tree.name, "down")])
+        self.assertTrue(any("cancel failed" in row.message for row in fx.db.log(engine_fixtures.KEY)))
+
+    def test_teardown_runs_once_when_the_segment_closes(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        run = fx.launched()
+        calls = []
+        def collect():
+            with mock.patch.object(worker.process_status, "identity", return_value=None), \
+                 mock.patch.object(worker, "teardown", side_effect=lambda *args: calls.append(args) or []):
+                worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down")
+        collect()
+        collect()
+        self.assertEqual(calls, [])
+        (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        fx.report(run)
+
+        def leave_open(*_args):
+            return None
+
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker, "teardown", side_effect=lambda *args: calls.append(args) or []):
+            worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down", finish=leave_open)
+            worker.collect(fx.db, fx.root, lambda: engine_fixtures.NOW, teardown_command="down", finish=leave_open)
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(fx.db.segments(engine_fixtures.KEY)[0].ended_at)
+        collect()
+        self.assertEqual(len(calls), 1)
+        self.assertIsNotNone(fx.db.segments(engine_fixtures.KEY)[0].ended_at)
+
+    def test_a_stuck_teardown_warns_after_sigkill_without_waiting(self):
+        class Child:
+            def __init__(self):
+                self.pid = 123
+                self.returncode = None
+                self.args = ["shell"]
+                self.waits = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                if self.returncode is None:
+                    self.wait()
+                return False
+
+            def wait(self, timeout=None):
+                self.waits.append(timeout)
+                if timeout is None:
+                    raise AssertionError("unbounded wait")
+                raise subprocess.TimeoutExpired(self.args, timeout)
+
+            def poll(self):
+                return None
+
+        child = Child()
+        with mock.patch.object(shell_setup.subprocess, "Popen", return_value=child), \
+             mock.patch.object(shell_setup.os, "killpg") as kill:
+            warnings = shell_setup.teardown(self.root, self.tree, "worker01", "exit 0")
+        kill.assert_called_once()
+        self.assertEqual(child.waits, [120, 5])
+        self.assertIsNotNone(child.returncode)
+        self.assertTrue(warnings)
+        self.assertIn("timed out", warnings[0])
+
     def test_unverified_engine_start_tears_the_stack_down(self):
         fx = engine_fixtures.WorkerTest("runTest")
         fx.setUp()

@@ -232,6 +232,27 @@ class EngineTest(unittest.TestCase):
         self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
         self.assertEqual(sum(row.message.startswith("worker review attempt 1:") for row in self.db.log(KEY)), 1)
 
+    def test_a_verified_landing_is_not_reread_on_later_gathers(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", stage="merge")
+        self.db.upsert_item(OTHER, stage="merge", forge_state="closed", merge_state="merged")
+        self.db.set_resume(OTHER, {"verified_landing": True})
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed", ref="main")
+        reads = []
+
+        def landings(pipeline, keys, **kwargs):
+            reads.append(tuple(keys))
+            return {key: (True, True) for key in keys}
+
+        self.forge.landings = landings
+        self.run_pass()
+        self.assertEqual(reads, [(KEY,)])
+        self.assertIs(self.db.resume(KEY)["verified_landing"], True)
+        self.assertIs(self.db.resume(OTHER)["verified_landing"], True)
+        self.forge.landings = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reread"))
+        self.run_pass()
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+        self.assertIn(OTHER, self.cleanup.call_args.kwargs["completed"])
+
     def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")

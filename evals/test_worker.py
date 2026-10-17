@@ -595,6 +595,33 @@ class WorkerTest(unittest.TestCase):
                                    workers=engine.settings.Workers(),
                                    clock=lambda: NOW + timedelta(minutes=1), require_green=True)
 
+    def test_a_red_suite_does_not_replace_a_completion_hold(self):
+        forge = self.suite_run()
+        forge.add_human_hold = mock.Mock(return_value="")
+        with mock.patch.object(engine.engine_facts, "_tree_facts",
+                               return_value=(reconcile.TreeState("head", 3, 0, 0), False, NOW)):
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        self.assertNotIn("suite_hold", self.db.resume(KEY) or {})
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertTrue(any("uncommitted" in row.message for row in self.db.log(KEY)))
+
+    def test_a_dead_worker_without_an_exit_holds_a_red_suite(self):
+        forge = self.suite_run()
+        run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run_dir / "exit.json").unlink()
+        forge.add_human_hold = mock.Mock(return_value="")
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(engine.engine_facts.process_status, "identity", return_value=None), \
+             mock.patch.object(engine.engine_facts, "_tree_facts",
+                               return_value=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+        self.assertEqual(self.db.resume(KEY)["suite_hold"]["stage"], "implement")
+        launch = mock.Mock(return_value=("example", ""))
+        self.suite_pass(forge, launch)
+        launch.assert_not_called()
+
     def test_a_non_done_report_is_not_suite_gated(self):
         forge = self.suite_run(outcome="blocked")
         forge.add_human_hold = mock.Mock(return_value="")
