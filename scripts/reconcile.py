@@ -123,10 +123,11 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
 
 def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
-    if stage == "review":
-        return Review(key, attempt)
     rounds = attempt - 1 - sum(s.stage == stage and s.outcome in RETRYABLE for s in history)
-    if any(e.target == stage for e in workflow.next("review")):
+    if stage == "review":
+        # Completed review rounds belong to the fix loop; only failed reviews spend retries.
+        rounds = sum(s.stage == stage and s.outcome == "failed" for s in history)
+    elif any(e.target == stage for e in workflow.next("review")):
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)
         if review is not None:
@@ -137,7 +138,7 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
                                              and _time(s.started_at) >= review for s in history)
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")
-    return Dispatch(key, stage, policies.stages[stage].persona, attempt)
+    return Review(key, attempt) if stage == "review" else Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
@@ -194,7 +195,7 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
 
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
-          decisions: Sequence[Decision], hold_stages: Sequence[str]) -> Action | None:
+          decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object]) -> Action | None:
     key = item.issue_key
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
@@ -212,8 +213,11 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if item.human_review:
         # Only an interrupted/failed run at this stage can release an extra launcher hold.
         # Human outcomes, completed work and stage-required holds still need a human's release.
-        if (stage not in hold_stages and latest and latest.stage == stage
+        if (item.stage and stage not in hold_stages and latest and latest.stage == stage
+                and launcher_hold.get("stage") == stage and launcher_hold.get("attempt") == latest.attempt
                 and latest.outcome in (*RETRYABLE, "failed")):
+            if launcher_hold.get("release_failures", 0) > _policy(policies, stage, room).retry_limit:
+                return Escalate(key, f"hold release retry limit reached for {stage}")
             return _work(key, stage, workflow, history, policies, room)
         return Wait(key, "human review")
     return_edge = None
@@ -257,14 +261,15 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
          quota_resets: Mapping[str, datetime] | None = None,
-         hold_stages: Sequence[str] = ()) -> list[Action]:
+         hold_stages: Sequence[str] = (),
+         launcher_holds: Mapping[str, Mapping[str, object]] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
-    Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
+    Gates use their source stage's policy; retries use the destination stage's policy. Completed reviews do not spend retries.
     Merge requires answered decisions and, where policy requires it, a done architect segment for the current work.
     Without creation times, issue numbers order work within each forge namespace.
-    Extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
+    Attempt-owned extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
     """
     _time(now)
     if type(free_slots) is not int or free_slots < 0:
@@ -277,7 +282,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             continue
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
-                       (decisions or {}).get(item.issue_key, ()), hold_stages)
+                       (decisions or {}).get(item.issue_key, ()), hold_stages,
+                       (launcher_holds or {}).get(item.issue_key, {}))
         if isinstance(action, (Dispatch, Review)):
             if free_slots:
                 free_slots -= 1

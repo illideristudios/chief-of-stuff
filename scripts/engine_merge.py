@@ -37,7 +37,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
         item.merge_state = request.verdict
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
         planned = reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(),  # not `at`: a gate may expire mid-pass
-                                 **inputs)
+                                 hold_stages=getattr(getattr(forge, "kanban", None), "hold_stages", ()), **inputs)
         if not planned or not isinstance(planned[0], reconcile.Merge):
             reason = (getattr(planned[0], "reason", f"{type(planned[0]).__name__.lower()} required")
                       if planned else "no eligible merge")

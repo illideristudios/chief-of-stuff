@@ -158,8 +158,8 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     """Update issue labels, or a GitHub Project Status plus the issue's hold label."""
     if ref.host != backlog.GITHUB:
         return kanban.Sync(ref, stage, error="issue is not on GitHub")
-    if release_hold and (not expected_stage or stage != expected_stage or initialize):
-        return kanban.Sync(ref, stage, error="hold release needs the same current and expected stage, without initialize")
+    if error := kanban.release_error(stage, expected_stage, initialize, release_hold):
+        return kanban.Sync(ref, stage, error=error)
     try:
         config.label_for(stage)
     except KeyError:
@@ -174,7 +174,7 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if error:
         return kanban.Sync(ref, stage, error=error)
     current = kanban._canonical(config, current)
-    held = not release_hold and kanban.extra_hold(config, current, expected_stage)
+    held = kanban.keep_hold(config, current, expected_stage, release_hold)
     delta = kanban._github_label_delta(config, current, stage, keep_hold=held)
     managed = kanban._managed(config)
     current_labels = frozenset(current) & managed
@@ -300,8 +300,8 @@ def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, st
     """GitLab's add/remove update leaves unrelated issue labels untouched."""
     if ref.host != backlog.home_of(cfg)[0]:
         return kanban.Sync(ref, stage, error="issue host does not match the configured GitLab host")
-    if release_hold and (not expected_stage or stage != expected_stage or initialize):
-        return kanban.Sync(ref, stage, error="hold release needs the same current and expected stage, without initialize")
+    if error := kanban.release_error(stage, expected_stage, initialize, release_hold):
+        return kanban.Sync(ref, stage, error=error)
     try:
         config.label_for(stage)
     except KeyError:
@@ -322,7 +322,7 @@ def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, st
     if not isinstance(row, dict) or not isinstance(row.get("labels"), list):
         return kanban.Sync(ref, stage, error="GitLab issue has no readable labels")
     current = tuple(str(label) for label in row["labels"])
-    held = not release_hold and kanban.extra_hold(config, current, expected_stage)
+    held = kanban.keep_hold(config, current, expected_stage, release_hold)
     delta = kanban.label_delta(config, current, stage, keep_hold=held)
     managed = kanban._managed(config)
     prior = frozenset(kanban.label_delta(config, (), expected_stage).add) if expected_stage else frozenset()

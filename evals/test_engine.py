@@ -521,13 +521,7 @@ class EngineTest(unittest.TestCase):
 
     def test_launch_failure_restores_hold_and_spends_retry_budget(self):
         self.pending_release()
-        self.p = policy.parse({**{
-            "default_workflow": "standard",
-            "personas": {"builder": {"role": "implements", "model": "example"},
-                         "critic": {"role": "reviews", "model": "example"}},
-            "stages": {"implement": {"persona": "builder"}, "review": {"persona": "critic"}, "merge": {}},
-            "workflows": {"standard": {"start": "implement", "edges": []}},
-        }, "policy": {"retry_limit": 1}})
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
         with mock.patch.object(self.forge, "add_human_hold", create=True, return_value="") as restore:
             with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
                 self.run_pass()
