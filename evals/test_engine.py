@@ -147,15 +147,19 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
 
-    def test_a_failed_start_records_only_a_declared_agent_type(self):
+    def failed_type(self, agent_line):
         self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
-        self.declare()
+        self.declare(agent_line)
         self.run_pass()
-        self.assertEqual((self.db.segments(KEY)[0].outcome, self.db.segments(KEY)[0].agent_type), ("failed", "specialist"))
-        self.db.drop_segment(KEY, "implement", 1)
-        self.declare("- Agent: implementer task\n")
-        self.run_pass()
-        self.assertEqual((self.db.segments(KEY)[0].outcome, self.db.segments(KEY)[0].agent_type), ("failed", ""))
+        failed = self.db.segments(KEY)[0]
+        self.assertEqual(failed.outcome, "failed")
+        return failed.agent_type
+
+    def test_a_failed_start_records_a_declared_agent_type(self):
+        self.assertEqual(self.failed_type("- Agent: specialist task\n"), "specialist")
+
+    def test_a_failed_start_records_no_undeclared_agent_type(self):
+        self.assertEqual(self.failed_type("- Agent: implementer task\n"), "")
 
     def test_a_failed_start_with_an_unreadable_workspace_file_still_records_the_failure(self):
         self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))

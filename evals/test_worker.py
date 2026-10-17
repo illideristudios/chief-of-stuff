@@ -1006,7 +1006,7 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             used = worker.launch(KEY, "implement", 1, "builder", store=self.db, root=self.root,
                                  trees=self.trees, policies=self.p, forge=self.forge, claude_as_profile="secondary")
-        self.assertEqual(used, ("opus", "high"))
+        self.assertEqual(used, ("opus", "high", "specialist"))
         self.assertEqual(start.call_args.args[0].agent, "specialist")
         self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
 

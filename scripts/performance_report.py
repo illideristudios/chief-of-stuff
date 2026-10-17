@@ -8,6 +8,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 import store_access
+import supervisor
 from performance import table
 from workspace import ConfigError, read_config
 
@@ -49,7 +50,11 @@ def main(argv: list[str] | None = None) -> int:
     if not path.is_file():
         print(f"performance: no store at {path}", file=sys.stderr)
         return 2
-    db = store_access.migrated_store(root)
+    try:
+        db = store_access.migrated_store(root)
+    except (OSError, supervisor.ServiceError) as exc:
+        print(f"performance: {exc}", file=sys.stderr)
+        return 2
     try:
         _print_table(table(db.segments(), since=since, until=until, by=args.by, zone=cfg.zone))
     finally:

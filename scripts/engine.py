@@ -31,7 +31,7 @@ import worker
 from forge_port import ForgeError
 from workspace import worktrees_dir
 
-Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
+Launch = Callable[[str, str, int, str | None], tuple | None]
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -291,7 +291,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
-                agent_type = worker.resolved_agent(root, policies, stage, persona)
                 launch_failed = False
 
                 def start():
@@ -316,7 +315,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                 store.add_log(key, message, at)
                             raise HoldReleaseFailed(message) from exc
                     try:
-                        return launch(key, stage, action.attempt, persona, agent_type=agent_type)
+                        return launch(key, stage, action.attempt, persona)
                     except Exception as exc:
                         # slots drops a failed reservation. Keep the actual failed start so its
                         # attempt spends the retry budget, and replace the hold before returning.
@@ -327,10 +326,14 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
-                                agent_type=agent_type, runtime="claude")
+                                runtime="claude")
                 except Exception:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
+                        try:  # the failed start's type; an unreadable file leaves it unknown, not the retry unspent
+                            agent_type = worker.resolved_agent(root, policies, stage, persona)
+                        except Exception:
+                            agent_type = None
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
                                              runtime="claude", agent_type=agent_type)
                     raise

@@ -24,7 +24,6 @@ from model_port import Failure, Request, retry_at
 from shell_setup import teardown
 
 _runners: dict[str, Any] = {}
-_RESOLVE = object()
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -127,9 +126,9 @@ def resolved_agent(root: Path, policies: Any, stage: str, persona: str | None) -
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
-           clock: engine_clock.Clock = engine_clock.system,
-           agent_type: Any = _RESOLVE) -> tuple[str, str]:
-    """The Launch port: verify a live start or adopt durable completion before slots records it."""
+           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str, str | None]:
+    """The Launch port: verify a live start or adopt durable completion before slots records it.
+    Returns (model, effort, declared agent type); the type is resolved here, once, and the segment records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
@@ -140,13 +139,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if existing is not None:
         store.set_ownership(issue_key, existing["tree"])
         _save_run(store, issue_key, stage, attempt, existing)
-        return actor.model, actor.effort or ""
+        return actor.model, actor.effort or "", existing.get("agent_type")
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     loaded = load_settings(root, settings_path(text))
     defaults = loaded.stages.get(stage)
-    # The engine passes the type it already resolved; a direct launch resolves the same way.
-    if agent_type is _RESOLVE:
-        agent_type = declared_agent(text, _named_agent(actor, defaults))
+    agent_type = declared_agent(text, _named_agent(actor, defaults))
     agent = agent_type or ""
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
@@ -242,6 +239,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
                   "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
+        if agent_type:  # an adopting restart reports the type the run started with
+            record["agent_type"] = agent_type
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
@@ -255,7 +254,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 pass
         raise
     _runners[str(run_dir)] = runner
-    return actor.model, actor.effort or ""
+    return actor.model, actor.effort or "", agent_type
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
