@@ -165,7 +165,7 @@ class CleanupTest(unittest.TestCase):
         self.assertTrue(tree.is_dir())
         self.assertEqual(self.store.log(f"{KEY}-done")[0].message, line)
 
-    def test_a_teardown_warning_does_not_replace_the_mount_guard(self) -> None:
+    def test_a_teardown_warning_does_not_block_guarded_removal(self) -> None:
         self.configure_teardown()
         with mock.patch.object(shell_setup, "teardown", return_value=["teardown: exit 7"]) as stop, \
                 mock.patch.object(cleanup, "containers", return_value=[]):
@@ -244,7 +244,7 @@ class CleanupTest(unittest.TestCase):
                 mock.patch.object(shell_setup, "teardown") as stop:
             _, out = self.run_cleanup("--remove")
         stop.assert_not_called()
-        self.assertIn("not finished", self.kept(out)["done"])
+        self.assertEqual(self.kept(out)["done"], f"keep done — {KEY}-done is not finished")
 
     def test_teardown_cannot_invalidate_another_removal_guard(self) -> None:
         self.configure_teardown()
