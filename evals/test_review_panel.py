@@ -1,5 +1,6 @@
 """Policy-driven review panels, per-finding burn-down and commit-bound approval."""
 import sys
+from types import SimpleNamespace
 import tempfile
 import unittest
 from datetime import timedelta
@@ -44,9 +45,13 @@ class ReviewPanelTest(unittest.TestCase):
 
     def plan(self, head="head", slots=4):
         history = self.db.segments(KEY)
-        findings = reconcile.review_findings(self.db.reports(KEY), history)
+        findings = reconcile.review_findings(self.db.reports(KEY), history,
+                                              sessions={s.attempt: f"session-{s.attempt}" for s in history if s.stage == "review"},
+                                              consults={1: "session-3"})
         return reconcile.plan(self.db.items(), {KEY: history}, self.p, {}, slots, NOW,
-                              {} if findings is None else {KEY: findings}, heads={KEY: head})
+                              {} if findings is None else {KEY: findings}, heads={KEY: head},
+                              architect_replies=getattr(self, "replies", {}),
+                              consult_requests=getattr(self, "requests", {}))
 
     def test_launches_each_policy_reviewer_and_respects_slots(self):
         actions = self.plan()
@@ -92,7 +97,7 @@ class ReviewPanelTest(unittest.TestCase):
         self.review(1, "critic", [finding()])
         self.review(2, "security")
         action, = self.plan()
-        self.assertEqual((action.stage, action.persona), ("architect", "architect"))
+        self.assertIsInstance(action, reconcile.Consult)
 
     def test_three_unsuccessful_fix_rounds_ping(self):
         for round in range(1, 5):
@@ -137,7 +142,7 @@ class ReviewPanelTest(unittest.TestCase):
         self.review(1, "critic", [finding()])
         self.review(2, "security")
         action, = self.plan()
-        self.assertEqual((action.stage, action.persona), ("architect", "architect"))
+        self.assertIsInstance(action, reconcile.Consult)
 
     def test_room_overrides_the_panel_and_architect_requirement(self):
         self.p.rooms["lab"] = policy.Place("lab", policy={"reviewers": ("security",), "architect": False})
@@ -159,7 +164,7 @@ class ReviewPanelTest(unittest.TestCase):
     def test_a_review_from_before_the_upgrade_is_rerun_under_the_panel_not_trusted_or_dropped(self):
         # test_store pins that a migrated 0003 segment has no persona, head or round.
         self.segment("review", 1)
-        self.db.add_report(KEY, "review", 1, "session-1", "done", "Reviewed", [finding()])
+        self.db.upsert_item(KEY, review_state="changes_requested")
         actions = self.plan()
         self.assertEqual([(a.persona, a.review_round) for a in actions], [("critic", 1), ("security", 1)])
 
@@ -185,42 +190,83 @@ class ReviewPanelTest(unittest.TestCase):
         action, = self.plan()
         self.assertEqual((action.persona, action.review_round), ("security", 1))
 
-    def test_successful_consults_do_not_consume_the_architect_retry_budget(self):
-        self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
-        for attempt in range(1, 5):
-            self.db.record_segment(KEY, "architect", attempt, (NOW - timedelta(hours=2)).isoformat(),
-                                   (NOW - timedelta(hours=1)).isoformat(), "done", persona="architect")
-        self.review(5, "critic", [finding()])
-        self.review(6, "security")
-        action, = self.plan()
-        self.assertEqual((action.stage, action.persona, action.attempt), ("architect", "architect", 5))
-
     def consulted(self, *dispositions):
         self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
         self.review(1, "critic", [finding(title) for title, _ in dispositions])
         self.review(2, "security")
         keys = [f["finding_key"] for f in reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))]
-        self.segment("architect", 1, persona="architect")
-        self.db.add_report(KEY, "architect", 1, "session-3", "done", "Judged",
-                           [dict(finding(title), finding_key=key, disposition=disposition)
-                            for key, (title, disposition) in zip(keys, dispositions)])
+        self.replies = {KEY: reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(),
+                        dict(zip(keys, [d for _, d in dispositions])))}
 
     def test_the_architect_decides_which_findings_get_a_fix(self):
         self.consulted(("Keep me", "keep"), ("Fix me", "fix"), ("Not real", "discard"), ("Later", "file"))
         action, = self.plan()
         self.assertEqual((action.stage, action.finding["title"]), ("fix", "Fix me"))
-        self.segment("fix", 1, finding_key=action.finding_key)
+        self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="head")
         self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan()))
 
-    def test_findings_the_architect_did_not_fix_do_not_block_the_merge(self):
+    def test_only_current_head_approval_allows_merge(self):
         self.consulted(("Keep me", "keep"), ("Later", "file"))
+        self.replies[KEY] = reconcile.ArchitectReply("head", "APPROVED", NOW.isoformat(), self.replies[KEY].dispositions)
         self.assertEqual(self.plan(), [reconcile.Merge(KEY)])
+        self.replies[KEY] = reconcile.ArchitectReply("old", "APPROVED", NOW.isoformat(), self.replies[KEY].dispositions)
+        self.assertIsInstance(self.plan()[0], reconcile.Consult)
 
-    def test_a_consult_that_leaves_a_finding_undisposed_escalates_instead_of_fixing(self):
+    def test_a_reply_that_leaves_a_finding_undisposed_waits(self):
         self.consulted(("Fix me", "fix"))
-        self.db.add_report(KEY, "architect", 1, "session-4", "done", "Judged again", [])
+        self.replies[KEY] = reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(), {})
+        self.assertIsInstance(self.plan()[0], reconcile.Wait)
+
+    def test_reviewer_dispositions_cannot_suppress_or_authorize_findings(self):
+        for disposition in ("file", "keep", "discard", "fix"):
+            with self.subTest(disposition=disposition):
+                self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
+                self.review(1, "critic", [{**finding(), "disposition": disposition}])
+                self.review(2, "security")
+                self.assertIsInstance(self.plan()[0], reconcile.Consult)
+                raw = reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))
+                self.assertNotIn("disposition", raw[0])
+
+    def test_a_request_waits_without_consuming_a_slot_or_launching_an_architect(self):
+        self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
+        self.review(1, "critic", [finding()])
+        self.review(2, "security")
+        self.requests = {KEY: ["head"]}
+        self.assertIsInstance(self.plan(slots=0)[0], reconcile.Wait)
+        self.assertFalse(any(s.stage == "architect" for s in self.db.segments(KEY)))
+
+    def test_a_reply_before_a_new_panel_member_cannot_dispose_its_findings(self):
+        self.consulted(("One", "fix"))
+        self.db.record_segment(KEY, "review", 2, (NOW + timedelta(seconds=1)).isoformat(),
+                               (NOW + timedelta(seconds=2)).isoformat())
+        self.assertIsInstance(self.plan()[0], reconcile.Consult)
+
+    def test_failed_or_quota_fix_does_not_explain_an_external_push(self):
+        self.review(1, "critic", [finding()])
+        self.review(2, "security")
         action, = self.plan()
-        self.assertEqual(action, reconcile.Escalate(KEY, "architect left a review finding undisposed"))
+        for outcome in ("quota", "failed", "done"):
+            with self.subTest(outcome=outcome):
+                self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="head")
+                self.db.record_segment(KEY, "fix", 1, NOW.isoformat(), outcome=outcome)
+                self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan(head="external")))
+
+    def test_completed_fix_output_head_allows_the_next_finding(self):
+        self.review(1, "critic", [finding("One"), finding("Two")])
+        self.review(2, "security")
+        action, = self.plan()
+        self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="produced")
+        self.assertEqual(self.plan(head="produced")[0].finding["title"], "Two")
+        self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan(head="external")))
+
+    def test_identical_prose_at_distinct_locations_has_distinct_finding_keys(self):
+        self.review(1, "critic", [dict(finding(), path="a.py", line=1), dict(finding(), path="b.py", line=2)])
+        self.review(2, "security")
+        first, = self.plan()
+        self.segment("fix", 1, finding_key=first.finding_key, reviewed_head="head")
+        second, = self.plan()
+        self.assertNotEqual(first.finding_key, second.finding_key)
+        self.assertEqual(second.finding["path"], "b.py")
 
     def test_findings_from_a_superseded_head_are_re_reviewed_not_fixed(self):
         self.review(1, "critic", [finding()], head="old")

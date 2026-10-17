@@ -92,10 +92,15 @@ class MCPTest(unittest.TestCase):
         self.assertEqual(Finding.model_json_schema()["properties"]["severity"]["enum"], list(SEVERITIES))
 
     def test_an_architect_report_carries_a_disposition_per_finding_key(self):
-        self.tools.report("done", "Judged", [{**FINDING, "finding_key": "1/1/abc", "disposition": "keep"}])
+        import engine_mcp
+        from dataclasses import replace
+        architect = engine_mcp.EngineTools(replace(self.tools.binding, stage="architect"), self.db)
+        architect.report("done", "Judged", [{**FINDING, "finding_key": "1/1/abc", "disposition": "keep"}])
         self.assertEqual(self.db.reports(KEY)[0].findings[0]["disposition"], "keep")
         with self.assertRaises(ValueError):
-            self.tools.report("done", "bad", [{**FINDING, "finding_key": "1/1/abc", "disposition": "ignore"}])
+            architect.report("done", "bad", [{**FINDING, "finding_key": "1/1/abc", "disposition": "ignore"}])
+        with self.assertRaises(ValueError):
+            self.tools.report("done", "forged disposition", [{**FINDING, "disposition": "keep"}])
 
     def test_stdio_sdk_round_trip(self):
         from mcp import ClientSession, StdioServerParameters

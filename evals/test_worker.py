@@ -214,22 +214,28 @@ class WorkerTest(unittest.TestCase):
         self.assertIn("push the existing request branch", prompt)
         self.assertIn("do not open a new request", prompt)
 
-    def test_architect_consult_gets_a_detached_checkout_and_leaves_the_work_branch(self):
-        data = self.db.resume(KEY) or {}
-        data.update(worktree=str(self.tree), work_branch="work/issue-1-implement-1")
-        self.db.set_resume(KEY, data)
-        fresh = self.trees / "consult"
-        fresh.mkdir()
-        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=fresh)) as build, \
+    def test_explicit_architect_workflow_work_starts_without_a_request(self):
+        self.forge.closing_request = mock.Mock(side_effect=RuntimeError("no request yet"))
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             worker.launch(KEY, "architect", 1, "critic", store=self.db, root=self.root, trees=self.trees,
                           policies=self.p, forge=self.forge, clock=lambda: NOW)
-        self.assertEqual(build.call_args.kwargs["from_branch"], "feature/existing")
-        self.assertEqual(start.call_args.args[0].cwd, str(fresh))
-        resume = self.db.resume(KEY)
-        self.assertEqual((resume["worktree"], resume["work_branch"]), (str(self.tree), "work/issue-1-implement-1"))
-        self.assertEqual(resume["review_trees"]["architect-1"]["head"], "head")
+        self.forge.closing_request.assert_not_called()
+        self.assertEqual(build.call_args.kwargs["from_branch"], "")
+        self.assertNotIn("Consult on these review findings", start.call_args.args[0].prompt)
+        self.assertEqual(self.db.resume(KEY)["worktree"], str(self.tree))
+
+    def test_collection_records_the_head_produced_by_a_done_finding_fix(self):
+        run = self.launched()
+        seg = self.db.segments(KEY)[0]
+        self.db.record_segment(KEY, "implement", 1, seg.started_at, finding_key="1/1/key")
+        self.report(run)
+        (run / "stdout").write_text('{"result":"done"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code":0}')
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "head")
 
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \

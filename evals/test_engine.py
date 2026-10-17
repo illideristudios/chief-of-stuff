@@ -42,7 +42,7 @@ def policies():
 class FakeForge:
     def __init__(self):
         self.rows = [{"issue_key": KEY, "stage": "implement", "forge_state": "open", "merge_state": "ready"}]
-        self.writes, self.merges = [], []
+        self.writes, self.merges, self.comments = [], [], []
         self.kanban, self.github = None, True
         self.home = SimpleNamespace(repo=KEY.split(":", 1)[1].rsplit("#", 1)[0])
 
@@ -70,6 +70,12 @@ class FakeForge:
     def closing_request(self, issue_key, requests=None):
         return SimpleNamespace(number=10, verdict="ready", approval="", head=tf.tma.HEAD)
 
+    def change_comments(self, number):
+        return list(self.comments)
+
+    def comment_change(self, number, body):
+        self.comments.append(SimpleNamespace(body=body, time=NOW.isoformat()))
+
     def issue(self, number):
         row = next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))
         return SimpleNamespace(ok=True, issue=SimpleNamespace(is_open=row["forge_state"] == "open", labels=[]))
@@ -93,10 +99,11 @@ class PlanningInputsTest(unittest.TestCase):
             def closing_request(key, requests):
                 if key != KEY:
                     raise ForgeError("no open request")
-                return SimpleNamespace(head="h")
+                return SimpleNamespace(head="h", number=10)
 
             forge = SimpleNamespace(requests=mock.Mock(return_value=["listed"]),
-                                    closing_request=mock.Mock(side_effect=closing_request))
+                                    closing_request=mock.Mock(side_effect=closing_request),
+                                    change_comments=mock.Mock(return_value=[]))
             for _ in range(2):
                 inputs = engine._planning_inputs(db, db.items(), forge, NOW.isoformat())
             self.assertEqual(inputs["heads"], {KEY: "h", other: None})
@@ -532,7 +539,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([s.persona for s in self.db.segments(KEY) if s.stage == "review"], ["critic", "security"])
 
 
-    def test_out_of_band_architect_consult_keeps_the_review_label_then_merges(self):
+    def test_architect_request_posts_once_then_waits_for_a_current_head_reply(self):
         self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
         self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
         self.run_pass()
@@ -540,11 +547,31 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.finish("review")
         self.findings()
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "architect", "architect", 1)])
+        self.assertIsInstance(self.run_pass()[0], reconcile.Consult)
         self.assertEqual(self.db.items()[0].stage, "review")
-        self.assertFalse(any(w[1] == "architect" for w in self.forge.writes))
-        self.finish("architect")
+        self.assertEqual(len(self.forge.comments), 1)
+        self.assertIn("Architect review requested: " + tf.tma.HEAD, self.forge.comments[0].body)
+        self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
+        self.assertEqual(len(self.forge.comments), 1)
+        self.assertFalse(any(s.stage == "architect" for s in self.db.segments(KEY)))
+        self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED old", time=self.now.isoformat()))
+        self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
+        self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=self.now.isoformat()))
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
+    def test_latest_equal_time_reply_wins_and_request_survives_lost_resume(self):
+        self.forge.rows[0]["stage"] = "review"
+        self.db.sync_from_forge(self.forge.rows)
+        self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(),
+                               (NOW - timedelta(minutes=1)).isoformat(), "done", persona="critic", reviewed_head=tf.tma.HEAD, review_round=1)
+        self.findings()
+        self.p.stages["review"].policy.update(architect=True, architect_persona="critic")
+        self.forge.comments = [SimpleNamespace(body="Architect review requested: " + tf.tma.HEAD, time=NOW.isoformat()),
+                               SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=NOW.isoformat()),
+                               SimpleNamespace(body="Architect: CHANGES " + tf.tma.HEAD, time=NOW.isoformat())]
+        self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
+        self.assertEqual(len(self.forge.comments), 3)
+        self.assertEqual(self.forge.merges, [])
 
 
 
