@@ -12,6 +12,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+import claude_adapter
 import cleanup
 import clock as engine_clock
 import decision_actions
@@ -197,10 +198,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     )
                     if existing_dec is None:
                         existing_dec = store.add_decision(key, action.gate, action.reason)
-                    if (trio_port is not None and existing_dec.status == "open"
+                    eff_policy = policies.resolve(stage=stages.get(key) if stages.get(key) in policies.stages else None)
+                    # An unconfigured trio leaves the decision for the board, never a failed consult.
+                    if (trio_port is not None and (eff_policy.trio or eff_policy.trios) and existing_dec.status == "open"
                             and not (isinstance(existing_dec.record, dict) and "verdicts" in existing_dec.record)):
                         trio_dec = trio_gate.Decision(key, action.gate, action.reason, ("adopt", "escalate"))
-                        eff_policy = policies.resolve(stage=stages.get(key) if stages.get(key) in policies.stages else None)
                         outcome = trio_gate.consult(trio_dec, eff_policy, policies.personas, trio_port, store, decision_id=existing_dec.id)
                         with store.transaction():
                             current = store.decision(existing_dec.id)
@@ -273,7 +275,8 @@ def main(argv: list[str] | None = None) -> int:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, max_concurrency=config.workers.max_concurrency,
+                                 trio_port=partial(claude_adapter.call, claude_as_profile=config.workers.claude_as_profile))
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

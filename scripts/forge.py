@@ -753,11 +753,8 @@ class Forge:
         """Post or preview a comment on an issue."""
         if not commit:
             return f"would comment on #{number}: {body}"
-        _, repo = home_of(self.home)
-        if self.github:
-            code, _, stderr = self.gh(["issue", "comment", str(number), "-R", repo, "--body", body])
-            return stderr.strip() or f"gh exited {code}" if code else ""
-        return ""
+        return backlog.comment(self.home, number, body, token=None if self.github else self._token(),
+                               commit=True, gh=self.gh).error
 
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:
