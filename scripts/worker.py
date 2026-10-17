@@ -31,8 +31,8 @@ def _resume(store: Any, key: str) -> dict:
 
 
 def _detached(stage: str) -> bool:
-    """Reviews and architect consults read the request's head in a detached tree; only fixes use the writable one."""
-    return stage in ("review", "architect")
+    """Reviews read the request head in a detached tree; workflow work uses the writable tree."""
+    return stage == "review"
 
 
 def _tree_key(stage: str, attempt: int) -> str:
@@ -152,24 +152,18 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     assignment_stage = "fix" if segment is not None and segment.finding_key else stage
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, assignment_stage, actor, root=root,
                                                skills=defaults.skills if defaults else ())
-    if stage == "architect" or (segment is not None and segment.finding_key):
+    if segment is not None and segment.finding_key:
         history = store.segments(issue_key)
         findings = reconcile.review_findings(store.reports(issue_key), history,
-                                             sessions=run_sessions(data, history, "review"),
-                                             consults=run_sessions(data, history, "architect"))
-        if stage == "architect":
-            assignment += ("\nConsult on these review findings without changing code. In your report, return each finding "
-                           "unchanged with its finding_key and a disposition: fix, file, keep or discard:\n"
-                           + json.dumps(findings) + "\n")
-        else:
-            finding = next((f for f in findings or () if f["finding_key"] == segment.finding_key), None)
-            if finding is None:
-                raise RuntimeError("assigned finding is no longer available")
-            assignment += "\nFix this review finding, then report the result:\n" + json.dumps(finding) + "\n"
+                                             sessions=run_sessions(data, history, "review"))
+        finding = next((f for f in findings or () if f["finding_key"] == segment.finding_key), None)
+        if finding is None:
+            raise RuntimeError("assigned finding is no longer available")
+        assignment += "\nFix this review finding, then report the result:\n" + json.dumps(finding) + "\n"
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
-    # build's from_branch is detached. Reviews and consults use it; fixes need the original writable checkout.
+    # build's from_branch is detached. Reviews use it; fixes need the original writable checkout.
     detached = _detached(stage)
     prepared_review = data.get("review_trees", {}).get(_tree_key(stage, attempt)) if detached else None
     request_head = forge.closing_request(issue_key) if detached else None
@@ -337,6 +331,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
+            if segment.finding_key and outcome == "done":
+                code, produced = make_worktree.git(["rev-parse", "HEAD"], Path(record["tree"]))
+                if code or not produced.strip():
+                    outcome = "failed"
+                    raise RuntimeError("completed fix head is unreadable")
+                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                     reviewed_head=produced.strip())
             if segment.stage == "review":
                 # This attempt's collected result always names the SHA pinned at launch.
                 store.record_segment(key, segment.stage, segment.attempt, segment.started_at,

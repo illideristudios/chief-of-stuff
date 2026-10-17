@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -15,6 +15,7 @@ from typing import Any
 import cleanup
 import clock as engine_clock
 import engine_merge
+import engine_facts
 import forge
 import issue_gate
 import policy
@@ -36,47 +37,7 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _planning_inputs(store: Any, items: list, forge: Any = None, at: str = "") -> dict:
-    """Read the same issue context for the engine pass and merge recheck; `at` stamps a head-read failure log."""
-    segments = {item.issue_key: store.segments(item.issue_key) for item in items}
-    states = {item.issue_key: _resume(store, item.issue_key) for item in items}
-    findings = {}
-    heads = {}
-    requests, listing = None, None
-    if forge is not None:
-        try:
-            requests = forge.requests()  # one list per pass, shared by every item's closing request
-        except ForgeError as exc:
-            listing = exc
-    for item in items:
-        key = item.issue_key
-        findings[key] = reconcile.review_findings(
-            store.reports(key), segments[key], sessions=worker.run_sessions(states[key], segments[key], "review"),
-            consults=worker.run_sessions(states[key], segments[key], "architect"))
-        if forge is not None and item.forge_state != "closed":
-            try:
-                if listing is not None:
-                    raise listing
-                request = forge.closing_request(key, requests)
-                heads[key] = request.head if request else None
-            except ForgeError as exc:
-                # Review and merge stay blocked on an unknown head; say why, once per change of message.
-                heads[key] = None
-                message = f"change head unreadable: {exc}"
-                logged = store.log(key)
-                if at and (not logged or logged[-1].message != message):
-                    store.add_log(key, message, at)
-    return {
-        "segments": segments,
-        "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
-                        or getattr(item, "issue_type", None) for item in items},
-        "open_findings": {key: value for key, value in findings.items() if value is not None},
-        "heads": heads,
-        "rooms": {key: state.get("room") for key, state in states.items()},
-        "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
-        "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
-                         if (quota := state.get("quota"))},
-    }
+_planning_inputs = engine_facts.gather
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
@@ -162,16 +123,30 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                             launch=lambda: launch(key, stage, action.attempt, persona), runtime="claude",
                             persona=persona, review_round=getattr(action, "review_round", None),
                             finding_key=getattr(action, "finding_key", None))
-                if stage == "architect" and stage not in {e.target for e in policies.workflow_for(
-                        _resume(store, key).get("issue_type")).edges}:
-                    stage = None  # an out-of-band consult does not move the workflow label
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
                 elif engine_merge.execute(action, forge, store, at, policies=policies,
-                                         inputs=_planning_inputs(store, [by_key[key]])):
+                                         inputs=_planning_inputs(store, [by_key[key]], forge, at)):
                     stage = "merge"
+            elif isinstance(action, reconcile.Consult):
+                request = forge.closing_request(key)
+                if request.head != action.head:
+                    raise ForgeError("change head moved before architect request")
+                data = _resume(store, key)
+                _, posted = engine_facts.architect_comments(forge.change_comments(request.number))
+                known = list(dict.fromkeys([*posted, *data.get("architect_requests", [])]))
+                if action.head not in known:
+                    body = (f"Architect review requested: {action.head}\n\n"
+                            "Dispose of each finding and reply with `Architect: APPROVED <sha>` or "
+                            "`Architect: CHANGES <sha>`. Include a JSON block with a `dispositions` object "
+                            "mapping each finding_key to fix, file, keep or discard.\n\n"
+                            + "```json\n" + json.dumps({"findings": list(action.findings)}, indent=2) + "\n```")
+                    forge.comment_change(request.number, body)
+                    known.append(action.head)
+                data["architect_requests"] = known
+                store.set_resume(key, data)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
                 record = {"kind": type(action).__name__, "reason": action.reason}

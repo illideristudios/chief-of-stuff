@@ -96,10 +96,11 @@ class ExecutorTest(unittest.TestCase):
 
     def test_required_architect_and_answered_decision_allow_merge(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
-        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
         self.db.add_decision(self.key, "design", "Split the parser?", answer="yes", decided_by="trio")
-        self.planned()
-        self.assertTrue(self.execute())
+        note = backlog.Note("architect", self.at, f"Architect: APPROVED {tma.HEAD}")
+        with mock.patch.object(forge.Forge, "change_comments", return_value=[note]):
+            self.planned()
+            self.assertTrue(self.execute(forge_facts=True))
         self.assertEqual(len(self.gh.merges), 1)
         self.assertIn("merged", self.message())
 
@@ -329,10 +330,10 @@ class ExecutorTest(unittest.TestCase):
         self.gh.prs[0]["reviews"] = []
         self.refused("review has not run")
 
-    def execute(self):
+    def execute(self, *, forge_facts=False):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
         return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p,
-                                    inputs=engine._planning_inputs(self.db, [item]))
+                                    inputs=engine._planning_inputs(self.db, [item], self.forge if forge_facts else None))
 
     def message(self):
         entries = self.db.log(self.key)

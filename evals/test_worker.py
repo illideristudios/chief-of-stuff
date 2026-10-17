@@ -192,6 +192,14 @@ class WorkerTest(unittest.TestCase):
         self.assertTrue(record["session_id"])
 
     def test_per_finding_fix_in_a_shared_implement_stage_keeps_the_existing_request(self):
+        self.assert_finding_fix_keeps_request("implement")
+
+    def test_architect_workflow_fixes_receive_fix_instructions_in_the_writable_tree(self):
+        import policy
+        self.p.stages["architect"] = policy.Place("architect", "builder")
+        self.assert_finding_fix_keeps_request("architect")
+
+    def assert_finding_fix_keeps_request(self, stage):
         self.launched()
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
         self.db.record_segment(KEY, "review", 1, NOW.isoformat(), NOW.isoformat(), "done",
@@ -206,9 +214,10 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.make_worktree, "git", return_value=(0, "work/issue-1-implement-1")), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
-            slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=2,
+            slots.claim(self.trees, self.db, issue_key=KEY, stage=stage, attempt=2,
                         max_concurrency=1, finding_key=key, clock=lambda: NOW,
-                        launch=lambda: self.launch("implement", 2))
+                        launch=lambda: self.launch(stage, 2))
+        self.assertEqual(start.call_args.args[0].cwd, str(self.tree))
         prompt = start.call_args.args[0].prompt
         self.assertIn("Handle the boundary", prompt)
         self.assertIn("push the existing request branch", prompt)
@@ -231,7 +240,7 @@ class WorkerTest(unittest.TestCase):
         seg = self.db.segments(KEY)[0]
         self.db.record_segment(KEY, "implement", 1, seg.started_at, finding_key="1/1/key")
         self.report(run)
-        (run / "stdout").write_text('{"result":"done"}')
+        (run / "stdout").write_text('{"is_error":false,"result":"done"}')
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code":0}')
         worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))

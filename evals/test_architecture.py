@@ -56,6 +56,7 @@ DRAWS_NOTHING = (
     "reconcile",
     "cleanup",
     "engine",
+    "engine_facts",
     "worker",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
@@ -226,7 +227,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
-        "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
+        "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
         "audit_tasks", "inbox", "flow",
         "hooks/hooks.json", "guard/hooks/hooks.json",

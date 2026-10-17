@@ -200,11 +200,11 @@ class ReconcileTest(unittest.TestCase):
                 finding, = found("minor", attempt=attempt, round=attempt)
                 # The shipped review policy consults the architect, which disposes of the finding, before any fix.
                 self.assertEqual(self.plan(item, history, [finding]),
-                                 [reconcile.Dispatch(KEY, "architect", "architect", attempt)])
-                history.append(Segment("architect", attempt, persona="architect", started_at=reviewed + timedelta(seconds=1),
-                                       ended_at=reviewed + timedelta(seconds=2)))
-                finding = {**finding, "disposition": "fix"}
-                self.assertEqual(self.plan(item, history, [finding]), [fix("fix", "implementer", attempt, finding)])
+                                 [reconcile.Consult(KEY, "head", [finding])])
+                reply = reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(), {finding["finding_key"]: "fix"})
+                disposed = {**finding, "disposition": "fix"}
+                self.assertEqual(self.plan(item, history, [finding], architect_replies={KEY: reply}),
+                                 [fix("fix", "implementer", attempt, disposed)])
                 start = NOW - timedelta(minutes=10 - 2 * attempt)
                 history.append(Segment("fix", attempt, finding_key=finding["finding_key"], started_at=start,
                                        ended_at=start + timedelta(seconds=30)))
@@ -216,8 +216,8 @@ class ReconcileTest(unittest.TestCase):
                 reviewed = start
         self.assertEqual(self.plan(item, history, found("minor", attempt=4, round=4)),
                          [reconcile.Escalate(KEY, "retry limit reached for review fix rounds")])
-        history.append(Segment("architect", started_at=history[-1].started_at, ended_at=NOW))
-        self.assertEqual(self.plan(item, history, []), [reconcile.Merge(KEY)])
+        self.assertEqual(self.plan(item, history, [], architect_replies={KEY: reconcile.ArchitectReply(
+            "head", "APPROVED", NOW.isoformat(), {})}), [reconcile.Merge(KEY)])
 
     def test_review_edge_counts_every_repair_attempt_against_the_retry_limit(self):
         self.p.stages["repair"] = policy.Place("repair", "builder")
@@ -300,49 +300,29 @@ class ReconcileTest(unittest.TestCase):
         review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
         self.assertNotIn(reconcile.Merge(KEY), self.plan(item, [implement, review], []))
 
-    def test_required_architect_consultation_must_be_done_for_the_current_work(self):
+    def test_required_architect_consultation_accepts_only_a_current_head_reply_after_the_panel(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         item = replace(Item(), stage="merge", merge_state="ready")
-        implement = Segment("implement", started_at=NOW - timedelta(hours=3))
-        review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
-        for architect in (None, Segment("architect", outcome="failed"),
-                          Segment("architect", ended_at=None),
-                          Segment("architect", started_at=NOW - timedelta(hours=4)),
-                          # overlaps implement (ends NOW-1h): it could not see the final work
-                          Segment("architect", started_at=NOW - timedelta(hours=2), ended_at=NOW)):
-            with self.subTest(architect=architect):
-                history = [implement, review, *([architect] if architect else [])]
-                self.assertNotIn(reconcile.Merge(KEY), self.plan(item, history, []))
-        for started_at in (NOW - timedelta(hours=1), NOW):
-            with self.subTest(started_at=started_at):
-                architect = Segment("architect", started_at=started_at, ended_at=NOW)
-                self.assertEqual(self.plan(item, [implement, review, architect], []), [reconcile.Merge(KEY)])
+        history = [Segment("implement", started_at=NOW - timedelta(hours=3)),
+                   Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)]
+        self.assertEqual(self.plan(item, history, []), [reconcile.Consult(KEY, "head", [])])
+        for reply in (reconcile.ArchitectReply("old", "APPROVED", NOW.isoformat(), {}),
+                      reconcile.ArchitectReply("head", "APPROVED", (NOW - timedelta(hours=2)).isoformat(), {}),
+                      reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(), {})):
+            with self.subTest(reply=reply):
+                self.assertNotIn(reconcile.Merge(KEY), self.plan(item, history, [], architect_replies={KEY: reply}))
+        self.assertEqual(self.plan(item, history, [], architect_replies={KEY: reconcile.ArchitectReply(
+            "head", "APPROVED", NOW.isoformat(), {})}), [reconcile.Merge(KEY)])
 
-    def test_implement_stage_architect_policy_requires_consultation(self):
-        self.p.stages["implement"] = policy.Place("implement", "builder", {"architect": True})
-        review = Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)
-        for stage in ("review", "merge"):
-            with self.subTest(stage=stage):
-                item = replace(Item(), stage=stage, merge_state="ready")
-                self.assertEqual(self.plan(item, [review], []), [reconcile.Merge(KEY)])
-                history = [Segment("implement"), review]
-                self.assertEqual(self.plan(item, history, []),
-                                 [reconcile.Wait(KEY, "architect consultation is required: no architect persona configured")])
-                self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], []),
-                                 [reconcile.Merge(KEY)])
-
-    def test_implementer_persona_architect_policy_requires_consultation(self):
-        self.p.personas["builder"] = replace(self.p.personas["builder"], policy={"architect": True})
-        review = Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)
-        for stage in ("review", "merge"):
-            with self.subTest(stage=stage):
-                item = replace(Item(), stage=stage, merge_state="ready")
-                self.assertEqual(self.plan(item, [review], []), [reconcile.Merge(KEY)])
-                history = [Segment("implement"), review]
-                self.assertEqual(self.plan(item, history, []),
-                                 [reconcile.Wait(KEY, "architect consultation is required: no architect persona configured")])
-                self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], []),
-                                 [reconcile.Merge(KEY)])
+    def test_implement_stage_and_persona_architect_policy_require_a_reply(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        history = [Segment("implement"), Segment("review", started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
+        for owner in (self.p.stages["implement"], self.p.personas["builder"]):
+            owner.policy["architect"] = True
+            self.assertEqual(self.plan(item, history, []), [reconcile.Consult(KEY, "head", [])])
+            self.assertEqual(self.plan(item, history, [], architect_replies={KEY: reconcile.ArchitectReply(
+                "head", "APPROVED", NOW.isoformat(), {})}), [reconcile.Merge(KEY)])
+            owner.policy.pop("architect")
 
     def test_an_architect_workflow_stage_follows_its_edge_after_a_done_segment(self):
         self.p = policy.parse({

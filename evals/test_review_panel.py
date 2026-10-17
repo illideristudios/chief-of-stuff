@@ -46,8 +46,7 @@ class ReviewPanelTest(unittest.TestCase):
     def plan(self, head="head", slots=4):
         history = self.db.segments(KEY)
         findings = reconcile.review_findings(self.db.reports(KEY), history,
-                                              sessions={s.attempt: f"session-{s.attempt}" for s in history if s.stage == "review"},
-                                              consults={1: "session-3"})
+                                              sessions={s.attempt: f"session-{s.attempt}" for s in history if s.stage == "review"})
         return reconcile.plan(self.db.items(), {KEY: history}, self.p, {}, slots, NOW,
                               {} if findings is None else {KEY: findings}, heads={KEY: head},
                               architect_replies=getattr(self, "replies", {}),
@@ -98,6 +97,12 @@ class ReviewPanelTest(unittest.TestCase):
         self.review(2, "security")
         action, = self.plan()
         self.assertIsInstance(action, reconcile.Consult)
+
+    def test_the_reserved_architect_is_never_launched_as_an_engine_worker(self):
+        from dataclasses import replace
+        self.p.personas["architect"] = replace(self.p.personas["architect"], agent="frank-lloyd-aight")
+        self.p.stages["review"].policy["reviewers"] = ("architect",)
+        self.assertEqual(self.plan(), [reconcile.Wait(KEY, "architect runs require Zach's request")])
 
     def test_three_unsuccessful_fix_rounds_ping(self):
         for round in range(1, 5):
@@ -165,7 +170,11 @@ class ReviewPanelTest(unittest.TestCase):
         # test_store pins that a migrated 0003 segment has no persona, head or round.
         self.segment("review", 1)
         self.db.upsert_item(KEY, review_state="changes_requested")
-        actions = self.plan()
+        import engine_facts
+        self.db.set_resume(KEY, {"runs": {"review-1": {"session_id": "legacy-session"}}})
+        inputs = engine_facts.gather(self.db, self.db.items())
+        actions = reconcile.plan(self.db.items(), policies=self.p, free_slots=4, now=NOW,
+                                 **{**inputs, "heads": {KEY: "head"}})
         self.assertEqual([(a.persona, a.review_round) for a in actions], [("critic", 1), ("security", 1)])
 
     def test_an_earlier_failed_peer_with_a_later_clean_peer_is_retried(self):
@@ -251,6 +260,11 @@ class ReviewPanelTest(unittest.TestCase):
                 self.db.record_segment(KEY, "fix", 1, NOW.isoformat(), outcome=outcome)
                 self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan(head="external")))
 
+    def test_an_unreadable_current_head_blocks_a_finding_fix(self):
+        self.review(1, "critic", [finding()])
+        self.review(2, "security")
+        self.assertEqual(self.plan(head=None), [reconcile.Wait(KEY, "change head is unknown")])
+
     def test_completed_fix_output_head_allows_the_next_finding(self):
         self.review(1, "critic", [finding("One"), finding("Two")])
         self.review(2, "security")
@@ -289,3 +303,30 @@ class ReviewPanelTest(unittest.TestCase):
         second, = reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))
         self.assertEqual(second["finding_key"], first["B"])
         self.assertNotEqual(first["A"], first["B"])
+
+
+class ArchitectCommentsTest(unittest.TestCase):
+    def test_latest_reply_uses_comment_order_for_equal_timestamps(self):
+        import engine_facts
+        timestamp = NOW.isoformat()
+        reply, requested = engine_facts.architect_comments([
+            SimpleNamespace(body='Architect review requested: head', time=timestamp),
+            SimpleNamespace(body='Architect: APPROVED head', time=timestamp),
+            SimpleNamespace(body='Architect: CHANGES head\n```json\n{"dispositions":{"1/1/key":"fix"}}\n```', time=timestamp)])
+        self.assertEqual((reply.status, reply.dispositions, requested), ('CHANGES', {'1/1/key': 'fix'}, ['head']))
+
+    def test_malformed_reply_cannot_reuse_old_dispositions(self):
+        import engine_facts
+        for payload in ('{"dispositions":{"key":"ignore"}}', '{invalid', '[]'):
+            with self.subTest(payload=payload):
+                reply, _ = engine_facts.architect_comments([
+                    SimpleNamespace(body='Architect: APPROVED head\n' + payload, time=NOW.isoformat())])
+                self.assertEqual(reply.dispositions, {})
+
+    def test_newer_timestamp_wins_over_source_order_and_untimed_replies_are_ignored(self):
+        import engine_facts
+        reply, _ = engine_facts.architect_comments([
+            SimpleNamespace(body='Architect: CHANGES new', time=NOW.isoformat()),
+            SimpleNamespace(body='Architect: APPROVED old', time=(NOW - timedelta(seconds=1)).isoformat()),
+            SimpleNamespace(body='Architect: APPROVED forged', time='')])
+        self.assertEqual(reply.reviewed_head, 'new')

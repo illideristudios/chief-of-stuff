@@ -61,6 +61,8 @@ class EngineTools:
         data = ReportInput.model_validate({"outcome": outcome, "summary": summary,
                                            "findings": [] if findings is None else findings})
         b = self.binding
+        if b.stage != "architect" and any(f.disposition is not None for f in data.findings):
+            raise ValueError("only the architect may supply dispositions")
         report_id = self.store.add_report(b.issue_key, b.stage, b.attempt, b.session_id, data.outcome, data.summary,
                                           [f.model_dump(exclude_none=True) for f in data.findings])
         return {"report_id": report_id}

@@ -65,6 +65,8 @@ class FakeGh(tma.FakeGhGraphql):
         validate_project_cli(args)
         if tuple(args[:2]) in self.fail:
             return 1, "", "rate limited"
+        if args[:2] == ["api", "--paginate"] and "/comments?" in args[2]:
+            return 0, "[]", ""
         if args[:2] == ["issue", "list"]:
             state = args[args.index("--state") + 1] if "--state" in args else "open"
             rows = [i for i in self.issues.values()
@@ -229,7 +231,7 @@ class GitHubTest(unittest.TestCase):
                     item.stage = stage
                     self.assertEqual(tr.reconcile.plan([item],
                                      {item.issue_key: [tr.Segment("review")]}, tr.policies(), {}, 0, tr.NOW,
-                                     {item.issue_key: {}}),
+                                     {item.issue_key: []}),
                                      [tr.reconcile.Wait(item.issue_key, "changes requested on the forge")])
 
     def test_approval_consumers_keep_their_blockers_and_latest_review_rules(self):
