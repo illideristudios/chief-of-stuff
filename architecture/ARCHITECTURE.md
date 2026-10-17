@@ -68,7 +68,10 @@ In policy, the name `architect` is reserved for the agent: `[personas.architect]
 
 The engine never starts an architect run on its own (Zach, 2026-10-17). The architect is a standing session that keeps its context across consults.
 - **A consult is a request.** The engine posts it where the architect watches, on the change or its issue, in the form `Architect review requested: <sha>`, with the findings to dispose of. It then waits for the architect's reply on the same thread, and treats the issue as waiting on the architect until the reply comes.
-- **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding. A reply for any commit but the current head does not count.
+- **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding.
+- **The head is the forge's.** "The current head" is the change's head as the forge adapter reports it, never a worker's local `HEAD`.
+- **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request.
+- **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
 - **A new architect run happens only when Zach asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
 
 Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
@@ -96,6 +99,13 @@ A module has one reason to change. `inbox.py` and `audit_tasks.py`, the two larg
 | `flow.py` | The tick orchestration and the command line | Frameworks and Drivers |
 
 Each module keeps re-exporting the names its callers import until they import from the new modules. Where the module boundaries and their names fall is decided when the work is assigned. On the engine path, `flow.py`'s ready-task judgement lands in `readiness.py`, and its stagnation judgement lands in `worker_health.py`, beside the silence signal it shares a rule with. The audit's done-on-main, read-only, unlanded and orphan judgements land in `completion.py`.
+
+On the engine path, file ownership is declared on the issue, because the forge is the source of truth and the store rebuilds from it.
+- **Where it is declared.** An issue states the paths it owns and their mode (write, or read-only) in a section of its body.
+- **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
+- **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
+- **Workers declare nothing.** They report what they changed, and the read-only rule judges that report. They never grant themselves a scope.
+- **An issue with no declared scope** is treated as owning its whole repository for writing. It conflicts with every running write in that repository until it declares a narrower scope.
 
 ## 9. Agent performance
 
