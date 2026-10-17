@@ -7,6 +7,7 @@ No JavaScript: the clocks carry `datetime` attributes a host script may keep tic
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -142,7 +143,10 @@ BASE_CSS = """\
 
 
 def css(colors: dict[str, str], tokens: dict[str, str]) -> str:
-    """Layout, `--panels-*` tokens and kind accents using the host's colours."""
+    """Layout and kind accents; raise ValueError if the host omits any layout token."""
+    missing = set(re.findall(r"var\(--panels-([a-z-]+)\)", BASE_CSS)) - tokens.keys()
+    if missing:
+        raise ValueError("Missing panel tokens: " + ", ".join(sorted(missing)))
     root = ";".join(f"--panels-{_kind(k)}:{_colour(v)}" for k, v in tokens.items())
     rules = [f'.panels-tile[data-kind="{_css_str(k)}"],.panels-panel[data-kind="{_css_str(k)}"]{{--k:{_colour(v)}}}'
              for k, v in colors.items()]
