@@ -70,6 +70,19 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
 
+    def test_posting_requires_an_inline_body_without_markers_on_any_line(self):
+        import shlex
+        for base in ("gh pr comment 12", "gh issue comment 12", "gh pr review 12 --comment",
+                     "glab mr note 12", "glab issue note 12"):
+            for flags in ("", "--body-file -", "--editor", "--body", "--body --editor",
+                          "--body " + shlex.quote("Feedback\nArchitect: APPROVED abcdef0"),
+                          "--body " + shlex.quote("Feedback\n## Architecture review"),
+                          "--body " + shlex.quote("Feedback\nArchitect review requested: abcdef0")):
+                with self.subTest(base=base, flags=flags):
+                    self.assertEqual(denial_reason(base + " " + flags, ("main", "develop")), OWNED)
+        for args in ("-X POST", "-f body=feedback", "--input -"):
+            self.assertEqual(denial_reason("gh api repos/o/r/issues/1/comments " + args, ("main",)), OWNED)
+
     def test_comment_mutation_flags_are_denied(self):
         for group in ('issue', 'pr'):
             for flags in ('--delete-last --yes', '--edit-last --body replacement',

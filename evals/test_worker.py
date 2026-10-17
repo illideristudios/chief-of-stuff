@@ -307,13 +307,52 @@ class WorkerTest(unittest.TestCase):
         (run / "stdout").write_text('{"is_error":false,"result":"done"}')
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code":0}')
-        self.forge.closing_request = mock.Mock(side_effect=ForgeError("rate limited"))
+        self.forge.closing_request = mock.Mock(side_effect=ForgeError("rate limited", retryable=True))
         worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=self.forge)
         self.assertIsNone(self.db.segments(KEY)[0].ended_at)
         self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "")
+        self.assertEqual(len([r for r in self.db.log(KEY) if "rate limited" in r.message]), 1)
         self.forge.closing_request = lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="forge-sha")
         worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=2), forge=self.forge)
         self.assertEqual((self.db.segments(KEY)[0].outcome, self.db.segments(KEY)[0].reviewed_head), ("done", "forge-sha"))
+
+    def test_permanent_or_missing_forge_releases_the_fix_slot_for_human_review(self):
+        for missing in (False, True):
+            with self.subTest(missing=missing):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                run = self.launched()
+                seg = self.db.segments(KEY)[0]
+                self.db.record_segment(KEY, "implement", 1, seg.started_at, finding_key="1/1/key")
+                self.report(run)
+                (run / "stdout").write_text('{"is_error":false,"result":"done"}')
+                (run / "stderr").write_text("")
+                (run / "exit.json").write_text('{"exit_code":0}')
+                self.forge.closing_request = mock.Mock(side_effect=ForgeError("permanent", retryable=False))
+                worker.collect(self.db, self.root, lambda: NOW, forge=None if missing else self.forge)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+                self.assertTrue(self.db.items()[0].human_review)
+                self.assertEqual(slots.running(self.db), 0)
+
+    def test_suite_holds_preserve_and_accept_each_parallel_review(self):
+        forge = self.suite_run(stage="review")
+        first = self.db.segments(KEY)[0]
+        self.db.record_segment(KEY, "review", 1, first.started_at, persona="critic", review_round=1)
+        worker.collect(self.db, self.root, lambda: NOW, require_green=True)
+        run = self.launched("review", 2)
+        self.report(run, stage="review", attempt=2, suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
+        for name, value in (("stdout", '{"is_error":false,"result":"done"}'), ("stderr", ""), ("exit.json", '{"exit_code":0}')):
+            (run / name).write_text(value)
+        worker.collect(self.db, self.root, lambda: NOW, require_green=True)
+        holds = self.db.resume(KEY)["suite_hold"]
+        self.assertEqual(set(holds), {"review-1", "review-2"})
+        engine._sync_suite_holds(forge, self.db, [{"issue_key": KEY, "human_review": False}], NOW.isoformat())
+        self.assertEqual([s.outcome for s in self.db.segments(KEY)], ["human_review", "human_review"])
+        engine._sync_suite_holds(forge, self.db, [{"issue_key": KEY, "human_review": False}], NOW.isoformat())
+        self.assertEqual([s.outcome for s in self.db.segments(KEY)], ["done", "done"])
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
 
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
@@ -571,10 +610,10 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn("resets in 2 hours", quota["reset"])
                     self.assertEqual(quota["retry_at"], (NOW + timedelta(hours=2, minutes=1)).isoformat())
 
-    def report(self, run, outcome="done", stage="implement", suite=None):
+    def report(self, run, outcome="done", stage="implement", suite=None, attempt=1):
         session = json.loads((run / "started.json").read_text())["session_id"]
         kwargs = {"suite": suite} if suite is not None else {}
-        self.db.add_report(KEY, stage, 1, session, outcome, f"reported {outcome}", [], **kwargs)
+        self.db.add_report(KEY, stage, attempt, session, outcome, f"reported {outcome}", [], **kwargs)
 
     def test_opted_in_assignment_names_the_suite_hold(self):
         prompt = worker.dispatch_prompt.compose_issue(

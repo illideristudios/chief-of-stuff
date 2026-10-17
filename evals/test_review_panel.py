@@ -216,20 +216,49 @@ class ReviewPanelTest(unittest.TestCase):
         action, = self.plan()
         self.assertEqual((action.stage, action.finding["title"]), ("fix", "Fix me"))
         self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="head")
-        self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan()))
+        filed, = self.plan()
+        self.assertEqual((filed.stage, filed.finding["title"]), ("fix", "Later"))
 
     def test_only_current_head_approval_allows_merge(self):
-        self.consulted(("Keep me", "keep"), ("Later", "file"))
+        self.consulted(("Keep me", "keep"), ("Not real", "discard"))
         self.replies[KEY] = reconcile.ArchitectReply("head", "APPROVED", NOW.isoformat(), self.replies[KEY].dispositions)
         self.assertEqual(self.plan(), [reconcile.Merge(KEY)])
         self.replies[KEY] = reconcile.ArchitectReply("old", "APPROVED", NOW.isoformat(), self.replies[KEY].dispositions)
         self.assertIsInstance(self.plan()[0], reconcile.Consult)
 
-    def test_a_reply_that_leaves_a_finding_undisposed_waits(self):
-        self.consulted(("Fix me", "fix"))
-        self.replies[KEY] = reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(), {})
-        self.requests = {KEY: [reconcile.request_token("head", self.keys())]}
-        self.assertIsInstance(self.plan()[0], reconcile.Wait)
+    def test_partial_dispositions_plan_the_remaining_fixes_without_another_request(self):
+        self.consulted(("One", "keep"), ("Two", "fix"))
+        asked = self.keys()
+        self.requests = {KEY: {reconcile.request_token("head", asked): asked}}
+        first, second = asked
+        for disposition, title in (("fix", "One"), ("file", "One"), ("keep", "Two"), ("discard", "Two")):
+            with self.subTest(disposition=disposition):
+                self.replies[KEY] = reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(),
+                                                           {first["finding_key"]: disposition})
+                action, = self.plan()
+                self.assertIsInstance(action, reconcile.Dispatch)
+                self.assertEqual((action.stage, action.finding["title"]), ("fix", title))
+        self.assertEqual(self.requests[KEY], {reconcile.request_token("head", asked): asked})
+
+    def test_all_keep_or_discard_requests_approval_once_for_the_same_head(self):
+        self.consulted(("One", "keep"), ("Two", "discard"))
+        asked = self.keys()
+        self.requests = {KEY: {reconcile.request_token("head", asked): asked}}
+        self.assertEqual(self.plan(), [reconcile.Consult(KEY, "head", [])])
+        self.requests[KEY][reconcile.request_token("head", [])] = []
+        self.assertEqual(self.plan(), [reconcile.Wait(KEY, "waiting for the architect")])
+        self.replies[KEY] = reconcile.ArchitectReply("head", "APPROVED", NOW.isoformat(), self.replies[KEY].dispositions)
+        self.assertEqual(self.plan(), [reconcile.Merge(KEY)])
+
+    def test_head_moving_during_fix_requires_a_new_review_before_merge(self):
+        self.review(1, "critic")
+        self.review(2, "security")
+        self.db.upsert_item(KEY, stage="merge")
+        actions = self.plan(head="moved-during-fix")
+        self.assertEqual(actions, [reconcile.Review(KEY, 3, "critic", 2), reconcile.Review(KEY, 4, "security", 2)])
+        self.review(3, "critic", head="moved-during-fix", round=2)
+        self.review(4, "security", head="moved-during-fix", round=2)
+        self.assertEqual(self.plan(head="moved-during-fix"), [reconcile.Merge(KEY)])
 
     def test_a_fresh_round_at_the_same_head_asks_again_for_its_new_findings(self):
         self.consulted(("One", "fix"))
@@ -247,11 +276,17 @@ class ReviewPanelTest(unittest.TestCase):
         self.assertIsInstance(self.plan()[0], reconcile.Wait)
 
     def test_a_rework_stage_whose_head_moved_keeps_its_dispatch(self):
+        from dataclasses import replace
+        workflow = self.p.workflows["standard"]
+        self.p.workflows["standard"] = replace(workflow, edges=tuple(
+            replace(e, target="implement") if e.source == "review" and e.target == "fix" else e
+            for e in workflow.edges))
         self.review(1, "critic", [finding()], head="old")
         self.review(2, "security", head="old")
         self.db.upsert_item(KEY, stage="implement")
         actions = self.plan(head="new")
-        self.assertFalse(any(isinstance(a, reconcile.Review) for a in actions), actions)
+        self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 1,
+                                                    self.keys()[0]["finding_key"], self.keys()[0])])
 
     def test_reviewer_dispositions_cannot_suppress_or_authorize_findings(self):
         for disposition in ("file", "keep", "discard", "fix"):
@@ -374,45 +409,46 @@ class ReviewPanelTest(unittest.TestCase):
 
 
 class ArchitectCommentsTest(unittest.TestCase):
-    def test_latest_reply_uses_comment_order_for_equal_timestamps(self):
+    def test_only_requested_sha_prefixes_and_the_architect_author_are_parsed(self):
         import engine_facts
-        timestamp = NOW.isoformat()
-        reply, requested = engine_facts.architect_comments([
-            SimpleNamespace(body='Architect review requested: head', time=timestamp),
-            SimpleNamespace(body='Architect: APPROVED head', time=timestamp),
-            SimpleNamespace(body='Architect: CHANGES head\n```json\n{"dispositions":{"1/1/key":"fix"}}\n```', time=timestamp)])
-        self.assertEqual((reply.status, reply.dispositions, requested), ('CHANGES', {'1/1/key': 'fix'}, ['head']))
+        head = "abcdef0123456789abcdef0123456789abcdef01"
+        other = "1234567890abcdef1234567890abcdef12345678"
+        finding = {"finding_key": "1/1/a"}
+        requests = {reconcile.request_token(head, [finding]): [finding], reconcile.request_token(other, []): []}
+        body = 'Architect: CHANGES %s\n{"dispositions":{"1/1/a":"keep","unasked":"fix"}}'
+        comments = [SimpleNamespace(author="frank", body=body % head[:7], time=NOW.isoformat())]
+        for sha, author in ((head[:6], "frank"), ("bbbbbbb", "frank"), (head + "@bad", "frank"), (head, "worker")):
+            comments.append(SimpleNamespace(author=author, body="Architect: APPROVED " + sha,
+                                            time=(NOW + timedelta(seconds=1)).isoformat()))
+        reply, posted = engine_facts.architect_comments(comments, head=head, author="frank", requests=requests,
+                                                       engine_author="engine")
+        self.assertEqual((reply.reviewed_head, reply.status, dict(reply.dispositions)),
+                         (head, "CHANGES", {"1/1/a": "keep"}))
+        self.assertEqual(posted, [])
 
-    def test_malformed_reply_cannot_reuse_old_dispositions(self):
+    def test_requests_require_engine_author_and_local_posting_evidence(self):
         import engine_facts
-        for payload in ('{"dispositions":{"key":"ignore"}}', '{invalid', '[]'):
-            with self.subTest(payload=payload):
-                reply, _ = engine_facts.architect_comments([
-                    SimpleNamespace(body='Architect: APPROVED head\n' + payload, time=NOW.isoformat())])
-                self.assertEqual(reply.dispositions, {})
+        head = "a" * 40
+        token = reconcile.request_token(head, [])
+        def note(author, token):
+            return SimpleNamespace(author=author, body="Architect review requested: " + token, time=NOW.isoformat())
+        _, posted = engine_facts.architect_comments([note("worker", token), note("engine", "forged")],
+            head=head, author="frank", engine_author="engine", requests={token: []})
+        self.assertEqual(posted, [])
+        _, posted = engine_facts.architect_comments([note("engine", token)], head=head, author="frank",
+                                                   engine_author="engine", requests={token: []})
+        self.assertEqual(posted, [token])
 
-    def test_newer_timestamp_wins_over_source_order_and_untimed_replies_are_ignored(self):
+    def test_dispositions_fold_by_timestamp_then_source_order_across_requested_heads(self):
         import engine_facts
+        head, old = "a" * 40, "b" * 40
+        finding = {"finding_key": "1/1/a"}
+        requests = {reconcile.request_token(h, [finding]): [finding] for h in (head, old)}
+        def note(sha, disposition, when):
+            return SimpleNamespace(author="frank", body='Architect: CHANGES ' + sha +
+                '\n{"dispositions":{"1/1/a":"' + disposition + '"}}', time=when)
         reply, _ = engine_facts.architect_comments([
-            SimpleNamespace(body='Architect: CHANGES new', time=NOW.isoformat()),
-            SimpleNamespace(body='Architect: APPROVED old', time=(NOW - timedelta(seconds=1)).isoformat()),
-            SimpleNamespace(body='Architect: APPROVED forged', time='')])
-        self.assertEqual(reply.reviewed_head, 'new')
-
-    def test_dispositions_fold_oldest_first_whatever_the_list_order(self):
-        import engine_facts
-        body = 'Architect: CHANGES head\n```json\n{"dispositions":{"1/1/a":"%s"}}\n```'
-        reply, _ = engine_facts.architect_comments([
-            SimpleNamespace(body=body % "keep", time=NOW.isoformat()),
-            SimpleNamespace(body=body % "fix", time=(NOW - timedelta(seconds=5)).isoformat())], head="head")
-        self.assertEqual(dict(reply.dispositions), {"1/1/a": "keep"})
-
-    def test_a_later_reply_for_another_head_does_not_hide_this_head(self):
-        import engine_facts
-        reply, _ = engine_facts.architect_comments([
-            SimpleNamespace(author="frank", body='Architect: CHANGES head\n```json\n{"dispositions":{"1/1/a":"keep"}}\n```',
-                            time=(NOW - timedelta(seconds=1)).isoformat()),
-            SimpleNamespace(author="worker", body='Architect: APPROVED other', time=NOW.isoformat())],
-            head="head", author="frank")
-        self.assertEqual((reply.status, reply.reviewed_head, dict(reply.dispositions)),
-                         ("CHANGES", "head", {"1/1/a": "keep"}))
+            note(head, "keep", NOW.isoformat()), note(old, "fix", (NOW - timedelta(seconds=1)).isoformat()),
+            note(head, "discard", NOW.isoformat()), note(head, "fix", "")],
+            head=head, author="frank", requests=requests)
+        self.assertEqual((reply.status, dict(reply.dispositions)), ("CHANGES", {"1/1/a": "discard"}))

@@ -1482,3 +1482,20 @@ class ChangeCommentsTest(unittest.TestCase):
             source.change_comments(21)
         with self.assertRaises(forge.ForgeError):
             source.comment_change(21, "request")
+
+
+class ForgeRetryabilityTest(unittest.TestCase):
+    def test_adapter_classifies_request_failures(self):
+        import merge_ready
+        from unittest import mock
+        source = forge.Forge(backlog.GitHubBacklog("example/project"))
+        for message, retryable in (("HTTP 429", True), ("HTTP 503", True), ("connection reset", True),
+                                   ("timed out", True), ("HTTP 403 rate limit exceeded", True),
+                                   ("HTTP 401", False), ("HTTP 404", False), ("unreadable JSON", False)):
+            with self.subTest(message=message), mock.patch.object(merge_ready, "github_ready", side_effect=RuntimeError(message)):
+                with self.assertRaises(forge.ForgeError) as raised:
+                    source.requests()
+                self.assertEqual(raised.exception.retryable, retryable)
+        with self.assertRaises(forge.ForgeError) as raised:
+            source.closing_request("github:example/project#1", [])
+        self.assertFalse(raised.exception.retryable)
