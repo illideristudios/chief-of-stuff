@@ -65,7 +65,9 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
     try:
         used = launch()
     except Exception:
-        store.drop_segment(issue_key, stage, attempt)
+        data = store.resume(issue_key)
+        if not isinstance(data, dict) or data.get("canceling") != f"{stage}-{attempt}":
+            store.drop_segment(issue_key, stage, attempt)
         raise
     if used is not None:
         model, effort = used

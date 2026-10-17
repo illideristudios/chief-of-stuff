@@ -378,37 +378,55 @@ def _move_tree(repo: Path, trees: Path, path: Path, issue: str, stamp: str) -> N
             raise RuntimeError(f"could not quarantine orphaned worktree: {detail or exc}") from exc
 
 
+def _preserve_ref(repo: Path, common: Path, dest: str, sha: str) -> str:
+    """Create a preservation ref once; a resumed copy never overwrites an earlier tip."""
+    while True:
+        existing = _ref_sha(repo, common, dest)
+        if existing == sha:
+            return dest
+        if existing is not None:
+            dest = f"{dest}-resumed-{uuid.uuid4().hex}"
+            continue
+        wrote, detail = make_worktree.git_trusted(["update-ref", dest, sha, "0" * len(sha)], repo)
+        if not wrote:
+            return dest
+        if _ref_sha(repo, common, dest) is None:
+            raise RuntimeError(f"could not quarantine ref {dest}: {detail}")
+
+
 def _apply_quarantine(repo: Path, trees: Path, number: int, plan: dict, common: Path) -> None:
-    """Move the saved trees and rename the saved refs. A ref that git will not rename stays, and the quarantine ref holds it."""
+    """Move whole trees, preserving their HEADs and every copied tip across interruptions."""
     issue, stamp = str(number), plan["stamp"]
+    moved = []
     for path_s in plan["paths"]:
         path = Path(path_s)
-        if not path.is_dir():
+        dest = trees / "quarantine" / issue / stamp / path.name
+        source = path if path.is_dir() else dest
+        if not source.is_dir():
             continue
-        code, sha = make_worktree.git(["rev-parse", "HEAD"], path, expected_common=common)
+        code, sha = make_worktree.git(["rev-parse", "HEAD"], source, expected_common=common)
         if code == 0 and sha:
-            anchor = f"refs/quarantine/{issue}/{stamp}/commits/{path.name}"
-            wrote, detail = make_worktree.git_trusted(["update-ref", anchor, sha], repo)
-            if wrote:
-                raise RuntimeError(f"could not quarantine ref {anchor}: {detail}")
+            _preserve_ref(repo, common, f"refs/quarantine/{issue}/{stamp}/commits/{path.name}", sha)
         _move_tree(repo, trees, path, issue, stamp)
+        moved.append(dest)
     for ref in plan["refs"]:
         sha = _ref_sha(repo, common, ref)
         if sha is None:
             continue
-        dest = _quarantine_ref(issue, stamp, ref)
-        wrote, detail = make_worktree.git_trusted(["update-ref", dest, sha], repo)
-        if wrote:
-            raise RuntimeError(f"could not quarantine ref {ref}: {detail}")
+        dest = _preserve_ref(repo, common, _quarantine_ref(issue, stamp, ref), sha)
         if ref.startswith("refs/heads/"):
+            # Address moved destinations directly: rename fallback leaves worktree list's path stale.
+            for path in moved:
+                code, head_ref = make_worktree.git_trusted(["symbolic-ref", "HEAD"], path)
+                if code == 0 and head_ref == ref:
+                    code, detail = make_worktree.git_trusted(["symbolic-ref", "HEAD", dest], path)
+                    if code:
+                        raise RuntimeError(f"cannot repoint quarantined HEAD: {detail}")
             code, listed = make_worktree.git_trusted(["worktree", "list", "--porcelain"], repo)
-            if code == 0:
-                held = None
-                for line in listed.splitlines():
-                    if line.startswith("worktree "):
-                        held = Path(line.removeprefix("worktree "))
-                    elif line == f"branch {ref}" and held is not None and "quarantine" in held.parts:
-                        make_worktree.git_trusted(["symbolic-ref", "HEAD", dest], held)
+            if code:
+                raise RuntimeError("cannot list worktrees; preserving refs")
+            if f"branch {ref}" in listed.splitlines():
+                continue  # the main clone, an outside checkout, or unverified metadata still holds it
         make_worktree.git_trusted(["update-ref", "-d", ref, sha], repo)
 
 
@@ -678,23 +696,27 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     except BaseException as exc:  # an interrupt too: a start that was never verified must not leave a runner behind
         # Cancel first. Archive only once the host is confirmed stopped, or when the run never started.
         claude_adapter.cancel(runner)
-        stopped = True
-        if (run_dir / "started.json").is_file():
+        try:
+            (run_dir / "canceled").write_text("canceled\n")
+        except OSError:
+            raise exc
+        saved = _resume(store, issue_key)
+        saved.get("runs", {}).pop(f"{stage}-{attempt}", None)
+        saved["canceling"] = f"{stage}-{attempt}"
+        store.set_resume(issue_key, saved)
+        deadline = time.monotonic() + 1
+        while (run_dir / "started.json").is_file():
             try:
                 _assert_stopped(run_dir)
+                break
             except (OSError, ValueError, KeyError, TypeError, RuntimeError):
-                stopped = False
-        if not stopped:
-            if isinstance(exc, Exception):
-                return actor.model, actor.effort or ""  # the reservation stays until the host is confirmed stopped
-            raise
-        with contextlib.suppress(OSError):
-            (run_dir / "canceled").write_text("canceled\n")
+                if time.monotonic() >= deadline:
+                    raise exc
+                time.sleep(0.01)
         with contextlib.suppress(OSError):
             run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
-        saved = _resume(store, issue_key)
-        if saved.get("runs", {}).pop(f"{stage}-{attempt}", None) is not None:
-            store.set_resume(issue_key, saved)
+        saved.pop("canceling", None)
+        store.set_resume(issue_key, saved)
         raise
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
@@ -726,6 +748,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         continue
                 run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
                 store.drop_segment(key, segment.stage, segment.attempt)
+                data.pop("canceling", None)
+                store.set_resume(key, data)
                 if (data.get("pending_stage") or {}).get("stage") == segment.stage:
                     data.pop("pending_stage")
                     store.set_resume(key, data)
