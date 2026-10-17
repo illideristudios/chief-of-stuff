@@ -198,7 +198,7 @@ def fetch_base(tree: Path, timeout: int = 30) -> str:
 
 
 def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
-    """`""` once `origin/<branch>` is fetched, else one line saying why: the first `fatal:` line, else the last, with the
+    """`""` once `origin/<branch>` is fetched, else a timeout line or the first `fatal:` line (else the last), with the
     tree's path blanked and every non-printable character escaped (`clean`), since it is printed. The refspec is
     explicit and forced, so the ref moves whatever `remote.origin.fetch` says and follows a rewritten branch, and
     `--no-tags` keeps it the only ref written. Not through `git()`: the fetch writes into a tree a worker can write, so
@@ -216,7 +216,7 @@ def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
             if out.returncode == 0 or "cannot lock ref" not in out.stderr:
                 break
     except subprocess.TimeoutExpired:
-        return f"git fetch timed out after {timeout}s; fetch origin manually, then retry"
+        return f"git fetch timed out after {timeout}s"
     except (OSError, subprocess.SubprocessError) as exc:  # not `exc`'s text: it can repeat the tree's path
         return f"git fetch did not run ({type(exc).__name__})"
     if out.returncode == 0:
