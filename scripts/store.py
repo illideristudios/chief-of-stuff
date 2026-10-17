@@ -166,21 +166,18 @@ def migrate(path: Path | str) -> None:
 
 
 class Store:
-    def __init__(self, path: Path | str, clock: clock.Clock = clock.system, *, readonly: bool = False) -> None:
+    def __init__(self, path: Path | str, clock: clock.Clock = clock.system) -> None:
         self.clock = clock
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"timeout": 30, "isolation_level": None})
 
         @event.listens_for(self.engine, "connect")
         def _pragmas(conn, _record) -> None:  # noqa: ANN001 - DBAPI connection
             conn.execute("PRAGMA foreign_keys=ON")
-            if readonly:
-                conn.execute("PRAGMA query_only=ON")
 
         @event.listens_for(self.engine, "begin")
         def _begin(conn) -> None:  # noqa: ANN001 - SQLAlchemy connection
-            # A writer takes the reserved lock before reading: a WAL snapshot cannot upgrade after another commit.
-            # A read-only opener must not take that lock, or an audit blocks the engine.
-            conn.exec_driver_sql("BEGIN" if readonly else "BEGIN IMMEDIATE")
+            # Take the write lock before reading: a WAL snapshot cannot upgrade after another writer commits.
+            conn.exec_driver_sql("BEGIN IMMEDIATE")
 
     def _stamp(self) -> str:
         return self.clock().isoformat()

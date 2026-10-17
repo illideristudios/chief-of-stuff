@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 """Audit task completion against worktree and issue state.
 
-The exit code counts actionable findings, including stale stacks and discovery failures.
-Tasks without worktrees are excluded from reopening. Worktree paths must remain inside the workspace root.
+The exit code counts tasks to reopen. Tasks without worktrees are excluded. Worktree paths must
+remain inside the workspace root.
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import re
 import subprocess
 import sys
@@ -19,7 +18,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from clock import HHMM, RAN, dur as _dur, hhmm as _hhmm  # noqa: E402
-from findings import ISSUE, KANBAN, LANE, MERGED, NEXT, OVER, QUEUE, REOPEN, STACK, STOPPED  # noqa: E402
+from findings import ISSUE, KANBAN, LANE, MERGED, NEXT, OVER, QUEUE, REOPEN, STOPPED  # noqa: E402
 from md import cells as _cells, is_separator as _is_separator, section as _section, unmark as _unmark  # noqa: E402
 from tracker import Session, clip_name, parse_tracker  # noqa: E402
 from workspace import ConfigError, parse_coordinator, read_config, settings_path, worktrees_dir  # noqa: E402
@@ -32,15 +31,12 @@ import tracker_log  # noqa: E402
 import forge  # noqa: E402
 import kanban as kanban_tool  # noqa: E402
 import ownership  # noqa: E402
-import shell_setup  # noqa: E402
 import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
 from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
-import process_status  # noqa: E402
 from process_status import process_exists, registrations, running_trees  # noqa: E402
-from tree_claims import Claims, engine_claims, one_shot_claims, registry_claims  # noqa: E402
-import worker  # noqa: E402
+from tree_claims import Claims, one_shot_claims, registry_claims  # noqa: E402
 
 # Preserve branch names from ownership rows when worktrees disappear.
 WORKTREE = re.compile(r"\bworktrees?\s+(?P<tick>`)?(?P<name>[A-Za-z0-9._\-/]+)`?(?:\s*\((?P<branch>[^)]*)\))?")
@@ -110,16 +106,6 @@ class QueueFault:
 
     def __str__(self) -> str:
         return f"{QUEUE} {self.row} — {self.why}"
-
-
-@dataclass(frozen=True)
-class StackFault:
-    """A stack without a live owner, or an unsuccessful stack discovery."""
-
-    why: str
-
-    def __str__(self) -> str:
-        return f"{STACK} {self.why}"
 
 
 @dataclass(frozen=True)
@@ -430,7 +416,6 @@ class Report:
     lanes: list[LaneFault] = field(default_factory=list)
     kanban: list[KanbanFault] = field(default_factory=list)
     over: list[OverBudget] = field(default_factory=list)
-    stacks: list[StackFault] = field(default_factory=list)
 
 
 def _worktrees(cell: str) -> tuple[list[str], dict[str, str]]:
@@ -847,102 +832,6 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
     return faults, lines, len(open_rows)
 
 
-def _sample_claims(root: Path, trees: str) -> tuple[Claims, BaseException | None, str]:
-    """Registry and one-shot claims, plus engine claims when the store can be read.
-
-    The third value is "" when the sample is complete, "process" when registry or one-shot
-    claims could not be read, and "engine" when only engine ownership failed.
-    """
-    try:
-        claims = registry_claims(root, registrations, process_exists)
-        for path, rows in one_shot_claims((root / trees).resolve(), running_trees).items():
-            claims.setdefault(path, []).extend(rows)
-    except (OSError, RuntimeError) as exc:
-        return {}, exc, "process"
-    try:
-        found = engine_ownership(root)
-    except (OSError, RuntimeError, ValueError, ImportError) as exc:
-        return claims, exc, "engine"
-    for path, rows in found.items():
-        claims.setdefault(path, []).extend(rows)
-    return claims, None, ""
-
-
-def engine_ownership(root: Path) -> Claims:
-    """Open a current store read-only and return engine tree claims. Failures propagate.
-
-    A missing store is no engine rows, not an error. A stale or unreadable store raises
-    rather than migrating: an audit must not take the migration lock or rewrite the database.
-    """
-    path = root / "store.db"
-    rows = []
-    if path.is_file():
-        import sqlalchemy.exc
-        import sqlite3
-        import store
-        try:
-            if not store.is_current(path):
-                raise RuntimeError("store.db is not at the current revision")
-            db = store.Store(path, readonly=True)
-            try:
-                rows = db.segment_runs()
-            finally:
-                db.engine.dispose()
-        except RuntimeError:
-            raise
-        except (OSError, sqlite3.Error, ValueError, sqlalchemy.exc.SQLAlchemyError) as exc:
-            raise RuntimeError(str(exc)) from exc
-    located = []
-    for key, stage, attempt, ended, record in rows:
-        if not isinstance(record, dict):
-            record = {}
-        evidence = record.get("run_dir")
-        if not isinstance(evidence, str) or not evidence.strip():
-            try:
-                evidence = str(worker.run_dir(root, key, stage, attempt).resolve())
-            except ValueError:
-                evidence = ""
-            if evidence:
-                record = {**record, "run_dir": evidence}
-        located.append((ended, record))
-    return engine_claims(root, process_status.identity, located)
-
-
-def _live_trees(claims: Claims, workspace: Path) -> set[Path]:
-    return {path.relative_to(workspace) if path.is_relative_to(workspace) else path
-            for path, found in claims.items() if any(claim.live for claim in found)}
-
-
-def discover_stacks(root: Path, command: str) -> list[tuple[str, Path]]:
-    """Gather stack facts; invalid command output raises rather than claiming no stacks."""
-    if not command:
-        return []
-    try:
-        result = shell_setup.run_command(command, root, workspace=root)
-        if result.returncode:
-            raise ValueError(f"exit {result.returncode}: {result.stderr.strip() or result.stdout.strip()}")
-        rows = json.loads(result.stdout)
-        if not isinstance(rows, list) or any(
-                not isinstance(row, dict) or any(not isinstance(row.get(key), str) or not row[key].strip()
-                                                for key in ("stack", "worktree")) for row in rows):
-            raise ValueError('expected JSON [{"stack": name, "worktree": path}]')
-        return [(git_trees.clean(row["stack"]), Path(git_trees.clean(str((root / row["worktree"]).resolve()))))
-                for row in rows]
-    except (OSError, KeyError, subprocess.SubprocessError) as exc:
-        raise ValueError(str(exc)) from exc
-
-
-def stale_stacks(rows: list[tuple[str, Path]], base: Path, live: set[Path]) -> list[StackFault]:
-    """Judge discovered stacks using process-backed claims, without reading files or processes."""
-    faults = []
-    for name, path in rows:
-        if path == base or not path.is_relative_to(base):
-            faults.append(StackFault(f"{name}: worktree {path} is outside the configured Worktrees directory"))
-        elif path not in live:
-            faults.append(StackFault(f"{name}: worktree {path} has no live owner"))
-    return faults
-
-
 def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetime | None = None, call=None) -> Report:
     claude_md = (root / "CLAUDE.md").read_text()
     cfg = parse_coordinator(claude_md, today=date.today())
@@ -965,60 +854,6 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
         roster.add(_bare(cfg.user))
 
     report = Report()
-    discovered = []
-    workspace = root.resolve()
-    base = (workspace / trees).resolve()
-    before: Claims = {}
-    after: Claims = {}
-    saw_after = False
-    sampled_before = False
-    process_failed = False
-
-    def _note(exc: BaseException | None) -> None:
-        if exc is None or not settings.workers.teardown_list:
-            return
-        if not any("engine ownership unreadable" in str(item) for item in report.stacks):
-            report.stacks.append(StackFault(git_trees.clean(f"engine ownership unreadable: {exc}")))
-
-    if settings.workers.teardown_list:
-        if not trees or base == workspace or not base.is_relative_to(workspace):
-            report.stacks.append(StackFault(git_trees.clean(
-                "discovery failed: stack discovery requires a nonempty Worktrees directory inside the workspace")))
-        else:
-            before, exc, kind = _sample_claims(root, trees)
-            sampled_before = True
-            if exc is not None:
-                _note(exc)
-                # A failed engine probe is not proof the tree is unowned.
-                process_failed = True
-            else:
-                try:
-                    discovered = discover_stacks(root, settings.workers.teardown_list)
-                except (OSError, ValueError) as exc:
-                    report.stacks.append(StackFault(git_trees.clean(f"discovery failed: {exc}")))
-                else:
-                    after, exc, kind = _sample_claims(root, trees)
-                    if exc is not None:
-                        # A failed second sample cannot prove a stack or a tree unowned.
-                        _note(exc)
-                        discovered = []
-                        process_failed = True
-                    else:
-                        saw_after = True
-    if saw_after:
-        process_claims = after
-    elif sampled_before:
-        process_claims = before
-    else:
-        process_claims, exc, kind = _sample_claims(root, trees)
-        _note(exc)
-        process_failed = exc is not None
-    if discovered:
-        base = base.relative_to(workspace)
-        rows = [(name, path.relative_to(workspace) if path.is_relative_to(workspace) else path)
-                for name, path in discovered]
-        report.stacks.extend(stale_stacks(rows, base, _live_trees(before, workspace) | _live_trees(after, workspace)))
-    report.lines.extend(str(stack) for stack in report.stacks)
     handled: set[str] = set()
     seen: set[Path] = set()
     order: list[Path] = []
@@ -1105,17 +940,18 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 path = _resolve(root, trees, name)[0]
                 if path is not None:
                     claims.setdefault(path, []).append(row_claim(row, tasks, roster, refs, cfg.user, tracker.sessions))
-        for path, found in process_claims.items():
-            claims.setdefault(path, []).extend(found)
-        if not process_failed:
-            for path in order:
-                state = git_trees.read_state(path, view_of(path))
-                state = replace(state, branch=git_trees.clean(state.branch))  # the branch reaches an audit line (#534)
-                finding = judge(names[path], state, claims.get(path, []))
-                if isinstance(finding, Orphan):
-                    report.orphans.append(finding)
-                elif isinstance(finding, Unclaimed):
-                    report.unclaimed.append(finding)
+        for source in (registry_claims(root, registrations, process_exists),
+                       one_shot_claims((root / trees).resolve(), running_trees)):
+            for path, found in source.items():
+                claims.setdefault(path, []).extend(found)
+        for path in order:
+            state = git_trees.read_state(path, view_of(path))
+            state = replace(state, branch=git_trees.clean(state.branch))  # the branch reaches an audit line (#534)
+            finding = judge(names[path], state, claims.get(path, []))
+            if isinstance(finding, Orphan):
+                report.orphans.append(finding)
+            elif isinstance(finding, Unclaimed):
+                report.unclaimed.append(finding)
         handle = _handle(root, trees, order, view_of)
         for name, detail in gone.items():
             report.lines.append(missing_tree(handle, name, detail, view_of(handle) if handle else None))
@@ -1152,7 +988,6 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     report.over.extend(over_budget(tasks, settings.budgets, day, now or datetime.now(cfg.zone)))
     report.lines.extend(str(o) for o in report.over)
     budgeted = f" over={len(report.over)}" if settings.budgets else ""
-    stacks = f" stacks={len(report.stacks)}" if settings.workers.teardown_list else ""
     report.lines.extend(str(f) for f in report.lanes)
     laned = f" lanes={len(report.lanes)}" if report.lanes or any(t.lane.strip() for t in tasks) else ""
     kanban = f" kanban={len(report.kanban)}" if settings.kanban and check_issues else ""
@@ -1160,7 +995,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     reopen = f"{facts} tree{'' if facts == 1 else 's'}/{len(report.reopen)} task{'' if len(report.reopen) == 1 else 's'}" if report.reopen else "0"
     report.lines.append(
         f"tasks={len(tasks)} trees={len(seen)} reopen={reopen} orphaned={len(report.orphans)} "
-        + (f"unclaimed={len(report.unclaimed)} " if report.unclaimed else "") + f"stopped={len(report.stopped)}" + (f" queued={queued}" if queue_lines or faults or queued else "") + issues + merged + laned + kanban + budgeted + stacks)
+        + (f"unclaimed={len(report.unclaimed)} " if report.unclaimed else "") + f"stopped={len(report.stopped)}" + (f" queued={queued}" if queue_lines or faults or queued else "") + issues + merged + laned + kanban + budgeted)
     return report
 
 
@@ -1235,7 +1070,7 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         return 2
     for line in report.lines:
         print(line)
-    return len(report.reopen) + len(report.stopped) + len(report.queue) + len(report.issues) + len(report.merged) + len(report.lanes) + len(report.kanban) + len(report.stacks)
+    return len(report.reopen) + len(report.stopped) + len(report.queue) + len(report.issues) + len(report.merged) + len(report.lanes) + len(report.kanban)
 
 
 if __name__ == "__main__":

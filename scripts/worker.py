@@ -31,7 +31,7 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
+def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
     number = key.rpartition("#")[2]
     if not number.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_-]+", stage) or attempt < 1:
         raise ValueError("invalid worker issue, stage or attempt")
@@ -117,7 +117,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
     actor = policies.personas[name]
-    located = run_dir(root, issue_key, stage, attempt)
+    located = _run_dir(root, issue_key, stage, attempt)
     data = _resume(store, issue_key)
     existing = _existing_run(data, located, stage, attempt, trees, clock)
     if existing is not None:
@@ -255,7 +255,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             record = runs.get(f"{segment.stage}-{segment.attempt}")
             if record is None and trees is not None:
                 # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.
-                located = run_dir(root, key, segment.stage, segment.attempt)
+                located = _run_dir(root, key, segment.stage, segment.attempt)
                 try:
                     record = _existing_run(data, located, segment.stage, segment.attempt, trees, clock)
                 except RuntimeError:
@@ -271,7 +271,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     or any(not isinstance(record.get(field), str) or not record[field]
                            for field in ("session_id", "run_dir", "tree"))):
                 raise ValueError("incomplete run identity")
-            located = run_dir(root, key, segment.stage, segment.attempt)
+            located = _run_dir(root, key, segment.stage, segment.attempt)
             if Path(record["run_dir"]).resolve() != located or located.is_relative_to(Path(record["tree"]).resolve()):
                 raise ValueError("run record is outside the engine evidence directory")
             runner = _runners.get(str(located))

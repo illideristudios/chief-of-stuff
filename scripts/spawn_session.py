@@ -15,7 +15,6 @@ import re
 import shlex
 import subprocess
 import sys
-import shell_setup
 import time
 from datetime import datetime
 from pathlib import Path
@@ -176,7 +175,6 @@ def runtime_tokens(*, cwd: str, workspace: str = ".", **worker) -> list[str]:
     """Exact worker argv shared by terminal launchers: cwd and PATH pinned inline by `env`."""
     return [ENV_BIN, "-C", _paths(cwd)[0], f"PATH={os.environ.get('PATH', '')}",
             f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(workspace)}",
-            f"CHIEF_OF_STUFF_WORKER={worker.get('title') or ''}",
             *worker_tokens(cwd=cwd, workspace=workspace, **worker)]
 
 
@@ -211,8 +209,7 @@ def herdr_commands(*, herdr: Path | None, session: str, **worker) -> tuple[list[
                            "the pane shell cannot take a line that long")
     return ([*prefix, "tab", "create", "--cwd", os.path.abspath(worker["cwd"]),
              "--label", title, "--no-focus",
-             "--env", f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(worker.get('workspace', '.'))}",
-             "--env", f"CHIEF_OF_STUFF_WORKER={title or ''}"],
+             "--env", f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(worker.get('workspace', '.'))}"],
             [*prefix, "pane", "run", "<root-pane>", *line])
 
 
@@ -496,7 +493,7 @@ def main(argv_in: list[str] | None = None) -> int:
             return one_shot.run(root=Path(args.root).resolve(), day=args.date, task=args.task,
                                 cwd=Path(args.cwd), name=args.title, runtime=args.runtime,
                                 agent_type=args.agent_type, model=args.model, effort=args.effort,
-                                dry_run=args.dry_run, timeout_minutes=args.timeout_minutes, teardown=shell_setup.teardown)
+                                dry_run=args.dry_run, timeout_minutes=args.timeout_minutes)
         except (ValueError, OSError, dispatch_prompt.RefusedError, ShellError, SettingsError) as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 1

@@ -154,36 +154,14 @@ def command(runtime: str, binary: str, release: Path, root: Path) -> list[str]:
     return [binary, "-i", initial]
 
 
-def _audit_python(root: Path) -> str:
-    """The engine venv when the store exists: base Python has no SQLAlchemy to read it.
-
-    supervisor imports siblings, so it loads by bare name with scripts/ on the path, the same
-    way the engine starts it. A package import (`scripts.supervisor`) cannot resolve those.
-    """
-    if not (root / "store.db").is_file():
-        return sys.executable
-    scripts = str(Path(__file__).resolve().parent / "scripts")
-    sys.path.insert(0, scripts)
-    try:
-        import supervisor
-        return str(supervisor.ensure_venv(supervisor.data_dir()))
-    finally:
-        sys.path.remove(scripts)
-
-
 def check_once(root: Path, release: Path) -> str:
     scripts = release / "scripts"
     mailbox = root / ".chief-of-stuff" / "mailbox"
     inbox = subprocess.run([sys.executable, str(scripts / "inbox.py"), "--mailbox-dir", str(mailbox),
                             "list", "--recipient", "coordinator", "--unread"], capture_output=True,
                            text=True, timeout=30)
-    try:
-        audit_python = _audit_python(root)
-    except (OSError, RuntimeError) as exc:
-        audit = subprocess.CompletedProcess([], 1, "", str(exc))
-    else:
-        audit = subprocess.run([audit_python, str(scripts / "audit_tasks.py")],  # its default day is the workspace zone's, not the host's
-                               cwd=root, capture_output=True, text=True, timeout=150)  # past run_command's 120s discovery bound
+    audit = subprocess.run([sys.executable, str(scripts / "audit_tasks.py")],  # its default day is the workspace zone's, not the host's
+                           cwd=root, capture_output=True, text=True, timeout=60)
     workers = subprocess.run([sys.executable, str(scripts / "process_status.py"), "--root", str(root)],
                              capture_output=True, text=True, timeout=10)
     if inbox.returncode:

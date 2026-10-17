@@ -20,7 +20,7 @@ import findings  # noqa: E402
 import start_coordinator as start  # noqa: E402
 
 # The watcher's pattern as it was typed before it was built from `findings.WATCHED`.
-LITERAL = re.compile(r"(?i)^(orphaned work:|stopped:|reopen:|issue:|merged:|lane:|kanban:|decision queue:|next decision:|stack:|overdue:|waiting:)")
+LITERAL = re.compile(r"(?i)^(orphaned work:|stopped:|reopen:|issue:|merged:|lane:|kanban:|decision queue:|next decision:|overdue:|waiting:)")
 
 TRACKER = """## Decision queue
 
@@ -47,7 +47,6 @@ FINDINGS = {
     al.LaneFault: (findings.LANE, al.LaneFault("Build it", "lane review but no stage")),
     al.KanbanFault: (findings.KANBAN, al.KanbanFault("Build it", "expected 03, found 00")),
     al.OverBudget: (findings.OVER, al.OverBudget("Build it", timedelta(hours=3), "S", timedelta(hours=1))),
-    al.StackFault: (findings.STACK, al.StackFault("worker-vm: worktree trees/worker01 has no live owner")),
 }
 
 

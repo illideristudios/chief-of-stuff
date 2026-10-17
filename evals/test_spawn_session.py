@@ -1024,7 +1024,7 @@ print(found)
 
     def worker_tokens(self, *, title="audit-01", runtime="claude", model="", effort="", herdr=False):
         """The shared wrapper (tmux, Ghostty). herdr=True is the typed-line form: the leading
-        `env -C <root> PATH=... CHIEF_OF_STUFF_WORKSPACE=... CHIEF_OF_STUFF_WORKER=...` is dropped and the rest is unchanged."""
+        `env -C <root> PATH=... CHIEF_OF_STUFF_WORKSPACE=...` is dropped and the rest is unchanged."""
         binary = self.bin / {"claude": "claude", "codex": "codex", "cursor": "agent", "agy": "agy"}[runtime]
         with unittest.mock.patch.dict(os.environ, self.env, clear=True):
             tokens = ss.runtime_tokens(cwd=str(self.tree), agent_type=None, binary=binary, title=title,
@@ -1032,12 +1032,11 @@ print(found)
         if not herdr:
             return tokens
         self.assertEqual(tokens[:2], [ss.ENV_BIN, "-C"])
-        return tokens[6:]  # env, -C, <root>, PATH=..., WORKSPACE=..., WORKER=...
+        return tokens[5:]  # env, -C, <root>, PATH=..., CHIEF_OF_STUFF_WORKSPACE=...
 
     def tab_argv(self, title="audit-01", *, session="chief-of-stuff"):
         return ["--session", session, "tab", "create", "--cwd", str(self.tree), "--label", title, "--no-focus",
-                "--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}",
-                "--env", f"CHIEF_OF_STUFF_WORKER={title}"]
+                "--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}"]
 
     def pane_tokens(self, *, title="audit-01", runtime="claude", model="", effort=""):
         """The typed-line tokens herdr_commands builds: the wrapper's herdr form, with the claude
@@ -1465,10 +1464,9 @@ with open({str(self.log)!r}, 'a') as log:
                                    cwd=str(self.tree), agent_type=None, title="audit-01",
                                    runtime="codex", model="gpt-test", effort="high", workspace=str(self.root))
         # The same runtime argv as tmux; only the env prefix is gone (the tab's --env carries the workspace).
-        self.assertEqual(shlex.split(" ".join(run[6:])), tmux[7 + 6:])
+        self.assertEqual(shlex.split(" ".join(run[6:])), tmux[7 + 5:])
         self.assertEqual(tmux[7:12][:2], [ss.ENV_BIN, "-C"])
-        self.assertEqual(create[-4:], ["--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}",
-                                       "--env", "CHIEF_OF_STUFF_WORKER=audit-01"])
+        self.assertEqual(create[-2:], ["--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}"])
 
     def long_path(self):
         """About 20 KB of PATH, the launching bin dir first so the fakes still resolve."""
@@ -1523,8 +1521,7 @@ with open({str(self.log)!r}, 'a') as log:
         out = self.invoke()
         self.assertEqual(out.returncode, 0, out.stderr)
         create = self.calls()[1]["argv"]
-        self.assertEqual(create[-5:], ["--no-focus", "--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}",
-                                       "--env", "CHIEF_OF_STUFF_WORKER=audit-01"])
+        self.assertEqual(create[-3:], ["--no-focus", "--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}"])
         self.assertEqual(create, self.tab_argv())
 
     def test_herdr_commands_builds_the_short_line_without_a_filesystem(self):
@@ -1536,8 +1533,7 @@ with open({str(self.log)!r}, 'a') as log:
         words = shlex.split(self.typed(run, built=True))
         self.assertEqual(words[0], sys.executable)
         self.assertNotIn(ss.ENV_BIN, words)
-        self.assertEqual(create[-4:], ["--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}",
-                                       "--env", "CHIEF_OF_STUFF_WORKER=audit-01"])
+        self.assertEqual(create[-2:], ["--env", f"CHIEF_OF_STUFF_WORKSPACE={self.root}"])
         self.assertFalse(gone.exists())
 
     def test_the_workspace_environment_is_absolute_even_for_a_relative_root(self):
@@ -1545,8 +1541,7 @@ with open({str(self.log)!r}, 'a') as log:
             create, _ = ss.herdr_commands(herdr=self.herdr, session="chief-of-stuff", cwd=str(self.tree),
                                           agent_type=None, binary=self.bin / "claude", title="audit-01",
                                           runtime="claude", workspace=os.path.relpath(self.root))
-        self.assertIn(f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(self.root)}", create)
-        self.assertIn("CHIEF_OF_STUFF_WORKER=audit-01", create)
+        self.assertEqual(create[-1], f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(self.root)}")
 
     # The length guard: a launch never claims "started" with a line the pane shell would cut.
     def line_bytes(self, **kw):
@@ -1646,9 +1641,8 @@ with open({str(self.log)!r}, 'a') as log:
         out = self.invoke(launcher="tmux")
         self.assertEqual(out.returncode, 0, out.stderr)
         argv = self.calls()[0]["argv"]
-        self.assertEqual(argv[6:12], [ss.ENV_BIN, "-C", str(self.tree), f"PATH={launching}",
-                                      f"CHIEF_OF_STUFF_WORKSPACE={self.root}",
-                                      "CHIEF_OF_STUFF_WORKER=audit-01"])
+        self.assertEqual(argv[6:11], [ss.ENV_BIN, "-C", str(self.tree), f"PATH={launching}",
+                                      f"CHIEF_OF_STUFF_WORKSPACE={self.root}"])
         self.assertNotIn("--workspace", argv)
         with unittest.mock.patch.dict(os.environ, self.env, clear=True):
             script = ss.ghostty_script(cwd=str(self.tree), agent_type=None, claude=self.bin / "claude",

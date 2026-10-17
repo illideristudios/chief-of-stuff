@@ -18,7 +18,6 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import start_coordinator as start  # noqa: E402
-import shell_setup  # noqa: E402
 import dispatch_prompt as dispatch  # noqa: E402
 import session_exec  # noqa: E402
 import process_status  # noqa: E402
@@ -223,30 +222,6 @@ class CoordinatorLaunchTest(unittest.TestCase):
         with mock.patch.object(start.subprocess, "run", side_effect=outputs):
             self.assertIn("kanban: Build it", start.check_once(self.root, release))
 
-    def test_watcher_audits_through_the_engine_python_when_the_store_exists(self):
-        release = start.install(ROOT, self.install_dir)
-        (self.root / "store.db").write_bytes(b"")
-        clean = [mock.Mock(returncode=0, stdout="[]"),
-                 mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
-                 mock.Mock(returncode=0, stdout="[]")]
-        fake = mock.Mock()
-        fake.ensure_venv.return_value = Path("/managed/bin/python")
-        fake.data_dir.return_value = Path("/data")
-        with mock.patch.object(start.subprocess, "run", side_effect=clean) as run, \
-             mock.patch.dict(sys.modules, {"supervisor": fake}):
-            self.assertEqual(start.check_once(self.root, release), "")
-        self.assertEqual(run.call_args_list[1].args[0][0], "/managed/bin/python")
-
-    def test_watcher_audit_outlasts_stack_discovery(self):
-        release = start.install(ROOT, self.install_dir)
-        clean = [mock.Mock(returncode=0, stdout="[]"),
-                 mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
-                 mock.Mock(returncode=0, stdout="[]")]
-        with mock.patch.object(start.subprocess, "run", side_effect=clean) as run:
-            start.check_once(self.root, release)
-        self.assertGreater(run.call_args_list[1].kwargs["timeout"],
-                           shell_setup.run_command.__kwdefaults__["timeout"])
-
     def test_watcher_audits_the_workspace_day_not_the_hosts(self):
         # Between the host's midnight and the workspace's, the host's date names the wrong tracker.
         release = start.install(ROOT, self.install_dir)
@@ -390,8 +365,8 @@ class WorkerRuntimeTest(unittest.TestCase):
     def test_wrapper_registers_before_exec_of_fake_cursor(self):
         fake = self.root / "fake-agent"
         marker = self.root / "seen.json"
-        fake.write_text("#!/usr/bin/env python3\nimport json,os,sys\n"
-                        f"open({str(marker)!r}, 'w').write(json.dumps({{'argv': sys.argv[1:], 'worker': os.environ.get('CHIEF_OF_STUFF_WORKER')}}))\n")
+        fake.write_text("#!/usr/bin/env python3\nimport json,sys\n"
+                        f"open({str(marker)!r}, 'w').write(json.dumps(sys.argv[1:]))\n")
         fake.chmod(0o755)
         registry = self.root / ".chief-of-stuff" / "sessions" / "impl01.json"
         proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "session_exec.py"),
@@ -399,7 +374,7 @@ class WorkerRuntimeTest(unittest.TestCase):
             "--worktree", str(self.root), "--", str(fake), "--mode", "plan"],
             capture_output=True, text=True, timeout=10)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual(json.loads(marker.read_text()), {"argv": ["--mode", "plan"], "worker": "impl01"})
+        self.assertEqual(json.loads(marker.read_text()), ["--mode", "plan"])
         self.assertEqual(json.loads(registry.read_text())["name"], "impl01")
         self.assertFalse(session_exec.alive(registry))
 

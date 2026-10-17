@@ -32,7 +32,7 @@ from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
-from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line, teardown_failed_line
+from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -429,8 +429,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     for error in (teardown_errors or []):
         try:
             tracker_write.edit(path, lambda text: tracker_write.append_log(
-                text, teardown_failed_line(tracker_write.stamp(cfg.zone), name, task,
-                                           _brief(error.removeprefix("teardown: "))), create=True))
+                text, f"- {tracker_write.stamp(cfg.zone)} one-shot {name}: teardown failed: "
+                f"{_brief(error.removeprefix('teardown: '))}, task {task}", create=True))
         except (OSError, ValueError) as exc:
             errors.append(f"teardown: could not log cleanup failure: {exc}")
     if adopted:
