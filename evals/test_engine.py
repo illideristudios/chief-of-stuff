@@ -165,10 +165,10 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(engine.engine_facts, "recovery", side_effect=facts):
             actions = self.run_pass()
         self.assertEqual(actions, [
-            reconcile.Wait(KEY, "orphan recovery held"),
+            reconcile.Dispatch(KEY, "implement", "builder", 1),
             reconcile.Dispatch(OTHER, "implement", "builder", 1)])
         self.assertTrue(any("recovery facts failed: clone lock" in entry.message for entry in self.db.log(KEY)))
-        self.assertEqual([item[0] for item in self.launched], [OTHER])
+        self.assertEqual([item[0] for item in self.launched], [KEY, OTHER])
 
     def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message):
         self.run_pass()

@@ -86,6 +86,23 @@ class ArgvTest(unittest.TestCase):
 
 
 class StartTest(unittest.TestCase):
+    def test_spawn_record_is_atomic_and_precedes_started_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "command.json").write_text(json.dumps({"argv": ["fake"], "cwd": tmp, "session_id": SID}))
+            process = mock.Mock(pid=4242)
+            def wait():
+                record = json.loads((run / "spawn.json").read_text())
+                self.assertEqual(record["pid"], 4242)
+                self.assertGreater(record["pgid"], 0)
+                self.assertGreater(record["start_time"], 0)
+                return 0
+            process.wait.side_effect = wait
+            with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process):
+                claude_adapter._worker(run)
+            self.assertTrue((run / "spawn.json").is_file())
+            self.assertTrue((run / "started.json").is_file())
+
     def test_runner_spawn_failure_removes_launch_evidence_and_reraises(self):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
@@ -100,6 +117,14 @@ class StartTest(unittest.TestCase):
 
 
 class CancelTest(unittest.TestCase):
+    def test_exited_runner_does_not_hide_a_surviving_group(self):
+        process = mock.Mock(pid=4242)
+        process.wait.return_value = 0
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg, \
+             mock.patch.object(claude_adapter, "group_alive", side_effect=[True, False]):
+            claude_adapter.cancel(process)
+        self.assertIn(mock.call(4242, signal.SIGKILL), killpg.call_args_list)
+
     def test_a_host_that_ignores_sigterm_is_killed_and_reaped(self):
         process = mock.Mock(pid=4242)
         process.wait.side_effect = [subprocess.TimeoutExpired("host", 5), 0]

@@ -82,6 +82,80 @@ class WorkerTest(unittest.TestCase):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         return self.db.segments(KEY)[0]
 
+    def test_recovery_facts_gate_before_git_and_scan_without_clone_lock(self):
+        import engine_facts
+        scan = mock.Mock(return_value=None)
+        with mock.patch.object(worker, "recovery_conflict", scan):
+            engine_facts.recovery(self.db, KEY, trees=self.trees, repo=self.root)
+            scan.assert_not_called()
+            self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+            engine_facts.recovery(self.db, KEY, trees=self.trees, repo=self.root)
+            scan.assert_called_once()
+            scan.reset_mock()
+            self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+            engine_facts.recovery(self.db, KEY, trees=self.trees, repo=self.root)
+            scan.assert_not_called()
+            self.db.add_decision(KEY, "conflict", "implement\ndiverged", answer="abort")
+            engine_facts.recovery(self.db, KEY, trees=self.trees, repo=self.root)
+            scan.assert_called_once()
+        with mock.patch.object(worker, "_common", return_value=self.root), \
+             mock.patch.object(worker, "_read_orphans", return_value=[]), \
+             mock.patch.object(worker.make_worktree, "clone_lock", side_effect=AssertionError("scan locked")):
+            self.assertIsNone(worker.recovery_conflict(self.db, KEY, trees=self.trees, repo=self.root))
+
+    def test_recovery_facts_skip_a_live_workers_open_segment(self):
+        import engine_facts
+        self.launched()
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"), \
+             mock.patch.object(worker, "recovery_conflict") as scan:
+            engine_facts.recovery(self.db, KEY, trees=self.trees, repo=self.root)
+        scan.assert_not_called()
+
+    def stranded(self, *, canceled=False, age=0):
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        run.mkdir(parents=True)
+        (run / "command.json").write_text(json.dumps({"session_id": "stranded", "start_deadline": time.time() + 5 - age}))
+        if canceled:
+            (run / "canceled").write_text("canceled\n")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        return run
+
+    def test_stranded_start_waits_until_deadline_then_quarantines_and_frees_slot(self):
+        run = self.stranded()
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertIsNone(self.db.segments()[0].ended_at)
+        record = json.loads((run / "command.json").read_text())
+        record["start_deadline"] = time.time() - 1
+        (run / "command.json").write_text(json.dumps(record))
+        with mock.patch.object(worker.claude_adapter, "spawn_alive", return_value=False):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(slots.running(self.db), 0)
+        self.assertFalse(run.exists())
+        self.assertEqual(len(list(run.parent.glob(run.name + "-quarantine-*"))), 1)
+        self.assertIsNotNone(self.db.segments()[0].ended_at)
+
+    def test_live_spawn_group_keeps_stranded_or_canceled_reservation_and_blocks_abort(self):
+        run = self.stranded(canceled=True, age=10)
+        with mock.patch.object(worker.claude_adapter, "spawn_alive", return_value=True):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+            self.assertEqual(slots.running(self.db), 1)
+            self.assertTrue(run.exists())
+            with self.assertRaisesRegex(RuntimeError, "live|unverified"):
+                worker._abort_workers_gone(self.root, 1)
+
+    def test_cancel_or_marker_failure_keeps_reservation_until_verified_stopped(self):
+        def start(request, run, **kwargs):
+            result = self.start(request, run)
+            (run / "canceled").mkdir()
+            return result
+        with self.interrupted(start, identity=None), \
+             mock.patch.object(worker.claude_adapter, "cancel", side_effect=RuntimeError("cancel failed")):
+            with self.assertRaisesRegex(RuntimeError, "cancel failed"):
+                slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                            max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        self.assertEqual(slots.running(self.db), 1)
+
     def test_assignment_has_fixed_header_row_issue_job_and_persona_rules(self):
         persona = SimpleNamespace(role="builder", rules=("Tests first.",))
         row = self.db.items()[0]
@@ -1184,6 +1258,45 @@ class WorkerTest(unittest.TestCase):
             self.assertTrue(fresh.is_dir())
             self.assertEqual(make_repo.git(["rev-parse", "HEAD"], rejected[0]), kept_head)
             self.assertNotIn("abort_quarantine", self.db.resume(KEY))
+
+    def test_rejected_quarantine_is_written_ahead_and_replays_after_move_failure(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            apply = worker._apply_quarantine
+            rejected = []
+
+            def interrupted(repo, trees, number, plan, common):
+                if "-rejected" in plan["stamp"]:
+                    saved = self.db.resume(KEY)["abort_quarantine"]
+                    self.assertNotIn(str(trees / saved["fresh"]), plan["paths"])
+                    self.assertIn(plan, saved.get("pending", []))
+                    apply(repo, trees, number, plan, common)
+                    rejected.append(plan.copy())
+                    raise RuntimeError("interrupted after moving rejection")
+                return apply(repo, trees, number, plan, common)
+
+            with mock.patch.object(worker, "_verify_replacement", side_effect=RuntimeError("reject")), \
+                 mock.patch.object(worker, "_apply_quarantine", side_effect=interrupted):
+                with self.assertRaisesRegex(RuntimeError, "interrupted"):
+                    self.launch_in(clone, attempt=3)
+            saved = self.db.resume(KEY)["abort_quarantine"]
+            fresh = Path(self.launch_in(clone, attempt=3).cwd)
+            self.assertEqual(fresh.name, saved["fresh"])
+            self.assertFalse(make_repo.git(["for-each-ref", "--format=%(refname)", rejected[0]["refs"][0]], clone))
+
+    def test_broken_head_is_quarantined_but_missing_main_still_reuses_dirty_tree(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([{"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "dirty": True}])
+            old = self.trees / "issue-1-implement-1"
+            make_repo.git(["update-ref", "-d", worker.git_trees.REF], clone)
+            actual = worker._read_tree(old, worker._common(clone))
+            self.assertIsNone(actual.ahead)
+            self.assertTrue(actual.dirty)
+            layout = worker.git_view.locate(old)
+            (layout.gitdir / "HEAD").write_text("ref: refs/heads/missing\n")
+            self.assertTrue(worker._read_tree(old, worker._common(clone)).unreadable)
 
     def test_replacement_uses_its_own_head_when_another_fetch_moves_main(self):
         from evals import git_taint as taint, make_repo
