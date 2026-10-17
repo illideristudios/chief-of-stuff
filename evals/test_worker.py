@@ -274,6 +274,7 @@ class WorkerTest(unittest.TestCase):
         self.forge.closing_request = mock.Mock(return_value=SimpleNamespace(branch="feature/existing", head="new-head"))
         data = self.db.resume(KEY)
         data["review_trees"]["1"]["head"] = "new-head"
+        data["runs"]["review-1"].pop("starting_head")  # Recover the durable launch baseline during collect.
         self.db.set_resume(KEY, data)
         (run / "stdout").write_text('{"is_error": false, "result": "reviewed"}')
         (run / "stderr").write_text("")
