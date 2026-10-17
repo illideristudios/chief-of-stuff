@@ -325,19 +325,17 @@ class CleanupTest(unittest.TestCase):
         stale = {"pending_stage": "implement"}
         recovered = {"pending_stage": "review"}
         self.store.set_resume(key, stale)
-        real_resume = store.Store.resume
-
-        def recover_after_read(db, issue_key):
-            snapshot = real_resume(db, issue_key)
-            self.store.set_resume(issue_key, recovered)
-            return snapshot
 
         with mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
                 mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
-            with mock.patch.object(store.Store, "resume", recover_after_read):
+            with mock.patch.object(store.Store, "resume", autospec=True, side_effect=store.Store.resume) as read, \
+                    mock.patch.object(store.Store, "set_resume", autospec=True,
+                                      side_effect=store.Store.set_resume) as write:
                 self.run_cleanup("--remove")
+                read.assert_not_called()
+                write.assert_not_called()
             # Cleanup must neither read nor replace the engine's resume document.
-            self.assertIn(self.store.resume(key), (stale, recovered))
+            self.assertEqual(self.store.resume(key), stale)
             self.store.set_resume(key, recovered)  # a later engine writer replaces its entire document
             self.run_cleanup("--remove")
         stop.assert_called_once()
@@ -392,6 +390,22 @@ class CleanupTest(unittest.TestCase):
             containers.assert_called_once()
             stop.assert_not_called()
             self.assertTrue(tree.is_dir())
+
+    def test_locked_teardown_identity_failure_keeps_its_diagnostic_and_skips_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        identity = cleanup.teardown_identity(cleanup.git_view.locate(tree), "stack-stop")
+        with mock.patch.object(cleanup, "teardown_identity", side_effect=[identity, OSError("unreadable")]), \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]), \
+                mock.patch.object(shell_setup, "teardown") as stop:
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 1, out)
+        self.assertEqual(self.kept(out)["done"],
+                         "keep done — store teardown attempt cannot be checked (OSError); "
+                         "a container binds a path in it")
+        stop.assert_not_called()
+        self.assertTrue(tree.is_dir())
+        self.assertEqual(self.store.log(f"{KEY}-done")[-1].message, self.kept(out)["done"])
 
     def test_locked_precheck_refusals_retain_mount_diagnostics_without_running_teardown(self) -> None:
         self.configure_teardown()
