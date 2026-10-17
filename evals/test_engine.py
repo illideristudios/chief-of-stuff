@@ -557,8 +557,14 @@ class EngineTest(unittest.TestCase):
         self.db.sync_from_forge(self.forge.snapshots())
         dec = self.db.add_decision(KEY, "design", "Back to review?")
         self.db.answer_decision(dec.id, "Back", status="blocked", blocked_reason=error, rerouted_to="review")
-        self.db.set_resume(KEY, {"pending_stage": {"stage": "review", "expected": "implement"},
+        self.db.set_resume(KEY, {"pending_stage": {"stage": "review", "expected": "implement", "decision_id": dec.id},
                                  "redispatch": {"stage": "review", "persona": "critic", "attempt": 1}})
+        return dec
+
+    def settled_reroute(self, stage="review"):
+        self.db.sync_from_forge(self.forge.snapshots())
+        dec = self.db.add_decision(KEY, "design", "Earlier?")
+        self.db.answer_decision(dec.id, "Went back", status="re-routed", rerouted_to=stage)
         return dec
 
     def test_a_retried_reroute_that_lands_restores_the_decision_and_clears_the_intent(self):
@@ -576,17 +582,65 @@ class EngineTest(unittest.TestCase):
         saved = self.db.decision(dec.id)
         self.assertEqual((saved.status, saved.rerouted_to), ("blocked", "review"))
         self.assertIn("offline", saved.blocked_reason)
-        self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "review", "expected": "implement"})
+        self.assertEqual(self.db.resume(KEY)["pending_stage"],
+                         {"stage": "review", "expected": "implement", "decision_id": dec.id})
 
-    def test_a_pending_sibling_decision_does_not_clear_another_decisions_block(self):
+    def test_a_refused_retry_blocks_only_the_decision_its_pending_write_names(self):
+        old = self.settled_reroute()
+        dec = self.blocked_reroute()
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+        self.assertEqual(self.db.decision(old.id).status, "re-routed")
+        self.assertEqual(self.db.decision(dec.id).status, "blocked")
+
+    def test_a_landed_write_restores_only_the_decision_its_pending_write_names(self):
+        dec = self.blocked_reroute()
+        other = self.db.add_decision(KEY, "scope", "Conflicts?")
+        self.db.answer_decision(other.id, "Yes", status="blocked", blocked_reason="merge conflicts", rerouted_to="review")
+        self.run_pass()
+        self.assertEqual(self.db.decision(dec.id).status, "re-routed")
+        self.assertEqual((self.db.decision(other.id).status, self.db.decision(other.id).blocked_reason),
+                         ("blocked", "merge conflicts"))
+
+    def test_a_pending_write_with_no_decision_id_touches_no_decision(self):
+        old = self.settled_reroute()
+        dec = self.blocked_reroute()
+        self.db.set_resume(KEY, {"pending_stage": {"stage": "review", "expected": "implement"}})
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+        self.assertEqual((self.db.decision(old.id).status, self.db.decision(dec.id).blocked_reason),
+                         ("re-routed", "write refused"))
+        self.run_pass()
+        self.assertEqual(self.db.decision(dec.id).status, "blocked")
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+
+    def test_the_engines_own_stage_move_blocks_no_settled_reroute(self):
+        old = self.settled_reroute("review")
+        self.run_pass()
+        self.finish("implement")
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+            self.run_pass()  # the retry of the move is what refuses it again
+        self.assertEqual(self.db.resume(KEY)["pending_stage"]["stage"], "review")
+        self.assertEqual(self.db.decision(old.id).status, "re-routed")
+
+    def test_an_answered_decision_a_wait_blocked_is_unblocked_when_the_wait_is_the_decision_hold(self):
         self.db.sync_from_forge(self.forge.snapshots())
-        blocked = self.db.add_decision(KEY, "design", "Approve schema?")
-        self.db.answer_decision(blocked.id, "Yes", status="blocked", blocked_reason="merge conflicts")
+        dec = self.db.add_decision(KEY, "design", "Approve schema?")
+        self.db.answer_decision(dec.id, "Yes", status="blocked", blocked_reason="merge is not ready")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+            self.run_pass()
+        saved = self.db.decision(dec.id)
+        self.assertEqual((saved.status, saved.blocked_reason), ("answered", ""))
+
+    def test_a_decision_hold_wait_blocks_no_answered_decision(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        answered = self.db.add_decision(KEY, "design", "Approve schema?")
+        self.db.answer_decision(answered.id, "Yes", status="answered")
         self.db.add_decision(KEY, "scope", "Still open?")
         with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
             self.run_pass()
-        saved = self.db.decision(blocked.id)
-        self.assertEqual((saved.status, saved.blocked_reason), ("blocked", "merge conflicts"))
+        self.assertEqual(self.db.decision(answered.id).status, "answered")
 
     def test_comment_delivery_keeps_what_the_board_queued_meanwhile(self):
         self.db.sync_from_forge(self.forge.snapshots())
@@ -643,6 +697,65 @@ class EngineTest(unittest.TestCase):
         data = self.db.resume(KEY)
         self.assertEqual(data["redispatch"]["attempt"], 2)
         self.assertEqual(data["interrupt"]["gate"], "gate")
+
+    def test_the_launch_pops_only_the_request_it_carried(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        carried = {"stage": "implement", "persona": "builder", "attempt": 2, "decision_id": 8}
+        newer = {**carried, "decision_id": 9}
+        self.db.set_resume(KEY, {"redispatch": carried})
+        launch = self.launch
+
+        def board_post_during_launch(key, stage, attempt, persona):
+            result = launch(key, stage, attempt, persona)
+            self.db.update_resume(key, lambda data: data.__setitem__("redispatch", newer))  # committed after planning
+            return result
+
+        self.launch = board_post_during_launch
+        self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["redispatch"], newer)
+
+    def test_a_request_past_the_retry_limit_blocks_its_decision_and_clears_only_that_request(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        dec = self.db.add_decision(KEY, "design", "Back?")
+        self.db.answer_decision(dec.id, "Back", status="re-routed", rerouted_to="implement")
+        request = {"stage": "implement", "persona": "builder", "attempt": 9, "decision_id": dec.id}
+        self.db.set_resume(KEY, {"redispatch": request})
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Escalate(KEY, "retry limit reached")]):
+            self.run_pass()
+        saved = self.db.decision(dec.id)
+        self.assertEqual((saved.status, saved.blocked_reason), ("blocked", "retry limit reached"))
+        self.assertNotIn("redispatch", self.db.resume(KEY))
+
+    def test_a_request_that_escalates_keeps_a_newer_request(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.set_resume(KEY, {"redispatch": {"stage": "implement", "persona": "builder", "attempt": 9, "decision_id": 3}})
+        newer = {"stage": "implement", "persona": "builder", "attempt": 10, "decision_id": 4}
+
+        def plan(*args, **kwargs):
+            self.db.update_resume(KEY, lambda data: data.__setitem__("redispatch", newer))
+            return [reconcile.Escalate(KEY, "retry limit reached")]
+
+        with mock.patch.object(engine.reconcile, "plan", side_effect=plan):
+            self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["redispatch"], newer)
+
+    def test_a_human_answer_during_a_trio_consult_wins_and_leaves_one_settled_row(self):
+        self.p = self.trio_policy(trio=["one", "two", "three"])
+        answered = []
+
+        def person_answers(request):
+            if not answered:
+                row = self.db.decisions(KEY)[0]
+                answered.append(self.db.answer_decision(row.id, "Not that", decided_by="user"))
+            return mock.DEFAULT
+
+        model = self.adopting_model(side_effect=person_answers)
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split module?")]):
+            self.run_pass(trio_port=model)
+        (row,) = self.db.decisions(KEY)
+        self.assertEqual((row.status, row.answer, row.decided_by), ("answered", "Not that", "user"))
+        self.assertFalse(self.db.resume(KEY).get("decision_comments"))
+        self.assertFalse([e for e in self.db.log(KEY) if "failed" in e.message])
 
     def test_a_policy_with_only_tagged_trios_is_consulted_for_the_gate_tag(self):
         self.p = self.trio_policy(trios={"gate": ["one", "two", "three"]})

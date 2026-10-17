@@ -221,5 +221,41 @@ class RespondTest(unittest.TestCase):
         self.assertNotIsInstance(closed.exception, da.BadRequest)
 
 
+class DecisionUpdateTest(unittest.TestCase):
+    def reroutes(self):
+        return [make_decision(id=n, status="re-routed", answer="Back", rerouted_to="review") for n in (1, 2)]
+
+    def test_block_updates_only_the_decision_with_that_id(self) -> None:
+        update = da.block(self.reroutes(), 2, "offline")
+        self.assertEqual((update.store_write.decision_id, update.store_write.status), (2, "blocked"))
+        self.assertEqual((update.store_write.blocked_reason, update.store_write.rerouted_to), ("offline", "review"))
+
+    def test_block_with_no_matching_id_updates_nothing(self) -> None:
+        for decision_id in (None, 0, 3):
+            self.assertIsNone(da.block(self.reroutes(), decision_id, "offline"))
+
+    def test_block_leaves_an_open_or_answered_decision_alone(self) -> None:
+        for status in ("open", "answered"):
+            self.assertIsNone(da.block([make_decision(id=1, status=status)], 1, "offline"))
+
+    def test_block_takes_a_reversed_decision_past_the_retry_limit(self) -> None:
+        update = da.block([make_decision(id=1, status="reversed", answer="Redo")], 1, "retry limit reached")
+        self.assertEqual((update.store_write.status, update.store_write.blocked_reason), ("blocked", "retry limit reached"))
+
+    def test_unblock_restores_only_the_decision_with_that_id(self) -> None:
+        blocked = [make_decision(id=n, status="blocked", answer="Back", blocked_reason="offline", rerouted_to="review")
+                   for n in (1, 2)]
+        update = da.unblock(blocked, 1)
+        self.assertEqual((update.store_write.decision_id, update.store_write.status, update.store_write.blocked_reason),
+                         (1, "re-routed", ""))
+        self.assertIsNone(da.unblock(blocked, None))
+        self.assertIsNone(da.unblock(self.reroutes(), 1))
+
+    def test_a_reroute_and_a_reversal_name_their_decision_in_the_redispatch(self) -> None:
+        rerouted = da.reroute(make_decision(), "implement", persona="builder")
+        reversed_ = da.reverse(make_decision(status="answered", answer="Yes"), "No", stage="implement", persona="builder")
+        self.assertEqual((rerouted.redispatch.decision_id, reversed_.redispatch.decision_id), (7, 7))
+
+
 if __name__ == "__main__":
     unittest.main()
