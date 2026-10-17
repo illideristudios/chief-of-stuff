@@ -707,6 +707,62 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(model.n, 3)
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
 
+    def test_a_capped_gate_regains_a_lost_interrupt_without_another_consultation(self):
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        for _ in range(8):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        interrupt = self.db.resume(KEY)["interrupt"]
+        # A kill between the exhaustion row and its interrupt must not hide the gate.
+        data = self.db.resume(KEY)
+        data.pop("interrupt")
+        self.db.set_resume(KEY, data)
+        self.assertEqual(self.run_pass(model=failed), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(self.db.resume(KEY)["interrupt"], interrupt)
+        self.assertEqual(failed.call_count, 24)
+
+    def test_the_cap_counts_failures_a_killed_pass_did_not_absorb(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        for _ in range(7):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        # A kill after the 7th failed row but before its counter write leaves the counter one short.
+        data = self.db.resume(KEY)
+        retry, = data["trio_retries"].values()
+        retry["failures"] -= 1
+        self.db.set_resume(KEY, data)
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 24)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["reason"], "trio unavailable after 8 attempts: Which parser?")
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 24)
+
+    def test_two_capped_decisions_keep_one_interrupt_and_a_bounded_log(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        first = self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which backend?", ["Local", "Remote"], "")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        for _ in range(8):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        logged = sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY))
+        interrupt = self.db.resume(KEY)["interrupt"]
+        for _ in range(3):
+            self.run_pass(model=failed)
+        self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), logged)
+        self.assertEqual(self.db.resume(KEY)["interrupt"], interrupt)
+        self.db.answer_ask(first, "Keep")
+        self.run_pass(model=failed)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["decision"]["question"], "Which backend?")
+
     def test_retryable_replacement_failures_escalate_with_an_answerable_ask_at_the_cap(self):
         failed = self._retryable_replacement()
         for _ in range(10):
