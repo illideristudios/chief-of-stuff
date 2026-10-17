@@ -60,9 +60,19 @@ class DerivationTest(unittest.TestCase):
         self.assertFalse(why)
 
     def test_explicit_do_not_edit_paths_cannot_be_granted_write_access(self):
-        scopes, why = ownership.derive_scopes('Fix widget.py', 'Do not edit `docs/design.md` or `scripts/widget.py`.', SOURCES)
-        self.assertEqual(dict(scopes), {'docs/design.md': 'read', 'scripts/widget.py': 'read'})
+        scopes, why = ownership.derive_scopes('Fix widget.py', 'Do not edit `docs/design.md`.', SOURCES)
+        self.assertEqual(dict(scopes), {'docs/design.md': 'read', 'scripts/widget.py': 'write', 'evals/test_widget.py': 'write'})
         self.assertFalse(why)
+
+    def test_companion_tests_respect_explicit_edit_prohibitions(self):
+        scopes, why = ownership.derive_scopes('Fix widget.py', 'Do not edit `evals/test_widget.py`.', SOURCES)
+        self.assertEqual(dict(scopes), {'scripts/widget.py': 'write', 'evals/test_widget.py': 'read'})
+        self.assertFalse(why)
+
+    def test_directory_prohibition_cannot_be_bypassed_by_named_child(self):
+        scopes, why = ownership.derive_scopes('Fix widget.py', 'Do not edit `scripts/`.', SOURCES)
+        self.assertEqual(scopes, [])
+        self.assertTrue(why)
 
     def test_read_only_checkbox_is_a_task_intent(self):
         scopes, why = ownership.derive_scopes('Audit', '- [ ] Read-only: inspect `widget.py`.', SOURCES)
