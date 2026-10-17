@@ -31,6 +31,16 @@ class DerivationTest(unittest.TestCase):
         self.assertEqual(dict(scopes), {'scripts/widget.py': 'write', 'evals/test_widget.py': 'write'})
         self.assertFalse(why)
 
+    def test_read_only_feature_under_review_does_not_make_fix_task_read_only(self):
+        scopes, why = ownership.derive_scopes('Fix widget.py', 'Found in review of the read-only widget task.', SOURCES)
+        self.assertEqual(dict(scopes), {'scripts/widget.py': 'write', 'evals/test_widget.py': 'write'})
+        self.assertFalse(why)
+
+    def test_comparative_example_alone_is_not_an_implementation_target(self):
+        scopes, why = ownership.derive_scopes('Implement merge ordering', 'Use both hosts, like `widget`.', SOURCES)
+        self.assertEqual(scopes, [])
+        self.assertTrue(why)
+
     def test_read_only_requires_explicit_task_intent(self):
         scopes, why = ownership.derive_scopes('Read-only audit', 'Inspect `widget.py`; read-only.', SOURCES)
         self.assertEqual(scopes, [('scripts/widget.py', 'read')])
