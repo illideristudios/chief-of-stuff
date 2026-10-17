@@ -811,6 +811,66 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
         self.assertIn("implement-1", self.db.decisions(KEY)[-1].record["decision"]["context"])
 
+    def assert_reversal_claim_crash_recovers(self, stage, outcome):
+        import decision_actions
+        import tomllib
+        # Use the shipped plan -> implement -> review route; isolate the restart
+        # from its separate out-of-band architect requirement.
+        self.p = policy.parse(tomllib.loads((Path(__file__).resolve().parents[1] / "assets/policy.toml").read_text()))
+        self.p.stages["review"] = policy.Place("review", "reviewer", {"architect": False})
+        self.forge.rows[0].update(stage=stage, review_state="approved")
+        self.db.sync_from_forge(self.forge.snapshots())
+        for index, prior in enumerate(("plan", "implement", "review")):
+            self.db.record_segment(KEY, prior, 1, (NOW - timedelta(minutes=60 - index * 10)).isoformat(),
+                                   (NOW - timedelta(minutes=55 - index * 10)).isoformat(), "done")
+        self.findings()
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
+            "decision": {"options": ["Split", "Keep"], "context": "original"}})
+        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        model = self._votes([("adopt", "Keep")] * 3)
+        claim = engine.slots.claim
+
+        def crash_after_claim(*args, **kwargs):
+            claim(*args, **kwargs)
+            raise SystemExit("crash after durable claim")
+
+        with mock.patch.object(engine.slots, "claim", side_effect=crash_after_claim):
+            with self.assertRaisesRegex(SystemExit, "crash after durable claim"):
+                self.run_pass(model=model)
+        self.assertEqual(self.forge.rows[0]["stage"], stage)
+        self.assertNotIn("restarted", self.db.decisions(KEY)[-1].record)
+        self.assertEqual(self.run_pass(model=model), [])
+        self.assertEqual(model.n, 0)
+        self.finish("plan", 2, outcome)
+        if outcome != "done":
+            self.assertEqual(self.run_pass(model=model), [reconcile.Dispatch(KEY, "plan", "implementer", 3)])
+            self.assertEqual(model.n, 0)
+            self.finish("plan", 3)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Dispatch(KEY, "implement", "implementer", 2)])
+        self.assertEqual(model.n, 3)
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
+        self.finish("implement", 2)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Review(KEY, 2)])
+        self.finish("review", 2)
+        self.findings(2)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
+        self.assertEqual([s for _, s, _, _ in self.launched],
+                         ["plan"] + (["plan"] if outcome != "done" else []) + ["implement", "review"])
+        self.assertEqual(len(self.forge.merges), 1)
+
+    def test_reversal_claim_crash_from_review_retries_failed_plan(self):
+        self.assert_reversal_claim_crash_recovers("review", "error")
+
+    def test_reversal_claim_crash_from_merge_retries_failed_plan(self):
+        self.assert_reversal_claim_crash_recovers("merge", "error")
+
+    def test_reversal_claim_crash_from_review_runs_implementation_after_plan(self):
+        self.assert_reversal_claim_crash_recovers("review", "done")
+
+    def test_reversal_claim_crash_from_merge_runs_implementation_after_plan(self):
+        self.assert_reversal_claim_crash_recovers("merge", "done")
+
     def test_reversed_gate_waits_for_reworked_source_attempt(self):
         import decision_actions
         self._merge_gate()
