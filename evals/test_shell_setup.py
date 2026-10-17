@@ -48,9 +48,11 @@ class ShellSetupTest(unittest.TestCase):
 
     def test_command_cleanup_is_bounded_and_preserves_the_original_failure(self):
         """#798: even SIGKILL cannot guarantee that a child can be reaped promptly."""
-        for failure in (subprocess.TimeoutExpired("workspace command", 0.1), KeyboardInterrupt()):
+        for failure_type in (subprocess.TimeoutExpired, KeyboardInterrupt):
             for stuck in (False, True):
-                with self.subTest(failure=type(failure).__name__, stuck=stuck):
+                failure = (subprocess.TimeoutExpired("workspace command", 0.1)
+                           if failure_type is subprocess.TimeoutExpired else KeyboardInterrupt())
+                with self.subTest(failure=failure_type.__name__, stuck=stuck):
                     child = mock.MagicMock(pid=123, returncode=None)
                     child.__enter__.return_value = child
                     # Popen.__exit__ waits implicitly, even when an explicit wait was bounded.
@@ -73,6 +75,7 @@ class ShellSetupTest(unittest.TestCase):
                     with tempfile.TemporaryDirectory() as directory, \
                          mock.patch.object(shell, "login_shell", return_value="/bin/sh"), \
                          mock.patch.object(shell.subprocess, "Popen", return_value=child), \
+                         mock.patch.object(shell, "_unreaped_children", [], create=True), \
                          mock.patch.object(shell.os, "killpg") as kill:
                         root = Path(directory)
                         with self.assertRaises(type(failure)) as raised:
@@ -80,6 +83,56 @@ class ShellSetupTest(unittest.TestCase):
                     self.assertIs(raised.exception, failure)
                     kill.assert_called_once_with(child.pid, shell.signal.SIGKILL)
                     self.assertEqual(len(waits), 2)
+                    self.assertLessEqual(waits[1], 1, "cleanup promises at most one additional second")
+                    if stuck:
+                        self.assertIn(f"pid {child.pid}", str(raised.exception))
+                    else:
+                        self.assertNotIn(f"pid {child.pid}", str(raised.exception))
+
+    def test_teardown_warning_distinguishes_an_unreaped_child(self):
+        for stuck in (False, True):
+            with self.subTest(stuck=stuck):
+                child = mock.Mock(pid=798, returncode=None)
+                failure = subprocess.TimeoutExpired("workspace command", 120)
+                child.wait.side_effect = [failure, subprocess.TimeoutExpired("cleanup", 1) if stuck else 0]
+                with tempfile.TemporaryDirectory() as directory, \
+                     mock.patch.object(shell, "login_shell", return_value="/bin/sh"), \
+                     mock.patch.object(shell.subprocess, "Popen", return_value=child), \
+                     mock.patch.object(shell, "_unreaped_children", [], create=True), \
+                     mock.patch.object(shell.os, "killpg"):
+                    root = Path(directory)
+                    warnings = shell.teardown(root, root / "tree", "worker", "cleanup")
+                self.assertEqual(len(warnings), 1)
+                self.assertIn("timed out", warnings[0])
+                if stuck:
+                    self.assertIn("pid 798", warnings[0])
+                    self.assertIn("not reaped", warnings[0])
+                else:
+                    self.assertNotIn("pid 798", warnings[0])
+
+    def test_unreaped_child_is_retained_and_polled_by_later_commands(self):
+        child = mock.Mock(pid=798, returncode=None)
+        child.wait.side_effect = [subprocess.TimeoutExpired("command", 0.1),
+                                  subprocess.TimeoutExpired("cleanup", 1)]
+        child.poll.side_effect = [None, -shell.signal.SIGKILL]
+        finished = mock.Mock(returncode=0)
+        pending = []
+        with tempfile.TemporaryDirectory() as directory, \
+             mock.patch.object(shell, "login_shell", return_value="/bin/sh"), \
+             mock.patch.object(shell.subprocess, "Popen", side_effect=[child, finished, finished]), \
+             mock.patch.object(shell, "_unreaped_children", pending, create=True), \
+             mock.patch.object(shell.os, "killpg"):
+            root = Path(directory)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                shell.run_command("cleanup", root, workspace=root, timeout=0.1)
+            self.assertEqual(pending, [child], "retain Popen without relying on its destructor")
+            child.poll.assert_not_called()
+            for status in (None, -shell.signal.SIGKILL):
+                result = shell.run_command("exit 0", root, workspace=root)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(pending, [child] if status is None else [])
+            self.assertEqual(child.poll.call_args_list, [mock.call(), mock.call()])
+            self.assertEqual(child.wait.call_args_list, [mock.call(timeout=0.1), mock.call(timeout=1)])
 
     def standin(self, path: Path, knows: Path) -> Path:
         """An executable at `path` that answers `-lic "command -v <knows' name>"` with `knows`, and nothing else."""
