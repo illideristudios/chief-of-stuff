@@ -8,8 +8,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from workspace import ConfigError, read_config
-
 TEMPLATE = Path(__file__).resolve().parent.parent / "assets" / "worker-model-guidance.md"
 NAME = "chief-of-stuff-models.md"
 
@@ -37,6 +35,7 @@ def install(root: Path, *, dry_run: bool = False) -> tuple[Path, bool]:
 
 def chosen(root: Path, name: str, after: str | None, not_family: str | None) -> str:
     from settings import load, pick
+    from workspace import ConfigError, read_config
     try:
         cfg = read_config(root)
     except (OSError, ConfigError) as exc:

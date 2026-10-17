@@ -14,7 +14,7 @@ could not be asked. A caller can branch on it without parsing. Every target gets
 line even when it fails: a missing line would read as a healthy service. No `Settings:` line is no
 settings line, and a settings file that is not there is `absent, defaults`: not a fault, and not ok.
 Settings that name no runtime, or did not load, get no runtimes line.
-A missing or non-file `CLAUDE.md` or settings path gets one `workspace file <name> missing (advice); <command>`
+A missing or non-file settings path gets one `workspace file <name> missing (advice); <command>`
 (or `not a file`, or `unreadable`) line, printed after the runtimes line and before the targets, with or without a
 `Settings:` line. Model guidance is not advised. These lines are advice only and do not affect the exit code.
 A usage fault (no config at the path, a `Health:` line that is not a target) is stderr and exit 2.
@@ -189,7 +189,7 @@ def report(targets: list[Target], timeout: float = TIMEOUT) -> tuple[list[str], 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check settings, runtimes and Health: targets; advise about a missing config or settings file (exit code unaffected).")
+    parser = argparse.ArgumentParser(description="Check settings, runtimes and Health: targets; advise about a missing settings file (exit code unaffected).")
     parser.add_argument("--config", default="CLAUDE.md", help="workspace CLAUDE.md holding the block")
     parser.add_argument("--timeout", type=float, default=TIMEOUT, help="seconds per target")
     args = parser.parse_args(argv)

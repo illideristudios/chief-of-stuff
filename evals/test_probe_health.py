@@ -180,7 +180,7 @@ class OutputTest(unittest.TestCase):
 
 
 class WorkspaceFilesTest(unittest.TestCase):
-    """#284: missing init files are advice, with their installer named."""
+    """#284: missing init files are advice naming the init command; model guidance is not advised."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="workspace with spaces ")
@@ -215,7 +215,6 @@ class WorkspaceFilesTest(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_health_reads_new_init_file_data_without_its_own_list(self):
-        guidance.install(self.root)
         extra = workspace.WorkspaceFile("new-release.md", "chief-of-stuff models --root {root}")
         with mock.patch.dict(workspace.WORKSPACE_FILES, {"future": extra}):
             code, lines = self.health()
@@ -223,7 +222,6 @@ class WorkspaceFilesTest(unittest.TestCase):
         self.assertEqual(len([line for line in lines if "new-release.md" in line]), 1, lines)
 
     def test_custom_config_and_settings_paths_do_not_advise_default_names(self):
-        guidance.install(self.root)
         self.config.rename(self.root / "workspace.md")
         self.config = self.root / "workspace.md"
         self.config.write_text("## Coordinator\n- Settings: `custom.toml`\n")
@@ -250,11 +248,10 @@ class WorkspaceFilesTest(unittest.TestCase):
                     finally:
                         shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink(missing_ok=True)
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores chmod(0)")
     def test_an_unreadable_inventory_path_is_reported_not_dropped(self):
         locked = self.root / "locked"
         locked.mkdir()
-        (locked / guidance.NAME).write_text("hi")
-        (self.root / guidance.NAME).symlink_to(locked / guidance.NAME)
         self.config.write_text("## Coordinator\n- Settings: `locked/custom.toml`\n")
         locked.chmod(0)
         self.addCleanup(locked.chmod, 0o700)
@@ -265,11 +262,9 @@ class WorkspaceFilesTest(unittest.TestCase):
             ["workspace file locked/custom.toml unreadable (advice); Permission denied"],
             lines,
         )
-        self.assertFalse(any(guidance.NAME in line for line in lines), lines)
         self.assertEqual(code, 1)
 
     def test_a_settings_name_with_a_nul_gets_no_duplicate_workspace_file_advice(self):
-        guidance.install(self.root)
         self.config.write_text("## Coordinator\n- Settings: `a\x00chief-of-stuff.toml`\n")
         code, lines = self.health()
         self.assertEqual([line for line in lines if line.startswith("workspace file ")], [], lines)
