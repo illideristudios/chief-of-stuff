@@ -206,14 +206,11 @@ def _close_segment(forge: Any, store: Any, key: str, stage: str, attempt: int,
 
 def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any,
                    outcome: str, reason: str, now: datetime, *, policies: policy.Policies) -> None:
-    """Adapter classification precedes completion judgement; a forge hold must precede closure."""
+    """Close the exited run; the planner and cleanup gate merged-item completion on main CI."""
     key = segment.issue_key
     item = next((item for item in store.items() if item.issue_key == key), None)
     workflow = policies.workflow_for(_resume(store, key).get("issue_type") or getattr(item, "issue_type", None))
     facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now)
-    if (item is not None and item.forge_state == "closed" and item.merge_state == "merged"
-            and reconcile.completion_wait(key, facts)):
-        return  # Keep the segment and its hold; this pass's planner records the wait.
     verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
     held = verdict.human_review or reason.startswith("unreadable worker run:")
     if verdict.human_review:
