@@ -78,17 +78,21 @@ SOURCE_DIRS = (".claude-plugin", ".github", "agents", "architecture", "assets", 
 def retired_provider_files(root: Path) -> list[str]:
     """Tracked source files that name the retired provider. History (docs/archive, run output) is out of scope."""
     # shortcut: a new top-level source directory must be added to SOURCE_DIRS; CI copies a worktree without
-    # its git directory, so `git ls-files` is not available there.
+    # its git directory, so `git ls-files` is not available there. Every top-level file is scanned.
     results = root / "evals/results"
-    paths = [p for p in root.iterdir() if p.name in {".gitignore", "CLAUDE.md", "LICENSE", "README.md", "chief_of_stuff.py", "requirements.txt", "start_coordinator.py"}] + [q for d in SOURCE_DIRS if (root / d).is_dir() for q in (root / d).rglob("*")]
+    paths = [p for p in root.iterdir() if p.is_file()] + [q for d in SOURCE_DIRS if (root / d).is_dir() for q in (root / d).rglob("*")]
     found = []
     for path in paths:
         rel = path.relative_to(root)
         if (not path.is_file() or "__pycache__" in rel.parts or rel.parts[:2] == ("docs", "archive")
-                or path.name == ".DS_Store" or path.suffix == ".pyc"
+                or path.name in {".DS_Store", ".git"} or path.suffix in {".pyc", ".log"}
                 or (results in path.parents and path.name != "PROGRESS.md")):
             continue
-        if RETIRED_PROVIDER.encode() in path.read_bytes().lower():
+        try:
+            hit = RETIRED_PROVIDER.encode() in path.read_bytes().lower()
+        except OSError:  # vanished or unreadable between the walk and the read
+            continue
+        if hit:
             found.append(rel.as_posix())
     return sorted(found)
 
@@ -128,6 +132,9 @@ class CaseLintTest(unittest.TestCase):
     def test_retired_deploy_provider_is_absent_outside_archives(self):
         # C20 names the open gap. Only the architect edits architecture/compliance.md.
         self.assertLessEqual(set(retired_provider_files(EVALS.parent)), {"architecture/compliance.md"})
+        ledger = (EVALS.parent / "architecture/compliance.md").read_text().splitlines()
+        stray = [line[:60] for line in ledger if RETIRED_PROVIDER in line.lower() and not line.startswith("| C20 |")]
+        self.assertEqual(stray, [])
 
     def test_retired_provider_scan_reads_source_and_skips_generated_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -135,12 +142,12 @@ class CaseLintTest(unittest.TestCase):
             for rel in ("README.md", "docs/guide.md", "evals/results/PROGRESS.md",
                         "docs/archive/old.md", "evals/results/20260101-000000/out.txt",
                         ".chief-of-stuff/mailbox/note.md", ".venv/lib/mod.py", "node_modules/pkg/index.js",
-                        ".git", "local.log", "local-config.toml"):
+                        ".git", "local.log", "pyproject.toml"):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_text(f"mentions {RETIRED_PROVIDER.title()}\n")
             (root / "docs/dangling.md").symlink_to(root / "nowhere")
             os.mkfifo(root / "docs/pipe")
-            self.assertEqual(retired_provider_files(root), ["README.md", "docs/guide.md", "evals/results/PROGRESS.md"])
+            self.assertEqual(retired_provider_files(root), ["README.md", "docs/guide.md", "evals/results/PROGRESS.md", "pyproject.toml"])
 
     def test_progress_marks_every_redaction_and_says_quotes_are_not_verbatim(self):
         text = (EVALS / "results/PROGRESS.md").read_text()

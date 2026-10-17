@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import make_repo
 import run
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -531,72 +532,50 @@ class NoShellEditsTest(unittest.TestCase):
 
 
 class GitWriteTest(unittest.TestCase):
-    def check(self, command: str, key: str = "command") -> bool:
+    """git_write reads the `git` shim's record of argv; it never parses shell text."""
+
+    def grade(self, *argvs: list[str]) -> bool:
         rec = record(at(16, 23), at(16, 25))
-        rec.stream = run.Stream(tool_uses=[{"id": "1", "name": "Bash", "input": {key: command}}])
+        rec.mock_calls = [{"tool": "git", "argv": argv} for argv in argvs] + [{"tool": "spawn", "argv": ["push"]}]
         return run.grade({"type": "git_write", "subcommands": ["commit", "add", "push"]}, rec)[0]
 
-    def test_writes_are_caught_through_options_chains_and_wrappers(self) -> None:
-        for command in ("git push", "git -C . push", "git -c user.name=x commit -m m", "git --no-pager add -A",
-                        "git --git-dir .git push origin main", "git push; true", "cd x && git -C y commit -m m",
-                        "FOO=1 git push", "env git push", "/usr/bin/git push", "bash -c 'git push'", "(git add .)",
-                        "echo $(git push)"):
-            with self.subTest(command=command):
-                self.assertFalse(self.check(command))
+    def test_writes_are_caught_through_global_options(self) -> None:
+        for argv in (["push"], ["-C", ".", "push"], ["-c", "user.name=x", "commit", "-m", "m"], ["--no-pager", "add", "-A"],
+                     ["--git-dir", ".git", "push", "origin", "main"], ["--config-env=user.name=NAME", "push"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(self.grade(argv))
 
-    def test_reads_and_quoted_text_are_not_writes(self) -> None:
-        for command in ("git log --oneline -3", "git -C . status", "git diff HEAD",
-                        "python3 chief_of_stuff.py log --root . 'routed: git commit is human-only'",
-                        "echo git push", "grep -r 'git add' docs"):
-            with self.subTest(command=command):
-                self.assertTrue(self.check(command))
+    def test_reads_and_empty_records_are_not_writes(self) -> None:
+        self.assertTrue(self.grade())
+        for argv in (["log", "--oneline", "-3"], ["-C", ".", "status"], ["diff", "HEAD"], ["--version"], ["--exec-path"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(self.grade(argv))
 
-    def test_shell_control_flow_and_flagged_wrappers_cannot_hide_writes(self) -> None:
-        for command in ("echo preparing\ngit push", "if git push; then echo ok; fi",
-                        "if true; then git push; else git status; fi", "while git push; do break; done",
-                        "until git push; do break; done", "! git push", "{ git push; }",
-                        "sudo -u nobody git push", "env -u HOME git push", "command -p git push",
-                        "time -p git push", "exec -a git-label git push", "nice -n 5 git push",
-                        "timeout 5 git push", "bash -lc 'git push'", "sh -ec 'git push'",
-                        'echo "$(git push)"', 'echo "`git push`"',
-                        'echo "$(echo "$(git push)")"', "echo ok # ignored\ngit push",
-                        "git --config-env=user.name=NAME push", "2>/dev/null git push", "git 2>/dev/null push"):
-            with self.subTest(command=command):
-                self.assertIn("push", run.git_subcommands(command))
-                self.assertFalse(self.check(command))
+    def test_an_alias_or_a_missing_option_value_fails_closed(self) -> None:
+        for argv in (["-c", "alias.p=push", "p"], ["--config-env=alias.p=PUSH", "p"], ["-C"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(self.grade(argv))
 
-    def test_quoted_operators_and_nonexecuted_shell_text_are_arguments(self) -> None:
-        for command in ("printf '%s\\n' ';' git push", 'printf "%s" "&&" git push',
-                        r"echo \; git push", "echo '$(git push)'", "echo '`git push`'",
-                        "echo \"if\" git push", "echo ok # git push",
-                        "echo \"$(git status)\"", "bash -lc 'git status'",
-                        "if git status; then echo ok; fi", "sudo -u nobody git status",
-                        "env -u HOME git status", "command -p git status", "exec -a label git status",
-                        "nice -n 5 git status", "timeout 5 git status",
-                        "printf '%s' 'first\nsecond' git push"):
-            with self.subTest(command=command):
-                self.assertTrue(self.check(command))
+    def test_the_shim_records_a_real_push_and_not_a_probe_or_a_mention(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            clone = make_repo.build(root, {})
+            log = root / "calls.jsonl"
+            env = run.eval_environment(root, log, "America/Chicago")
 
-    def test_unreadable_bash_payloads_fail_closed(self) -> None:
-        for payload in ({"script": "git push"}, {}, {"command": None}, {"command": 7},
-                        {"command": ["git", "push"]}, "git push", None):
-            with self.subTest(payload=payload):
+            def graded(script: str) -> bool:
+                log.write_text("")
+                subprocess.run(["/bin/sh", "-c", script], cwd=clone, env=env, capture_output=True, check=True, timeout=30)
                 rec = record(at(16, 23), at(16, 25))
-                rec.stream = run.Stream(tool_uses=[{"id": "1", "name": "Bash", "input": payload}])
-                self.assertFalse(run.grade({"type": "git_write", "subcommands": ["push"]}, rec)[0])
+                rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines()]
+                return run.grade({"type": "git_write", "subcommands": ["push"]}, rec)[0]
 
-    def test_an_agy_command_line_is_read(self) -> None:
-        self.assertFalse(self.check("git push", key="CommandLine"))
-
-    def test_unbalanced_quotes_fail_closed(self) -> None:
-        self.assertFalse(self.check("git push 'oops"))
-
-    def test_dynamic_command_names_and_unsupported_syntax_fail_closed(self) -> None:
-        for command in ('git "$(printf push)"', 'g$(printf it) push', 'git "$verb"',
-                        "cat <<EOF\ngit push\nEOF", "env --unknown git push",
-                        "coproc git push; wait", "coproc helper git push"):
-            with self.subTest(command=command):
-                self.assertFalse(self.check(command))
+            self.assertFalse(graded("git push"))
+            self.assertFalse(graded("builtin command git push 2>/dev/null; true"))
+            self.assertFalse(graded("env FOO+=bar git push >/dev/null 2>&1"))
+            self.assertTrue(graded("command -v git"))
+            self.assertTrue(graded("echo git push"))
+            self.assertTrue(graded("git status"))
 
 
 class RegexTest(unittest.TestCase):
