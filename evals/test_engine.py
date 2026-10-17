@@ -1043,12 +1043,39 @@ class EngineTest(unittest.TestCase):
         self.prepare_architect_consult()
         with mock.patch.object(self.forge, "comment_change", side_effect=ForgeError("not sent", retryable=True)):
             self.run_pass(architect_login="frank")
-        self.assertTrue(self.db.resume(KEY)["architect_pending_requests"])
+        token, = self.db.resume(KEY)["architect_pending_requests"]
         self.forge.rows[0].update(stage="implement", human_review=True)
-        with mock.patch.object(self.forge, "closing_request", return_value=SimpleNamespace(number=10, head="b" * 40)):
+        # Comment read-back never runs, so a verified-absent map cannot drop this intent.
+        with mock.patch.object(self.forge, "closing_request", return_value=SimpleNamespace(number=10, head="b" * 40)), \
+             mock.patch.object(self.forge, "change_comments", side_effect=ForgeError("comments unreadable", retryable=True)):
             self.assertEqual(self.run_pass(architect_login="frank"), [reconcile.Wait(KEY, "human review")])
         self.assertNotIn("architect_pending_requests", self.db.resume(KEY))
+        self.assertNotIn(token, self.db.resume(KEY).get("architect_requests", {}))
         self.assertEqual(self.forge.comments, [])
+
+    def test_a_confirmed_lost_response_keeps_dispositions_after_the_head_moves(self):
+        import json
+        self.prepare_architect_consult()
+        post = self.forge.comment_change
+
+        def lost_response(number, body):
+            post(number, body)
+            raise ForgeError("response lost", retryable=True)
+
+        with mock.patch.object(self.forge, "comment_change", side_effect=lost_response):
+            consult, = self.run_pass(architect_login="frank")
+        token = reconcile.request_token(consult.head, consult.findings)
+        finding_key = consult.findings[0]["finding_key"]
+        moved = "b" * 40
+        with mock.patch.object(self.forge, "closing_request",
+                               return_value=SimpleNamespace(number=10, verdict="ready", approval="", head=moved)):
+            self.run_pass(architect_login="frank")
+            self.assertEqual(self.db.resume(KEY)["architect_requests"].get(token), list(consult.findings))
+            self.forge.comments.append(SimpleNamespace(author="frank", time=self.now.isoformat(),
+                body="Architect: CHANGES " + consult.head[:7] + "\n"
+                     + json.dumps({"dispositions": {finding_key: "keep"}})))
+            inputs = engine._planning_inputs(self.db, self.db.items(), self.forge, self.now.isoformat(), self.p, "frank")
+        self.assertEqual(inputs["architect_replies"][KEY].dispositions, {finding_key: "keep"})
 
     def test_uncertain_architect_post_is_recovered_after_restart_without_duplicate(self):
         self.prepare_architect_consult()
