@@ -795,9 +795,9 @@ class EngineTest(unittest.TestCase):
         import decision_actions
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
-        self.db.add_decision(KEY, topic="ask", question="Which parser?", answer="Split", record={
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
             "decision": {"options": ["Split", "Keep"], "context": "original"}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         # Durable worker and segment exist; crash prevented appending the restarted row.
         self.launch(KEY, "implement", 1, "builder")
@@ -855,6 +855,20 @@ class EngineTest(unittest.TestCase):
         self.db.add_ask(KEY, "review", 1, "s1", "Which parser?", ["Split", "Keep"], "")
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
         self.assertEqual(self.forge.merges, [])
+
+    def test_entering_a_merge_hold_preserves_its_approval_until_merge(self):
+        self._merge_gate()
+        self.forge.rows[0]["stage"] = "review"
+        self.forge.kanban = SimpleNamespace(stage_map={}, holds=lambda stage: stage == "merge")
+        model = self._votes([("adopt", "approve")] * 3)
+        self.assertIsInstance(self.run_pass(model=model)[0], reconcile.Ask)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
+        self.assertEqual(self.forge.merges, [])
+        self.assertEqual(self.db.resume(KEY)["waived_gates"], ["merge"])
+        self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
+        self.assertEqual(len(self.forge.merges), 1)
+        self.assertNotIn("waived_gates", self.db.resume(KEY))
+        self.assertEqual(model.n, 3)
 
 
 class MainTest(unittest.TestCase):
