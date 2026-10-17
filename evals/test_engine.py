@@ -849,6 +849,33 @@ class MainTest(unittest.TestCase):
         self.assertTrue(passed.call_args.kwargs["require_green"])
         self.assertTrue(passed.call_args.kwargs["launch"].keywords["require_green"])
 
+    def test_rules_that_exceed_a_stage_budget_refuse_before_the_engine_loop(self):
+        from dataclasses import replace
+        import dispatch_prompt as dp
+        path = self.root / "settings.toml"
+        path.write_text(path.read_text() + '\nrules = ["Keep tests."]\nrequire_green_tests = true\n')
+        rules = ("p" * 1000,)
+        policies = engine.settings.load_policy()
+        policies.personas["implementer"] = replace(policies.personas["implementer"], rules=rules)
+        row = SimpleNamespace(issue_key="k" * dp.LINE_CAP, title="t" * dp.LINE_CAP)
+        prompt = dp.compose_issue(row, "", "", "implement", policies.personas["implementer"],
+                                  root=self.root, rules=("Keep tests.",), require_green=True)
+        budget = len(prompt.split("\n## Forge issue\n")[0])
+        # The startup check must include implement delivery, persona rules and the suite gate.
+        for cap, expected in ((budget, 0), (budget - 1, 2)):
+            errors = io.StringIO()
+            with self.subTest(cap=cap), mock.patch.object(dp, "BODY_CAP", cap), \
+                 mock.patch.object(engine.settings, "load_policy", return_value=policies), \
+                 mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+                 mock.patch.object(engine, "run_pass") as passed, contextlib.redirect_stderr(errors):
+                self.assertEqual(engine.main(["--root", str(self.root), "--once"]), expected)
+                if expected:
+                    passed.assert_not_called()
+                    self.assertIn("[workers] rules", errors.getvalue())
+                    self.assertIn("implement", errors.getvalue())
+                else:
+                    passed.assert_called_once()
+
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

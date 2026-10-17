@@ -651,12 +651,50 @@ class PromptCharacterBoundsTest(unittest.TestCase):
         body = dp.compose(self.root, "2026-09-18", item)
         self.assertLessEqual(len(body), dp.BODY_CAP)
 
-    def test_max_standing_rules_with_max_row_fit_under_cap(self):
+    def test_rendered_rule_budget_boundaries_for_both_assignment_paths(self):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "\n## Architecture\n- Canonical document: `design/ARCHITECTURE.md`\n")
         row = SimpleNamespace(issue_key="k" * dp.LINE_CAP, title="t" * dp.LINE_CAP)
-        persona = SimpleNamespace(role="r" * 20, rules=())
-        rules = ("x" * 2000,) * 4
-        self.assertEqual(sum(map(len, rules)), settings.RULES_TOTAL_CAP)
-        dp.compose_issue(row, "T", "B", "review", persona, skills=("s",) * 3, rules=rules, require_green=True)
+        persona = SimpleNamespace(role="builder", rules=("p" * 1000,))
+        # Exercise both many short rules and a few long ones at the *rendered* limit.
+        for width in (1, 2400):
+            rules = []
+            while len(dp.standing_rules(tuple(rules + ["x" * width]))) <= settings.RULES_TOTAL_CAP:
+                rules.append("x" * width)
+            rules[-1] += "x" * (settings.RULES_TOTAL_CAP - len(dp.standing_rules(tuple(rules))))
+            # For width=2400 fill a last partial rule instead of exceeding the per-rule cap.
+            if len(rules[-1]) > 2400:
+                tail = len(rules[-1]) - 2400 - 3
+                rules[-1] = "x" * 2400
+                rules.append("x" * tail)
+            path = self.root / "rules.toml"
+            path.write_text("[workers]\nrules = " + json.dumps(rules) + "\nrequire_green_tests = true\n")
+            loaded = settings.load(self.root, path)
+            self.assertEqual(len(dp.standing_rules(loaded.workers.rules)), settings.RULES_TOTAL_CAP)
+            for stage in ("plan", "implement", "fix", "review"):
+                with self.subTest(width=width, stage=stage):
+                    prompt = dp.compose_issue(row, "T", "B", stage, persona, root=self.root,
+                                              skills=("testing",), rules=loaded.workers.rules, require_green=True)
+                    self.assertLessEqual(len(prompt.split("\n## Forge issue\n")[0]), dp.BODY_CAP)
+                    self.assertIn("Rule: " + persona.rules[0], prompt)
+            prompt = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                                one_shot=True, settings=loaded)
+            self.assertLessEqual(len(prompt), dp.BODY_CAP)
+            self.assertIn("Architecture:", prompt)
+            rules[-1] += "x"
+            path.write_text("[workers]\nrules = " + json.dumps(rules) + "\n")
+            with self.assertRaisesRegex(settings.SettingsError, "rules.*rendered"):
+                settings.load(self.root, path)
+
+    def test_one_shot_rule_budget_includes_the_complete_assignment(self):
+        loaded = Settings(workers=Workers(rules=("x",) * 1000, require_green_tests=True))
+        prompt = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                            one_shot=True, settings=loaded)
+        with mock.patch.object(dp, "BODY_CAP", len(prompt)):
+            self.assertEqual(dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                                        one_shot=True, settings=loaded), prompt)
+        with mock.patch.object(dp, "BODY_CAP", len(prompt) - 1), self.assertRaisesRegex(dp.RefusedError, "over the"):
+            dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                       one_shot=True, settings=loaded)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
         item = "Security audit " + ("x" * 2000)
