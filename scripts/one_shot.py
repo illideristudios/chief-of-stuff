@@ -359,9 +359,16 @@ def _pending_run(root: Path, cfg, day: str, task: str, name: str) -> bool:
         rows = [row for row in parse_tracker(end.read_text()).tasks if row.item.strip() == task] if end.exists() else []
         if rows:
             row = rows[0]
-            return len(rows) == 1 and row.owner.strip().lower() == name.lower() and (
-                row.kind == "running" or (end != launch and row.kind == "open" and _launch_row_running(launch, task, name)))
-        return _launch_row_running(launch, task, name)
+            if len(rows) != 1 or row.owner.strip().lower() != name.lower():
+                return False
+            if row.kind == "running":
+                return True
+            if end == launch or row.kind != "open":
+                return False
+        # Read directly: _launch_row_running treats unreadable files as not running,
+        # which is suitable for rollover proof but cannot authorize releasing a marker.
+        rows = [row for row in parse_tracker(launch.read_text()).tasks if row.item.strip() == task]
+        return len(rows) == 1 and rows[0].kind == "running" and rows[0].owner.strip().lower() == name.lower()
     except OSError:
         return True  # an unreadable tracker cannot authorize discarding recovery evidence
 
