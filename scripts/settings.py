@@ -28,7 +28,8 @@ HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 OFFSET = re.compile(r"^(\d+)([hm])$")
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HERDR_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
-RULES_TOTAL_CAP = 6000  # rendered block; stage-specific assignment budgets are checked before the engine loop
+RULES_MAX = 64  # rules; the rendered assignment budget is checked by dispatch_prompt.validate_worker_rules at engine start
+RULES_TOTAL_CAP = 6000  # sum of len(rule)
 CLAUDE_AS_PROFILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # claude-as's valid_profile_name
 DEFAULT_WARNINGS = ("24h", "3h", "1h")
 POLICY = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"  # the shipped policy and workflow
@@ -37,14 +38,6 @@ EFFORTS = ("high", "medium", "low")
 
 class SettingsError(ValueError):
     """A settings file that is there and cannot be read as written."""
-
-
-def standing_rules(rules: tuple[str, ...]) -> str:
-    """The serialized settings block, shared by size validation and assignment composition."""
-    if not rules:
-        return ""
-    return ("\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in rules)
-            + "\n\nThese rules come from workspace settings (`[workers] rules`).\n")
 
 
 def _offset(label: str, where: str = "[notify] deadline_warnings") -> timedelta:
@@ -330,9 +323,8 @@ def _workers(table) -> Workers:
     ):
         raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
                             'or "(via " markers, each at most 2400 characters')
-    if len(standing_rules(tuple(rules))) > RULES_TOTAL_CAP:
-        raise SettingsError(f'[workers] rules exceed the {RULES_TOTAL_CAP}-character rendered budget '
-                            '(including bullets, line breaks and framing)')
+    if len(rules) > RULES_MAX or sum(map(len, rules)) > RULES_TOTAL_CAP:
+        raise SettingsError(f"[workers] rules must be at most {RULES_MAX} rules and {RULES_TOTAL_CAP} characters in all")
     # Preserve the user's wording, including surrounding spaces.
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
                    claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))

@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backlog_ref import file_with, issue_ref  # noqa: E402
 from tracker import Task, parse_tracker, short_name  # noqa: E402
 from workspace import Config, ConfigError, architecture_document, read_config  # noqa: E402
-from settings import Settings, Stage, SettingsError, Workflow, load as load_settings, standing_rules  # noqa: E402
+from settings import Settings, Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
 import ownership  # noqa: E402
 import runtimes  # noqa: E402
 
@@ -344,6 +344,14 @@ def _clean(label: str, value: str) -> str:
     if len(value) > LINE_CAP:
         raise RefusedError(f"{label} is {len(value)} characters, over the {LINE_CAP} cap")
     return value
+
+
+def standing_rules(rules: tuple[str, ...]) -> str:
+    """Render workspace rules already validated at the settings boundary, with their source."""
+    if not rules:
+        return ""
+    return ("\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in rules)
+            + "\n\nThese rules come from workspace settings (`[workers] rules`).\n")
 
 
 def task_keys(item: str, name: str = "") -> set[str]:
