@@ -259,6 +259,31 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     return _gate(key, edge, policies, room, now) or action
 
 
+def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: Mapping[str, object] | None,
+                  pending_release: Mapping[str, object] | None, owned: Mapping[str, object] | None) -> str:
+    """What to do with an issue's saved hold records before planning.
+
+    restore: retry a pending hold restoration. drop_hold: forget one that no longer applies.
+    drop_release: forget a release the board has moved past. replace: a release without current
+    ownership returns to a normal human hold. keep: leave a verified release to planning.
+    drop_owner: ownership the hold no longer backs. none: nothing saved applies.
+    """
+    if pending_hold:
+        return "restore" if item.forge_state == "open" and item.stage == pending_hold["stage"] else "drop_hold"
+    if pending_release:
+        if (item.forge_state != "open" or not item.stage or item.stage != pending_release["expected"]
+                or item.stage != pending_release["stage"]):
+            return "drop_release"
+        newest = max((s.attempt for s in history if s.stage == item.stage), default=0)
+        if not owned or owned.get("stage") != item.stage or owned.get("attempt") != newest:
+            # Older engines saved no provenance, and a kill inside a release can leave an older attempt.
+            return "replace"
+        return "keep"
+    if owned and (not item.human_review or item.stage != owned.get("stage")):
+        return "drop_owner"
+    return "none"
+
+
 def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], policies: Policies,
          issue_types: Mapping[str, str | None], free_slots: int, now: datetime,
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,

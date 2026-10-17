@@ -539,7 +539,8 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertEqual(self.launched, [])
         self.assertNotIn("pending_stage", self.db.resume(KEY))
-        self.assertTrue(self.db.resume(KEY)["pending_hold"])
+        self.assertTrue(self.forge.rows[0]["human_review"])
+        self.assertNotIn("pending_hold", self.db.resume(KEY))
 
     def test_slot_race_does_not_release_the_hold(self):
         self.pending_release()
@@ -624,7 +625,8 @@ class EngineTest(unittest.TestCase):
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.sync_from_forge(self.forge.snapshots())
-        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        self.db.record_segment(KEY, "implement", 1, (NOW - timedelta(minutes=2)).isoformat(),
+                               (NOW - timedelta(minutes=1)).isoformat(), "done")
         with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
             self.run_pass()
         self.assertEqual(self.db.items()[0].stage, "review")
