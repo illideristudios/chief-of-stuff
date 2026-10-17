@@ -462,7 +462,7 @@ def main(argv_in: list[str] | None = None) -> int:
     args.runtime = args.runtime or "claude"
     if args.agent_type is None and settings.stages and args.runtime == "claude":
         try:
-            stage = dispatch_prompt.stage_defaults(Path(args.root), args.date, args.task)
+            stage = dispatch_prompt.stage_defaults(Path(args.root), args.date, args.task, settings=settings)
             text = (Path(args.root) / "CLAUDE.md").read_text()
             if stage is not None and stage.agent in make_worktree.agent_types(text):
                 args.agent_type = stage.agent
@@ -501,7 +501,7 @@ def main(argv_in: list[str] | None = None) -> int:
     override = os.environ.get(ENV)
     try:
         selected = args.launcher or worker_settings.launcher
-        body = assignment(args, False, Path(args.cwd))
+        body = assignment(args, False, Path(args.cwd), settings=settings)
         # The eval harness uses the argv override.
         worker = dict(cwd=args.cwd, agent_type=args.agent_type, title=args.title, runtime=args.runtime,
                       model=args.model, effort=args.effort, workspace=args.root,

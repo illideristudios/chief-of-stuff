@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -90,7 +91,7 @@ class Workflow:
 
 @dataclass(frozen=True)
 class Workers:
-    """Worker launch configuration and standing workspace instructions."""
+    """Worker launch configuration and standing instructions for one-shot and engine tasks."""
     launcher: str = "ghostty"
     mode: str = "interactive"
     # #100: one-shots running at once across every session in the workspace; None is no cap.
@@ -98,7 +99,7 @@ class Workers:
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
     require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
-    rules: tuple[str, ...] = ()  # standing workspace rules carried before every dispatched task
+    rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
 
 
 @dataclass(frozen=True)
@@ -296,12 +297,13 @@ def _workers(table) -> Workers:
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
     rules = table.get("rules", [])
+    # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
     if not isinstance(rules, list) or not all(
         isinstance(rule, str) and rule.strip() and len(rule.splitlines()) == 1
         and "(via " not in rule and len(rule) <= 2400
-        and not re.search(r"[\x00-\x1f\x7f-\x9f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]", rule) for rule in rules
+        and not any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in rule) for rule in rules
     ):
-        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control characters '
+        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
                             'or "(via " markers, each at most 2400 characters')
     # Preserve the user's wording, including surrounding spaces.
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,

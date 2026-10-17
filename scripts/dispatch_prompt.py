@@ -403,12 +403,14 @@ def _task_context(root: Path, cfg: Config, day: str | None, task: str) -> tuple[
     return relative, text, rows[0]
 
 
-def stage_defaults(root: Path, day: str | None, task: str) -> Stage | None:
+def stage_defaults(root: Path, day: str | None, task: str, *, settings: Settings | None = None) -> Stage | None:
     """Return the task row's configured stage defaults; day defaults to workspace today."""
     cfg = config(root)
     _, _, row = _task_context(root, cfg, day, task)
     try:
-        return load_settings(root, cfg.settings_path).stages.get(row.stage.strip())
+        if settings is None:
+            settings = load_settings(root, cfg.settings_path)
+        return settings.stages.get(row.stage.strip())
     except (OSError, SettingsError) as exc:
         raise RefusedError(f"cannot read workspace settings: {exc}") from None
 
@@ -432,7 +434,7 @@ def _task_directives(root: Path, row: Task, skills: str, issue: Any) -> list[str
 def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
             coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
             one_shot: bool = False, *, settings: Settings | None = None) -> str:
-    """Compose a tracker assignment from one workspace settings snapshot.
+    """Compose a tracker assignment from one settings snapshot, with standing rules on one-shot runs only.
 
     Pass preloaded settings to reuse the caller's snapshot without rereading it;
     otherwise load the complete settings once from the configured workspace path.
@@ -447,7 +449,6 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         except (OSError, SettingsError) as exc:
             raise RefusedError(f"cannot read workspace settings: {exc}") from None
     workflow = settings.workflow
-    rules_header = standing_rules(settings.workers.rules)
     stage = settings.stages.get(row.stage.strip())
     skills = skills_line(stage.skills) if stage else ""
     owner = row.owner.strip()
@@ -499,7 +500,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
                         if workflow.delivery == "pull-request" else
                         "Commit the finished change on this worktree's branch; do not push or merge without existing authorization.")
         lines = [
-            "# One-shot assignment" + rules_header,
+            "# One-shot assignment" + standing_rules(settings.workers.rules),
             f"You are {name or 'a worker'} in a single, noninteractive {runtime} run. Complete only this task, then exit.",
             "Do not register, poll a mailbox, schedule checks, start another agent, or send messages.",
             "Do not wait for a plan approval or for a reply. If a decision, missing access, or another blocker prevents completion, stop and report human_review.",
