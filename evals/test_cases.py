@@ -158,31 +158,58 @@ class CaseLintTest(unittest.TestCase):
         self.assertIn("no longer verbatim", "\n".join(text.splitlines()[:6]))
 
     def test_git_refusal_cases_grade_the_command_not_its_text(self):
-        for name, extra in (("blocked-becomes-one-line", []), ("decision-cannot-lift-human-only", []),
-                            ("no-unapproved-actions", []), ("item-becomes-task-and-dispatch", ["merge"]),
-                            ("relay-does-not-restate-limits", ["merge"]), ("standing-approval-for-the-day", []),
-                            ("standing-approval-expired-at-midnight", [])):
+        for name in ("blocked-becomes-one-line", "decision-cannot-lift-human-only", "no-unapproved-actions",
+                     "item-becomes-task-and-dispatch", "relay-does-not-restate-limits",
+                     "standing-approval-for-the-day", "standing-approval-expired-at-midnight"):
             gs = [g for g in graders(spec(EVALS / "cases" / name)) if g["type"] == "path_git_write"]
             with self.subTest(case=name):
-                self.assertEqual([g["subcommands"] for g in gs], [["commit", "add", "push", *extra]])
+                self.assertEqual(len(gs), 1)
+                self.assertNotIn("subcommands", gs[0])
+                self.assertEqual(gs[0]["name"], "only allowlisted PATH git reads")
+
+    def _assert_local_remotes(self, root: Path) -> None:
+        configs = [p for p in root.rglob("config") if p.parent.name == ".git" or p.parent.suffix == ".git"]
+        if not configs:
+            return
+        # Some template .git dirs contain only HEAD/config. A private object store lets Git read their
+        # configuration and expand insteadOf/pushInsteadOf without requiring complete fixture repos.
+        probe = root / ".remote-check"
+        probe.mkdir(exist_ok=True)
+        run.make_repo.git(["init", "--bare", "."], probe)
+        for config in configs:
+            base = config.parent.parent if config.parent.name == ".git" else config.parent
+            run.make_repo.git(["config", "--file", str(probe / "config"), "include.path", str(config)], base)
+            args = ["--git-dir", str(probe)]
+            keys = run.make_repo.git([*args, "config", "--list", "--name-only"], base).splitlines()
+            remotes = {key[7:].rsplit(".", 1)[0] for key in keys
+                       if key.startswith("remote.") and key.endswith((".url", ".pushurl"))}
+            for remote in remotes:
+                for mode in ([], ["--push"]):
+                    urls = run.make_repo.git([*args, "remote", "get-url", "--all", *mode, remote], base).splitlines()
+                    self.assertTrue(urls, (config, remote, mode))
+                    for url in urls:
+                        self.assertNotRegex(url, r"^[^/]*:|^//", (config, url))
+                        destination = (base / url).resolve()
+                        self.assertTrue(destination.is_relative_to(root), (config, url))
 
     def test_every_fixture_remote_is_a_local_path(self) -> None:
-        """An absolute-path git can skip the PATH shim (#770); it stays harmless while no remote leaves the temp dir."""
+        """An absolute-path git can skip the PATH shim (#770); every fetch/push URL must stay in the fixture."""
         for case in CASES:
-            repo = spec(case).get("repo")
-            with self.subTest(case=case.name):
+            with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
+                root = Path(d).resolve()
+                context = ctx(spec(case))
+                rendered = run.render_value(spec(case), context)
+                repo = rendered.get("repo")
                 if repo is not None:
-                    origin = Path(repo.get("origin", "origin.git"))
-                    self.assertFalse(origin.is_absolute() or ".." in origin.parts, origin)
-                for config in (case / "fixture").rglob("config"):
-                    if config.parent.name == "{{dotgit}}":
-                        for url in re.findall(r"^\s*url\s*=\s*(\S+)", config.read_text(), re.M):
-                            self.assertTrue(url.startswith("/") or url.startswith("{{"), url)
-        with tempfile.TemporaryDirectory() as d:
-            root = Path(d).resolve()
-            clone = run.make_repo.build(root, {})
-            url = Path(run.make_repo.git(["remote", "get-url", "origin"], clone))
-            self.assertTrue(url.is_dir() and url.is_relative_to(root), url)
+                    # Validate before building: an absolute/escaping origin must never be created.
+                    for key, default in (("origin", "origin.git"), ("clone", "repo"), ("trees", "trees")):
+                        path = Path(repo.get(key, default))
+                        self.assertFalse(path.is_absolute() or ".." in path.parts, path)
+                run.render_tree(case / "fixture", root, context)
+                self._assert_local_remotes(root)
+                if repo is not None:
+                    run.make_repo.build(root, repo)
+                    self._assert_local_remotes(root)
 
     def test_remote_confinement_rejects_external_fetch_and_push_destinations(self) -> None:
         for setting, url in (("url", "/outside.git"), ("pushurl", "https://example.test/repo.git"),
@@ -195,6 +222,20 @@ class CaseLintTest(unittest.TestCase):
                 config.write_text('[remote "origin"]\n    url = {{dotgit}}\n' + f'    {setting} = {url}\n')
                 with patch(__name__ + ".CASES", [case]), self.assertRaises(AssertionError):
                     CaseLintTest().test_every_fixture_remote_is_a_local_path()
+
+    def test_remote_confinement_accepts_local_paths_and_checks_git_url_rewrites(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            config = root / "repo/.git/config"
+            config.parent.mkdir(parents=True)
+            local = '[remote "origin"]\n    url = ../origin.git\n    pushurl = "' + str(root / 'push target.git') + '"\n'
+            config.write_text(local)
+            self._assert_local_remotes(root)
+            for rewrite in ('[url "https://example.test/"]\n    insteadOf = ../',
+                            '[url "/outside/"]\n    pushInsteadOf = ../'):
+                config.write_text('[remote "origin"]\n    url = ../origin.git\n' + rewrite + '\n')
+                with self.subTest(rewrite=rewrite), self.assertRaises(AssertionError):
+                    self._assert_local_remotes(root)
 
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)

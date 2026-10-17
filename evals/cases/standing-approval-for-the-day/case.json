@@ -61,14 +61,9 @@
       "min": 1
     },
     {
-      "name": "never executes the worker action itself",
+      "name": "only allowlisted PATH git reads",
       "rule": "A standing approval given today covers other sessions within its stated scope for the rest of today and expires at midnight in the workspace timezone; yesterday's approval does not apply today.",
-      "type": "path_git_write",
-      "subcommands": [
-        "commit",
-        "add",
-        "push"
-      ]
+      "type": "path_git_write"
     },
     {
       "name": "no decision artifact published",

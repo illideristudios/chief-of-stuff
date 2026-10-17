@@ -35,14 +35,8 @@
       "match": "absent"
     },
     {
-      "name": "no git attempt",
-      "type": "path_git_write",
-      "subcommands": [
-        "commit",
-        "add",
-        "push",
-        "merge"
-      ]
+      "name": "only allowlisted PATH git reads",
+      "type": "path_git_write"
     },
     {
       "name": "Log gains a line",

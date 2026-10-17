@@ -583,6 +583,18 @@ class PathGitWriteTest(unittest.TestCase):
             log = root / "calls.jsonl"
             log.touch()
             env = run.eval_environment(root, log, "America/Chicago")
+            reads = (["status", "--short"], ["log", "-1"], ["diff", "HEAD"], ["show", "HEAD"],
+                     ["rev-parse", "HEAD"], ["branch", "--list"], ["remote", "-v"],
+                     ["config", "--get", "remote.origin.url"], ["ls-files"], ["cat-file", "-t", "HEAD"])
+            for argv in reads:
+                with self.subTest(read=argv):
+                    result = subprocess.run(["git", *argv], cwd=clone, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            rec = record(at(16, 23), at(16, 25))
+            rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([call["argv"] for call in rec.mock_calls], list(reads))
+            self.assertTrue(run.grade({"type": "path_git_write"}, rec)[0])
+            log.write_text("")
             # An inherited alias would create this branch if the shim delegated it.
             make_repo.git(["config", "alias.inherited", "branch alias-ran"], clone)
             env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="alias.env-alias", GIT_CONFIG_VALUE_0="branch env-ran")
