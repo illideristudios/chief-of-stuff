@@ -799,7 +799,8 @@ class EngineTest(unittest.TestCase):
             "decision": {"options": ["Split", "Keep"], "context": "original"}})
         rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
-        # Durable segment exists; crash prevented appending the restarted row.
+        # Durable worker and segment exist; crash prevented appending the restarted row.
+        self.launch(KEY, "implement", 1, "builder")
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         model = self._votes([("adopt", "Keep")] * 3)
         self.run_pass(model=model)
@@ -827,6 +828,33 @@ class EngineTest(unittest.TestCase):
         self.assertIsInstance(self.run_pass(model=model)[0], reconcile.Ask)
         self.assertEqual(model.n, 6)
         self.assertEqual(self.db.decisions(KEY)[-1].record["decision"]["context"], "review-2")
+
+    def test_replacement_split_is_settled_until_a_human_answers(self):
+        import decision_actions
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_decision(KEY, topic="ask", question="Which parser?", answer="Split", record={
+            "decision": {"options": ["Split", "Keep"], "context": "original"}})
+        rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        model = self._votes([("concern", "Keep")] * 3)
+        self.run_pass(model=model)
+        self.finish("implement")
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        self.finish("review")
+        self.findings()
+        self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(model.n, 3)
+
+    def test_unrouted_ask_blocks_merge_even_without_a_model(self):
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.db.add_ask(KEY, "review", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(self.forge.merges, [])
 
 
 class MainTest(unittest.TestCase):

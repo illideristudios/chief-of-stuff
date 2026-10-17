@@ -92,10 +92,10 @@ class ShippedPolicyTest(unittest.TestCase):
         self.assertEqual(len(got.workflows), 1)
         self.assertIn(got.default_workflow, got.workflows)
 
-    def test_the_shipped_personas_are_marked_placeholders(self):
+    def test_unsettled_shipped_personas_are_marked_placeholders(self):
         self.assertIn("PLACEHOLDER", settings.POLICY.read_text())
-        for persona in settings.load_policy().personas.values():
-            self.assertIn("PLACEHOLDER", persona.role, persona.name)
+        for name in ("reviewer", "architect"):
+            self.assertIn("PLACEHOLDER", settings.load_policy().personas[name].role, name)
 
     def test_the_shipped_base_needs_no_word_from_zach_and_has_no_limits(self):
         base = settings.load_policy().resolve()
