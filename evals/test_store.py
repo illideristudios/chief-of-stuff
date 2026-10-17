@@ -138,6 +138,47 @@ class StoreTest(unittest.TestCase):
         self.assertEqual({entry.message for entry in self.store.log(KEY)},
                          {"first", "second", *(f"w{n}" for n in range(len(writers)))})
 
+    def test_file_claim_replacement_keeps_every_open_segments_scope(self) -> None:
+        self.store.upsert_item(KEY)
+        self.store.replace_file_ownership(KEY, [("src", "write")])
+        self.store.set_ownership(KEY, "/tmp/worker-tree", "tree")
+        self.store.record_segment(KEY, "implement", 1, started_at="09:00")
+        self.store.record_segment(KEY, "review", 1, started_at="09:01", ended_at="09:02", outcome="done")
+        for pending in ([], [("docs", "read")]):
+            self.store.replace_file_ownership(KEY, pending)
+            self.assertEqual({(r.path, r.mode) for r in self.store.ownership(KEY)},
+                             {("src", "write"), ("/tmp/worker-tree", "tree")})
+        self.store.end_segment(KEY, "implement", 1, "09:03", "done")
+        self.store.replace_file_ownership(KEY, [("docs", "read")])
+        self.assertEqual({(r.path, r.mode) for r in self.store.ownership(KEY)},
+                         {("docs", "read"), ("/tmp/worker-tree", "tree")})
+
+    def test_scope_sync_waits_for_a_worker_start_transaction_before_replacing(self) -> None:
+        self.store.upsert_item(KEY)
+        self.store.replace_file_ownership(KEY, [("src", "write")])
+        other = store.Store(self.path)
+        self.addCleanup(other.engine.dispose)
+        started = threading.Event()
+        errors = []
+
+        def replace() -> None:
+            started.set()
+            try:
+                other.replace_file_ownership(KEY, [])
+            except BaseException as exc:
+                errors.append(exc)
+
+        with self.store.session() as session:
+            session.add(store.Segment(issue_key=KEY, stage="implement", attempt=1, started_at="09:00"))
+            session.flush()  # reserve the worker while another connection attempts the scope sync
+            thread = threading.Thread(target=replace)
+            thread.start()
+            self.assertTrue(started.wait(timeout=5))
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual([(r.path, r.mode) for r in self.store.ownership(KEY)], [("src", "write")])
+
     def test_rework_is_more_segments_on_the_one_item_not_more_items(self) -> None:
         self.store.upsert_item(KEY, title="x")
         self.store.record_segment(KEY, "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
