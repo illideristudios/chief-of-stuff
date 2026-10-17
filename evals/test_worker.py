@@ -1031,6 +1031,7 @@ class WorkerTest(unittest.TestCase):
                     self.assertEqual(make_repo.git(["rev-parse", f"refs/heads/{branch}"], clone), head)
                     self.assertEqual(make_repo.git(["rev-parse", "HEAD"], outside), head)
                     self.assertEqual((outside / "manual.txt").read_text(), "manual work\n")
+                    self.assert_abort_work_preserved(clone, heads)  # the refusal comes before any tree is removed
 
     def test_abort_snapshots_with_discovery_and_rechecks_with_retirement_under_the_clone_lock(self):
         from contextlib import contextmanager
@@ -1052,7 +1053,7 @@ class WorkerTest(unittest.TestCase):
             def observe(name, function):
                 def called(*args, **kwargs):
                     self.assertTrue(active, name)
-                    events.append((name, active[-1]))
+                    events.append((name, active[-1], None))
                     return function(*args, **kwargs)
                 return called
 
@@ -1060,23 +1061,144 @@ class WorkerTest(unittest.TestCase):
 
             def writes(args, cwd):
                 if args[:2] == ["worktree", "remove"]:
-                    events.append(("remove", active[-1]))
+                    events.append(("remove", active[-1], Path(args[-1])))
                 return trusted(args, cwd)
+
+            def seen(name, function):
+                def called(path, *args, **kwargs):
+                    self.assertTrue(active, name)
+                    events.append((name, active[-1], Path(path)))
+                    return function(path, *args, **kwargs)
+                return called
 
             with mock.patch.object(worker.make_worktree, "clone_lock", side_effect=tracked_lock), \
                  mock.patch.object(worker, "_read_orphans", side_effect=observe("discover", worker._read_orphans)), \
-                 mock.patch.object(worker, "_read_tree", side_effect=observe("read", worker._read_tree)), \
-                 mock.patch.object(worker, "_tree_contents", side_effect=observe("contents", worker._tree_contents)), \
+                 mock.patch.object(worker, "_read_tree", side_effect=seen("read", worker._read_tree)), \
+                 mock.patch.object(worker, "_tree_contents", side_effect=seen("contents", worker._tree_contents)), \
                  mock.patch.object(worker.make_worktree, "git_trusted", side_effect=writes):
                 self.launch_in(clone, attempt=3)
-            discovery = next(hold for name, hold in events if name == "discover")
-            contents = [hold for name, hold in events if name == "contents"]
-            self.assertIs(contents[0], discovery)
-            self.assertIs(contents[1], discovery)
-            retirement = next(hold for name, hold in events if name == "remove")
-            self.assertTrue(all(hold is retirement for hold in contents[2:]))
-            self.assertTrue(any(name == "read" and hold is retirement for name, hold in events))
-            self.assertTrue(all(hold is retirement for name, hold in events if name == "remove"))
+            discovery = next(hold for name, hold, *_ in events if name == "discover")
+            contents = [(hold, path) for name, hold, path in events if name == "contents"]
+            self.assertIs(contents[0][0], discovery)
+            self.assertIs(contents[1][0], discovery)
+            removals = [(i, hold, path) for i, (name, hold, path) in enumerate(events) if name == "remove"]
+            self.assertEqual(len(removals), 2)
+            retirement = removals[0][1]
+            self.assertIsNot(retirement, discovery)
+            previous = -1
+            for index, hold, path in removals:
+                self.assertIs(hold, retirement)
+                # Each tree is read and hashed again after every earlier removal and just before its own.
+                for name in ("read", "contents"):
+                    latest = max(i for i, (n, h, p) in enumerate(events[:index]) if n == name and p == path)
+                    self.assertGreater(latest, previous, f"{name} {path.name} before its removal")
+                    self.assertIs(events[latest][1], retirement)
+                previous = index
+
+    def test_abort_never_deletes_a_local_ref_that_moved_after_the_recheck(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            trusted = worker.make_worktree.git_trusted
+            moved = {}
+
+            def move_ref(args, cwd):
+                result = trusted(args, cwd)
+                if args[:2] == ["worktree", "remove"] and not moved:
+                    tree = next(t for t in heads if t.name == Path(args[-1]).name)
+                    ref = f"refs/heads/work/{tree.name}"
+                    # A manual `git update-ref` takes no clone_lock: the tip moves after the recheck.
+                    moved[ref] = make_repo.git(["commit-tree", f"{heads[tree]}^{{tree}}", "-p", heads[tree],
+                                                "-m", "moved"], clone)
+                    make_repo.git(["update-ref", ref, moved[ref]], clone)
+                return result
+
+            with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=move_ref):
+                with self.assertRaisesRegex(RuntimeError, "retire.*ref"):
+                    self.launch_in(clone, attempt=3)
+            for ref, tip in moved.items():
+                self.assertEqual(make_repo.git(["rev-parse", ref], clone), tip)
+
+    def test_abort_rechecks_each_tree_just_before_removing_it(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            trusted = worker.make_worktree.git_trusted
+            late = []
+
+            def edit_other(args, cwd):
+                if args[:2] == ["worktree", "remove"] and not late:
+                    other = next(t for t in heads if t.name != Path(args[-1]).name)
+                    (other / "late.txt").write_text("hand edit after the hash\n")
+                    late.append(other)
+                return trusted(args, cwd)
+
+            with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=edit_other):
+                with self.assertRaisesRegex(RuntimeError, "changed since.*snapshot"):
+                    self.launch_in(clone, attempt=3)
+            self.assertEqual((late[0] / "late.txt").read_text(), "hand edit after the hash\n")
+            self.assertEqual((late[0] / "scratch.txt").read_text(), "uncommitted work\n")
+
+    def single_tree(self):
+        from evals import make_repo
+        clone = self.orphans([{"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "merged": False}])
+        tree = self.trees / "issue-1-implement-1"
+        return tree, worker.git_view.locate(clone).common
+
+    def test_snapshot_hashes_tracked_and_untracked_files_but_never_opens_ignored_ones(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            tree, common = self.single_tree()
+            (tree / ".gitignore").write_text("node_modules/\n")
+            (tree / "node_modules" / "pkg").mkdir(parents=True)
+            (tree / "node_modules" / "pkg" / "index.js").write_text("one\n")
+            (tree / "scratch.txt").write_text("work\n")
+            opened = []
+            real = os.open
+
+            def record(path, *args, **kwargs):
+                opened.append(str(path))
+                return real(path, *args, **kwargs)
+
+            with mock.patch.object(worker.os, "open", side_effect=record):
+                before = worker._tree_contents(tree, common)
+            self.assertFalse([p for p in opened if "node_modules" in p], opened)
+            self.assertTrue([p for p in opened if p.endswith("scratch.txt")])
+            (tree / "node_modules" / "pkg" / "index.js").write_text("two\n")
+            self.assertEqual(worker._tree_contents(tree, common), before)
+            (tree / "scratch.txt").write_text("changed work\n")
+            self.assertNotEqual(worker._tree_contents(tree, common), before)
+
+    def test_abort_retires_trees_holding_a_fifo_or_socket_without_opening_it(self):
+        import socket
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            fifos = []
+            for tree in heads:
+                (tree / "README.md").unlink()
+                os.mkfifo(tree / "README.md")  # a tracked file replaced by a FIFO
+                fifos.append(str(tree / "README.md"))
+                (tree / "sub").mkdir()
+                here = os.getcwd()
+                os.chdir(tree / "sub")  # a unix socket path is short only relative to its directory
+                try:
+                    listener = socket.socket(socket.AF_UNIX)
+                    self.addCleanup(listener.close)
+                    listener.bind("dev.sock")
+                finally:
+                    os.chdir(here)
+            real = os.open
+
+            def refuse_special(path, *args, **kwargs):
+                if str(path) in fifos or str(path).endswith("dev.sock"):
+                    raise AssertionError(f"opened a special file: {path}")
+                return real(path, *args, **kwargs)
+
+            with mock.patch.object(worker.os, "open", side_effect=refuse_special):
+                fresh = Path(self.launch_in(clone, attempt=3).cwd)
+            self.assertTrue(fresh.is_dir())
+            self.assertTrue(all(not tree.exists() for tree in heads))
 
     def test_abort_add_failure_preserves_the_old_work_and_refs(self):
         from evals import git_taint as taint
