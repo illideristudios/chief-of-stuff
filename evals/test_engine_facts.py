@@ -88,6 +88,33 @@ class GatherTest(unittest.TestCase):
         with mock.patch.object(engine_facts.process_status, "identity", return_value="other"):
             self.assertEqual(self.gather().alive, ())
 
+    def test_an_exit_appearing_during_process_probes_is_left_to_collect(self):
+        run = self.root / "run"
+        run.mkdir()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["run_dir"] = str(run)
+        self.db.set_resume(KEY, data)
+        def appear(*args, **kwargs):
+            (run / "exit.json").write_text("{}")
+            return None
+        with mock.patch.object(engine_facts.process_status, "identity", side_effect=appear):
+            self.assertEqual(self.gather().alive, ())
+
+    def test_missing_or_root_level_recorded_trees_contribute_unknown_evidence(self):
+        for trees in (self.trees, self.root):
+            with self.subTest(trees=trees), mock.patch.object(engine_facts.process_status, "identity", return_value=None):
+                facts = engine_facts.gather(forge=SimpleNamespace(blocked_by=lambda: {}), store=self.db,
+                                            root=self.root, trees=trees, now=NOW)
+                self.assertEqual(facts.changed, ((KEY, None),))
+                self.assertEqual(facts.progress, ((KEY, None),))
+
+    def test_late_reports_from_an_older_run_do_not_replace_the_latest_stop(self):
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        self.db.record_segment(KEY, "review", 1, started_at=NOW.isoformat())
+        self.db.add_report(KEY, "review", 1, "new-session", "blocked", "stuck", [])
+        self.db.add_report(KEY, "implement", 1, "sess", "done", "late", [])
+        self.assertEqual([(r.stage, r.attempt) for r in self.gather().reports], [("review", 1)])
+
     def test_a_tree_git_cannot_open_is_unknown_not_a_failed_pass(self):
         tree = self.trees / "issue-1-implement-1"
         tree.mkdir()
@@ -142,4 +169,21 @@ class BlockedByTest(unittest.TestCase):
         issue["blockedBy"] = {"nodes": [{"number": 2, "state": "OPEN"}], "totalCount": 1}
         source = forge.Forge(backlog.GitHubBacklog("example/project"), gh=FakeGh(issues=[issue, gh_issue(2, "Blocker")]))
         self.assertEqual(source.blocked_by(), {"github:example/project#1": ("github:example/project#2",)})
+
+    def test_a_foreign_github_blocker_keeps_its_repository(self):
+        from evals.test_forge import FakeGh, gh_issue
+        issue = gh_issue(1, "Blocked")
+        issue["blockedBy"] = {"nodes": [{"number": 2, "state": "OPEN",
+                                             "repository": {"nameWithOwner": "elsewhere/lib"}}], "totalCount": 1}
+        source = forge.Forge(backlog.GitHubBacklog("example/project"), gh=FakeGh(issues=[issue]))
+        self.assertEqual(source.blocked_by(), {KEY: ("github:elsewhere/lib#2",)})
+
+    def test_a_foreign_gitlab_blocker_keeps_its_project(self):
+        source = forge.Forge(backlog.Backlog("https://gitlab.example.test", "example/project"), token="t")
+        link = {"iid": 2, "link_type": "is_blocked_by", "state": "opened",
+                "web_url": "https://gitlab.example.test/elsewhere/lib/-/issues/2"}
+        with mock.patch.object(forge.Forge, "issues", return_value=SimpleNamespace(ok=True, issues=[SimpleNamespace(iid=1)])), \
+             mock.patch.object(backlog, "_get", return_value=([link], {}, "")):
+            self.assertEqual(source.blocked_by(), {"gitlab:gitlab.example.test/example/project#1":
+                                                   ("gitlab:gitlab.example.test/elsewhere/lib#2",)})
 

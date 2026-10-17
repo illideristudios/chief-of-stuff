@@ -3,6 +3,7 @@
 import contextlib
 from dataclasses import replace
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -18,6 +19,7 @@ import policy
 import reconcile
 import store
 import supervisor
+from tree_state import TreeState
 from evals import test_forge as tf
 from forge_port import ForgeError
 from settings import Kanban
@@ -237,6 +239,50 @@ class EngineTest(unittest.TestCase):
                                 "body": "## File ownership\n- write: `src/a.py`"})
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
                                           reconcile.Wait(OTHER, f"file ownership conflict with {KEY}")])
+
+    def test_a_closed_issue_still_releases_its_gone_worker_slot(self):
+        self.run_pass()
+        self.forge.rows[0]["forge_state"] = "closed"
+        with mock.patch.object(engine.worker.process_status, "identity", return_value=None):
+            actions = self.run_pass()
+        self.assertIsInstance(actions[0], reconcile.Close)
+        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+
+    def test_a_root_level_or_missing_tree_holds_a_gone_worker(self):
+        self.trees = self.root
+        self.run_pass()
+        with mock.patch.object(engine.worker.process_status, "identity", return_value=None):
+            actions = self.run_pass()
+        self.assertTrue(actions[0].human_review)
+        self.assertTrue(self.db.items()[0].human_review)
+
+    def test_unreadable_live_tree_still_reaches_stall_judgement(self):
+        self.run_pass()
+        self.now += timedelta(hours=1)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "stalled")])
+
+    def test_normal_exit_enforces_read_only_scope_before_closing(self):
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
+        self.run_pass()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        run.mkdir(parents=True)
+        (run / "stdout").write_text(json.dumps({"is_error": False, "result": "done"}))
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        self.db.add_report(KEY, "implement", 1, "fake-session", "done", "finished", [])
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 0, 0), True, NOW)), \
+             mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
+            self.run_pass()
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertEqual(len(self.launched), 1)
+
+    def test_malformed_record_requires_a_human_hold_before_closing(self):
+        self.run_pass()
+        self.db.set_resume(KEY, {"runs": []})
+        self.run_pass()
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(len(self.launched), 1)
 
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
