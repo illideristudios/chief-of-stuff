@@ -63,12 +63,13 @@ def _link(text: str, url: str, cls: str = "", tag: str = "span", prose: bool = F
     return f'<a{c} {_href(url)}>{body}</a>' if url and '<a ' not in body else f"<{tag}{c}>{body}</{tag}>"
 
 
-def _card(c: Card, inline: Callable[[str], str] = _esc) -> str:
+def _card(c: Card, inline: Callable[[str], str] = _esc, linked_inline: Callable[[str], str] | None = None) -> str:
     chip = _tag("chip", c.kind, c.state) if c.state else ""
     marks = f'<div class="columns-marks">{"".join(_tag("mark", m.category, m.text) for m in c.marks)}</div>' if c.marks else ""
     head = f'<div class="columns-card columns-flagged" data-cat="{_esc(c.flag.category)}">' if c.flag else '<div class="columns-card">'
     flag = f'<div class="columns-tag columns-flag" data-cat="{_esc(c.flag.category)}">{_esc(c.flag.text)}</div>' if c.flag else ""
-    return (f'{head}{_link(c.name, c.href, "columns-card-name", "div", True, inline)}'
+    name_inline = linked_inline if c.href and linked_inline else inline
+    return (f'{head}{_link(c.name, c.href, "columns-card-name", "div", True, name_inline)}'
             + (f'<div class="columns-refs">{"".join(_link(t, u) for t, u in c.refs)}</div>' if c.refs else "")
             + f'<div class="columns-who">{_link(c.owner, c.owner_href, "columns-owner")}{chip}</div>{marks}{flag}</div>')
 
@@ -78,22 +79,24 @@ def tally(cards: tuple[Card, ...]) -> str:
     return "".join(f"<span>{n} {_esc(k)}</span>" for k, n in Counter(c.kind for c in cards).items())
 
 
-def _column(col: Column, limit: int, inline: Callable[[str], str] = _esc) -> str:
+def _column(col: Column, limit: int, inline: Callable[[str], str] = _esc,
+            linked_inline: Callable[[str], str] | None = None) -> str:
     kind = f" columns-{_kind(col.kind)}" if col.kind else ""
     note = f'<span class="columns-note">{_esc(col.note)}</span>' if col.note else ""
     shown, rest = col.cards[:limit], col.cards[limit:]
-    more = (f'<details class="columns-more"><summary>+ {tally(rest)}</summary>{"".join(_card(c, inline) for c in rest)}</details>'
+    more = (f'<details class="columns-more"><summary>+ {tally(rest)}</summary>{"".join(_card(c, inline, linked_inline) for c in rest)}</details>'
             if rest else "")
     return (f'<section class="columns-col{kind}" aria-label="{_esc(col.name)}, {len(col.cards)}">'
             f'<div class="columns-head"><h3 class="columns-name">{_esc(col.name)}</h3>{note}'
-            f'<span class="columns-count">{len(col.cards)}</span></div>{"".join(_card(c, inline) for c in shown)}{more}</section>')
+            f'<span class="columns-count">{len(col.cards)}</span></div>{"".join(_card(c, inline, linked_inline) for c in shown)}{more}</section>')
 
 
-def render(cols: list[Column], limit: int = LIMIT, inline: Callable[[str], str] = _esc) -> str:
-    """The board as one `<figure>`: at most `limit` cards a column, the rest folded."""
+def render(cols: list[Column], limit: int = LIMIT, inline: Callable[[str], str] = _esc,
+           linked_inline: Callable[[str], str] | None = None) -> str:
+    """At most `limit` cards per column; `linked_inline` renders names already inside navigation links."""
     n = sum(len(c.cards) for c in cols)
     out = [f'<figure class="columns" aria-label="{len(cols)} column{"" if len(cols) == 1 else "s"}, {n} card{"" if n == 1 else "s"}">',
-           '<div class="columns-grid">', *(_column(c, limit, inline) for c in cols), "</div>", "</figure>"]
+           '<div class="columns-grid">', *(_column(c, limit, inline, linked_inline) for c in cols), "</div>", "</figure>"]
     return "\n".join(out)
 
 
