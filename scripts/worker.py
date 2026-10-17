@@ -9,7 +9,7 @@ import time
 import uuid
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import claude_adapter
 import clock as engine_clock
@@ -140,13 +140,22 @@ def _declared_agent(text: str, agent: str) -> str:
     return agent if agent in make_worktree.agent_types(text) else ""
 
 
-def _ask_conflict(store: Any, key: str, stage: str, attempt: int, reason: str, clock: engine_clock.Clock) -> None:
+_CONFLICT_OPTIONS = ("abort", "hold")
+
+
+def _conflict_question(stage: str, reason: str) -> str:
+    """One answer per issue, stage and conflict reason. Tree heads are not part of it."""
+    return f"{stage}\n{reason}"
+
+
+def _ask_conflict(store: Any, key: str, stage: str, attempt: int, reason: str, clock: engine_clock.Clock) -> NoReturn:
     now = clock().isoformat()
-    rows = [d for d in store.decisions(key) if (d.topic, d.question) == ("conflict", reason)]
-    if not rows or rows[-1].answer:
-        store.add_decision(key, "conflict", reason)
-    if not any(a.question == reason for a in store.asks(key)):
-        store.add_ask(key, stage, attempt, "", reason, ["keep one branch/worktree", "abort"], reason)
+    question = _conflict_question(stage, reason)
+    rows = [d for d in store.decisions(key) if (d.topic, d.question) == ("conflict", question)]
+    if not rows or rows[-1].answer not in _CONFLICT_OPTIONS:
+        store.add_decision(key, "conflict", question)
+    if not any(a.question == question and tuple(a.options) == _CONFLICT_OPTIONS for a in store.asks(key)):
+        store.add_ask(key, stage, attempt, "", question, list(_CONFLICT_OPTIONS), reason)
     data = _resume(store, key)
     record = {"kind": "Ask", "gate": "conflict", "reason": reason}
     if data.get("interrupt") != record:
@@ -156,15 +165,14 @@ def _ask_conflict(store: Any, key: str, stage: str, attempt: int, reason: str, c
     raise RuntimeError(reason)
 
 
-def _asked(store: Any, key: str, stage: str, attempt: int, reason: str, clock: engine_clock.Clock) -> str:
-    """The user's answer to this conflict. With none yet, ask and stop the launch; an abort stops it for good."""
-    rows = [d for d in store.decisions(key) if (d.topic, d.question) == ("conflict", reason)]
-    answer = rows[-1].answer.strip() if rows and rows[-1].answer else ""
-    if not answer:
-        _ask_conflict(store, key, stage, attempt, reason, clock)
-    if answer.lower().startswith("abort"):
-        raise RuntimeError(f"aborted by the answer to: {reason}")
-    return answer
+def _conflict_choice(store: Any, key: str, stage: str, attempt: int, reason: str, clock: engine_clock.Clock) -> str:
+    """The offered option, matched exactly. Anything else asks again."""
+    question = _conflict_question(stage, reason)
+    rows = [d for d in store.decisions(key) if (d.topic, d.question) == ("conflict", question)]
+    answer = rows[-1].answer if rows and rows[-1].answer else ""
+    if answer in _CONFLICT_OPTIONS:
+        return answer
+    _ask_conflict(store, key, stage, attempt, reason, clock)
 
 
 def _common(repo: Path) -> Path | None:
@@ -203,7 +211,8 @@ def _read_tree(path: Path, common: Path) -> completion.OrphanTree:
                                  ahead=int(count) if code == 0 and count.isdecimal() else None)
 
 
-def _read_branches(number: int, data: dict, repo: Path, common: Path) -> list[completion.OrphanTree]:
+def _read_branches(number: int, data: dict, repo: Path, common: Path,
+                   checked_out: set[str]) -> list[completion.OrphanTree]:
     names: list[str] = [data["work_branch"]] if data.get("work_branch") else []
     for prefix, strip in ((f"refs/heads/work/issue-{number}-*", ""),
                           (f"refs/remotes/origin/work/issue-{number}-*", "origin/")):
@@ -213,6 +222,8 @@ def _read_branches(number: int, data: dict, repo: Path, common: Path) -> list[co
                          if ref and not ref.removeprefix(strip).startswith(f"work/issue-{number}-review-"))
     found = []
     for name in dict.fromkeys(names):
+        if name in checked_out:
+            continue
         for ref in (f"refs/heads/{name}", f"refs/remotes/origin/{name}"):
             code, sha = make_worktree.git(["rev-parse", "--verify", "-q", ref], repo, expected_common=common)
             if code == 0 and sha:
@@ -262,7 +273,8 @@ def _read_orphans(candidates: list[Path], review_paths: set[Path], number: int, 
                 found.append(completion.OrphanTree(str(path), "", "", unreadable=True))
             continue  # another repository's tree is none of ours to adopt
         found.append(_read_tree(path, common))
-    return _with_ancestry(found + _read_branches(number, data, repo, common), repo, common)
+    checked_out = {c.branch for c in found if c.branch}
+    return _with_ancestry(found + _read_branches(number, data, repo, common, checked_out), repo, common)
 
 
 def _legacy_worktree(issue_key: str, number: int, stage: str, attempt: int, tree_name: str, branch: str,
@@ -309,26 +321,26 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
 
     # The facts, the tip they name and the fast-forward or re-cut must not change between reading and acting.
+    abort = False
     with make_worktree.clone_lock(repo):
         found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
-        # Answers apply only to these paths, branches, heads and working states.
-        identity = json.dumps(sorted((c.path or "", c.branch, c.head, c.dirty, c.conflicted, c.unreadable)
-                                     for c in found), separators=(",", ":"))
-        def asked(reason: str) -> str:
-            return _asked(store, issue_key, stage, attempt, f"{reason}\nCandidates: {identity}", clock)
-
         preferred = str(Path(data["worktree"])) if data.get("worktree") else None
         chosen = completion.recovery(found, preferred=preferred)
         if isinstance(chosen, completion.Conflict):
-            chosen = completion.recovery(found, preferred=preferred, answer=asked(chosen.reason))
-            if isinstance(chosen, completion.Conflict):
-                _ask_conflict(store, issue_key, stage, attempt, f"{chosen.reason}\nCandidates: {identity}", clock)
+            choice = _conflict_choice(store, issue_key, stage, attempt, chosen.reason, clock)
+            if choice == "hold":
+                raise RuntimeError(f"orphan recovery held: {chosen.reason}")
+            abort = True
+            chosen = None
         if chosen is not None and chosen.path is not None:
             tree = Path(chosen.path)
             if next(c.head for c in found if c.path == chosen.path) != chosen.head:
                 code, detail = make_worktree.git_trusted(["merge", "--ff-only", chosen.head], tree)
                 if code != 0:
-                    asked(f"could not fast-forward orphaned worktree: {detail}")  # kept as it is, or stops
+                    reason = f"could not fast-forward orphaned worktree: {detail}"
+                    if _conflict_choice(store, issue_key, stage, attempt, reason, clock) == "hold":
+                        raise RuntimeError(f"orphan recovery held: {reason}")
+                    abort, chosen = True, None
         elif chosen is not None:
             make_worktree.git_trusted(["worktree", "prune"], repo)
             if (data.get("worktree") and not Path(data["worktree"]).exists()
@@ -341,6 +353,14 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
                 ["worktree", "add", "--no-track", "-B", chosen.branch, "--", str(tree), chosen.head], repo)
             if code != 0:
                 raise RuntimeError(f"git worktree add failed: {detail}")
+    if abort:
+        # A fresh tree from main. Its name cannot be one the conflicting checkouts already hold.
+        fresh = f"{tree_name}-{uuid.uuid4()}"
+        made = make_worktree.build(root, repo, str(trees), fresh, f"work/{fresh}", agent)
+        store.set_ownership(issue_key, str(made.path))
+        data.update(worktree=str(made.path), work_branch=f"work/{fresh}")
+        store.set_resume(issue_key, data)
+        return made.path, f"work/{fresh}", False
     if chosen is not None:
         recovered = (chosen.recovered or data.get("worktree") != str(tree) or attempt > 1 or bool(data.get("runs")))
         store.set_ownership(issue_key, str(tree))
@@ -471,7 +491,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     except BaseException:  # an interrupt too: a start that was never verified must not leave a runner behind
         claude_adapter.cancel(runner)
         if not (run_dir / "started.json").exists():
-            # cancel waited for the whole runner group: this command can no longer produce a start.
+            # cancel waits on the runner process: this command can no longer produce a start.
             run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
         raise
     _runners[str(run_dir)] = runner
@@ -506,8 +526,12 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     _save_run(store, key, segment.stage, segment.attempt, record)
                     data = _resume(store, key)
                     record = data["runs"][f"{segment.stage}-{segment.attempt}"]
-                elif not any((run_dir / name).exists() for name in ("started.json", "command.json", "exit.json")):
-                    # The launcher died before it started anything: no attempt ran, so none is spent.
+                elif not (run_dir / "exit.json").exists() and (
+                        not any((run_dir / name).exists() for name in ("started.json", "command.json", "exit.json"))
+                        or (run_dir / "started.json").is_file()):
+                    # Nothing verified ran. An interrupt after started.json leaves the rename for this pass.
+                    if (run_dir / "started.json").is_file():
+                        run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
                     store.drop_segment(key, segment.stage, segment.attempt)
                     if (data.get("pending_stage") or {}).get("stage") == segment.stage:
                         data.pop("pending_stage")

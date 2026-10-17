@@ -140,12 +140,6 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
     return Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
-def _recovery_aborted(decisions: Sequence[Decision]) -> bool:
-    latest = {(d.topic, d.question): d for d in decisions}
-    return any(d.topic == "conflict" and d.answer and d.answer.strip().lower().startswith("abort")
-               for d in latest.values())
-
-
 def _decision_pending(decisions: Sequence[Decision]) -> bool:
     # Decision rows are append-only, oldest first: the latest row for a question is its state.
     latest = {(d.topic, d.question): d for d in decisions}
@@ -157,8 +151,6 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
            decisions: Sequence[Decision]) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
-    if _recovery_aborted(decisions):
-        return Wait(key, "orphan recovery aborted")
     if _decision_pending(decisions):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
@@ -212,8 +204,6 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
         return None
     if item.human_review:
         return Wait(key, "human review")
-    if _recovery_aborted(decisions):
-        return Wait(key, "orphan recovery aborted")
     if _decision_pending(decisions):
         return Wait(key, "decision pending")
     workflow = policies.workflow_for(issue_type)

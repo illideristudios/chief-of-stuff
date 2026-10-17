@@ -476,7 +476,7 @@ class EngineTest(unittest.TestCase):
         self.db.add_decision(KEY, "conflict", "Diverged branches on #1")
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
         self.assertEqual(self.launched, [])
-        self.db.add_decision(KEY, "conflict", "Diverged branches on #1", answer="Keep work/issue-1-implement-1")
+        self.db.add_decision(KEY, "conflict", "Diverged branches on #1", answer="hold")
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
 

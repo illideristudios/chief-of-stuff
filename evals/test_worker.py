@@ -952,6 +952,7 @@ class WorkerTest(unittest.TestCase):
             start.assert_not_called()
             self.assertEqual(len(self.db.asks(KEY)), 1)
             shutil.rmtree(self.trees / "issue-1-implement-2")
+            make_repo.git(["worktree", "prune"], clone)
             make_repo.git(["branch", "-D", "work/issue-1-implement-2"], clone)
             request = self.launch_in(clone, attempt=3)
             self.assertEqual(Path(request.cwd).name, "issue-1-implement-1")

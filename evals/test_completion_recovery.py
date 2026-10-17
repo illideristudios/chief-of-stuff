@@ -44,12 +44,6 @@ class RecoveryTest(unittest.TestCase):
         clean, dirty = tree("/t/clean"), tree("/t/dirty", dirty=True)
         self.assertEqual(recovery([clean, dirty], preferred=clean.path).path, dirty.path)
 
-    def test_explicit_answer_matches_complete_branch_even_without_a_directory(self):
-        a = tree("/t/a", branch="work/issue-1-implement-1")
-        b = tree(None, head="b", branch="work/issue-1-implement-10")
-        chosen = recovery([a, b], preferred=a.path, answer="Keep `work/issue-1-implement-10`.")
-        self.assertEqual((chosen.path, chosen.branch, chosen.head), (None, b.branch, b.head))
-
     def test_the_preferred_tree_wins_among_equal_heads(self):
         a, b = tree("/t/a"), tree("/t/b", branch="work/issue-1-implement-2")
         self.assertEqual(recovery([a, b], preferred="/t/b").path, "/t/b")
@@ -69,20 +63,6 @@ class RecoveryTest(unittest.TestCase):
                 got = recovery(trees)
                 self.assertIsInstance(got, Conflict)
                 self.assertIn(reason, got.reason)
-
-    def test_an_answer_keeps_one_candidate_as_it_is(self):
-        a, b = tree("/t/a", head="a"), tree("/t/b", head="b", branch="work/issue-1-implement-2")
-        self.assertEqual(recovery([a, b], answer="keep one branch/worktree", preferred="/t/b").path, "/t/b")
-        self.assertEqual(recovery([a, b], answer="Keep work/issue-1-implement-1").path, "/t/a")
-        kept = recovery([tree("/t/a", head="a"), tree("/t/b", head="b", dirty=True)], answer="keep one")
-        self.assertEqual((kept.path, kept.head), ("/t/b", "b"))
-
-    def test_an_answer_skips_what_cannot_be_used_and_conflicts_when_nothing_is_left(self):
-        usable = recovery([tree("/t/a", unreadable=True), tree("/t/b", head="b", conflicted=True),
-                           tree("/t/c", head="c")], answer="keep")
-        self.assertEqual(usable.path, "/t/c")
-        self.assertIsInstance(recovery([tree("/t/a", unreadable=True)], answer="keep"), Conflict)
-
 
 if __name__ == "__main__":
     unittest.main()

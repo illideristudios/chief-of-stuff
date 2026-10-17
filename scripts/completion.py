@@ -6,7 +6,6 @@ decides which one to reuse, or why the choice is the user's.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -49,26 +48,11 @@ def _preferring(candidates: Sequence[OrphanTree], preferred: str | None) -> Orph
     return next((c for c in candidates if preferred and c.path == preferred), candidates[0])
 
 
-def _kept(candidates: Sequence[OrphanTree], answer: str, preferred: str | None) -> Recovery | Conflict:
-    """The user chose to keep one: take the one they named, else dirty work, else the preferred, as it is."""
-    usable = [c for c in candidates if not (c.unreadable or c.conflicted)]
-    if not usable:
-        return Conflict("no orphaned worktree or branch is readable and free of merge conflicts")
-    named = [c for c in usable if re.search(r"(?<![\w/.-])" + re.escape(c.branch) + r"(?![\w/.-])", answer)]
-    pool = named or usable
-    trees = [c for c in pool if c.path] or pool
-    chosen = _preferring([c for c in trees if c.dirty] or trees, preferred)
-    return _reuse(chosen, chosen.head)
-
-
-def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None,
-             answer: str | None = None) -> Recovery | Conflict | None:
+def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None) -> Recovery | Conflict | None:
     """None without candidates. Otherwise the commit to resume from and the tree or branch that holds it, or the
     conflict that needs the user. Uncommitted work is never put behind a fast-forward or beside other uncommitted work."""
     if not candidates:
         return None
-    if answer is not None:
-        return _kept(candidates, answer, preferred)
     if bad := [c for c in candidates if c.unreadable]:
         return Conflict(f"orphaned worktree {_label(bad[0])} is detached or unreadable")
     if bad := [c for c in candidates if c.conflicted]:
