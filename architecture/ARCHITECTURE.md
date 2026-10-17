@@ -105,7 +105,19 @@ On the engine path, file ownership is declared on the issue, because the forge i
 - **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
 - **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
 - **Workers declare nothing.** They report what they changed, and the read-only rule judges that report. They never grant themselves a scope.
-- **An issue with no declared scope** is treated as owning its whole repository for writing. It conflicts with every running write in that repository until it declares a narrower scope.
+- **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (Zach, 2026-10-17).
+- **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
+
+```
+I := an issue      S(I) := I has a valid File ownership section
+W(I) := I declares the whole repository, with the path "."
+D(I) := I may be dispatched      R(I) := I conflicts with every running write in its repository
+
+∀I: ¬S(I) → ¬D(I)      [Zach 2026-10-17: never allow the whole-repo fallback generally]
+∀I: W(I) → S(I) ∧ R(I)  [the whole repository only when declared]
+intake refuses ¬S       [issue_gate.py; the issue forms]
+∴ the engine serializes a repository only for an issue that asked for the whole of it, and an undeclared issue waits instead of blocking everyone
+```
 
 ## 9. Agent performance
 
