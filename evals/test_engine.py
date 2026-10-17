@@ -47,6 +47,9 @@ class FakeForge:
         self.kanban, self.github = None, True
         self.home = SimpleNamespace(repo=KEY.split(":", 1)[1].rsplit("#", 1)[0])
 
+    def blocked_by(self):
+        return {}
+
     def snapshots(self):
         return [self.snapshot(row["issue_key"]) for row in self.rows]
 
@@ -205,8 +208,9 @@ class EngineTest(unittest.TestCase):
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
         self.forge.holds = []
         self.forge.add_human_hold = lambda number: self.forge.holds.append(number) or ""
-        self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
         self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
+        self.launch(KEY, "implement", 1, "builder")
         action = reconcile.Close(KEY, "implement", 1, "done", "read-only run left changes", True)
         with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
             self.run_pass()
@@ -216,7 +220,9 @@ class EngineTest(unittest.TestCase):
     def test_a_close_whose_hold_write_fails_leaves_the_segment_open(self):
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
         self.forge.add_human_hold = lambda number: "forge offline"
+        self.db.upsert_item(KEY, stage="implement")
         self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
+        self.launch(KEY, "implement", 1, "builder")
         action = reconcile.Close(KEY, "implement", 1, "done", "read-only run left changes", True)
         with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
             self.run_pass()

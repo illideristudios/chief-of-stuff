@@ -6,6 +6,7 @@ this module only reads.
 
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -21,19 +22,16 @@ from reconcile import Facts
 # shortcut: nothing in the forge says the suite ran on main; unknown does not clear a done report
 
 
-def _blockers(forge: Any) -> dict[str, tuple[str, ...] | None] | None:
+def _blockers(forge: Any) -> tuple[dict[str, tuple[str, ...]] | None, str]:
+    """The blockers and, when unknown, why."""
     read = getattr(forge, "blocked_by", None)
     if read is None:
-        return {}
+        return None, "the forge cannot read them"
     try:
         got = read()
-    except (ForgeError, OSError, ValueError, TypeError):
-        return None
-    if got is None:
-        return None
-    if not isinstance(got, dict):
-        return None
-    return got
+    except (ForgeError, OSError, ValueError, TypeError) as exc:
+        return None, str(exc)
+    return (got, "") if isinstance(got, dict) else (None, "the forge did not answer with a mapping")
 
 
 def _record(store: Any, issue_key: str, stage: str, attempt: int) -> dict | None:
@@ -46,6 +44,9 @@ def _record(store: Any, issue_key: str, stage: str, attempt: int) -> dict | None
 def _alive(record: dict | None) -> bool | None:
     if record is None:
         return None
+    run_dir = record.get("run_dir")
+    if isinstance(run_dir, str) and run_dir and (Path(run_dir) / "exit.json").exists():
+        return None  # the adapter finished: `worker.collect` classifies its exit, not a liveness guess
     pid, session, identity = record.get("pid"), record.get("session_id"), record.get("identity")
     if type(pid) is not int or pid <= 0 or not isinstance(session, str) or not session or not isinstance(identity, str) or not identity:
         return None
@@ -105,7 +106,7 @@ def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]
     try:
         with git_view.opened(tree, git_trees.audit_env()) as view:
             return git_trees.read_state(tree, view), _on_main(tree, view), _progress(tree, view)
-    except (OSError, git_view.Unviewable, ValueError, RuntimeError):
+    except (OSError, git_view.Unviewable, git_view.CacheError, subprocess.SubprocessError, ValueError, RuntimeError):
         return None, None, object()
 
 
@@ -117,6 +118,13 @@ def _trees_dir(root: Path, trees: Path) -> str:
     return "" if rel == Path(".") else rel.as_posix()
 
 
+def _in_trees(root: Path, trees: Path, path: str) -> bool:
+    try:
+        return (root / path).resolve().is_relative_to(trees.resolve())
+    except OSError:
+        return False
+
+
 def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) -> Facts:
     """Plain fact records for `reconcile.plan`. A tree is read only when `git_trees.discover` listed it."""
     if now.utcoffset() is None:
@@ -126,13 +134,12 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
     reports: list[readiness.Report] = []
     read_only: list[str] = []
     for item in store.items():
-        rows = store.ownership(item.issue_key)
+        # worker.launch also records the worktree path here; that is a tree claim, not a file scope.
+        rows = [row for row in store.ownership(item.issue_key) if not _in_trees(root, trees, row.path)]
         claims.extend(readiness.Claim(item.issue_key, row.path, row.mode) for row in rows)
         if rows and all(row.mode == "read" for row in rows):
             read_only.append(item.issue_key)
-        asks.extend(readiness.Ask(row.issue_key, row.answer) for row in store.asks(item.issue_key))
-        reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt)
-                       for row in store.reports(item.issue_key))
+        asks.extend(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt) for row in store.asks(item.issue_key))
     alive: list[tuple[tuple[str, str, int], bool]] = []
     changed: list[tuple[str, bool | None]] = []
     on_main: list[tuple[str, bool | None]] = []
@@ -167,15 +174,17 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
             names.append((segment.issue_key, tree.name))
             tree_claims.append((segment.issue_key, (Claim(segment.issue_key, flag is not False,
                                                          "" if flag is not False else "has no process"),)))
-        change = _changed(state)
-        if change is not None:
-            changed.append((segment.issue_key, change))
+        changed.append((segment.issue_key, _changed(state)))
         if landed is not None:
             on_main.append((segment.issue_key, landed))
         if stamp is None or isinstance(stamp, datetime):
             progress.append((segment.issue_key, stamp))
-    blockers = _blockers(forge)
-    return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()),
+    # Read after liveness: a report written before a worker's exit is seen with it. By id: Store orders by attempt.
+    for item in store.items():
+        reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt)
+                       for row in sorted(store.reports(item.issue_key), key=lambda row: row.id))
+    blockers, why = _blockers(forge)
+    return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
                  asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
                  changed=tuple(changed), on_main=tuple(on_main), trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress))

@@ -293,7 +293,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             for error in teardown(root, Path(record["tree"]), Path(record["tree"]).name, teardown_command):
                 store.add_log(key, f"worker teardown failed: {error}", now.isoformat())
             if not (run_dir / "exit.json").exists():
-                raise ValueError("missing adapter exit record")
+                # The planner closes it from tree, report and orphan evidence.
+                continue
             code = _exit_code(run_dir)
             reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
             if isinstance(reply, Failure):

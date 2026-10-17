@@ -706,6 +706,20 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(slots=slots, now=now), self.assertRaises(ValueError):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
 
+    def test_an_item_that_waits_for_a_slot_claims_nothing_for_the_next(self):
+        import readiness
+        keys = [f"github:example/project#{n}" for n in (1, 2, 3)]
+        items = [replace(Item(), issue_key=key) for key in keys]
+        claims = (readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
+        got = reconcile.plan(items, {}, self.p, {}, 1, NOW, {}, facts=reconcile.Facts(claims=claims, blockers=()))
+        self.assertEqual([type(a).__name__ for a in got], ["Dispatch", "Wait", "Wait"])
+        self.assertEqual([a.reason for a in got[1:]], ["no free worker slots"] * 2)
+
+    def test_unknown_blockers_wait_with_their_reason(self):
+        facts = reconcile.Facts(blockers=None, blockers_error="auth required")
+        self.assertEqual(self.plan(facts=facts),
+                         [reconcile.Wait(KEY, "dependency blockers unknown: auth required")])
+
     def test_a_running_segment_whose_worker_is_gone_is_closed_instead_of_suppressed(self):
         import readiness
         other = "github:example/project#2"

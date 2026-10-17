@@ -54,22 +54,24 @@ def orphan_reason(name: str, state: TreeState | None, claims: Sequence[Claim]) -
 def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only: bool = False,
               changed: bool | None = None, on_main: bool | None = None, suite_on_main: bool | None = None,
               tree: TreeState | None = None, tree_name: str = "",
-              tree_claims: Sequence[Claim] = ()) -> Verdict | None:
+              tree_claims: Sequence[Claim] = (), tree_unreadable: bool = False) -> Verdict | None:
     """How to close an open segment whose worker is gone. None while the worker may still be running."""
     if worker_alive is not False:
         return None
     why = read_only_left_changes(read_only, changed)
     if why:
         return Verdict("done", why, True)
+    left = unlanded(tree)
+    if report == "done" and left and on_main is not True:
+        return Verdict("done", left, True)
     orphaned = orphan_reason(tree_name, tree, tree_claims)
     if orphaned:
         return Verdict("failed", orphaned, True)
     if report == "done":
-        left = unlanded(tree)
-        if left and on_main is not True:
-            return Verdict("done", left, True)
         gate = done_on_main(on_main, suite_on_main)
         if gate:
             return Verdict("done", gate, True)
         return Verdict("done", "")
+    if tree_unreadable:
+        return Verdict("failed", "worker tree could not be read", True)
     return Verdict("failed", "worker gone")

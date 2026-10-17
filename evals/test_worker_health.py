@@ -25,6 +25,12 @@ class SilenceTest(unittest.TestCase):
         self.assertEqual(self.signal(start, None), "act")
         self.assertEqual(self.signal(start, NOW - timedelta(minutes=5)), "ok")
 
+    def test_a_commit_from_before_the_run_or_after_now_is_not_progress(self):
+        start = NOW - timedelta(hours=2)
+        self.assertEqual(self.signal(start, start - timedelta(minutes=5)), "act")
+        self.assertEqual(self.signal(NOW - timedelta(minutes=30), NOW - timedelta(minutes=31)), "watch")
+        self.assertEqual(self.signal(start, NOW + timedelta(hours=3)), "act")
+
     def test_the_limit_must_be_positive(self):
         with self.assertRaises(ValueError):
             worker_health.silence(NOW, None, NOW, timedelta(0))

@@ -104,6 +104,11 @@ class GatherTest(unittest.TestCase):
     def test_a_forge_that_cannot_read_blockers_is_unknown(self):
         self.assertIsNone(self.gather(SimpleNamespace()).blockers)
 
+    def test_a_failed_relationship_read_says_why(self):
+        failing = mock.Mock(**{"blocked_by.side_effect": engine_facts.ForgeError("auth required")})
+        facts = self.gather(failing)
+        self.assertEqual((facts.blockers, facts.blockers_error), (None, "auth required"))
+
     def test_a_failed_relationship_read_is_unknown(self):
         forge = mock.Mock()
         forge.blocked_by.return_value = None
@@ -117,6 +122,19 @@ class BlockedByTest(unittest.TestCase):
                                                            {"number": 3, "state": "CLOSED"}], "totalCount": 2}), (2,))
         self.assertIsNone(forge._blocked_numbers({"nodes": [], "totalCount": 1}))
         self.assertEqual(forge._blocked_numbers(None), ())
+
+    def test_a_github_read_failure_raises_with_its_reason(self):
+        source = forge.Forge(backlog.GitHubBacklog("example/project"), gh=lambda args: (1, "", "auth required"))
+        with self.assertRaisesRegex(engine_facts.ForgeError, "auth required"):
+            source.blocked_by()
+
+    def test_a_gitlab_links_list_with_a_next_page_is_partial(self):
+        fake = SimpleNamespace(issues=lambda: SimpleNamespace(ok=True, issues=[SimpleNamespace(iid=1)]),
+                               _token=lambda: "token", home=SimpleNamespace(issues_url="https://gl/issues"),
+                               key=lambda n: f"gitlab:p#{n}")
+        with mock.patch.object(backlog, "_get", return_value=([], {"x-next-page": "2"}, "")):
+            with self.assertRaisesRegex(engine_facts.ForgeError, "more than one page"):
+                forge._gitlab_blocked(fake)
 
     def test_a_github_list_of_blockers_is_keyed_by_issue(self):
         from evals.test_forge import FakeGh, gh_issue

@@ -147,13 +147,14 @@ class Facts:
     reports: tuple[readiness.Report, ...] = ()
     alive: tuple[tuple[tuple[str, str, int], bool], ...] = ()  # (issue, stage, attempt) → worker alive
     read_only: tuple[str, ...] = ()
-    changed: tuple[tuple[str, bool | None], ...] = ()
+    changed: tuple[tuple[str, bool | None], ...] = ()  # present None: the tree could not be read
     on_main: tuple[tuple[str, bool | None], ...] = ()
     suite_on_main: tuple[tuple[str, bool | None], ...] = ()
     trees: tuple[tuple[str, TreeState], ...] = ()
     tree_names: tuple[tuple[str, str], ...] = ()
     tree_claims: tuple[tuple[str, tuple], ...] = ()
     progress: tuple[tuple[str, datetime | None], ...] = ()  # present None: looked, no commit; absent: unknown
+    blockers_error: str = ""  # why `blockers` is None
     stall_after: timedelta = timedelta(minutes=45)
 
 
@@ -282,6 +283,7 @@ def _abandoned(item: WorkItem, segment: Segment, facts: Facts) -> Close | None:
         False, report=_report_outcome(facts, item.issue_key, segment),
         read_only=item.issue_key in facts.read_only, changed=dict(facts.changed).get(item.issue_key),
         on_main=dict(facts.on_main).get(item.issue_key), suite_on_main=dict(facts.suite_on_main).get(item.issue_key),
+        tree_unreadable=item.issue_key in dict(facts.changed) and dict(facts.changed)[item.issue_key] is None,
         tree=dict(facts.trees).get(item.issue_key), tree_name=dict(facts.tree_names).get(item.issue_key, ""),
         tree_claims=dict(facts.tree_claims).get(item.issue_key, ()))
     if verdict is None:
@@ -425,6 +427,8 @@ def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment
     blockers = None if facts.blockers is None else dict(facts.blockers).get(item.issue_key, ())
     reason = readiness.why_not(item.issue_key, claims=facts.claims, running=running, blockers=blockers,
                                asks=facts.asks, reports=facts.reports)
+    if reason == "dependency blockers unknown" and facts.blockers_error:
+        reason = f"{reason}: {facts.blockers_error}"
     return Wait(item.issue_key, reason) if reason else action
 
 
@@ -466,9 +470,9 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         if facts is not None and action is not None:
             action = _with_facts(action, item, history, facts, (*running, *accepted))
         if isinstance(action, (Dispatch, Review)):
-            accepted.append(item.issue_key)
             if free_slots:
                 free_slots -= 1
+                accepted.append(item.issue_key)
             else:
                 action = Wait(item.issue_key, "no free worker slots")
         if action is not None:

@@ -55,42 +55,46 @@ def _blocked_numbers(raw: Any) -> tuple[int, ...] | None:
     return tuple(numbers)
 
 
-def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]] | None:
+def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
     row, error = _gh_json(forge.gh, ["issue", "list", "-R", forge.home.repo, "--state", "open",
                                      "--json", "number,blockedBy", "--limit", str(backlog.GH_LIMIT)])
-    if error or not isinstance(row, list) or len(row) >= backlog.GH_LIMIT:
-        return None
+    if error:
+        raise ForgeError(error)
+    if not isinstance(row, list) or len(row) >= backlog.GH_LIMIT:
+        raise ForgeError("issue list is not a complete list")
     out: dict[str, tuple[str, ...]] = {}
     for item in row:
         if not isinstance(item, dict) or type(item.get("number")) is not int:
-            return None
+            raise ForgeError("issue row has no number")
         numbers = _blocked_numbers(item.get("blockedBy"))
         if numbers is None:
-            return None
+            raise ForgeError(f"blockers of #{item['number']} are incomplete")
         if numbers:
             out[forge.key(item["number"])] = tuple(forge.key(number) for number in numbers)
     return out
 
 
-def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]] | None:
+def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
     # shortcut: one links read per open issue; page the list when a workspace exceeds one issues() page
     got = forge.issues()
     if not got.ok:
-        return None
+        raise ForgeError(got.error)
     secret = forge._token()
     if not secret:
-        return None
+        raise ForgeError(forge.home.missing_token)
     out: dict[str, tuple[str, ...]] = {}
     for issue in got.issues:
-        body, _, error = backlog._get(f"{forge.home.issues_url}/{issue.iid}/links", secret, backlog.TIMEOUT)
+        body, headers, error = backlog._get(f"{forge.home.issues_url}/{issue.iid}/links", secret, backlog.TIMEOUT)
         if error or not isinstance(body, list):
-            return None
+            raise ForgeError(error or f"links of #{issue.iid} are not a list")
+        if (headers.get("x-next-page") or "").strip():
+            raise ForgeError(f"links of #{issue.iid} span more than one page")
         numbers = []
         for link in body:
             if not isinstance(link, dict) or link.get("link_type") != "is_blocked_by" or link.get("state") != "opened":
                 continue
             if type(link.get("iid")) is not int:
-                return None
+                raise ForgeError(f"a link of #{issue.iid} has no iid")
             numbers.append(link["iid"])
         if numbers:
             out[forge.key(issue.iid)] = tuple(forge.key(number) for number in numbers)
@@ -641,14 +645,16 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"review threads: {exc}") from exc
 
-    def blocked_by(self) -> dict[str, tuple[str, ...]] | None:
-        """Open issues blocking each open issue, keyed by issue key. None when the read fails."""
+    def blocked_by(self) -> dict[str, tuple[str, ...]]:
+        """Open issues blocking each open issue, keyed by issue key. Raises ForgeError, saying why, when the read fails or is partial."""
         try:
             if self.github:
                 return _github_blocked(self)
             return _gitlab_blocked(self)
-        except (ForgeError, OSError, ValueError, TypeError, KeyError, AttributeError):
-            return None
+        except ForgeError:
+            raise
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ForgeError(f"blockers: {exc}") from exc
 
     def snapshot(self, issue_key: str, *, issue: Any | None = None,
                  request: merge_ready.Request | None = None) -> dict[str, Any]:

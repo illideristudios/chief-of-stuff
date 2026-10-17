@@ -1,7 +1,7 @@
 """Whether an item may be dispatched now. Use Cases; no I/O.
 
 File ownership is the pass's claim rows (store.Ownership). Dependency blockers are the forge's
-native relationships for this pass. Stop records are the engine's Ask and Report rows.
+native relationships for this pass. Stop records are the engine's Ask and Report rows, in the order written.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ class Claim:
 class Ask:
     issue_key: str
     answer: str | None = None
+    stage: str = ""
+    attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -57,10 +59,11 @@ def why_not(issue_key: str, *, claims: Sequence[Claim], running: Sequence[str],
     mine_asks = [row for row in asks if row.issue_key == issue_key]
     if any(not (row.answer or "").strip() for row in mine_asks):
         return "unanswered ask"
-    if not mine_asks:
-        mine = [row for row in reports if row.issue_key == issue_key]
-        if mine and mine[-1].outcome == "blocked":
-            return "worker stopped"
+    mine = [row for row in reports if row.issue_key == issue_key]
+    # Reports arrive in the order written, so the last is the latest stop; an answer clears only its own run's stop.
+    if mine and mine[-1].outcome == "blocked" and not any(
+            row.stage == mine[-1].stage and row.attempt == mine[-1].attempt for row in mine_asks):
+        return "worker stopped"
     if blockers is None:
         return "dependency blockers unknown"
     if blockers:

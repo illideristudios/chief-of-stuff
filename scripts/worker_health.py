@@ -17,7 +17,8 @@ def silence(started_at: datetime, last_progress_at: datetime | None, now: dateti
     for value in (started_at, now, last_progress_at):
         if value is not None and value.utcoffset() is None:
             raise ValueError("timestamps must include a timezone")
-    if last_progress_at is not None and now - last_progress_at < limit:
+    # A commit from before the run (its base) or after now (a skewed clock) is no sign of life.
+    if last_progress_at is not None and started_at <= last_progress_at <= now and now - last_progress_at < limit:
         return "ok"
     ran = now - started_at
     if ran < limit / 2:

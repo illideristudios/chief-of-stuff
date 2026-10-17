@@ -344,6 +344,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                          hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
             elif isinstance(action, reconcile.Close):
+                if action.human_review and board is not None:
+                    # human_review is forge-owned: write the label first, so a failed write retries the Close.
+                    held = forge.add_human_hold(int(key.rpartition("#")[2]))
+                    if held:
+                        raise ForgeError(held)
                 store.end_segment(key, action.stage, action.attempt, at, action.outcome)
                 if action.human_review:
                     store.upsert_item(key, human_review=True)
