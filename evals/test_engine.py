@@ -1285,6 +1285,11 @@ class EngineTest(unittest.TestCase):
         (run_dir / "exit.json").write_text(f'{{"exit_code": {exit_code}}}')
 
     def test_quota_and_outage_wait_with_backoff_persist_across_restart_and_never_ask(self):
+        # An unreadable tree is a human hold. This case is the quota backoff, so the tree has to be readable.
+        readable = mock.patch.object(engine.engine_facts, "_tree_facts",
+                                     return_value=(TreeState("work", 0, 0, 0), False, self.now))
+        readable.start()
+        self.addCleanup(readable.stop)
         # 1. Four consecutive outages exceed retry_limit (3) yet back off exponentially, persist across store reopen,
         # log wait once, never Ask or Escalate, and dispatch again when retry_at passes.
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
