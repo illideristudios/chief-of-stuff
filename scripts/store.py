@@ -109,6 +109,7 @@ class Report(WorkerRecord, Base):
     outcome: Mapped[str] = mapped_column(String)
     summary: Mapped[str] = mapped_column(String)
     findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    suite: Mapped[Any] = mapped_column(JSON, nullable=True)
 
 
 class Ask(WorkerRecord, Base):
@@ -271,10 +272,11 @@ class Store:
 
     # Worker reports are append-only, including late reports from older attempts.
     def add_report(self, issue_key: str, stage: str, attempt: int, session_id: str,
-                   outcome: str, summary: str, findings: list[dict[str, Any]]) -> int:
+                   outcome: str, summary: str, findings: list[dict[str, Any]], suite: Any = None) -> int:
         with self.session() as s:
             row = Report(issue_key=issue_key, stage=stage, attempt=attempt, session_id=session_id,
-                         outcome=outcome, summary=summary, findings=findings, created_at=self._stamp())
+                         outcome=outcome, summary=summary, findings=findings, suite=suite,
+                         created_at=self._stamp())
             s.add(row)
             s.flush()
             return row.id

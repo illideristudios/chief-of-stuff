@@ -33,6 +33,16 @@ class Decision(Protocol):
     answer: str | None
 
 
+def suite_holds(counts: Mapping[str, int | None], *, require_green: bool) -> bool:
+    """An opted-in done is human review when a count is unknown, passed is 0, or a failure count is nonzero."""
+    if not require_green:
+        return False
+    keys = ("passed", "failed", "skipped", "xfailed")
+    if any(counts.get(key) is None for key in keys):
+        return True
+    return counts["passed"] == 0 or any(counts[key] for key in keys[1:])
+
+
 def review_findings(state: Mapping[str, object], history: Sequence[Segment]) -> dict[str, int] | None:
     """Severity counts from the latest completed review, or None when unknown or stale."""
     latest = max((s for s in history if s.stage == "review" and s.ended_at),

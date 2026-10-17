@@ -164,7 +164,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     _record_limits(workers)
-    worker.collect(store, root, clock, trees)
+    worker.collect(store, root, clock, trees, forge)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:

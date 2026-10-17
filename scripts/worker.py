@@ -15,6 +15,7 @@ import dispatch_prompt
 import guard_binding
 import make_worktree
 import process_status
+import reconcile
 import supervisor
 from settings import load as load_settings
 from workspace import settings_path
@@ -123,14 +124,16 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         _save_run(store, issue_key, stage, attempt, existing)
         return actor.model, actor.effort or ""
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    defaults = load_settings(root, settings_path(text)).stages.get(stage)
+    loaded = load_settings(root, settings_path(text))
+    defaults = loaded.stages.get(stage)
     agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
-                                               skills=defaults.skills if defaults else (), rules=rules)
+                                               skills=defaults.skills if defaults else (), rules=rules,
+                                               require_green=loaded.workers.require_green_tests)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -228,8 +231,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None) -> None:
+            trees: Path | None = None, forge: Any = None) -> None:
     """Finish every exited or lost open segment, using only the engine's run directory."""
+    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
+    require_green = load_settings(root, settings_path(text)).workers.require_green_tests
     for segment in store.segments():
         if segment.ended_at is not None:
             continue
@@ -298,7 +303,23 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 if not reports:
                     reason = "worker stopped without reporting an outcome"
                 elif reports[-1].outcome == "done":
-                    outcome = "done"
+                    raw = reports[-1].suite if isinstance(reports[-1].suite, dict) else {}
+                    counts = dispatch_prompt.suite_counts(raw)
+                    if reconcile.suite_holds(counts, require_green=require_green):
+                        outcome = "human_review"
+                        shown = ", ".join(
+                            f"{name}={counts[name] if counts[name] is not None else 'missing or invalid'}"
+                            for name in dispatch_prompt.SUITE_KEYS)
+                        reason = f"suite is not green; Suite: {shown}; worker said: {reports[-1].summary}"
+                        store.set_human_review(key, True)
+                        add = getattr(forge, "add_human_hold", None) if forge is not None else None
+                        if add is not None:
+                            number = key.rpartition("#")[2]
+                            error = add(int(number)) if number.isdecimal() else "invalid issue number"
+                            if error:
+                                store.add_log(key, f"review hold: {error}", now.isoformat())
+                    else:
+                        outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
             if segment.stage == "review":

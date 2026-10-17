@@ -252,7 +252,7 @@ def skills_line(skills: tuple[str, ...]) -> str:
 
 
 def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
-                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = ()) -> str:
+                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = (), require_green: bool = False) -> str:
     """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or a header over BODY_CAP raises RefusedError (E3)."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
@@ -262,6 +262,11 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
         delivery = ("Commits: Commit the fixes and verify them with tests, then push the existing request branch "
                     "before reporting done; do not open a new request. Report its URL and head sha.\n")
     review = f"{CODE_REVIEW}\n{REVIEW_RULE}\n" if stage == "review" else ""
+    suite_gate = ("" if not require_green else
+                  "Rule: Workspace [workers] require_green_tests is enabled: the engine holds a done report "
+                  "as human review unless passed, failed, skipped and xfailed are all known, with passed > 0 "
+                  "and failed, skipped and xfailed all zero. Report those counts on the report tool; omit a count "
+                  "when unknown.\n")
     architecture = ""
     if root is not None and stage in ("implement", "fix"):
         line = architecture_line(root)
@@ -271,6 +276,7 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
             f"Job: {ISSUE_JOBS.get(stage, persona.role)}\nPersona: {persona.role}\n"
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
+            + suite_gate
             + review
             + (skills_line(skills) + "\n" if skills else "")
             + architecture)
