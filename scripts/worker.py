@@ -65,6 +65,8 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                       started_at=clock().isoformat())
     else:
         record = dict(record)
+    if "starting_head" not in record and (run_dir / "starting_head").is_file():
+        record["starting_head"] = (run_dir / "starting_head").read_text()
     if stage == "review":
         record.setdefault("reviewed_head", data.get("review_trees", {}).get(str(attempt), {}).get("head"))
     if (any(type(record.get(field)) is not int or record[field] <= 0 for field in ("pid", "runner_pid"))
@@ -186,12 +188,16 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 raise RuntimeError("prepared review tree does not match the request head")
     if run_dir.resolve().is_relative_to(tree.resolve()):
         raise RuntimeError("engine run directory must be outside the worker tree")
+    code, starting_head = make_worktree.git(["rev-parse", "HEAD"], tree)
+    if code or not starting_head:
+        raise RuntimeError("cannot read the worker's starting HEAD")
     # Read before touching evidence: an unreadable forge refuses the start, never launches with defaults only.
     protected = tuple(dict.fromkeys((*guard_binding.DEFAULT_PROTECTED_BRANCHES, *forge.protected_branches())))
     # A failed start may be retried at the same attempt. Preserve its evidence under a unique sibling.
     if run_dir.exists():
         run_dir.rename(run_dir.with_name(f"{run_dir.name}-refused-{uuid.uuid4()}"))
     run_dir.mkdir(parents=True)
+    (run_dir / "starting_head").write_text(starting_head)
     session_id = str(uuid.uuid4())
     plugin = guard_binding.guard_plugin_dir()
     if plugin is None:
@@ -222,7 +228,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             time.sleep(0.01)
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
-                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
+                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
+                  "starting_head": starting_head}
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)

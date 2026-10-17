@@ -60,22 +60,32 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
     """Close a gone worker; only a final stage requires landing. Retryable stops retain their tree for resumption."""
     if worker_alive is not False:
         return None
+    outcome = report or "failed"
+    if tree_unreadable:
+        return Verdict(outcome, "worker tree could not be read", True)
     why = read_only_left_changes(read_only, changed)
     if why:
-        return Verdict("done", why, True)
+        return Verdict(outcome, why, True)
     if report in (*RETRYABLE, "blocked"):
         return Verdict(report, "")
+    if report == "done" and not landing_required:
+        # Detached reviews inherit unmerged commits. Only files or known unpushed commits need recovery here.
+        left = []
+        if tree is not None:
+            if tree.dirty:
+                left.append(f"{tree.dirty} uncommitted")
+            if tree.unpushed:
+                left.append(f"{tree.unpushed} unpushed")
+        return Verdict("done", ", ".join(left), bool(left))
     left = unlanded(tree)
-    # Keep the explicit done outcome behind a human hold, so recovery does not retry and overwrite the delivered work.
+    # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
     if report == "done" and left and on_main is not True:
         return Verdict("done", left, True)
     orphaned = orphan_reason(tree_name, tree, tree_claims)
     if orphaned:
         return Verdict("failed", orphaned, True)
-    if tree_unreadable:
-        return Verdict("done" if report == "done" else "failed", "worker tree could not be read", True)
     if report == "done":
-        gate = done_on_main(on_main, suite_on_main) if landing_required else None
+        gate = done_on_main(on_main, suite_on_main)
         if gate:
             return Verdict("done", gate, True)
         return Verdict("done", "")

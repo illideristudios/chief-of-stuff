@@ -445,7 +445,7 @@ class WorkerTest(unittest.TestCase):
         fresh = self.trees / "fresh-review"
         fresh.mkdir()
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=fresh)) as build, \
-             mock.patch.object(worker.make_worktree, "git", side_effect=[(0, "head"), (0, "new-head")]), \
+             mock.patch.object(worker.make_worktree, "git", side_effect=[(0, "head"), (0, "new-head"), (0, "new-head")]), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             self.launch("review")

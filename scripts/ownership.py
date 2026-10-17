@@ -71,12 +71,16 @@ def issue_scopes(body: str) -> list[tuple[str, str]]:
             continue
         if mode not in ("write", "read", "read-only"):
             return [(".", "write")]
+        if "`" in row.paths and not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", row.paths):
+            return [(".", "write")]
+        if any(token != token.strip() for token in re.findall(r"`([^`]+)`", row.paths)):
+            return [(".", "write")]
         paths = _paths(row.paths)
         if not paths:
             return [(".", "write")]
         for path in paths:
             if (path.startswith("/") or (path != "." and any(part in ("", ".", "..") for part in path.split("/")))
-                    or any(c in path for c in "*?[]")):
+                    or any(c in path for c in "*?[]`") or _paths(path) != [path]):
                 return [(".", "write")]
             # A duplicate write cannot be narrowed by a later read row.
             scopes[path] = "write" if mode == "write" or scopes.get(path) == "write" else "read"

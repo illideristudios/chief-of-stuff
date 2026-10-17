@@ -119,7 +119,7 @@ class EngineTest(unittest.TestCase):
             "pid": 123, "session_id": "fake-session", "identity": "fake-start",
             "runner_pid": 124, "runner_identity": "fake-start",
             "run_dir": str(supervisor.state_dir(self.root) / "runs" / f"{key.rpartition('#')[2]}-{stage}-{attempt}"),
-            "tree": str(self.trees / "fake"),
+            "tree": str(self.trees / "fake"), "starting_head": "starting-head",
         }}
         self.db.set_resume(key, data)
         return "used-model", "high"
@@ -275,10 +275,10 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.publish_exit()
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
-        # A clean on-main tree with an extra local commit has changes, but is not an orphan.
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 1), True, NOW)), \
+        # HEAD changed after launch, but all commits are pushed and on main: only the read-only rule holds it.
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
              mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]), \
-             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "")):
+             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "current-head")):
             self.run_pass()
             self.assertTrue(self.db.items()[0].human_review)
             self.assertTrue(any("worker implement attempt 1:" in row.message and "read-only run left changes" in row.message
@@ -290,9 +290,9 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.publish_exit()
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 1), True, NOW)), \
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
              mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]), \
-             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "")):
+             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "current-head")):
             self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
         self.assertFalse(self.db.items()[0].human_review)
 
@@ -358,7 +358,7 @@ class EngineTest(unittest.TestCase):
                  mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)), \
                  mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
                 segment = self.db.segments(KEY)[-1]
-                engine._finish_worker(self.forge, self.db, self.root, self.trees, segment, outcome, "retry later", NOW)
+                engine._finish_worker(self.forge, self.db, self.root, self.trees, segment, outcome, "retry later", NOW, policies=self.p)
                 self.assertFalse(self.db.items()[0].human_review)
                 self.assertEqual(self.db.segments(KEY)[-1].outcome, outcome)
                 self.assertIn("retry later", self.db.log(KEY)[-1].message)
@@ -380,7 +380,8 @@ class EngineTest(unittest.TestCase):
         self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
         self.run_pass()
         self.now += timedelta(hours=1)
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, self.now)):
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, self.now)), \
+             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "starting-head")):
             self.assertEqual(self.run_pass(), [])
             self.publish_exit()
             self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])

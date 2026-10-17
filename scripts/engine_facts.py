@@ -92,14 +92,19 @@ def _progress(tree: Path, view: git_view.View) -> datetime | None | object:
     return when if when.utcoffset() is not None else object()
 
 
-def _changed(state: Any) -> bool | None:
+def _changed(state: Any, tree: Path, starting_head: str | None) -> bool | None:
+    """Read-only changes belong to this run, not to the unmerged branch it checked out."""
     if state is None or state.dirty is None:
         return None
     if state.dirty:
         return True
-    if state.off_origin is None and state.unpushed is None:
+    if not isinstance(starting_head, str) or not starting_head:
         return None
-    return bool(state.off_origin or state.unpushed)
+    try:
+        code, head = git_trees.git(["rev-parse", "HEAD"], tree)
+    except (OSError, git_view.CacheError, subprocess.SubprocessError):
+        return None
+    return head != starting_head if code == 0 and head else None
 
 
 def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]:
@@ -159,13 +164,17 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
             alive.append(((segment.issue_key, segment.stage, segment.attempt), flag))
         raw = record.get("tree") if record else None
         tree = Path(raw) if isinstance(raw, str) and raw else None
+        tree = tree if tree is None or any(tree.resolve().is_relative_to(base.resolve()) for base in (root, trees)) else None
         state, landed, stamp = (None, None, None) if tree is None else _tree_facts(tree)
         if state is not None:
             tree_rows.append((segment.issue_key, state))
             names.append((segment.issue_key, tree.name))
             tree_claims.append((segment.issue_key, (Claim(segment.issue_key, flag is not False,
                                                          "" if flag is not False else "has no process"),)))
-        changed.append((segment.issue_key, _changed(state)))
+        changes = None if state is None or state.dirty is None else bool(state.dirty)
+        if segment.issue_key in read_only:
+            changes = _changed(state, tree, record.get("starting_head") if record else None)
+        changed.append((segment.issue_key, changes))
         if landed is not None:
             on_main.append((segment.issue_key, landed))
         # Unknown progress is no evidence of progress; the bounded silence rule must still run.

@@ -139,6 +139,9 @@ class GatherTest(unittest.TestCase):
         read.assert_not_called()
 
     def test_read_only_changes_are_relative_to_starting_head_in_a_real_detached_tree(self):
+        from evals import git_taint
+        cache = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.enterContext(git_taint.private_git_views(cache))
         tree = self.trees / "review"
         tree.mkdir()
         env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}

@@ -275,7 +275,7 @@ def _running_segment(history: Sequence[Segment]) -> Segment | None:
     return next((segment for segment in history if segment.started_at and not segment.ended_at), None)
 
 
-def _abandoned(item: WorkItem, segment: Segment, facts: Facts) -> Close | None:
+def _abandoned(item: WorkItem, segment: Segment, facts: Facts, workflow: Workflow) -> Close | None:
     alive = dict(facts.alive).get((item.issue_key, segment.stage, segment.attempt))
     if alive is not False:
         return None
@@ -285,7 +285,7 @@ def _abandoned(item: WorkItem, segment: Segment, facts: Facts) -> Close | None:
         on_main=dict(facts.on_main).get(item.issue_key), suite_on_main=dict(facts.suite_on_main).get(item.issue_key),
         tree_unreadable=item.issue_key in dict(facts.changed) and dict(facts.changed)[item.issue_key] is None,
         tree=dict(facts.trees).get(item.issue_key), tree_name=dict(facts.tree_names).get(item.issue_key, ""),
-        tree_claims=dict(facts.tree_claims).get(item.issue_key, ()), landing_required=segment.stage == "merge")
+        tree_claims=dict(facts.tree_claims).get(item.issue_key, ()), landing_required=not workflow.next(segment.stage))
     if verdict is None:
         return None
     return Close(item.issue_key, segment.stage, segment.attempt, verdict.outcome, verdict.reason, verdict.human_review)
@@ -305,14 +305,14 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
           decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object], facts: Facts | None = None) -> Action | None:
     key = item.issue_key
+    workflow = policies.workflow_for(issue_type)
     running = _running_segment(history)
     if running is not None:
         if facts is None:
             return None
-        return _abandoned(item, running, facts) or _stalled(item, running, facts, now)
+        return _abandoned(item, running, facts, workflow) or _stalled(item, running, facts, now)
     if item.forge_state == "closed":
         return None
-    workflow = policies.workflow_for(issue_type)
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
@@ -418,10 +418,7 @@ def _running_keys(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Seg
 
 def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment], facts: Facts,
                 running: Sequence[str]) -> Action | None:
-    if isinstance(action, (Dispatch, Review, Merge)) and item.issue_key in facts.read_only:
-        changed = dict(facts.changed)
-        if any(s.ended_at and s.outcome == "done" for s in history) and item.issue_key in changed and changed[item.issue_key] is True:
-            return Wait(item.issue_key, "read-only run left changes")
+    # Completion writes a forge hold before closure. A human's release must survive retained tree evidence.
     if not isinstance(action, (Dispatch, Review)):
         return action
     blockers = None if facts.blockers is None else dict(facts.blockers).get(item.issue_key, ())

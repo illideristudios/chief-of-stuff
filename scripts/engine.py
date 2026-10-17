@@ -207,16 +207,19 @@ def _close_segment(forge: Any, store: Any, key: str, stage: str, attempt: int,
 
 
 def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any,
-                   outcome: str, reason: str, now: datetime) -> None:
+                   outcome: str, reason: str, now: datetime, *, policies: policy.Policies) -> None:
     """Adapter classification precedes completion judgement; a forge hold must precede closure."""
     key = segment.issue_key
+    item = next(item for item in store.items() if item.issue_key == key)
+    issue_type = _resume(store, key).get("issue_type") or getattr(item, "issue_type", None)
+    workflow = policies.workflow_for(issue_type)
     facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now)
     verdict = completion.abandoned(
         False, report=outcome, read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
         on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
         tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
         tree_claims=(Claim(key, False, "worker exited"),),
-        tree_unreadable=dict(facts.changed).get(key) is None, landing_required=segment.stage == "merge")
+        tree_unreadable=dict(facts.changed).get(key) is None, landing_required=not workflow.next(segment.stage))
     held = verdict.human_review or reason.startswith("unreadable worker run:")
     if verdict.human_review:
         outcome = verdict.outcome
@@ -255,7 +258,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 got = forge.issue(int(key.rpartition("#")[2]))
                 if not got.ok or got.issue is None:
                     raise ForgeError(got.error or "issue not found")
-                body = got.issue.body
+                body = got.issue.body if isinstance(got.issue.body, str) else ""
             except (ForgeError, OSError, ValueError, TypeError) as exc:
                 store.add_log(key, f"ownership read failed: {exc}", clock().isoformat())
                 # A failed per-issue fallback preserves prior claims; a new issue owns the repository.
@@ -270,7 +273,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
 
-    worker.collect(store, root, clock, trees, finish=partial(_finish_worker, forge, store, root, trees),
+    worker.collect(store, root, clock, trees, finish=partial(_finish_worker, forge, store, root, trees, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
 
     now = clock()
