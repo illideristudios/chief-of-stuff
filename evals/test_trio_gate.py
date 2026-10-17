@@ -290,7 +290,7 @@ class GateTest(unittest.TestCase):
         self.assertEqual([r.record["decision"]["attempt"] for r in self.store.decisions(KEY)], [1, 2])
 
     def test_a_gate_hold_is_recorded_as_unanswered_for_the_owner(self):
-        decision = replace(self.decision, options=("approve", "hold"), stage="implement", attempt=1)
+        decision = replace(self.decision, options=("approve", "hold"), stage="implement", attempt=1, gate=True)
         self.consult([reply(choice="hold")] * 3, decision=decision)
         row, = self.store.decisions(KEY)
         self.assertEqual((row.answer, row.decided_by), (None, "zach"))
