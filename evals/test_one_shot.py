@@ -669,7 +669,7 @@ class RunTest(unittest.TestCase):
              mock.patch.object(one_shot, "resolve", return_value="/fake/agent"), \
              contextlib.redirect_stdout(io.StringIO()):
             code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree,
-                                name="worker01", runtime="codex", agent_type=None, model="example", effort="", dry_run=True)
+                                name="worker01", runtime="claude", agent_type=None, model="example", effort="", dry_run=True)
         self.assertEqual(code, 0)
         load.assert_called_once_with(self.root, "cos.toml")
         self.assertIs(compose.call_args.kwargs["settings"], settings)

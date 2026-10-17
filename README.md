@@ -61,10 +61,10 @@ launcher = "ghostty" # ghostty, tmux, or herdr for interactive workers
 herdr_session = "chief-of-stuff" # herdr only: the dedicated session workers run in
 claude_as_profile = "secondary" # optional: Claude workers run as `claude-as run secondary`
 require_green_tests = true # optional: hold one-shot completions with unknown or non-green suite counts
-rules = ["Never skip or weaken tests."] # optional: standing rules for every worker
+rules = ["Never skip or weaken tests."] # optional: standing rules for every one-shot and engine worker
 ```
 
-`[workers] rules` is an ordered list of non-blank, single-line strings without control characters or `(via ` markers, each at most 2400 characters; surrounding spaces are preserved. Every interactive, one-shot and engine assignment puts these rules in its header, before the task, for Claude, Codex, Cursor and Antigravity. Omitting `rules` or setting it to `[]` leaves the assignment unchanged.
+`[workers] rules` is an ordered list of non-blank, single-line strings without control characters or `(via ` markers, each at most 2400 characters; surrounding spaces are preserved. Every one-shot and engine assignment puts these rules in its header, before the task. Interactive launches do not carry them. Omitting `rules` or setting it to `[]` leaves the assignment unchanged.
 
 With `claude_as_profile` set, every Claude-runtime worker, interactive or one-shot, launches through `claude-as run <profile>` instead of a bare `claude`, so it runs under that account profile. `claude-as` must be on the login shell's PATH, or the launch is refused. Codex, Cursor and Antigravity workers are unaffected.
 

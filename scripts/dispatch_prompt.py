@@ -541,7 +541,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     # Pin the workspace mailbox; worktree discovery can select a different one.
     inbox_script = f"{INBOX_SCRIPT} --mailbox-dir {shlex.quote(str(root.resolve() / PROMPT_DIR / 'mailbox'))}"
 
-    header_text = HEADER.replace(UNNAMED, name or UNNAMED).replace("\\\n", "").format(
+    header_text = HEADER.replace("\\\n", "").format(
         user=cfg.user,
         stop_file=STOP_FILE,
         coordinator=f"the chief-of-stuff coordinator{f' `{who.group()}`' if who else ''}",
@@ -579,7 +579,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             header_text += "\n\n**Cursor plan gate.** This session starts in Cursor Plan mode. Ask the user to approve the plan before switching to Agent mode.\n"
     header_text = header_text.replace("**Your name is fixed.**",
         mailbox_check(runtime, name or UNNAMED, inbox_script) + "\n\n**Your name is fixed.**", 1)
-    report_text = REPORT.replace(UNNAMED, name or UNNAMED).format(
+    report_text = REPORT.format(
         inbox_script=inbox_script,
         coord_mailbox=coord_mailbox,
     )
@@ -587,8 +587,6 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         report_text = report_text.replace("If direct messaging fails, send via mailbox:", "Send via mailbox:")
         header_text = header_text.replace("When direct messaging is unavailable, send your ask via:", "Send your ask via:")
 
-    if rules_header:
-        header_text = header_text.replace("# Assignment\n", "# Assignment" + rules_header, 1)
     lines = [header_text, board_rule, WRITING_RULE, REVIEW_RULE, f"Task: {item}"]
     lines += _task_directives(root, row, skills, issue)
     if worktree is not None:
@@ -604,6 +602,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         report_text,
     ]
     body = "\n".join(lines) + "\n"
+    if name:
+        body = body.replace(UNNAMED, name)
     if len(body) > BODY_CAP:
         raise RefusedError(f"the assignment is {len(body)} characters, over the {BODY_CAP} cap")
     return body

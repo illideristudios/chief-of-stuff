@@ -501,7 +501,7 @@ def main(argv_in: list[str] | None = None) -> int:
     override = os.environ.get(ENV)
     try:
         selected = args.launcher or worker_settings.launcher
-        body = assignment(args, False, Path(args.cwd), settings=settings)
+        body = assignment(args, False, Path(args.cwd))
         # The eval harness uses the argv override.
         worker = dict(cwd=args.cwd, agent_type=args.agent_type, title=args.title, runtime=args.runtime,
                       model=args.model, effort=args.effort, workspace=args.root,

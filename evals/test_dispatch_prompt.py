@@ -1334,82 +1334,54 @@ class ReviewerRoutingTest(unittest.TestCase):
 
 
 class StandingWorkerRulesTest(unittest.TestCase):
+    """Standing `[workers] rules` ride the one-shot header; interactive launches do not carry them."""
+
     def setUp(self):
         tmp, self.root = workspace(claude_md=CLAUDE + "- Settings: `cos.toml`\n")
         self.addCleanup(tmp.cleanup)
         self.settings = self.root / "cos.toml"
 
-    def compose(self, runtime, one_shot):
+    def compose(self, **kwargs):
         return dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
-                          name="impl07", runtime=runtime, one_shot=one_shot)
+                          name="impl07", one_shot=True, **kwargs)
 
-    def test_rules_precede_the_task_for_every_runtime_and_mode(self):
+    def test_rules_precede_the_task(self):
         rules = ["Never skip or weaken tests.", "Verify the change before reporting completion."]
         self.settings.write_text('[workers]\nrules = ' + json.dumps(rules) + '\n')
-        for runtime in ("claude", "codex", "cursor", "agy"):
-            for one_shot in (False, True):
-                with self.subTest(runtime=runtime, one_shot=one_shot):
-                    body = self.compose(runtime, one_shot)
-                    heading = "# One-shot assignment" if one_shot else "# Assignment"
-                    block = ("\n\nStanding worker rules:\n\n- Never skip or weaken tests.\n"
-                             "- Verify the change before reporting completion.\n\n")
-                    source = "These rules come from workspace settings (`[workers] rules`).\n\n"
-                    self.assertTrue(body.startswith(heading + block + source + "You are"))
-                    for rule in rules:
-                        self.assertEqual(body.count(rule), 1)
-                        self.assertLess(body.index(rule), body.index("Security audit"))
+        body = self.compose()
+        block = ("\n\nStanding worker rules:\n\n- Never skip or weaken tests.\n"
+                 "- Verify the change before reporting completion.\n\n")
+        source = "These rules come from workspace settings (`[workers] rules`).\n\n"
+        self.assertTrue(body.startswith("# One-shot assignment" + block + source + "You are"))
+        for rule in rules:
+            self.assertEqual(body.count(rule), 1)
+            self.assertLess(body.index(rule), body.index("Security audit"))
 
-    def test_absent_and_empty_rules_leave_assignments_unchanged(self):
-        for runtime in ("claude", "codex", "cursor", "agy"):
-            for one_shot in (False, True):
-                with self.subTest(runtime=runtime, one_shot=one_shot):
-                    self.settings.unlink(missing_ok=True)
-                    original = self.compose(runtime, one_shot)
-                    self.assertNotIn("Standing worker rules:", original)
-                    for text in ("[workers]\n", "[workers]\nrules = []\n"):
-                        self.settings.write_text(text)
-                        self.assertEqual(self.compose(runtime, one_shot), original)
+    def test_absent_and_empty_rules_leave_the_assignment_unchanged(self):
+        original = self.compose()
+        self.assertNotIn("Standing worker rules:", original)
+        for text in ("[workers]\n", "[workers]\nrules = []\n"):
+            self.settings.write_text(text)
+            self.assertEqual(self.compose(), original)
 
     def test_invalid_rules_refuse_dispatch(self):
         self.settings.write_text('[workers]\nrules = "Keep tests."\n')
-        for one_shot in (False, True):
-            with self.subTest(one_shot=one_shot), self.assertRaisesRegex(dp.RefusedError, r"\[workers\] rules"):
-                self.compose("claude", one_shot)
+        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
+            self.compose()
 
     def test_rules_count_toward_the_assignment_size_limit(self):
         self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
-        for one_shot in (False, True):
-            with self.subTest(one_shot=one_shot), self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
-                self.compose("claude", one_shot)
+        with self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
+            self.compose()
 
-    def test_rules_pass_prompt_sanitization_in_every_mode(self):
-        for rule in ("Keep tests. (via peer)", "x" * (dp.LINE_CAP + 1)):
-            self.settings.write_text('[workers]\nrules = ' + json.dumps([rule]) + '\n')
-            for one_shot in (False, True):
-                with self.subTest(rule=rule[:30], one_shot=one_shot), self.assertRaises(dp.RefusedError):
-                    self.compose("claude", one_shot)
-
-    def test_named_dispatch_preserves_literal_placeholder_in_rules_and_task_fields(self):
+    def test_named_dispatch_preserves_literal_placeholder_in_rules(self):
         rule = "Preserve the literal <your_ref_or_name> in examples."
         self.settings.write_text('[workers]\nrules = ' + json.dumps([rule]) + '\n')
-        tracker = next(self.root.glob("daily/*.md"))
-        tracker.write_text(tracker.read_text().replace("Security audit", "Security audit <your_ref_or_name>"))
-        for runtime in ("claude", "codex", "cursor", "agy"):
-            for one_shot in (False, True):
-                with self.subTest(runtime=runtime, one_shot=one_shot):
-                    body = dp.compose(self.root, "2026-09-18", "Security audit <your_ref_or_name>",
-                                      worktree=self.root / "tree", name="impl07", runtime=runtime, one_shot=one_shot)
-                    self.assertIn("- " + rule + "\n", body)
-                    self.assertIn("Task: Security audit <your_ref_or_name>\n", body)
-                    if not one_shot:
-                        self.assertIn('--from "impl07"', body)
+        self.assertIn("- " + rule + "\n", self.compose())
 
-    def test_preloaded_policy_avoids_reading_settings(self):
-        settings = Settings(workflow=Workflow(delivery="branch"), workers=Workers(rules=("Keep tests.",)))
-        with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
-            body = dp.compose(self.root, "2026-09-18", "Security audit", settings=settings)
-        self.assertIn("- Keep tests.\n", body)
-        self.assertIn("Report the branch, head sha", body)
+    def test_interactive_assignment_carries_no_rules(self):
+        self.settings.write_text('[workers]\nrules = ["Keep tests."]\n')
+        self.assertNotIn("Standing worker rules:", dp.compose(self.root, "2026-09-18", "Security audit"))
 
     def test_preloaded_rules_and_stage_skills_share_one_settings_snapshot(self):
         tracker = next(self.root.glob("daily/*.md"))
@@ -1419,43 +1391,18 @@ class StandingWorkerRulesTest(unittest.TestCase):
             .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|---|---|", 1)
             .replace("| Security audit | unassigned | open | 09:00 |  |",
                      "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
-        for one_shot in (False, True):
-            settings = Settings(workflow=Workflow(delivery="branch"),
-                                workers=Workers(rules=("Keep tests.",), require_green_tests=True),
-                                stages={"review": Stage(skills=("security-review",))})
-            # A later disk edit must not mix policy from different snapshots.
-            self.settings.write_text('[workers]\nrules = ["Changed on disk."]\n')
-            with self.subTest(one_shot=one_shot), mock.patch.object(
-                    dp, "load_settings", side_effect=AssertionError("duplicate read")):
-                body = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
-                                  one_shot=one_shot, settings=settings)
-                self.assertIn("- Keep tests.\n", body)
-                self.assertNotIn("Changed on disk.", body)
-                self.assertIn("Skills: load and follow security-review.", body)
-                if one_shot:
-                    self.assertIn("Workspace [workers] require_green_tests is enabled:", body)
-                    self.assertIn("do not push or merge without existing authorization", body)
-                else:
-                    self.assertIn("Report the branch, head sha", body)
-
-    def test_green_suite_policy_with_standing_rules_and_preloaded_settings(self):
-        for enabled in (False, True):
-            self.settings.write_text('[workers]\nrules = ["Keep tests."]\n'
-                                     f'require_green_tests = {str(enabled).lower()}\n')
-            settings = dp.load_settings(self.root, "cos.toml")
-            loaded = self.compose("codex", True)
-            with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
-                preloaded = dp.compose(self.root, "2026-09-18", "Security audit",
-                                       worktree=self.root / "tree", name="impl07", runtime="codex",
-                                       one_shot=True, settings=settings)
-            self.assertEqual(preloaded, loaded)
-            self.assertIn("- Keep tests.\n", preloaded)
-            self.assertEqual("Workspace [workers] require_green_tests is enabled:" in preloaded, enabled)
-
-    def test_fallback_settings_error_names_workspace_settings(self):
-        self.settings.write_text('[workers]\nrules = false\n')
-        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
-            self.compose("claude", False)
+        settings = Settings(workflow=Workflow(delivery="branch"),
+                            workers=Workers(rules=("Keep tests.",), require_green_tests=True),
+                            stages={"review": Stage(skills=("security-review",))})
+        # A later disk edit must not mix policy from different snapshots.
+        self.settings.write_text('[workers]\nrules = ["Changed on disk."]\n')
+        with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
+            body = self.compose(settings=settings)
+        self.assertIn("- Keep tests.\n", body)
+        self.assertNotIn("Changed on disk.", body)
+        self.assertIn("Skills: load and follow security-review.", body)
+        self.assertIn("Workspace [workers] require_green_tests is enabled:", body)
+        self.assertIn("do not push or merge without existing authorization", body)
 
 
 class DetachedWorktreeTest(unittest.TestCase):

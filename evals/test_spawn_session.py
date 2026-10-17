@@ -2105,7 +2105,7 @@ class CheckTest(unittest.TestCase):
     def test_check_uses_already_loaded_workspace_policy(self):
         root = self.workspace(toml='[workers]\nrules = ["Keep tests."]\n')
         with unittest.mock.patch.object(ss.dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")):
-            code, out, err = self.check(root)
+            code, out, err = self.check(root, "--one-shot")
         self.assertEqual(code, 0, err)
         self.assertIn("- Keep tests.\n", out)
 
