@@ -29,3 +29,13 @@ body:
       label: Evidence
       description: Log or output, pasted verbatim. 20 lines at most.
       render: text
+  - type: textarea
+    id: file_ownership
+    attributes:
+      label: File ownership
+      description: "Keep the ## File ownership heading. List repository-relative paths after write: or read-only:. Use . only for the whole repository."
+      value: |
+        ## File ownership
+        - write:
+    validations:
+      required: true

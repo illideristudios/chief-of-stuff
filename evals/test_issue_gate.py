@@ -199,6 +199,15 @@ class WorkMainTest(unittest.TestCase):
         self.assertEqual((self.root / "store.db").exists() or (state / "migrate.lock").exists(), False,
                          "a preview must not create, migrate or lock the store")
 
+    def test_new_issue_without_scope_refuses_preview_and_commit(self):
+        for args in ((), ("--commit",)):
+            with self.subTest(args=args):
+                code, out, err = self.run_work("--body", "", *args)
+                self.assertEqual(code, 1)
+                self.assertIn("needs file ownership", err)
+                self.assertEqual(out, "")
+                self.assertEqual((self.gh.all_calls, self.items()), ([], []))
+
     def test_work_records_an_answer_for_the_named_issues_ask(self):
         self.gh = tf.FakeGh(issues=[{**tf.gh_issue(3, "Parser"), "body": SCOPE}, tf.gh_issue(4, "Other")])
         store.migrate(self.root / "store.db")

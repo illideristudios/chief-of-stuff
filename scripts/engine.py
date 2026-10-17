@@ -282,13 +282,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 body = got.issue.body if isinstance(got.issue.body, str) else ""
             except (ForgeError, OSError, ValueError, TypeError) as exc:
                 store.add_log(key, f"ownership read failed: {exc}", clock().isoformat())
-                # A failed per-issue fallback preserves prior claims; a new issue owns the repository.
-                if not any(row.mode != "tree" for row in store.ownership(key)):
-                    scopes[key] = [(".", "write")]
+                # A failed read preserves prior declarations; a new issue waits without a scope.
                 continue
         scopes[key] = ownership.issue_scopes(body)
     for key, declared in scopes.items():
-        store.replace_file_ownership(key, declared)
+        store.replace_file_ownership(key, declared or [])
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
