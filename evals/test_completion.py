@@ -55,3 +55,14 @@ class CompletionTest(unittest.TestCase):
     def test_a_gone_worker_whose_tree_could_not_be_read_is_held(self):
         self.assertEqual(completion.abandoned(False, tree_unreadable=True),
                          completion.Verdict("failed", "worker tree could not be read", True))
+
+    def test_premerge_done_does_not_certify_an_unreadable_tree(self):
+        verdict = completion.abandoned(False, report="done", landing_required=False, tree_unreadable=True)
+        self.assertEqual(verdict, completion.Verdict("done", "worker tree could not be read", True))
+
+    def test_only_final_completion_requires_landing(self):
+        for final, held in ((False, False), (True, True)):
+            with self.subTest(final=final):
+                verdict = completion.abandoned(False, report="done", tree=CLEAN, on_main=False,
+                                               suite_on_main=False, landing_required=final)
+                self.assertEqual(verdict.human_review, held)
