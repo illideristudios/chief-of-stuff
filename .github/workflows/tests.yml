@@ -9,7 +9,7 @@ on:
 
 jobs:
   unittest:
-    runs-on: [self-hosted, chief-of-stuff]
+    runs-on: self-hosted
     steps:
       - uses: actions/checkout@v4
       - run: docker build -t chief-of-stuff-ci -f .github/ci/Dockerfile .

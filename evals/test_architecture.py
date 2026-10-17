@@ -28,7 +28,7 @@ LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "ownership", "forge_review",
-    "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "audit_tasks",
+    "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "pipeline_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
     "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
@@ -222,7 +222,7 @@ CIRCLES: dict[str, frozenset[str]] = {
     }),
     "drivers": frozenset({
         "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
-        "startup", "store_access", "kanban_cli", "process_status", "session_exec", "spawn_session",
+        "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
