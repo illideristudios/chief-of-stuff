@@ -15,6 +15,8 @@ from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from limits import Reading
+from runtimes import NAMES
+import settings
 
 
 def _now() -> datetime:
@@ -93,39 +95,7 @@ def _latest(runtime: str, account: str, candidates: list[Reading]) -> list[Readi
 
 
 def codex(account: str) -> list[Reading]:
-    if account:
-        return [_unknown("codex", account, "no local source configured for this Codex account")]
-    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
-    candidates = {}
-    for event in _events(root, ('"rate_limits"',)):
-        payload = event.get("payload")
-        if event.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") != "token_count":
-            continue
-        rates = payload.get("rate_limits")
-        if not isinstance(rates, dict):
-            continue
-        for window in ("primary", "secondary"):
-            data = rates.get(window)
-            if not isinstance(data, dict):
-                continue
-            name = f'{rates.get("limit_id") or "codex"}/{window}'
-            try:
-                minutes = _number(data.get("window_minutes"))
-                if not minutes:
-                    raise ValueError("empty window")
-                name = f'{rates.get("limit_id") or "codex"}/{window}/{minutes:g}m'
-                r = _reading("codex", account, name, data.get("used_percent"),
-                             data.get("resets_at"), event.get("timestamp"))
-            except (ValueError, TypeError, OverflowError, OSError):
-                # Preserve the fact that the newest event is unreadable, rather than displaying an older value.
-                try:
-                    r = Reading("codex", account, name, None, None, "", None,
-                                _time(event.get("timestamp")), "malformed local limit event")
-                except (ValueError, TypeError, OverflowError, OSError):
-                    continue
-            if name not in candidates or r.read_at >= candidates[name].read_at:
-                candidates[name] = r
-    return _latest("codex", account, list(candidates.values()))
+    return [_unknown("codex", account, "read in 1.1")]
 
 
 def _claude_error(event: dict, account: str) -> Reading | None:
@@ -210,11 +180,15 @@ def claude(account: str) -> list[Reading]:
 
 
 def cursor(account: str) -> list[Reading]:
-    return [_unknown("cursor", account, "a Codex spike is looking for a local limits source")]
+    return [_unknown("cursor", account, "read in 1.1")]
 
 
 def agy(account: str) -> list[Reading]:
-    return [_unknown("agy", account, "a Codex spike is looking for a local limits source")]
+    return [_unknown("agy", account, "read in 1.1")]
+
+
+def account(runtime: str, workers: settings.Workers) -> str:
+    return workers.claude_as_profile if runtime == "claude" else ""
 
 
 def read(runtime: str, account: str) -> list[Reading]:
@@ -222,3 +196,14 @@ def read(runtime: str, account: str) -> list[Reading]:
         return {"codex": codex, "claude": claude, "cursor": cursor, "agy": agy}[runtime](account)
     except (OSError, ValueError) as exc:
         return [_unknown(runtime, account, f"local limit source unreadable: {exc}")]
+
+
+def read_all(workers: settings.Workers) -> list[Reading]:
+    rows = []
+    for runtime in NAMES:
+        acct = account(runtime, workers)
+        try:
+            rows.extend(read(runtime, acct))
+        except Exception as exc:
+            rows.append(_unknown(runtime, acct, f"local limit read failed: {exc}"))
+    return rows

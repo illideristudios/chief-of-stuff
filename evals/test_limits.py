@@ -1,4 +1,4 @@
-"""Runtime limits: unbilled sources, account-wide history and board warnings (§10)."""
+"""Runtime limits: Claude readings, account-wide history, and the engine pass (§10)."""
 from __future__ import annotations
 
 import io
@@ -20,7 +20,6 @@ import limits
 import limits_cli
 import limits_history
 import limits_probe
-import render_board
 import settings
 import store
 
@@ -57,7 +56,7 @@ class Sources(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.home = Path(self.tmp.name)
-        self.env = patch.dict(os.environ, {"HOME": str(self.home), "CODEX_HOME": str(self.home / ".codex"),
+        self.env = patch.dict(os.environ, {"HOME": str(self.home),
                                           "CLAUDE_CONFIG_DIR": str(self.home / ".claude"),
                                           "CLAUDE_AS_PROFILES_DIR": str(self.home / "profiles")})
         self.env.start()
@@ -69,26 +68,13 @@ class Sources(unittest.TestCase):
         path.write_text("{broken\n" + "\n".join(json.dumps(e) for e in events) + "\n{partial")
         return path
 
-    def codex(self, at, used, name="codex"):
-        return {"type": "event_msg", "timestamp": at.isoformat(), "payload": {
-            "type": "token_count", "rate_limits": {"limit_id": name,
-                "primary": {"used_percent": used, "window_minutes": 300,
-                            "resets_at": (NOW + timedelta(hours=2)).timestamp()},
-                "secondary": {"used_percent": 31, "window_minutes": 10080,
-                              "resets_at": (NOW + timedelta(days=3)).timestamp()}}}}
-
-    def test_codex_latest_event_per_model_window_not_file_order(self):
-        self.write(".codex/sessions/older.jsonl", [self.codex(NOW, 40)])
-        self.write(".codex/sessions/2026/10/newer.jsonl", [self.codex(NOW - timedelta(hours=1), 10),
-                                                          self.codex(NOW, 55, "model-x")])
-        with patch("limits_probe._now", return_value=NOW):
-            rows = limits_probe.read("codex", "")
-        values = {r.limit: r for r in rows}
-        self.assertEqual(values["codex/primary/300m"].used, 40)
-        self.assertEqual(values["model-x/primary/300m"].used, 55)
-        self.assertEqual(values["codex/secondary/10080m"].cap, 100)
-        self.assertEqual(values["codex/primary/300m"].read_at, NOW)
-        self.assertTrue(all(r.account == "" for r in rows))
+    def test_codex_cursor_and_agy_stay_unread_until_1_1(self):
+        self.write(".codex/sessions/session.jsonl", [{"type": "event_msg", "payload": {
+            "type": "token_count", "rate_limits": {"primary": {"used_percent": 40}}}}])
+        for runtime in ("codex", "cursor", "agy"):
+            row = limits_probe.read(runtime, "acct")[0]
+            self.assertEqual((row.runtime, row.account, row.unknown, row.used, row.cap),
+                             (runtime, "acct", "read in 1.1", None, None))
 
     def test_claude_structured_transcript_and_profile_isolation(self):
         event = {"type": "rate_limit_event", "timestamp": NOW.isoformat(), "rate_limit_info": {
@@ -114,8 +100,8 @@ class Sources(unittest.TestCase):
             self.assertIsNone(r.used)
             self.assertIsNone(r.cap)
             self.assertTrue(r.unknown)
-            if runtime in ("cursor", "agy"):
-                self.assertIn("spike", r.unknown.lower())
+            if runtime != "claude":
+                self.assertEqual(r.unknown, "read in 1.1")
 
     def test_claude_native_cap_hit_uses_error_timestamp_and_local_reset_clock(self):
         stamp = NOW.replace(hour=1)
@@ -133,15 +119,23 @@ class Sources(unittest.TestCase):
         self.assertIsNone(r.used)
         self.assertTrue(r.unknown)
 
-    def test_expired_and_malformed_readings_are_unknown(self):
-        bad = self.codex(NOW, float("nan"))
-        old = self.codex(NOW - timedelta(days=8), 60)
-        for window in old["payload"]["rate_limits"].values():
-            if isinstance(window, dict): window["resets_at"] = (NOW - timedelta(days=1)).timestamp()
-        self.write(".codex/sessions/session.jsonl", [old, bad])
-        with patch("limits_probe._now", return_value=NOW):
-            rows = limits_probe.read("codex", "")
-        self.assertTrue(any(r.unknown and r.used is None for r in rows))
+    def test_read_all_uses_one_account_and_keeps_going_after_a_failed_runtime(self):
+        workers = settings.Workers(claude_as_profile="secondary")
+
+        def fake(runtime, account):
+            if runtime == "claude":
+                raise OSError("bad log")
+            return [reading(runtime=runtime, account=account, used=None, cap=None, unknown="read in 1.1")]
+
+        with patch("limits_probe.read", side_effect=fake) as probe:
+            rows = limits_probe.read_all(workers)
+        self.assertEqual([c.args for c in probe.call_args_list],
+                         [(runtime, "secondary" if runtime == "claude" else "")
+                          for runtime in ("claude", "codex", "cursor", "agy")])
+        claude = next(row for row in rows if row.runtime == "claude")
+        self.assertIsNone(claude.used)
+        self.assertIn("bad log", claude.unknown)
+        self.assertEqual({row.runtime for row in rows}, {"claude", "codex", "cursor", "agy"})
 
 
 class History(unittest.TestCase):
@@ -191,81 +185,52 @@ class Integration(unittest.TestCase):
             (root / "settings.toml").write_text("[limits]\nwarn_at = 0.6")
             self.assertEqual(settings.load(root, "settings.toml").limits.warn_at, .6)
 
-    def test_board_shows_unknown_reset_daily_burn_and_warning(self):
-        rows = [reading(20, read_at=NOW - timedelta(hours=1)), reading(40),
-                reading(None, runtime="cursor", limit="limits", cap=None, unknown="spike looking for source")]
-        panel = render_board.limits_panel(rows, NOW, .8)
-        html = render_board.panels.panels([panel])
-        for text in ("RUNTIME LIMITS", "codex", "40", "100", "20", "reset", "near cap", "cursor", "unknown", "spike"):
-            self.assertIn(text, html)
-
-    def test_board_warning_uses_setting_and_escapes_unknown_reason(self):
-        rows = [reading(70), reading(None, runtime="cursor", limit="limits", cap=None, unknown="<spike>")]
-        low = render_board.panels.panels([render_board.limits_panel(rows, NOW, .6)])
-        high = render_board.panels.panels([render_board.limits_panel(rows, NOW, .9)])
-        self.assertIn("near cap", low)
-        self.assertNotIn("near cap", high)
-        self.assertNotIn("<spike>", high)
-        self.assertIn("&lt;spike&gt;", high)
-
-    def test_source_failure_and_recovery_supersede_stale_board_values(self):
-        failure = reading(None, limit="limits", cap=None, unknown="unreadable source", read_at=NOW)
-        older = reading(90, read_at=NOW - timedelta(minutes=1))
-        panel = render_board.limits_panel([older, failure], NOW, .8)
-        codex = [r for r in panel.rows if "codex" in r.name]
-        self.assertEqual(len(codex), 1)
-        self.assertIn("unreadable source", codex[0].facts)
-        panel = render_board.limits_panel([failure, reading(40, read_at=NOW + timedelta(minutes=1))],
-                                         NOW + timedelta(minutes=2), .8)
-        codex = [r for r in panel.rows if "codex" in r.name]
-        self.assertEqual(len(codex), 1)
-        self.assertIn("40/100", codex[0].facts)
-
-    def test_board_write_queries_history_for_workspace_account_without_probing(self):
-        from test_flow import make_workspace
-        with tempfile.TemporaryDirectory() as tmp:
-            root = make_workspace(Path(tmp), "## Tasks\n", '[workers]\nclaude_as_profile = "secondary"\n[limits]\nwarn_at = 0.6\n')
-            with patch("limits_history.LimitsHistory") as history, patch("limits_probe.read") as probe:
-                history.return_value.readings.return_value = []
-                path, *_ = render_board.write(root, "2026-10-08")
-            probe.assert_not_called()
-            self.assertEqual([(c.args[0], c.args[1]) for c in history.return_value.readings.call_args_list],
-                             [(r, "secondary" if r == "claude" else "") for r in ("claude", "codex", "cursor", "agy")])
-            self.assertIn("RUNTIME LIMITS", path.read_text())
-
-    def test_cli_collects_every_runtime_and_records_profile(self):
+    def test_cli_records_one_reading_for_the_workspace_account(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             from test_flow import SAMPLE_CLAUDE_MD
             (root / "CLAUDE.md").write_text(SAMPLE_CLAUDE_MD.replace("chief-of-stuff.toml", "settings.toml"))
             (root / "settings.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
+            rows = [reading(None, runtime=runtime, account="secondary" if runtime == "claude" else "",
+                            cap=None, unknown="read in 1.1")
+                    for runtime in ("claude", "codex", "cursor", "agy")]
             output = io.StringIO()
-            with patch("limits_cli.read", side_effect=lambda runtime, account: [
-                    reading(None, runtime=runtime, account=account, cap=None, unknown="no local event")]) as probe, \
+            with patch("limits_cli.read_all", return_value=rows) as probe, \
                     patch("limits_cli.LimitsHistory") as history, redirect_stdout(output):
                 self.assertEqual(limits_cli.main(["--root", tmp]), 0)
-            self.assertEqual(probe.call_args_list, [unittest.mock.call(r, "secondary" if r == "claude" else "")
-                                                   for r in ("claude", "codex", "cursor", "agy")])
-            self.assertEqual(len(history.return_value.record.call_args.args[0]), 4)
+            probe.assert_called_once()
+            self.assertEqual(probe.call_args.args[0].claude_as_profile, "secondary")
+            self.assertEqual(history.return_value.record.call_args.args[0], rows)
             self.assertIn("unknown", output.getvalue())
 
-    def test_tick_records_all_accounts_and_survives_failure(self):
-        import flow
+    def test_engine_pass_records_one_reading_and_a_failure_does_not_stop_it(self):
+        import engine
+        from test_engine import FakeForge, policies
         from test_flow import make_workspace
         with tempfile.TemporaryDirectory() as tmp:
             root = make_workspace(Path(tmp), "## Tasks\n", '[workers]\nclaude_as_profile = "secondary"\n')
-            with patch("limits_probe.read", side_effect=[OSError("bad log"), [reading()], [], []]) as probe, \
-                    patch("limits_history.LimitsHistory") as history, \
-                    patch("flow.reconcile_dead_workers", return_value=["reconciled"]):
-                events = flow.tick(root, NOW)
-            self.assertIn("reconciled", events)
-            self.assertEqual(probe.call_count, 4)
-            self.assertEqual(probe.call_args_list[0], unittest.mock.call("claude", "secondary"))
-            recorded = history.return_value.record.call_args.args[0]
-            self.assertTrue(any(r.runtime == "claude" and r.unknown for r in recorded))
-            with patch("limits_history.LimitsHistory", side_effect=OSError("database unavailable")), \
-                    patch("flow.reconcile_dead_workers", return_value=["still reconciled"]):
-                self.assertIn("still reconciled", flow.tick(root, NOW))
+            db_path = root / "store.db"
+            store.migrate(db_path)
+            db = store.Store(db_path)
+            self.addCleanup(db.engine.dispose)
+            trees = root / "trees"
+            trees.mkdir()
+            rows = [reading(runtime="claude", account="secondary")]
+
+            def run():
+                with patch.object(engine.worker, "collect"), patch.object(engine.cleanup, "execute", return_value=0):
+                    return engine.run_pass(forge=FakeForge(), store=db, policies=policies(), root=root,
+                                           trees=trees, launch=lambda *_args: ("model", "high"))
+
+            with patch("limits_probe.read_all", return_value=rows) as probe, \
+                    patch("limits_history.LimitsHistory") as history:
+                actions = run()
+            probe.assert_called_once()
+            self.assertEqual(probe.call_args.args[0].claude_as_profile, "secondary")
+            history.return_value.record.assert_called_once_with(rows)
+            self.assertIsInstance(actions, list)
+            with patch("limits_history.LimitsHistory", side_effect=OSError("database unavailable")):
+                self.assertIsInstance(run(), list)
 
 
 if __name__ == "__main__":

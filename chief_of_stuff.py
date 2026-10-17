@@ -52,8 +52,7 @@ COMMANDS = {
     "tick": "scripts/flow.py",
 }
 # Commands whose scripts import store (SQLAlchemy/Alembic). Add cleanup/engine when they join COMMANDS.
-STORE_BACKED = frozenset({"performance", "work", "limits", "tick", "board", "pages", "notify",
-                          "decision", "worker", "adopt"})
+STORE_BACKED = frozenset({"performance", "work", "limits"})
 
 
 def wrapper_text(current: Path) -> str:
@@ -150,9 +149,7 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_file():
         print(f"installed command is missing: {target}", file=sys.stderr)
         return 1
-    # --check only validates tracker rows; it never reaches scheduled collection or the ORM.
-    read_only_check = args[0] == "worker" and "--check" in args[1:]
-    if args[0] in STORE_BACKED and not read_only_check:
+    if args[0] in STORE_BACKED:
         scripts_dir = str(SOURCE / "scripts")
         if scripts_dir not in sys.path:
             sys.path.insert(0, scripts_dir)

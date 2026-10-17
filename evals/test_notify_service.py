@@ -26,10 +26,6 @@ class WorkspaceTest(unittest.TestCase):
         self.ws = Workspace()
         self.addCleanup(self.ws.tmp.cleanup)
         self.root = self.ws.root
-        # LaunchAgent construction must not build an environment during a unit test.
-        environment = mock.patch("notify_service.ensure_venv", return_value=Path(sys.executable))
-        environment.start()
-        self.addCleanup(environment.stop)
         quiet = contextlib.redirect_stdout(io.StringIO())
         quiet.__enter__()
         self.addCleanup(quiet.__exit__, None, None, None)
@@ -148,14 +144,6 @@ class ServiceTest(WorkspaceTest):
 
 
 class LifecycleTest(WorkspaceTest):
-    def test_scheduled_flow_keeps_managed_python_for_limit_history(self):
-        python = Path("/managed/venv/bin/python")
-        with mock.patch("notify_service.require_macos"), \
-                mock.patch("notify_service.ensure_venv", return_value=python), \
-                mock.patch("notify_service.load_agent", return_value="started") as load:
-            self.assertEqual(service.ensure(self.root), "notify: started")
-        self.assertEqual(load.call_args.args[0]["ProgramArguments"][0], str(python))
-
     def test_add_with_service_command_in_what_writes_notification(self):
         code = service.main(["--root", str(self.root), "add", "--kind", "awaiting",
                              "--what", "status"])

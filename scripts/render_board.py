@@ -13,7 +13,7 @@ import html
 import re
 import sys
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -32,8 +32,6 @@ from decision_page import write_if_changed  # noqa: E402
 from fragment import FONTS, TAB_CSS, tab_bar, theme  # noqa: E402
 import flow_chart  # noqa: E402
 import panels  # noqa: E402
-import limits  # noqa: E402
-from runtimes import NAMES as RUNTIMES  # noqa: E402
 import tracker_log  # noqa: E402
 
 LONG_ITEM = 80
@@ -285,49 +283,6 @@ def worker_panel(sources: board_sources.Sources, now: datetime) -> panels.Panel:
     return panels.Panel("workers", "WORKERS", "workers", len(rows), rows, note, href="/workers")  # (#195)
 
 
-def limits_panel(readings: list[limits.Reading], now: datetime, warn_at: float) -> panels.Panel:
-    groups = {}
-    for r in sorted(readings, key=lambda r: r.read_at):
-        groups.setdefault((r.runtime, r.account, r.limit), []).append(r)
-    # A source-wide failure supersedes earlier values. A later valid event supersedes that failure.
-    for (runtime, account, name), series in list(groups.items()):
-        if name != "limits":
-            continue
-        specific = [key for key in groups if key[:2] == (runtime, account) and key[2] != "limits"]
-        if specific and max(groups[key][-1].read_at for key in specific) > series[-1].read_at:
-            del groups[(runtime, account, name)]
-        else:
-            for key in specific:
-                del groups[key]
-    rows = []
-    for (runtime, account, name), series in sorted(groups.items()):
-        last = series[-1]
-        title = f"{runtime} ({account or 'default'}) · {name}"
-        if last.unknown or last.used is None or last.cap is None:
-            facts = f"unknown: {last.unknown or 'usage unavailable'}"
-        elif last.resets_at is None or last.resets_at <= now or last.read_at > now:
-            facts = "unknown: last recorded window has expired or has no reset"
-        else:
-            rate = limits.burn_rate(series)
-            burn = f"{rate:g}{last.unit}/h" if rate is not None else "unknown"
-            # Only observed increases, never infer consumption from an unreadable period or reset.
-            deltas = [b.used - a.used for a, b in zip(series, series[1:])
-                      if not a.unknown and not b.unknown and a.used is not None and b.used is not None
-                      and a.resets_at == b.resets_at and a.cap == b.cap and a.unit == b.unit
-                      and b.used >= a.used and b.read_at.astimezone(now.tzinfo).date() == now.date()]
-            daily = f"+{sum(deltas):g}{last.unit}" if deltas else "unknown"
-            facts = (f"{last.used:g}/{last.cap:g}{last.unit} · reset {last.resets_at.isoformat()} · "
-                     f"burn {burn} · today observed {daily}")
-            if limits.near_cap(series, now, warn_at):
-                facts += " · near cap"
-        rows.append(panels.Row(title, f"{facts} · observed {last.read_at.isoformat()}"))
-    for runtime in RUNTIMES:
-        if not any(key[0] == runtime for key in groups):
-            rows.append(panels.Row(runtime, "unknown: no recorded reading"))
-    return panels.Panel("limits", "RUNTIME LIMITS", "limits", len(rows), tuple(rows),
-                        "Percentages are account caps; daily usage counts observed increases only.")
-
-
 def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: int, drift: int, orphaned: int) -> list[panels.Tile]:
     """Six counts in the artboard's order and words, each linking to where its items are listed. ALL counts every
     task; NEEDS INPUT the held cards; RUNNING workers, or running tasks when no worker source is read."""
@@ -343,8 +298,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            kanban: Kanban | None = None, sources: board_sources.Sources = board_sources.EMPTY, answered: int = 0,
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
-           look_log: list[tuple[date, str]] | None = None,
-           limit_readings: list[limits.Reading] | None = None, warn_at: float = .8) -> str:
+           look_log: list[tuple[date, str]] | None = None) -> str:
     """The board page, the Flow artboard's sections: header, tiles, BUILD (the stage columns), the MERGE ORDER,
     DECISIONS and WORKERS panels, and the Flow charts. `stage_log` is (day, tracker text) for the earlier days the
     Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
@@ -415,8 +369,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
     tiles = flow_tiles(len(tasks), len(held),
                        sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned))
-    panels_html = panels.panels([merge_order(sources), decision_panel(pending, answered, now), worker_panel(sources, now),
-                                limits_panel(limit_readings or [], now, warn_at)])
+    panels_html = panels.panels([merge_order(sources), decision_panel(pending, answered, now), worker_panel(sources, now)])
 
     return f"""<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -505,26 +458,12 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
     trackers = [(d, path) for d, path in daily_trackers(root, cfg) if min(reach, since_day) <= d < tracker_day]
     stage_log = [(d, path.read_text()) for d, path in trackers if reach <= d]
     look_log = [(d, path.read_text()) for d, path in trackers if d < reach]
-    limit_readings = []
-    try:
-        from limits_history import LimitsHistory
-        history = LimitsHistory()
-        try:
-            for runtime in RUNTIMES:
-                account = settings.workers.claude_as_profile if runtime == "claude" else ""
-                limit_readings.extend(history.readings(runtime, account, now - timedelta(days=8)))
-        finally:
-            history.engine.dispose()
-    except Exception as exc:
-        limit_readings = [limits.Reading(r, settings.workers.claude_as_profile if r == "claude" else "", "limits",
-                                         None, None, "", None, now, f"history unreadable: {exc}")
-                          for r in RUNTIMES]
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
                   sources=board_sources.load(out.parent), answered=len(decision_rows(tracker_text)),
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone), stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
-                  looked=looked, look_log=look_log, limit_readings=limit_readings, warn_at=settings.limits.warn_at)
+                  looked=looked, look_log=look_log)
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 

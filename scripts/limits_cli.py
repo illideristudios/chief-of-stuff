@@ -6,8 +6,7 @@ import sys
 from pathlib import Path
 
 from limits_history import LimitsHistory
-from limits_probe import read
-from runtimes import NAMES
+from limits_probe import read_all
 from settings import load
 from workspace import read_config
 
@@ -19,7 +18,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = read_config(args.root)
         settings = load(args.root, cfg.settings_path)
-        rows = [r for runtime in NAMES for r in read(runtime, settings.workers.claude_as_profile if runtime == "claude" else "")]
+        rows = read_all(settings.workers)
         history = LimitsHistory()
         try:
             history.record(rows)

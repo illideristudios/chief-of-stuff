@@ -17,6 +17,8 @@ import clock as engine_clock
 import engine_merge
 import forge
 import issue_gate
+import limits_history
+import limits_probe
 import policy
 import reconcile
 import settings
@@ -26,7 +28,7 @@ import store_access
 import supervisor
 import worker
 from forge_port import ForgeError
-from workspace import worktrees_dir
+from workspace import read_config, worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 
@@ -69,6 +71,19 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
     store.set_resume(key, data)
 
 
+def _record_limits(root: Path) -> None:
+    """A failed reading never stops the pass."""
+    try:
+        workers = settings.load(root, read_config(root).settings_path).workers
+        history = limits_history.LimitsHistory()
+        try:
+            history.record(limits_probe.read_all(workers))
+        finally:
+            history.engine.dispose()
+    except Exception:
+        return
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None) -> list[reconcile.Action]:
@@ -77,6 +92,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
+    _record_limits(root)
     worker.collect(store, root, clock, trees)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
