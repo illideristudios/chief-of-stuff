@@ -175,11 +175,6 @@ class ClockPreflightTest(unittest.TestCase):
             with self.assertRaisesRegex(claude_adapter.ClockError, r"\^9\.9"):
                 claude_adapter.command(self.request)
 
-    def test_inventory_is_exposed_without_applying_clock_policy(self):
-        with self.popen([{**self.clock, "enabled": False}]):
-            got = claude_adapter.plugin_inventory(cwd="/worktree")
-        self.assertFalse(got[0]["enabled"])
-
     def test_manifest_and_stderr_failures_stay_clock_results(self):
         real = Path.read_text
 

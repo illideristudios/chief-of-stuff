@@ -54,12 +54,6 @@ def _host(claude_as_profile: str) -> tuple[str, list[str]]:
     return binary, lead
 
 
-def plugin_inventory(claude_as_profile: str = "", cwd: str | None = None) -> list:
-    """Unbilled user-scope plugin list. Returns the records; clock policy is applied by the caller."""
-    binary, lead = _host(claude_as_profile)
-    return _plugins(binary, lead, cwd)
-
-
 def _check_clock(binary: str, lead: list[str], cwd: str | None) -> None:
     """Unbilled preflight in the worker's account. Workers load user settings only, never project plugins."""
     chosen = clock.user_clock(_plugins(binary, lead, cwd))

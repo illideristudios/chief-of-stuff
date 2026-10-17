@@ -144,7 +144,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
-                # shortcut: a run that vanishes after this check still launches clock_checked; re-check in launch if that race shows up.
+                # No race between recoverable() and launch(): one pass at a time under the singleton lock (1.0 M3).
                 if before is not None and not worker.recoverable(
                         key, stage, action.attempt, store=store, root=root, trees=trees, clock=clock):
                     preflight()
