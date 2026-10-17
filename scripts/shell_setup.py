@@ -77,10 +77,11 @@ def login_argv(command: list[str], *, path_prefix: str = "") -> list[str]:
 
 def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                 timeout: int = 120, worktree: str = "") -> subprocess.CompletedProcess:
-    """Run a trusted workspace command with shell setup, bounded separately from a worker's runtime.
+    """Run workspace-authored shell source in the caller-supplied cwd with login setup.
 
-    Teardown and stack discovery share this driver. Command text is workspace-authored shell source.
-    The process cwd is that trusted tree; worker and worktree identity travel in the environment.
+    Teardown uses this driver and supplies the trusted workspace as cwd. Workspace, worker and
+    optional worktree identity travel in the environment. Execution has its own timeout;
+    cleanup allows at most one additional second to reap the shell after a failure.
     """
     env = {**clean_env(), "CHIEF_OF_STUFF_WORKSPACE": str(workspace.resolve()),
            "CHIEF_OF_STUFF_WORKER": worker}
@@ -101,9 +102,11 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
             source = f"exec 1>{quoted}; set +m\n{command}"
         argv = [shell, "-lic", source]
         errors = Path(directory) / "stderr"
-        with errors.open("w") as stderr_file, subprocess.Popen(
+        with errors.open("w") as stderr_file:
+            # Popen.__exit__ waits without a timeout, so manage the child explicitly.
+            child = subprocess.Popen(
                 argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                stderr=stderr_file, start_new_session=True) as child:
+                stderr=stderr_file, start_new_session=True)
             try:
                 child.wait(timeout=timeout)
             except BaseException as exc:
@@ -114,10 +117,11 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                     except ProcessLookupError:
                         pass
                     try:
-                        child.wait(timeout=5)
+                        child.wait(timeout=1)
                     except subprocess.TimeoutExpired:
-                        # shortcut: a child stuck after SIGKILL is left after 5s; reap it if teardown must not leave one
-                        child.returncode = -signal.SIGKILL
+                        # SIGKILL may be pending on an uninterruptible child. Popen retains
+                        # unreaped children for later nonblocking collection; do not stall callers.
+                        pass
                 raise
             stderr = errors.read_text(errors="replace")
             stdout = output.read_text(errors="replace") if output.exists() else ""
