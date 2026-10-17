@@ -678,6 +678,18 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(model=gate_model), [reconcile.Ask(KEY, "merge", "gate requires Zach's approval")])
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["merge"])
 
+    def test_observed_quota_exhaustion_pings_then_expires_at_reset(self):
+        self._trio(quota_percent=80)
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.set_resume(KEY, {"quota_percent": 100,
+                                 "quota": {"reset": "in two hours", "retry_at": (NOW + timedelta(hours=2)).isoformat()}})
+        self.assertEqual(self.run_pass(), [reconcile.Limit(KEY, "quota", "reached quota limit")])
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "limit")
+        self.assertEqual(self.launched, [])
+        self.now += timedelta(hours=2)
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertNotIn("quota_percent", self.db.resume(KEY))
+
 
 class MainTest(unittest.TestCase):
     def setUp(self):
