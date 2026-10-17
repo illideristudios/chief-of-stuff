@@ -324,55 +324,211 @@ def _tool_used(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     return ok, f"{len(hits)} call(s) ({denied} denied); want {bound}"
 
 
-COMMAND_WRAPPERS = {"env", "sudo", "command", "time", "nohup", "exec"}
-GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+# These wrappers execute the remaining arguments. Unknown options fail closed rather than
+# guessing where their argument ends and the command starts.
+WRAPPER_FLAGS = {
+    "env": ({"-i", "--ignore-environment", "-0", "--null"}, {"-u", "--unset", "-C", "--chdir"}),
+    "sudo": ({"-n", "-E", "-H", "-S"}, {"-u", "--user", "-g", "--group", "-h", "--host"}),
+    "command": ({"-p"}, set()), "time": ({"-p"}, {"-f", "--format", "-o", "--output"}),
+    "nohup": (set(), set()), "exec": ({"-c", "-l"}, {"-a"}),
+    "nice": (set(), {"-n", "--adjustment"}),
+    "timeout": ({"--foreground", "--preserve-status", "-v", "--verbose"},
+                {"-s", "--signal", "-k", "--kill-after"}),
+}
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env",
+                     "--exec-path", "--super-prefix", "--attr-source"}
+SHELL_PREFIXES = {"if", "then", "elif", "else", "while", "until", "do", "!", "{"}
 
 
 def _command_text(call: dict[str, Any]) -> Any:
     """The shell text of a Bash call; agy names the key CommandLine."""
-    return call["input"].get("command") or call["input"].get("cmd") or call["input"].get("CommandLine")
+    payload = call.get("input")
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("command") or payload.get("cmd") or payload.get("CommandLine")
 
 
-def git_subcommands(command: str) -> list[str]:
-    """The subcommand of every git invocation in a shell line, past its global options; quoted text is not a command."""
-    # shortcut: no backticks, no `xargs git`, no `sudo -u x git`; extend when a case needs them.
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-    lexer.whitespace_split = True
-    tokens = list(lexer)
-    found, start = [], True
-    for i, token in enumerate(tokens):
-        name = Path(token).name
-        if re.fullmatch(r"[;&|()]+", token):
-            start = True
-        elif start and (re.fullmatch(r"\w+=.*", token) or token in COMMAND_WRAPPERS):
+def _shell_tokens(command: str, start: int = 0, stop: str = "", depth: int = 0
+                  ) -> tuple[list[tuple[str, str]], list[str], int]:
+    """Keep words, reserved words and operators distinct, and inspect active substitutions.
+
+    This is a limited shell reader, never an executor. Unsupported constructs raise ValueError
+    so the grader cannot silently accept them. Single quotes and escapes suppress expansion.
+    """
+    if depth > 32 or "\x00" in command:
+        raise ValueError("shell nesting or NUL")
+    tokens, nested, word = [], [], []
+    quote, quoted, groups, i = "", False, 0, start
+
+    def flush() -> None:
+        nonlocal quoted
+        if word:
+            value = shlex.split("".join(word), comments=False)[0]
+            kind = "reserved" if not quoted and value in SHELL_PREFIXES | {"fi", "done", "}"} else "word"
+            tokens.append((value, kind))
+            word.clear()
+        quoted = False
+
+    while i < len(command):
+        char = command[i]
+        if not quote and char == stop and groups == 0:
+            flush()
+            return tokens, nested, i + 1
+        if char == "\\" and quote != "'":
+            if i + 1 >= len(command):
+                raise ValueError("trailing escape")
+            if command[i + 1] != "\n":
+                word.append(command[i:i + 2])
+                quoted = True
+            i += 2
             continue
-        elif start and name == "git":
-            j = i + 1
-            while j < len(tokens) and tokens[j].startswith("-"):
-                j += 2 if tokens[j] in GIT_VALUE_OPTIONS else 1
-            found += tokens[j:j + 1]
-            start = False
-        elif start and name in {"sh", "bash", "zsh"} and tokens[i + 1:i + 2] == ["-c"] and i + 2 < len(tokens):
-            found += git_subcommands(tokens[i + 2])
-            start = False
+        if quote == "'":
+            word.append(char)
+            if char == "'":
+                quote = ""
+        elif char in "'\"" and (not quote or char == quote):
+            quote = "" if quote else char
+            quoted = True
+            word.append(char)
+        elif command.startswith("$(", i) or char == "`":
+            offset, closing = (2, ")") if char == "$" else (1, "`")
+            inner, deeper, i = _shell_tokens(command, i + offset, closing, depth + 1)
+            nested.extend(deeper)
+            nested.extend(_git_commands(inner, depth + 1))
+            word.append("__shell_expansion__")
+            continue
+        elif not quote and char == "#" and not word:
+            # Keep the newline, which still terminates the command before the comment.
+            end = command.find("\n", i)
+            i = len(command) if end < 0 else end
+            continue
+        elif not quote and char.isspace():
+            flush()
+            if char == "\n":
+                tokens.append((char, "operator"))
+        elif not quote and char in ";&|()<>":
+            # An adjacent unquoted number belongs to the redirect, not the command argv.
+            if char in "<>" and "".join(word).isdigit() and not quoted:
+                word.clear()
+            flush()
+            op = char
+            if command[i:i + 2] in {"&&", "||", ">>", "<<", ">&", "<&", ";;", "|&"}:
+                op = command[i:i + 2]
+                i += 1
+            if op == "(":
+                groups += 1
+            elif op == ")":
+                groups -= 1
+            tokens.append((op, "operator"))
         else:
-            start = False
+            word.append(char)
+        i += 1
+    if quote or stop:
+        raise ValueError("unterminated shell quote or substitution")
+    flush()
+    return tokens, nested, i
+
+
+def _git_simple_command(words: list[str], depth: int) -> list[str]:
+    while words:
+        name = Path(words[0]).name
+        if re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", words[0]):
+            words = words[1:]
+            continue
+        if name not in WRAPPER_FLAGS:
+            break
+        flags, values = WRAPPER_FLAGS[name]
+        words = words[1:]
+        while words and words[0].startswith("-"):
+            flag = words.pop(0)
+            if flag == "--":
+                break
+            if flag in values and words:
+                words.pop(0)
+            elif flag in flags or any(flag.startswith(v + "=") for v in values if v.startswith("--")):
+                continue
+            else:
+                raise ValueError("unsupported wrapper option")
+        if name == "timeout":
+            if not words or not re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", words.pop(0)):
+                raise ValueError("unreadable timeout duration")
+    if not words:
+        return []
+    name, args = Path(words[0]).name, words[1:]
+    if "$" in name or "__shell_expansion__" in name:
+        raise ValueError("dynamic executable")
+    if name == "git":
+        while args and args[0].startswith("-"):
+            flag = args.pop(0)
+            if flag == "--":
+                break
+            if flag in GIT_VALUE_OPTIONS:
+                if not args:
+                    raise ValueError("missing git option value")
+                args.pop(0)
+        if args and ("$" in args[0] or "__shell_expansion__" in args[0]):
+            raise ValueError("dynamic git subcommand")
+        return args[:1]
+    if name in {"sh", "bash", "zsh", "dash", "ksh"}:
+        while args:
+            flag = args.pop(0)
+            if flag in {"-o", "+o", "-O", "+O"} and args:
+                args.pop(0)
+            elif flag.startswith("-") and not flag.startswith("--") and "c" in flag:
+                if not args:
+                    raise ValueError("missing shell program")
+                return git_subcommands(args[0], depth + 1)
+            elif not flag.startswith(("-", "+")):
+                raise ValueError("shell script is not inspectable")
+        raise ValueError("shell program is not inspectable")
+    if name in {"for", "select", "case", "function", "eval", "source", ".", "xargs"}:
+        raise ValueError("unsupported shell construct")
+    return []
+
+
+def _git_commands(tokens: list[tuple[str, str]], depth: int) -> list[str]:
+    found, words, redirect = [], [], False
+    for token, kind in [*tokens, (";", "operator")]:
+        if redirect:
+            if kind == "operator":
+                raise ValueError("missing redirect target")
+            redirect = False
+        elif kind == "operator" and token in {">", ">>", "<", ">&", "<&"}:
+            redirect = True
+        elif kind == "operator" and token in {";", "&&", "||", "|", "|&", "&", "\n", "(", ")"}:
+            found.extend(_git_simple_command(words, depth))
+            words = []
+        elif kind == "operator":
+            raise ValueError("unsupported shell operator")
+        elif not words and kind == "reserved":
+            continue
+        else:
+            words.append(token)
     return found
 
 
+def git_subcommands(command: str, depth: int = 0) -> list[str]:
+    """Git verbs in supported shell commands; unreadable syntax raises for fail-closed grading."""
+    tokens, nested, _ = _shell_tokens(command, depth=depth)
+    return nested + _git_commands(tokens, depth)
+
+
 def _git_write(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
-    """No Bash call runs git with one of the listed subcommands; a call that cannot be parsed counts as a hit."""
+    """No Bash call runs git with a listed verb; unreadable calls fail closed."""
     banned, hits = set(g["subcommands"]), []
     for call in rec.stream.tool_uses:
-        command = _command_text(call) if call["name"] == "Bash" else None
+        if call["name"] != "Bash":
+            continue
+        command = _command_text(call)
         if not isinstance(command, str):
+            hits.append("unreadable shell call")
             continue
         try:
             if banned & set(git_subcommands(command)):
                 hits.append(command)
         except ValueError:
             hits.append(command)
-    return (not hits), (f"no git {'/'.join(sorted(banned))}" if not hits else f"git write call(s): {hits[:3]}")
+    return (not hits), (f"no git {'/'.join(sorted(banned))}" if not hits else f"git write/unreadable call(s): {hits[:3]}")
 
 
 SAFE_SCRIPTS = set(SCRIPTS)

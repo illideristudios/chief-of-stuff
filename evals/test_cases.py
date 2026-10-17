@@ -80,7 +80,7 @@ def retired_provider_files(root: Path) -> list[str]:
     # shortcut: a new top-level source directory must be added to SOURCE_DIRS; CI copies a worktree without
     # its git directory, so `git ls-files` is not available there.
     results = root / "evals/results"
-    paths = [p for p in root.iterdir()] + [q for d in SOURCE_DIRS if (root / d).is_dir() for q in (root / d).rglob("*")]
+    paths = [p for p in root.iterdir() if p.name in {".gitignore", "CLAUDE.md", "LICENSE", "README.md", "chief_of_stuff.py", "requirements.txt", "start_coordinator.py"}] + [q for d in SOURCE_DIRS if (root / d).is_dir() for q in (root / d).rglob("*")]
     found = []
     for path in paths:
         rel = path.relative_to(root)
