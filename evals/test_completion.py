@@ -46,3 +46,12 @@ class CompletionTest(unittest.TestCase):
                          completion.Verdict("done", ""))
         self.assertEqual(completion.abandoned(False, report="done", on_main=False, suite_on_main=True),
                          completion.Verdict("done", "not on main", True))
+
+    def test_a_done_report_with_unlanded_work_stays_done_for_review_not_an_orphan(self):
+        gone = (orphans.Claim("worker", False, "has no process"),)
+        verdict = completion.abandoned(False, report="done", on_main=False, tree=RISK, tree_name="tree", tree_claims=gone)
+        self.assertEqual((verdict.outcome, verdict.human_review), ("done", True))
+
+    def test_a_gone_worker_whose_tree_could_not_be_read_is_held(self):
+        self.assertEqual(completion.abandoned(False, tree_unreadable=True),
+                         completion.Verdict("failed", "worker tree could not be read", True))

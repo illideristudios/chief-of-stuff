@@ -769,6 +769,12 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([s.outcome for s in self.db.segments()], ["failed", "failed"])
         self.assertEqual(len(self.db.log(KEY)), 2)
 
+    def test_a_gone_worker_with_no_exit_record_stays_open_for_the_planner(self):
+        self.launched()
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW)
+        self.assertIsNone(self.db.segments()[0].ended_at)
+
     def test_malformed_run_records_and_result_end_failed(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         self.db.set_resume(KEY, {"runs": ["invalid"]})

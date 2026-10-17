@@ -181,7 +181,7 @@ class EngineTest(unittest.TestCase):
     def test_refused_verification_keeps_stage_and_is_planned_again_next_pass(self):
         self.assert_unconfirmed_merge_keeps_review_stage(ForgeError("head changed"), "merge refused: head changed")
 
-    def test_file_ownership_conflict_reaches_the_planner_before_dispatch(self):
+    def test_declared_file_scopes_conflict_before_dispatch(self):
         self.db.upsert_item(KEY, stage="implement", forge_state="open")
         self.db.upsert_item(OTHER, stage="implement", forge_state="open")
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
@@ -194,6 +194,34 @@ class EngineTest(unittest.TestCase):
             "run_dir": str(run_dir), "tree": str(self.trees / "fake")}}})
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, f"file ownership conflict with {OTHER}")])
         self.assertEqual(self.launched, [])
+
+    def test_launch_worktree_rows_do_not_conflict_two_fresh_issues(self):
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        self.db.upsert_item(OTHER, stage="implement", forge_state="open")
+        self.db.set_ownership(OTHER, str(self.trees / "issue-2-implement-1"))
+        self.assertEqual({a.issue_key for a in self.run_pass()}, {KEY, OTHER})
+
+    def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
+        self.forge.holds = []
+        self.forge.add_human_hold = lambda number: self.forge.holds.append(number) or ""
+        self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
+        self.db.upsert_item(KEY, stage="implement")
+        action = reconcile.Close(KEY, "implement", 1, "done", "read-only run left changes", True)
+        with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
+            self.run_pass()
+        self.assertEqual(self.forge.holds, [1])
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+
+    def test_a_close_whose_hold_write_fails_leaves_the_segment_open(self):
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
+        self.forge.add_human_hold = lambda number: "forge offline"
+        self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
+        action = reconcile.Close(KEY, "implement", 1, "done", "read-only run left changes", True)
+        with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
+            self.run_pass()
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertIn("forge offline", self.db.log(KEY)[-1].message)
 
     def test_closed_forge_snapshot_is_not_dispatched(self):
         self.db.upsert_item(KEY, forge_state="open")

@@ -39,6 +39,17 @@ class ReadinessTest(unittest.TestCase):
         self.assertIsNone(self.why(asks=(readiness.Ask(KEY, "proceed"),),
                                    reports=(readiness.Report(KEY, "blocked"),)))
 
+    def test_an_answer_clears_only_the_stop_it_answered(self):
+        reports = (readiness.Report(KEY, "blocked", "implement", 1),)
+        self.assertEqual(self.why(asks=(readiness.Ask(KEY, "proceed", "review", 1),), reports=reports),
+                         "worker stopped")
+        self.assertIsNone(self.why(asks=(readiness.Ask(KEY, "proceed", "implement", 1),), reports=reports))
+
+    def test_the_latest_report_decides_not_the_highest_attempt(self):
+        reports = (readiness.Report(KEY, "done", "implement", 2), readiness.Report(KEY, "blocked", "review", 1))
+        self.assertEqual(self.why(reports=reports), "worker stopped")
+        self.assertIsNone(self.why(reports=reports[::-1]))
+
     def test_a_blocked_report_with_no_ask_is_a_stop(self):
         self.assertEqual(self.why(reports=(readiness.Report(KEY, "blocked"),)), "worker stopped")
         self.assertIsNone(self.why(reports=(readiness.Report(KEY, "done"),)))

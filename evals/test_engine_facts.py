@@ -1,10 +1,12 @@
 """One pass's facts are gathered before the planner runs."""
 
+import subprocess
 import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -48,9 +50,59 @@ class GatherTest(unittest.TestCase):
         self.assertIn(readiness.Claim(KEY, "src/a.py", "write"), facts.claims)
         self.assertIn(readiness.Claim(KEY, "docs/readme", "read"), facts.claims)
         self.assertEqual(dict(facts.blockers), {KEY: (OTHER,)})
-        self.assertEqual(facts.asks, (readiness.Ask(KEY, None),))
+        self.assertEqual(facts.asks, (readiness.Ask(KEY, None, "implement", 1),))
         self.assertEqual(facts.reports[0].outcome, "blocked")
         self.assertEqual(dict(facts.alive), {((KEY, "implement", 1)): False})
+
+    def gather(self, forge=None):
+        forge = forge or mock.Mock(**{"blocked_by.return_value": {}})
+        return engine_facts.gather(forge=forge, store=self.db, root=self.root, trees=self.trees, now=NOW)
+
+    def test_a_worktree_row_is_not_a_file_claim_and_arms_no_read_only_check(self):
+        self.db.upsert_item(OTHER, stage="implement")
+        self.db.set_ownership(OTHER, str(self.trees / "issue-2-implement-1"))
+        with mock.patch.object(engine_facts.process_status, "identity", return_value="other"):
+            facts = self.gather()
+        self.assertFalse([c for c in facts.claims if c.issue_key == OTHER])
+        self.assertNotIn(OTHER, facts.read_only)
+
+    def test_reports_follow_the_order_they_were_written(self):
+        self.db.add_report(KEY, "implement", 2, "sess", "done", "ok", [])
+        self.db.add_report(KEY, "review", 1, "sess", "blocked", "stuck", [])
+        self.assertEqual([(r.stage, r.attempt) for r in self.gather().reports][-1], ("review", 1))
+
+    def test_a_report_written_while_liveness_is_read_is_seen(self):
+        def appear(*args, **kwargs):
+            self.db.add_report(KEY, "implement", 1, "sess", "done", "ok", [])
+            return "other"
+        with mock.patch.object(engine_facts.process_status, "identity", side_effect=appear):
+            self.assertEqual(self.gather().reports[-1].outcome, "done")
+
+    def test_a_worker_with_an_exit_record_is_left_to_collect(self):
+        run = self.root / "run"
+        run.mkdir()
+        (run / "exit.json").write_text("{}")
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["run_dir"] = str(run)
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(engine_facts.process_status, "identity", return_value="other"):
+            self.assertEqual(self.gather().alive, ())
+
+    def test_a_tree_git_cannot_open_is_unknown_not_a_failed_pass(self):
+        tree = self.trees / "issue-1-implement-1"
+        tree.mkdir()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["tree"] = str(tree)
+        self.db.set_resume(KEY, data)
+        for error in (engine_facts.git_view.CacheError("cache"), subprocess.TimeoutExpired("git", 1)):
+            with self.subTest(error=error), \
+                 mock.patch.object(engine_facts.git_trees, "discover", return_value=[tree]), \
+                 mock.patch.object(engine_facts.git_view, "opened", side_effect=error), \
+                 mock.patch.object(engine_facts.process_status, "identity", return_value="other"):
+                self.assertEqual(self.gather().changed, ((KEY, None),))
+
+    def test_a_forge_that_cannot_read_blockers_is_unknown(self):
+        self.assertIsNone(self.gather(SimpleNamespace()).blockers)
 
     def test_a_failed_relationship_read_is_unknown(self):
         forge = mock.Mock()
