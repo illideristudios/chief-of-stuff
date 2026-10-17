@@ -240,7 +240,7 @@ class WorkerTeardownTest(unittest.TestCase):
         self.configure(teardown=self.cleanup_command())
         one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
                                "codex", "", "10:00")
-        (self.tree / one_shot.RESULT).parent.mkdir(exist_ok=True)
+        self.fx._stopped_tree()  # A launched tree ignores its own dispatch/result metadata.
         (self.tree / one_shot.RESULT).write_text("status: done\nreason: checked\nchanges: none\n")
         (self.tree / one_shot.PIDFILE).write_text("999999999 Security audit\n")
         out = io.StringIO()
