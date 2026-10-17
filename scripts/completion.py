@@ -24,6 +24,21 @@ class OrphanTree:
 
 
 @dataclass(frozen=True)
+class RetirementSnapshot:
+    """The observed state abort may retire; contents is None for a branch without a tree."""
+    branch: str
+    head: str
+    contents: str | None
+    unreadable: bool = False
+
+
+def may_retire(saved: RetirementSnapshot, current: RetirementSnapshot) -> bool:
+    """Only matching, readable state is disposable. Two blank heads never prove a match."""
+    return bool(not saved.unreadable and not current.unreadable and saved.branch and saved.head
+                and saved.contents != "" and saved == current)
+
+
+@dataclass(frozen=True)
 class Recovery:
     path: str | None  # None: recreate the worktree from `branch`
     branch: str

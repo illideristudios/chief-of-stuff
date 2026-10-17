@@ -10,7 +10,7 @@ import stat
 import subprocess
 import time
 import uuid
-from dataclasses import replace
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -371,12 +371,16 @@ def _ref_head(repo: Path, common: Path, ref: str) -> str | None:
 
 
 def _snapshot_orphans(found: list[completion.OrphanTree], repo: Path, common: Path) -> list[dict]:
-    """Save the state abort may retire, before building its replacement releases the clone lock."""
+    """Save abort's state under the discovery lock, before preparing a replacement."""
     snapshots = []
     for c in found:
-        saved = {"path": c.path, "branch": c.branch, "head": c.head}
-        if c.path:
-            saved["contents"] = _tree_contents(Path(c.path), common)
+        actual = _read_tree(Path(c.path), common) if c.path else c
+        contents = _tree_contents(Path(c.path), common) if c.path and not actual.unreadable else None
+        expected = completion.RetirementSnapshot(c.branch, c.head, contents, c.unreadable)
+        current = completion.RetirementSnapshot(actual.branch, actual.head, contents, actual.unreadable)
+        if not completion.may_retire(expected, current):
+            raise RuntimeError("cannot snapshot unreadable or changed orphaned worktree; preserving work")
+        saved = {"path": c.path, **asdict(current)}
         saved["refs"] = {ref: _ref_head(repo, common, ref)
                          for ref in (f"refs/heads/{c.branch}", f"refs/remotes/origin/{c.branch}")
                          if c.branch.startswith("work/")}
@@ -385,7 +389,7 @@ def _snapshot_orphans(found: list[completion.OrphanTree], repo: Path, common: Pa
 
 
 def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
-    """Retire only the saved state. A restart must never erase work added since abort was prepared."""
+    """Retire only the saved state. The caller holds clone_lock across the re-read, comparison and removal."""
     common = git_view.locate(repo).common
 
     def check_tree(c: dict) -> None:
@@ -396,8 +400,10 @@ def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
             if not path.resolve().is_relative_to(trees.resolve()):
                 raise RuntimeError("orphaned worktree is outside the worktrees directory")
             actual = _read_tree(path, common)
-            if (actual.unreadable or actual.head != c["head"] or actual.branch != c["branch"]
-                    or not c.get("contents") or _tree_contents(path, common) != c["contents"]):
+            saved = completion.RetirementSnapshot(c["branch"], c["head"], c.get("contents"), c.get("unreadable", False))
+            current = completion.RetirementSnapshot(actual.branch, actual.head,
+                _tree_contents(path, common) if not actual.unreadable else None, actual.unreadable)
+            if not completion.may_retire(saved, current):
                 raise RuntimeError("orphaned worktree changed since abort snapshot; preserving work")
         except (OSError, git_view.Unviewable) as exc:
             raise RuntimeError("cannot verify orphaned worktree snapshot; preserving work") from exc
@@ -416,15 +422,16 @@ def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
     for c in found:
         if not c["path"] or not os.path.lexists(c["path"]):
             continue
-        check_tree(c)
         path = Path(c["path"])
         _, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
         if os.path.lexists(path):
             raise RuntimeError(f"could not retire orphaned worktree: {detail}")
     for ref, expected in refs.items():
         if expected is not None:
-            # Compare-and-delete also protects a ref moved after the preflight read.
-            _, detail = make_worktree.git_trusted(["update-ref", "-d", ref, expected], repo)
+            # branch -D preserves refs checked out in the clone or any surviving worktree.
+            command = (["branch", "-D", ref.removeprefix("refs/heads/")] if ref.startswith("refs/heads/")
+                       else ["update-ref", "-d", ref, expected])
+            _, detail = make_worktree.git_trusted(command, repo)
             if _ref_head(repo, common, ref) is not None:
                 raise RuntimeError(f"could not retire orphaned ref {ref}: {detail}")
 
@@ -532,11 +539,11 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
                 ["worktree", "add", "--no-track", "-B", chosen.branch, "--", str(tree), chosen.head], repo)
             if code != 0:
                 raise RuntimeError(f"git worktree add failed: {detail}")
+        if abort:
+            _abort_workers_gone(root, number)
+            retire = _snapshot_orphans(found, repo, common)
     if abort:
         # build takes the clone lock itself. Until it succeeds and is saved, all old work stays intact.
-        _abort_workers_gone(root, number)
-        with make_worktree.clone_lock(repo):
-            retire = _snapshot_orphans(found, repo, common)
         fresh = f"{tree_name}-{uuid.uuid4()}"
         fresh_branch = f"work/{fresh}"
         made = make_worktree.build(root, repo, str(trees), fresh, fresh_branch, agent)

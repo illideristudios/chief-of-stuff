@@ -1214,7 +1214,7 @@ class WorkerTest(unittest.TestCase):
 
     def test_resumed_abort_preserves_trees_and_refs_changed_since_the_snapshot(self):
         from evals import git_taint as taint, make_repo
-        for change in ("commit", "untracked", "ignored", "dirty edit", "index", "branch", "remote", "new remote"):
+        for change in ("commit", "untracked", "ignored", "dirty edit", "index", "detached", "branch", "remote", "new remote"):
             with self.subTest(change=change), tempfile.TemporaryDirectory() as tmp:
                 # Each case needs its own persisted transition and both conflicting trees.
                 self.db.engine.dispose()
@@ -1245,6 +1245,8 @@ class WorkerTest(unittest.TestCase):
                         (old / "README.md").write_text("only the index will keep this version\n")
                         make_repo.git(["add", "README.md"], old)
                         (old / "README.md").write_text("base\n")
+                    elif change == "detached":
+                        make_repo.git(["checkout", "--detach"], old)
                     elif change == "branch":
                         make_repo.git(["update-ref", f"refs/heads/{branch}", "main"], clone)
                     else:
