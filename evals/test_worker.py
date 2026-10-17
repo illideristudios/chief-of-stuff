@@ -19,6 +19,7 @@ import claude_adapter
 import cleanup
 import forge_review
 import process_status
+import performance
 import reconcile
 import slots
 import store
@@ -637,6 +638,75 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(actions, [reconcile.Merge(KEY)])
         launch.assert_not_called()
         self.assertEqual(self.db.resume(KEY)["runs"]["review-1"]["result"]["outcome"], "done")
+
+    def test_accepting_suite_hold_preserves_human_review_performance_after_restart(self):
+        forge = self.suite_run()
+        def hold(number):
+            forge.rows[0]["human_review"] = True
+            return ""
+        forge.add_human_hold = mock.Mock(side_effect=hold)
+        launch = mock.Mock(return_value=("example", ""))
+        self.suite_pass(forge, launch)
+        forge.rows[0]["human_review"] = False
+        self.suite_pass(forge, launch)
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
+        self.addCleanup(self.db.engine.dispose)
+        segment = self.db.segments(KEY)[0]
+        self.assertEqual(segment.outcome, "done")
+        rows = performance.table([segment], NOW.date(), NOW.date())
+        self.assertEqual((rows[0].completed, rows[0].human_review), (1, 1))
+
+    def test_closed_suite_holds_retire_without_publication_or_acceptance(self):
+        for published in (False, True):
+            with self.subTest(published=published):
+                self.db.record_segment(KEY, "implement", 1, NOW.isoformat(),
+                                       ended_at=NOW.isoformat(), outcome="human_review")
+                self.db.set_resume(KEY, {"suite_hold": {"stage": "implement", "attempt": 1,
+                                                        "published": published}})
+                forge = FakeForge()
+                forge.rows[0].update(forge_state="closed", human_review=False)
+                forge.add_human_hold = mock.Mock(return_value="")
+                launch = mock.Mock()
+                self.suite_pass(forge, launch)
+                forge.add_human_hold.assert_not_called()
+                launch.assert_not_called()
+                self.assertNotIn("suite_hold", self.db.resume(KEY))
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+
+    def test_malformed_suite_holds_fail_closed_without_blocking_other_issues(self):
+        bad_holds = [{}, "broken", {"published": True},
+                     {"stage": "implement", "attempt": 99, "published": True},
+                     {"stage": "implement", "attempt": True, "published": True},
+                     {"stage": "implement", "attempt": 1, "published": "yes"}]
+        other = KEY.rpartition("#")[0] + "#2"
+        for hold in bad_holds:
+            with self.subTest(hold=hold):
+                self.db.set_resume(KEY, {"suite_hold": hold})
+                forge = FakeForge()
+                forge.rows[0]["human_review"] = False
+                forge.rows.append({"issue_key": other, "stage": "implement", "forge_state": "open"})
+                forge.add_human_hold = mock.Mock(return_value="")
+                launch = mock.Mock(return_value=("example", ""))
+                # slots would otherwise keep the fake second worker's reservation on the next case.
+                self.db.drop_segment(other, "implement", 1)
+                self.suite_pass(forge, launch)
+                self.assertTrue(self.db.items()[0].human_review)
+                self.assertEqual(launch.call_args.args[0], other)
+                forge.add_human_hold.assert_not_called()
+                self.assertTrue(any("suite hold" in entry.message for entry in self.db.log(KEY)))
+
+    def test_missing_hold_observations_retain_hold_and_original_outcome(self):
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(),
+                               ended_at=NOW.isoformat(), outcome="human_review")
+        hold = {"stage": "implement", "attempt": 1, "published": True}
+        for rows in ([], [{"issue_key": KEY}]):
+            with self.subTest(rows=rows):
+                self.db.set_resume(KEY, {"suite_hold": hold})
+                engine._sync_suite_holds(FakeForge(), self.db, rows, NOW.isoformat())
+                self.assertEqual(self.db.resume(KEY)["suite_hold"], hold)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                self.assertTrue(self.db.items()[0].human_review)
 
     def test_collect_uses_passed_policy_when_workspace_configuration_breaks(self):
         self.suite_run()

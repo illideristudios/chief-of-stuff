@@ -181,6 +181,12 @@ class GitHubTest(unittest.TestCase):
         snapshots = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
         self.assertEqual([row.get("human_review") for row in snapshots], [True, False])
 
+    def test_snapshot_hold_membership_matches_case_insensitive_publication(self):
+        gh = FakeGh(issues=[gh_issue(1, "held", ["stage: review", "NEEDS HUMAN"])])
+        adapter = forge.Forge(GH, kanban=FLOW, gh=gh)
+        self.assertTrue(adapter.snapshots()[0]["human_review"])
+        self.assertTrue(adapter.snapshot(adapter.key(1))["human_review"])
+
     def test_snapshot_bounds_closed_history_by_update_recency(self):
         limit = forge.forge_review.REQUEST_LIMIT
         closed = [gh_issue(n, "Old", state="CLOSED") for n in range(1, backlog.GH_LIMIT + 2)]

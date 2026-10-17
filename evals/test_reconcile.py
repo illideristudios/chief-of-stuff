@@ -72,6 +72,18 @@ class ReconcileTest(unittest.TestCase):
                         expected = "replace" if restore and state == "open" and stage else "drop_stage"
                         self.assertEqual(action, expected)
 
+    def test_suite_hold_lifecycle_is_decided_from_facts(self):
+        hold = {"stage": "implement", "attempt": 1, "published": True}
+        history = [Segment("implement", outcome="human_review")]
+        decide = reconcile.suite_hold_action
+        self.assertEqual(decide(Item(), hold, history, observed=False), "accept")
+        for observed in (True, None):
+            self.assertEqual(decide(Item(), hold, history, observed=observed), "wait")
+        self.assertEqual(decide(Item(), {**hold, "published": False}, history, observed=False), "publish")
+        self.assertEqual(decide(Item(forge_state="closed"), hold, history, observed=False), "retire")
+        with self.assertRaises(ValueError):
+            decide(Item(), hold, [], observed=False)
+
     def plan(self, item=Item(), history=(), findings=None, slots=4, **kwargs):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
                               {} if findings is None else {item.issue_key: findings}, **kwargs)
