@@ -140,6 +140,20 @@ class CaseLintTest(unittest.TestCase):
                     found.append(f"{relative}:{number}")
         self.assertEqual(found, [])
 
+    def test_guard_runtime_lint_rejects_known_runtimes_in_any_case(self):
+        for runtime in ("dock" + "er", "pod" + "man"):
+            for name in (runtime, runtime.title(), runtime.upper()):
+                with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
+                    root = Path(d)
+                    for relative in ("scripts/guard_commands.py", "evals/test_guard_commands.py", "evals/test_cases.py"):
+                        path = root / relative
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text("runner exec box git status\n", encoding="utf-8")
+                    (root / "evals/test_guard_commands.py").write_text(f"{name} exec box git status\n", encoding="utf-8")
+                    with patch(__name__ + ".EVALS", root / "evals"):
+                        with self.assertRaises(AssertionError):
+                            CaseLintTest().test_guard_examples_use_no_real_container_runtime()
+
     def test_retired_deploy_provider_is_absent_outside_archives(self):
         # C20 names the open gap. Only the architect edits architecture/compliance.md.
         self.assertLessEqual(set(retired_provider_files(EVALS.parent)), {"architecture/compliance.md"})
