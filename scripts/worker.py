@@ -317,11 +317,6 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
-            if segment.stage == "review":
-                # This attempt's collected result always names the SHA pinned at launch.
-                record["result"] = {"reviewed_head": record.get("reviewed_head"),
-                                    "outcome": outcome, "ended_at": now.isoformat()}
-                store.set_resume(key, data)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)

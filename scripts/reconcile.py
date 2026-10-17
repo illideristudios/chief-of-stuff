@@ -43,6 +43,27 @@ def suite_holds(counts: Mapping[str, int | None], *, require_green: bool) -> boo
     return counts["passed"] == 0 or any(counts[key] for key in keys[1:])
 
 
+def suite_hold_action(item: WorkItem, hold: object, history: Sequence[Segment], *,
+                      observed: bool | None) -> str:
+    """Judge a persisted hold: retire closed work; accept only explicit removal after publication.
+
+    Invalid open holds raise so the driver can retain the local hold and isolate the item.
+    Missing observations never mean release.
+    """
+    if item.forge_state != "open":
+        return "retire"
+    if (not isinstance(hold, dict) or not isinstance(hold.get("stage"), str) or not hold["stage"]
+            or type(hold.get("attempt")) is not int or hold["attempt"] < 1
+            or type(hold.get("published")) is not bool):
+        raise ValueError("invalid suite hold record")
+    segment = next((s for s in history if s.stage == hold["stage"] and s.attempt == hold["attempt"]), None)
+    if segment is None or not segment.ended_at or segment.outcome != "human_review":
+        raise ValueError("suite hold must reference a completed human-review segment")
+    if not hold["published"]:
+        return "publish"
+    return "accept" if observed is False else "wait"
+
+
 def review_findings(state: Mapping[str, object], history: Sequence[Segment]) -> dict[str, int] | None:
     """Severity counts from the latest completed review, or None when unknown or stale."""
     latest = max((s for s in history if s.stage == "review" and s.ended_at),

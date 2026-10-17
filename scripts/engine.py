@@ -161,38 +161,30 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
     for item in store.items():
         key = item.issue_key
         data = _resume(store, key)
-        hold = data.get("suite_hold")
-        if not hold:
+        if "suite_hold" not in data:
             continue
-        if hold["published"]:
-            if observed.get(key) is False:
-                segment = next(s for s in store.segments(key)
-                               if s.stage == hold["stage"] and s.attempt == hold["attempt"])
-                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
-                                     ended_at=segment.ended_at, outcome="done")
-                record = data.get("runs", {}).get(f"{segment.stage}-{segment.attempt}", {})
-                if "result" in record:
-                    record["result"]["outcome"] = "done"
-                data.pop("suite_hold")
-                store.set_resume(key, data)
-                store.add_log(key, f"suite hold released: accepted {segment.stage} attempt {segment.attempt}", at)
-            else:
-                store.set_human_review(key, True)
-            continue
-        # Forge sync cannot erase an unpublished hold. Retry even after an engine restart.
-        store.set_human_review(key, True)
         try:
-            error = forge.add_human_hold(int(key.rpartition("#")[2]))
-            if error:
-                raise ForgeError(error)
+            action = reconcile.suite_hold_action(item, data["suite_hold"], store.segments(key),
+                                                  observed=observed.get(key))
+            if action in ("retire", "accept"):
+                store.finish_suite_hold(key, accept=action == "accept")
+                if action == "accept":
+                    store.add_log(key, "suite hold released: accepted completion", at)
+                continue
+            store.set_human_review(key, True)
+            if action == "publish":
+                error = forge.add_human_hold(int(key.rpartition("#")[2]))
+                if error:
+                    raise ForgeError(error)
+                data["suite_hold"]["published"] = True
+                store.set_resume(key, data)
         except Exception as exc:
-            message = f"review hold: {exc}"
+            # A corrupt record or one unavailable forge operation must not halt unrelated work.
+            store.set_human_review(key, True)
+            message = f"suite hold: {exc}"
             logged = store.log(key)
             if not logged or logged[-1].message != message:
                 store.add_log(key, message, at)
-        else:
-            hold["published"] = True
-            store.set_resume(key, data)
 
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
