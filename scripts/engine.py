@@ -487,7 +487,7 @@ def _prepare_handoff(release: Path) -> Path | None:
             try:
                 if not (release / "scripts/engine.py").is_file():
                     raise supervisor.ServiceError(f"missing engine entry file: {release / 'scripts/engine.py'}")
-                python = supervisor.ensure_venv(data, release=release)
+                python = supervisor.ensure_venv(data, release=release, timeout=60)
             except Exception as exc:
                 delay = min(previous.get("delay", 30) * 2, 3600)
                 message = str(exc)

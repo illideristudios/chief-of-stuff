@@ -235,17 +235,28 @@ class VenvTest(SupervisorTest):
              self.assertRaisesRegex(supervisor.ServiceError, "python3"):
             supervisor.ensure_venv(self.data)
 
-    def test_a_missing_or_dangling_venv_python_is_rebuilt(self):
+    def test_a_missing_or_dangling_venv_python_gets_a_new_published_generation(self):
         python = supervisor.ensure_venv(self.data)
-        python.unlink()
-        self.assertEqual(supervisor.ensure_venv(self.data), python)
-        self.assertTrue(python.is_file())
-        self.assertEqual(len(self.calls), 6, "marker alone must not reuse a missing interpreter")
-        python.unlink()
-        python.symlink_to("/nonexistent/chief-of-stuff-venv-python")
-        self.assertEqual(supervisor.ensure_venv(self.data), python)
-        self.assertTrue(python.is_file() and not python.is_symlink())
-        self.assertEqual(len(self.calls), 9)
+        for failure in ("missing", "dangling"):
+            with self.subTest(failure=failure):
+                python.unlink()
+                if failure == "dangling":
+                    python.symlink_to("/nonexistent/chief-of-stuff-venv-python")
+                repaired = supervisor.ensure_venv(self.data)
+                self.assertNotEqual(repaired, python)
+                self.assertTrue(repaired.is_file() and not repaired.is_symlink())
+                self.assertTrue((python.parent.parent / ".installed").exists())
+                self.assertEqual(supervisor.ensure_venv(self.data), repaired)
+                python = repaired
+
+    def test_successful_repair_keeps_the_previous_generation_at_its_original_path(self):
+        old = supervisor.ensure_venv(self.data)
+        with mock.patch.object(supervisor, "_venv_python_runs", return_value=False):
+            new = supervisor.ensure_venv(self.data)
+        self.assertNotEqual(old, new)
+        self.assertTrue(old.is_file())
+        self.assertTrue((old.parent.parent / ".installed").is_file())
+        self.assertEqual(supervisor.ensure_venv(self.data), new)
 
     def test_data_dir_falls_back_to_the_plugin_data_dir_when_unset(self):
         with mock.patch.dict(supervisor.os.environ, {"CLAUDE_PLUGIN_DATA": ""}):
