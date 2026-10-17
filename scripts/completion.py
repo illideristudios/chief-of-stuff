@@ -7,7 +7,7 @@ decides which one to reuse, or why the choice is the user's.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 
 @dataclass(frozen=True)
@@ -80,11 +80,12 @@ def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None) 
     return _reuse(_preferring(dirty or at_tip, preferred), tip)
 
 
-def needs_recovery(decisions: Sequence[tuple[str, str, str | None]], *, open_segment: bool, live: bool) -> bool:
-    """A conflict decision, or an open segment whose worker is gone. No git and no lock."""
+def needs_recovery(decisions: Sequence[tuple[str, str, str | None]], *, open_segment: bool,
+                   live: Callable[[], bool]) -> bool:
+    """A conflict decision, or an open segment whose worker is gone. `live` is asked only when it can matter."""
     if any(topic == "conflict" for topic, _, _ in decisions):
         return True
-    return open_segment and not live
+    return open_segment and not live()
 
 
 def held_stages(decisions: Sequence[tuple[str, str, str | None]], *, conflict: str | None,

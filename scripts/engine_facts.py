@@ -16,14 +16,15 @@ def recovery(store: Any, key: str, *, trees: Path, repo: Path | None) -> dict:
     segments = store.segments(key)
     latest = segments[-1] if segments else None
     open_segment = latest is not None and latest.ended_at is None
-    live = False
-    if open_segment:
+
+    def live() -> bool:
         data = store.resume(key)
         runs = data.get("runs", {}) if isinstance(data, dict) else {}
         record = runs.get(f"{latest.stage}-{latest.attempt}", {})
         # Store identity first: an active worker needs no git recovery scan.
-        live = any(process_status.identity(record[field], record["session_id"]) is not None
+        return any(process_status.identity(record[field], record["session_id"]) is not None
                    for field in ("pid", "runner_pid") if record.get(field))
+
     needed = completion.needs_recovery(decisions, open_segment=open_segment, live=live)
     return {"decisions": decisions,
             "conflict": worker.recovery_conflict(store, key, trees=trees, repo=repo) if needed and repo is not None else None,

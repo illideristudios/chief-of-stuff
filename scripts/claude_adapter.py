@@ -25,7 +25,7 @@ from shell_setup import ShellError, clean_env, login_argv, resolve
 RUNTIME = runtimes.get("claude")
 LAUNCH_TIMEOUT = 5
 _BIRTH = "%a %b %d %H:%M:%S %Y"
-_BIRTH_SLOP = 2  # lstart is whole seconds; time.time() after Popen falls in this window
+_BIRTH_SLOP = 2  # lstart is whole seconds, so a record taken at birth can read this far before it
 
 
 def command(request: Request, claude_as_profile: str = "") -> list[str]:
@@ -86,33 +86,43 @@ def cancel(process: subprocess.Popen) -> None:
     raise RuntimeError(f"runner {process.pid} survived SIGKILL; not cancelled")
 
 
-def _group_births(pgid: int) -> list[float]:
-    """Live members' birth times. Empty when the group is gone or belongs to someone else."""
+def _group_members(pgid: int) -> list[tuple[int, float]]:
+    """Live members' (pid, birth time). Empty when the group is gone or belongs to someone else."""
     try:
         os.killpg(pgid, 0)
     except (ProcessLookupError, PermissionError):
         return []
-    try:
-        probe = subprocess.run(["ps", "-axo", "pgid=,pid=,stat=,lstart="], capture_output=True, text=True, timeout=3)
+    try:  # lstart is localized; the C locale is the only one _BIRTH parses. Its own session keeps ps out of the group.
+        probe = subprocess.run(["ps", "-axo", "pgid=,pid=,stat=,lstart="], capture_output=True, text=True, timeout=3,
+                               env={**os.environ, "LC_ALL": "C"}, start_new_session=True)
     except (OSError, subprocess.SubprocessError) as exc:
         raise RuntimeError("cannot verify worker process group") from exc
     if probe.returncode:
         raise RuntimeError("cannot verify worker process group")
-    births = []
+    members = []
     for line in probe.stdout.splitlines():
         fields = line.split(None, 3)
         if len(fields) != 4 or fields[0] != str(pgid) or fields[2].startswith("Z"):
             continue
         try:
-            births.append(datetime.datetime.strptime(fields[3].strip(), _BIRTH).timestamp())
+            members.append((int(fields[1]), datetime.datetime.strptime(fields[3].strip(), _BIRTH).timestamp()))
         except ValueError:
             raise RuntimeError("cannot read worker start time") from None
-    return births
+    return members
 
 
 def group_alive(pgid: int) -> bool:
     """Every member counts, even when the runner has exited. Zombies cannot touch the tree."""
-    return bool(_group_births(pgid))
+    return bool(_group_members(pgid))
+
+
+def _group_is_ours(pgid: int, start_time: float) -> bool:
+    """A group id outlives its leader while any member lives, so only a live leader born after the record is foreign.
+
+    shortcut: a reused leader born within _BIRTH_SLOP of the record reads as ours, when the pid wraps in two seconds.
+    """
+    members = _group_members(pgid)
+    return bool(members) and not any(pid == pgid and birth - start_time >= _BIRTH_SLOP for pid, birth in members)
 
 
 def spawn_alive(run_dir: Path) -> bool:
@@ -127,7 +137,7 @@ def spawn_alive(run_dir: Path) -> bool:
                 or not isinstance(record.get("start_time"), (int, float)) or record["start_time"] <= 0):
             raise RuntimeError("invalid spawn identity")
         recorded = True
-        if any(abs(birth - record["start_time"]) < _BIRTH_SLOP for birth in _group_births(record["pgid"])):
+        if _group_is_ours(record["pgid"], record["start_time"]):
             return True
     if recorded:
         return False
@@ -158,18 +168,25 @@ def _write(run_dir: Path, name: str, record: dict) -> None:
 
 
 def _stop_host(process: subprocess.Popen) -> None:
-    """Kill one host and wait. Publishing exit.json first would free the slot while it can still write."""
+    """Kill every other member of this runner's group, host and descendants, and reap the host.
+
+    Publishing exit.json first would free the slot while any of them can still write.
+    """
+    me = os.getpid()
     for sig in (signal.SIGTERM, signal.SIGKILL):
-        try:
-            process.send_signal(sig)
-        except ProcessLookupError:
-            return
-        try:
-            process.wait(timeout=5)
-            return
-        except subprocess.TimeoutExpired:
-            continue
-    raise RuntimeError(f"host {process.pid} survived SIGKILL")
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            others = [pid for pid, _ in _group_members(os.getpgrp()) if pid != me]
+            if not others:
+                process.wait()
+                return
+            for pid in others:
+                try:
+                    os.kill(pid, sig)
+                except ProcessLookupError:
+                    pass
+            time.sleep(0.05)
+    raise RuntimeError(f"host {process.pid} or its children survived SIGKILL")
 
 
 def _worker(run_dir: Path) -> None:
