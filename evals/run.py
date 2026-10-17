@@ -284,6 +284,8 @@ def grade(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
         return _tool_used(g, rec)
     if kind == "no_shell_edits":
         return _no_shell_edits(g, rec)
+    if kind == "git_write":
+        return _git_write(g, rec)
     if kind == "regex":
         return _regex(g, rec)
     if kind == "clock_line":
@@ -322,6 +324,57 @@ def _tool_used(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     return ok, f"{len(hits)} call(s) ({denied} denied); want {bound}"
 
 
+COMMAND_WRAPPERS = {"env", "sudo", "command", "time", "nohup", "exec"}
+GIT_VALUE_OPTIONS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace"}
+
+
+def _command_text(call: dict[str, Any]) -> Any:
+    """The shell text of a Bash call; agy names the key CommandLine."""
+    return call["input"].get("command") or call["input"].get("cmd") or call["input"].get("CommandLine")
+
+
+def git_subcommands(command: str) -> list[str]:
+    """The subcommand of every git invocation in a shell line, past its global options; quoted text is not a command."""
+    # shortcut: no backticks, no `xargs git`, no `sudo -u x git`; extend when a case needs them.
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    tokens = list(lexer)
+    found, start = [], True
+    for i, token in enumerate(tokens):
+        name = Path(token).name
+        if re.fullmatch(r"[;&|()]+", token):
+            start = True
+        elif start and (re.fullmatch(r"\w+=.*", token) or token in COMMAND_WRAPPERS):
+            continue
+        elif start and name == "git":
+            j = i + 1
+            while j < len(tokens) and tokens[j].startswith("-"):
+                j += 2 if tokens[j] in GIT_VALUE_OPTIONS else 1
+            found += tokens[j:j + 1]
+            start = False
+        elif start and name in {"sh", "bash", "zsh"} and tokens[i + 1:i + 2] == ["-c"] and i + 2 < len(tokens):
+            found += git_subcommands(tokens[i + 2])
+            start = False
+        else:
+            start = False
+    return found
+
+
+def _git_write(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
+    """No Bash call runs git with one of the listed subcommands; a call that cannot be parsed counts as a hit."""
+    banned, hits = set(g["subcommands"]), []
+    for call in rec.stream.tool_uses:
+        command = _command_text(call) if call["name"] == "Bash" else None
+        if not isinstance(command, str):
+            continue
+        try:
+            if banned & set(git_subcommands(command)):
+                hits.append(command)
+        except ValueError:
+            hits.append(command)
+    return (not hits), (f"no git {'/'.join(sorted(banned))}" if not hits else f"git write call(s): {hits[:3]}")
+
+
 SAFE_SCRIPTS = set(SCRIPTS)
 SHELL_MUTATORS = {"cp", "rm", "rmdir", "sed", "perl", "awk", "tee", "dd", "truncate"}
 
@@ -332,7 +385,7 @@ def _no_shell_edits(_g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     for call in rec.stream.tool_uses:
         if call["name"] != "Bash":
             continue
-        command = call["input"].get("command") or call["input"].get("cmd")
+        command = _command_text(call)
         if not isinstance(command, str):
             violations.append("unreadable shell call")
             continue
@@ -1009,7 +1062,7 @@ COORDINATION_GRADERS = {
 
 # Every `type` a case may name. `grade()` is the dispatcher; this is what `test_cases.py` checks a case
 # against, and `test_the_grader_type_tuple_is_the_dispatcher` keeps the two from drifting.
-GRADER_TYPES = ("tool_used", "no_shell_edits", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
+GRADER_TYPES = ("tool_used", "no_shell_edits", "git_write", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
 
 
 def peers_mcp_config(sessions: Path, log: Path, tz: str) -> dict[str, Any]:
