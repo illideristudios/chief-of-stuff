@@ -156,7 +156,7 @@ class DecisionActionsTest(unittest.TestCase):
         refused = da.refuse(rerouted, "write refused")
         self.assertEqual((refused.decision.status, refused.decision.rerouted_to), ("blocked", "implement"))
         self.assertEqual(refused.store_write.rerouted_to, "implement")
-        restored = da.meet_action(refused.decision, None)
+        restored = da.unblock([refused.decision], refused.decision.id)
         self.assertEqual((restored.decision.status, restored.decision.blocked_reason), ("re-routed", ""))
         self.assertEqual(restored.store_write.rerouted_to, "implement")
 

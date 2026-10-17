@@ -18,6 +18,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from decision_actions import state_of
 from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history, horizon,  # noqa: E402
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
@@ -273,7 +274,7 @@ def _render_store_decisions(decisions: list) -> str:
         return ""
     items: list[str] = []
     for d in decisions:
-        st_name = d.status
+        st_name = state_of(d).status
         if st_name == "blocked":
             why = d.blocked_reason or "action blocked"
             badge = f'<span class="decision-badge blocked">BLOCKED · {_esc(why)}</span>'
@@ -316,7 +317,7 @@ def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kan
         stage_name = item.stage or (lane_obj.stages[0] if lane_obj and lane_obj.stages else "implement")
         item_segs = segs_by_key.get(item.issue_key, [])
         open_seg = next((s for s in reversed(item_segs) if not s.ended_at), None)
-        open_decs = [d for d in store_decisions if d.issue_key == item.issue_key and d.status in ("open", "blocked")]
+        open_decs = [d for d in store_decisions if d.issue_key == item.issue_key and state_of(d).status in ("open", "blocked")]
         is_held = bool(item.human_review or open_decs or (kanban and kanban.holds(stage_name)))
         state = "done" if item.forge_state == "closed" else ("waiting" if is_held else ("running 00:00" if open_seg else "open"))
         owner = (getattr(open_seg, "runner", "") if open_seg else "") or (cfg.user if is_held else "unassigned")
@@ -372,7 +373,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = dict(pending_refs or {})
     for d in store_decisions:
-        if d.status in ("open", "blocked"):
+        if state_of(d).status in ("open", "blocked"):
             pending_refs.setdefault(d.issue_key, None)
             pending_refs.setdefault(source_key(d.issue_key, sources.home), None)
     held = {**hold_causes(tasks, kanban, sources, lanes or {}, pending_refs), **store_held}
@@ -422,7 +423,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
                                     for s, r in flow_rows], now)
 
     pending = decisions or []
-    open_store_decisions = sum(1 for d in store_decisions if d.status in ("open", "blocked"))
+    open_store_decisions = sum(1 for d in store_decisions if state_of(d).status in ("open", "blocked"))
     # (#215) No render clock: pages re-render on every request, so it only ever said now. The meta keeps the
     # sources' read times and the page's own counts; `data-rendered-at` stays for scripts.
     meta = [f"tracker {(tracker_at or now).astimezone(zone):%H:%M}",

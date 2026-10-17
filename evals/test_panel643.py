@@ -114,7 +114,9 @@ class PanelTest(unittest.TestCase):
             self.assertEqual(self.request("POST", "/", data)[0], 303)
             self.assertEqual(self.request("POST", "/", data)[0], 409)
         self.assertEqual(fg.write_stage.call_count, 1)
-        self.assertEqual(self.db.decision(dec.id).status, "re-routed")
+        # The re-route is its own row; the asked decision is closed as superseded by it, so the replay is refused.
+        rerouted = self.db.decisions(KEY)[-1]
+        self.assertEqual((rerouted.status, self.db.decision(dec.id).status), ("re-routed", "superseded"))
         pending = self.db.resume(KEY)["redispatch"]
         self.assertEqual((pending["stage"], pending["attempt"]), ("implement", 1))
         self.assertEqual(self.db.item(KEY).stage, "implement")

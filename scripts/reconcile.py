@@ -151,8 +151,8 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
     # Decision rows are append-only, oldest first: the latest row for a question is its state.
-    latest = {(d.topic, d.question): d for d in decisions}
-    if any(decision_actions.board_status(d) == "open" or not d.answer or not d.answer.strip() for d in latest.values()):
+    latest = decision_actions.latest_questions(decisions)
+    if decision_actions.unanswered(decisions):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
@@ -183,9 +183,9 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
             return Wait(key, "architect consultation is required")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
-    if any(not decision_actions.is_closed(d) for d in latest.values()):
+    if any(not decision_actions.is_closed(d) for d in latest):
         return Wait(key, "decision pending")
-    for dec in latest.values():
+    for dec in latest:
         if decision_actions.board_status(dec) == "reversed":
             answered = getattr(dec, "answered_at", None)
             if not answered or not any(_time(s.started_at) >= _time(answered) for s in completed):
@@ -264,7 +264,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
          quota_resets: Mapping[str, datetime] | None = None,
-         redispatches: Mapping[str, Mapping] | None = None) -> list[Action]:
+         redispatches: Mapping[str, Mapping] | None = None,
+         pending_stages: Mapping[str, Mapping] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
@@ -282,6 +283,12 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             actions.append(Wait(item.issue_key, "quota reset pending"))
             continue
         history = segments.get(item.issue_key, ())
+        item_decisions = (decisions or {}).get(item.issue_key, ())
+        stage_write = (pending_stages or {}).get(item.issue_key)
+        if item.forge_state != "closed" and (stage_write or decision_actions.held_reroute(item_decisions)):
+            reason = "stage write pending" if stage_write and not stage_write.get("decision_id") else "re-route pending"
+            actions.append(Wait(item.issue_key, reason))
+            continue
         pending = (redispatches or {}).get(item.issue_key)
         if pending and item.forge_state != "closed":
             if any(s.started_at and not s.ended_at for s in history):
@@ -297,7 +304,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         else:
             action = _item(item, history, policies, issue_types.get(item.issue_key),
                            (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
-                           (decisions or {}).get(item.issue_key, ()))
+                           item_decisions)
         if isinstance(action, (Dispatch, Review)):
             if free_slots:
                 free_slots -= 1

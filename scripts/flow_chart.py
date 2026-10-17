@@ -17,6 +17,7 @@ import heapq
 from dataclasses import replace
 from datetime import datetime, timedelta
 
+from decision_actions import state_of
 import gantt
 from clock import done_clock, parse_stamp as _parse_store_dt
 from fragment import esc, issue_href
@@ -225,7 +226,7 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
         segs_by_key.setdefault(seg.issue_key, []).append(seg)
     open_decs_by_key: dict[str, list] = {}
     for dec in all_decisions:
-        if dec.status in ("open", "blocked"):
+        if state_of(dec).status in ("open", "blocked"):
             open_decs_by_key.setdefault(dec.issue_key, []).append(dec)
 
     out: list[tuple[str, gantt.Row]] = []

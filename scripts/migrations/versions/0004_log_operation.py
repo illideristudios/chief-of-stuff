@@ -10,14 +10,19 @@ revision = "0004"
 down_revision = "0003"
 
 
-# Old lines name their operation only in their wording; the first match wins, so refusals precede the generic failure.
+# Only known operation prefixes are recoverable. Ambiguous history stays unknown.
 _BY_WORDING = (
-    ("stage write%", "stage_write"),
-    ("%comment failed%", "decision_comment"),
+    ("stage write failed:%", "stage_write"),
+    ("stage write refused:%", "stage_write"),
+    ("decision comment failed:%", "decision_comment"),
     ("merge refused:%", "merge_refused"),
+    ("merge failed:%", "merge_refused"),
     ("merged %", "merge"),
+    ("dispatch failed:%", "worker_run"),
+    ("review failed:%", "worker_run"),
+    ("worker % attempt %: failed%", "worker_run"),
+    ("escalate: retry limit%", "worker_run"),
 )
-_WORKER_RUN = ("%failed%", "%refused%", "escalate: retry limit%")
 
 
 def upgrade() -> None:
@@ -25,5 +30,4 @@ def upgrade() -> None:
     log = sa.table("log_entry", sa.column("message", sa.String), sa.column("kind", sa.String))
     for pattern, kind in _BY_WORDING:
         op.execute(sa.update(log).where(log.c.kind == "", log.c.message.like(pattern)).values(kind=kind))
-    op.execute(sa.update(log).where(log.c.kind == "", sa.or_(*(log.c.message.like(p) for p in _WORKER_RUN)))
-               .values(kind="worker_run"))
+    op.execute(sa.update(log).where(log.c.kind == "").values(kind="unknown"))

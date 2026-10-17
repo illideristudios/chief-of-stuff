@@ -423,16 +423,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return None, (404, "no such decision")
                 item = db.item(dec.issue_key)
                 data = db.resume(dec.issue_key) or {}
-                try:
-                    tr = decision_actions.respond(
-                        dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
-                        history=db.segments(dec.issue_key), policies=load_policy(), issue_type=data.get("issue_type"),
-                        answered_at=now_iso)
-                except decision_actions.BadRequest as exc:
-                    return None, (400, str(exc))
-                except ValueError as exc:
-                    return None, (409, str(exc))
+                # Each re-route gets an immutable identity. Validation failures roll this allocation back.
+                row = db.add_decision(dec.issue_key, dec.topic, dec.question) if action in ("reroute", "re-route") else None
+                tr = decision_actions.respond(
+                    dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
+                    history=db.segments(dec.issue_key), policies=load_policy(), issue_type=data.get("issue_type"),
+                    answered_at=now_iso, reroute_id=row.id if row else None)
                 db.update_decision(tr.store_write)
+                if row is not None:
+                    replaced = {dec.id, data.get("pending_stage", {}).get("decision_id"),
+                                data.get("redispatch", {}).get("decision_id")}
+                    previous = [d for d in db.decisions(dec.issue_key)
+                                if d.id in replaced or decision_actions.held_reroute([d])]
+                    for update in decision_actions.supersede(previous, row.id):
+                        db.update_decision(update.store_write)
                 bodies = [a.body for a in tr.actions if isinstance(a, decision_actions.ForgeComment)]
                 stage_write = next((a for a in tr.actions if isinstance(a, decision_actions.ForgeStageWrite)), None)
 
@@ -448,8 +452,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 db.update_resume(dec.issue_key, intent)
                 return (tr, stage_write), None
 
-            with db.transaction():
-                done, error = record()
+            try:
+                with db.transaction():
+                    done, error = record()
+            except decision_actions.BadRequest as exc:
+                return self.send_error(400, str(exc))
+            except ValueError as exc:
+                return self.send_error(409, str(exc))
             if error is None and done[1] is not None:
                 error = self._write_reroute(db, forge, root, done[0], done[1], now_iso)
             if error is not None:
@@ -485,18 +494,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         with db.transaction():
             # The intent may be gone (the engine landed it) or replaced (a newer re-route): act only while it is still ours.
             mine = (db.resume(write.issue_key) or {}).get("pending_stage", {}).get("decision_id") == tr.decision.id
+            if not mine:
+                return
             if error:
-                refused = decision_actions.block(db.decisions(write.issue_key), tr.decision.id, error) if mine else None
+                refused = decision_actions.block(db.decisions(write.issue_key), tr.decision.id, error)
                 if refused is not None:
                     db.update_decision(refused.store_write)
                 db.add_log(write.issue_key, f"stage write refused: {error}", now_iso, OP_STAGE_WRITE)
                 return 409, error
             db.upsert_item(write.issue_key, stage=write.stage)
-            if mine:
-                db.update_resume(write.issue_key, lambda data: data.pop("pending_stage", None))
-                restored = decision_actions.unblock(db.decisions(write.issue_key), tr.decision.id)
-                if restored is not None:
-                    db.update_decision(restored.store_write)
+            db.update_resume(write.issue_key, lambda data: data.pop("pending_stage", None))
+            restored = decision_actions.unblock(db.decisions(write.issue_key), tr.decision.id)
+            if restored is not None:
+                db.update_decision(restored.store_write)
 
     def do_POST(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a

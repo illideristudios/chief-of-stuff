@@ -42,11 +42,12 @@ class BoardPostTest(unittest.TestCase):
         fg.write_stage.return_value = SimpleNamespace(ok=False, done=False, error="write refused")
         status = self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg)
         self.assertEqual(status, 409)
-        saved = self.db.decision(dec.id)
+        saved = self.db.decisions(KEY)[-1]
+        self.assertNotEqual(saved.id, dec.id)
         self.assertEqual((saved.status, saved.rerouted_to), ("blocked", "implement"))
         resume = self.db.resume(KEY)
-        self.assertEqual(resume["pending_stage"], {"stage": "implement", "expected": "review", "decision_id": dec.id})
-        self.assertEqual((resume["redispatch"]["stage"], resume["redispatch"]["decision_id"]), ("implement", dec.id))
+        self.assertEqual(resume["pending_stage"], {"stage": "implement", "expected": "review", "decision_id": saved.id})
+        self.assertEqual((resume["redispatch"]["stage"], resume["redispatch"]["decision_id"]), ("implement", saved.id))
         self.assertEqual(self.db.item(KEY).stage, "review")
         self.assertIn("stage write refused: write refused", [e.message for e in self.db.log(KEY)])
 
@@ -60,11 +61,11 @@ class BoardPostTest(unittest.TestCase):
 
         fg.write_stage.side_effect = engine_lands_it_first
         self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg)
-        self.assertEqual(self.db.decision(dec.id).status, "re-routed")
+        self.assertEqual(self.db.decisions(KEY)[-1].status, "re-routed")
 
     def test_a_late_success_keeps_a_newer_pending_write(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
-        newer = {"stage": "review", "expected": "implement", "decision_id": dec.id + 1}
+        newer = {"stage": "review", "expected": "implement", "decision_id": dec.id + 2}
         fg = mock.Mock()
 
         def newer_reroute_lands_meanwhile(*args, **kwargs):
@@ -80,19 +81,19 @@ class BoardPostTest(unittest.TestCase):
         fg = mock.Mock()
 
         def engine_retry_refused(*args, **kwargs):
-            self.db.answer_decision(dec.id, "Back", status="blocked", blocked_reason="offline", rerouted_to="implement")
+            self.db.answer_decision(self.db.decisions(KEY)[-1].id, "Back", status="blocked", blocked_reason="offline", rerouted_to="implement")
             return SimpleNamespace(ok=True, done=True, error="")
 
         fg.write_stage.side_effect = engine_retry_refused
         self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg)
-        self.assertEqual((self.db.decision(dec.id).status, self.db.decision(dec.id).blocked_reason), ("re-routed", ""))
+        self.assertEqual((self.db.decisions(KEY)[-1].status, self.db.decisions(KEY)[-1].blocked_reason), ("re-routed", ""))
 
     def test_a_landed_reroute_leaves_no_pending_write(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         fg = mock.Mock()
         fg.write_stage.return_value = SimpleNamespace(ok=True, done=True, error="")
         self.assertEqual(self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg), 303)
-        self.assertEqual(self.db.decision(dec.id).status, "re-routed")
+        self.assertEqual(self.db.decisions(KEY)[-1].status, "re-routed")
         self.assertEqual(self.db.item(KEY).stage, "implement")
         resume = self.db.resume(KEY)
         self.assertNotIn("pending_stage", resume)
@@ -192,6 +193,10 @@ class NotificationRecoveryTest(unittest.TestCase):
 
     def test_a_failure_with_no_recorded_operation_stays_unrecovered(self):
         self.assertEqual(self.failure("dispatch failed: no slot"), 1)
+
+    def test_unknown_operations_never_recover_through_a_later_worker_success(self):
+        for message in ("ask failed: offline", "wait failed: offline", "unrecognized failed operation"):
+            self.assertEqual(self.failure(message, "unknown"), 1)
 
     def test_recovery_follows_the_recorded_operation_not_the_wording(self):
         # Worded like a stage write, recorded as a worker run: a later success recovers it.

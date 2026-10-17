@@ -35,6 +35,7 @@ try:
     import store_access  # noqa: E402
 except ModuleNotFoundError:
     store_access = None  # type: ignore[assignment]
+from decision_actions import state_of
 from reconcile import OP_DECISION_COMMENT, OP_MERGE, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN  # noqa: E402
 from settings import Settings, SettingsError, load  # noqa: E402
 from workspace import ConfigError, read_config  # noqa: E402
@@ -195,7 +196,7 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
                 )
 
         for dec in decisions:
-            if dec.issue_key not in opened or dec.status not in ("open", "blocked"):
+            if dec.issue_key not in opened or state_of(dec).status not in ("open", "blocked"):
                 continue
             stamp = _parse_stamp(dec.created_at, cfg.zone, now)
             short = _short_key(dec.issue_key)

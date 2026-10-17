@@ -462,7 +462,7 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
             self.finish("review")
             self.findings()
-            self.assertEqual(self.run_pass(), [])
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "stage write pending")])
         self.assertEqual(len(self.launched), 2)
 
     def test_clock_orders_latest_review_by_instant_and_passes_now_to_planner(self):

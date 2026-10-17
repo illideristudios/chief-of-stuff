@@ -264,7 +264,9 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
                 "answer": "Back to implement",
             })
             self.assertEqual(resp.status, 303)
-            d3 = next(d for d in self.db.decisions(KEY) if d.id == reroute_dec.id)
+            d3 = self.db.decisions(KEY)[-1]
+            self.assertNotEqual(d3.id, reroute_dec.id)
+            self.assertEqual(self.db.decision(reroute_dec.id).status, "superseded")
             self.assertEqual(d3.status, "re-routed")
             self.assertEqual(self.db.item(KEY).stage, "implement")
             fake_forge.write_stage.assert_called_once_with(12, "implement", expected="review", commit=True)
@@ -435,8 +437,8 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
                                                          "target_stage": "review", "answer": "Review again"})
         self.assertEqual(status, 409)
         self.assertEqual(self.db.item(KEY).stage, "implement")
-        self.assertEqual(self.db.decision(dec.id).status, "blocked")
-        self.assertIn("write refused", self.db.decision(dec.id).blocked_reason)
+        self.assertEqual(self.db.decisions(KEY)[-1].status, "blocked")
+        self.assertIn("write refused", self.db.decisions(KEY)[-1].blocked_reason)
         fg.write_stage.assert_called_once_with(12, "review", expected="implement", commit=True)
 
     def test_board_command_uses_migrated_driver(self):
@@ -458,8 +460,8 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
                                                      "target_stage": "review", "answer": "Review again"})
         self.assertEqual(status, 409)
         self.assertEqual(self.db.item(KEY).stage, "implement")
-        self.assertEqual(self.db.decision(dec.id).status, "blocked")
-        self.assertIn("not committed", self.db.decision(dec.id).blocked_reason)
+        self.assertEqual(self.db.decisions(KEY)[-1].status, "blocked")
+        self.assertIn("not committed", self.db.decisions(KEY)[-1].blocked_reason)
 
     def test_store_decisions_have_only_board_post(self):
         dec = self.db.add_decision(KEY, "design", "Choose parser")

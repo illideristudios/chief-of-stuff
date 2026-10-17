@@ -15,6 +15,7 @@ from datetime import date, datetime
 from html import escape
 from pathlib import Path
 
+from decision_actions import state_of
 import board_sources
 import panels
 from clock import parse_stamp
@@ -206,7 +207,7 @@ def write(root: Path, pages_dir: Path, *, db: PageData | None = None, navigation
     now = datetime.now(cfg.zone)  # not cut to the second: a time running floors, as panels.hm counts
     tracker = root / cfg.tracker_path(now.date().isoformat())
     ctx = context(root, now.date().isoformat())
-    store_pending = sum(1 for d in db.decisions() if d.status in ("open", "blocked")) if db is not None else 0
+    store_pending = sum(1 for d in db.decisions() if state_of(d).status in ("open", "blocked")) if db is not None else 0
     page = render(tracker.read_text() if tracker.is_file() else "", board_sources.load(pages_dir), now,
                   root / worktrees_dir(claude_md), load_settings(root, cfg.settings_path).workers.max_concurrency,
                   pending_count(pages_dir, ctx) + store_pending, navigation, db=db)
