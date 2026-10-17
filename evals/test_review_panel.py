@@ -248,6 +248,21 @@ class ReviewPanelTest(unittest.TestCase):
                 self.assertEqual((action.stage, action.finding["title"]), ("fix", title))
         self.assertEqual(self.requests[KEY], {reconcile.request_token("head", asked): asked})
 
+    def test_historical_dispositions_do_not_answer_new_head_findings(self):
+        self.consulted(("Old", "keep"))
+        old = self.replies[KEY]
+        self.review(3, "critic", [finding("New")], head="new-head", round=2)
+        self.review(4, "security", head="new-head", round=2)
+        self.replies[KEY] = reconcile.ArchitectReply("new-head", "", "", old.dispositions)
+        new_findings = self.keys()
+        self.assertEqual(self.plan(head="new-head"), [reconcile.Consult(KEY, "new-head", new_findings)])
+        token = reconcile.request_token("new-head", new_findings)
+        self.requests[KEY][token] = new_findings
+        self.assertEqual(self.plan(head="new-head"), [reconcile.Wait(KEY, "waiting for the architect")])
+        self.replies[KEY] = reconcile.ArchitectReply("new-head", "CHANGES", NOW.isoformat(), old.dispositions, token)
+        action, = self.plan(head="new-head")
+        self.assertEqual((type(action), action.finding_key), (reconcile.Dispatch, new_findings[0]["finding_key"]))
+
     def test_all_keep_or_discard_requests_approval_once_for_the_same_head(self):
         self.consulted(("One", "keep"), ("Two", "discard"))
         asked = self.keys()

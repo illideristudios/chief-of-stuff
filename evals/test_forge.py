@@ -1500,6 +1500,15 @@ class ForgeRetryabilityTest(unittest.TestCase):
             source.closing_request("github:example/project#1", [])
         self.assertFalse(raised.exception.retryable)
 
+    def test_permanent_errors_with_transport_looking_resource_names_do_not_retry(self):
+        import merge_ready
+        source = forge.Forge(GH)
+        for message in ("HTTP 404: https://api.github.com/repos/example/app/pulls/512", "invalid tls setting", "eof field missing"):
+            with self.subTest(message=message), mock.patch.object(merge_ready, "github_ready", side_effect=RuntimeError(message)):
+                with self.assertRaises(forge.ForgeError) as raised:
+                    source.closing_request("github:example/app#1")
+                self.assertFalse(raised.exception.retryable)
+
     def test_engine_login_comes_from_the_authenticated_forge_user(self):
         from unittest import mock
         gh = mock.Mock(return_value=(0, '{"login":"engine"}', ""))

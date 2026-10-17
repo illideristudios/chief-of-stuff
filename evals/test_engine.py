@@ -947,6 +947,84 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["architect_requests"], original)
         self.assertEqual(len([n for n in self.forge.comments if getattr(n, "author", None) == "engine"]), 1)
 
+    def prepare_architect_consult(self):
+        self.p.stages["review"].policy["architect"] = True
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings(counts={"important": 1})
+
+    def test_identity_failure_keeps_authorized_replies_and_reads_identity_once(self):
+        import json
+        self.prepare_architect_consult()
+        consult, = self.run_pass(architect_login="frank")
+        finding_key = consult.findings[0]["finding_key"]
+        self.forge.comments.append(SimpleNamespace(author="frank", time=self.now.isoformat(),
+            body="Architect: CHANGES " + tf.tma.HEAD[:7] + "\n" + json.dumps({"dispositions": {finding_key: "fix"}})))
+        self.forge.rows.append({"issue_key": OTHER, "stage": "review", "forge_state": "open"})
+        self.db.upsert_item(OTHER, stage="review")
+        with mock.patch.object(self.forge, "login", side_effect=ForgeError("identity offline")) as login:
+            inputs = engine._planning_inputs(self.db, self.db.items(), self.forge, self.now.isoformat(), self.p, "frank")
+        self.assertEqual(login.call_count, 1)
+        reply = inputs["architect_replies"][KEY]
+        self.assertEqual(reply.dispositions, {finding_key: "fix"})
+        self.assertEqual(reply.request_token, reconcile.request_token(consult.head, consult.findings))
+        actions = reconcile.plan(self.db.items(), policies=self.p, free_slots=2, now=self.now, **inputs)
+        self.assertTrue(any(isinstance(a, reconcile.Dispatch) and a.finding_key == finding_key for a in actions))
+        self.forge.comments[-1].body = "Architect: APPROVED " + tf.tma.HEAD
+        with mock.patch.object(self.forge, "login", side_effect=ForgeError("identity offline")):
+            inputs = engine._planning_inputs(self.db, self.db.items(), self.forge, self.now.isoformat(), self.p, "frank")
+        self.assertEqual(inputs["architect_replies"][KEY].status, "APPROVED")
+
+    def test_uncertain_architect_post_is_recovered_after_restart_without_duplicate(self):
+        self.prepare_architect_consult()
+        post = self.forge.comment_change
+        def lost_response(number, body):
+            self.assertTrue(self.db.resume(KEY).get("architect_pending_requests"))
+            post(number, body)
+            raise ForgeError("response lost", retryable=True)
+        with mock.patch.object(self.forge, "comment_change", side_effect=lost_response):
+            self.assertIsInstance(self.run_pass(architect_login="frank")[0], reconcile.Consult)
+        self.assertEqual(len(self.forge.comments), 1)
+        path = self.db.engine.url.database
+        self.db.engine.dispose()
+        self.db = store.Store(path, clock=lambda: self.now)
+        self.addCleanup(self.db.engine.dispose)
+        self.assertEqual(self.run_pass(architect_login="frank"), [reconcile.Wait(KEY, "waiting for the architect")])
+        self.assertEqual(len(self.forge.comments), 1)
+        self.assertNotIn("architect_pending_requests", self.db.resume(KEY))
+        self.assertEqual(len(self.db.resume(KEY)["architect_requests"]), 1)
+
+    def test_uncertain_architect_post_waits_for_readback_then_retries_an_absent_post(self):
+        self.prepare_architect_consult()
+        with mock.patch.object(self.forge, "comment_change", side_effect=ForgeError("not sent", retryable=True)):
+            self.run_pass(architect_login="frank")
+        self.assertTrue(self.db.resume(KEY).get("architect_pending_requests"))
+        with mock.patch.object(self.forge, "login", side_effect=ForgeError("identity offline")):
+            self.assertEqual(self.run_pass(architect_login="frank"), [reconcile.Wait(KEY, "waiting for the architect")])
+        self.assertEqual(self.forge.comments, [])
+        self.assertIsInstance(self.run_pass(architect_login="frank")[0], reconcile.Consult)
+        self.assertEqual(len(self.forge.comments), 1)
+
+    def test_permanent_fix_hold_survives_stage_write_drift(self):
+        self.db.upsert_item(KEY, stage="review")
+        self.forge.rows[0].update(stage="review", human_review=False)
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "human_review",
+                               finding_key="1/1/failed")
+        self.db.set_resume(KEY, {"pending_hold": {"stage": "implement", "attempt": 1, "retry": False},
+                                 "pending_stage": {"stage": "implement", "expected": "review"}})
+        self.assertEqual(self.run_pass(), [])
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertNotIn("pending_hold", self.db.resume(KEY))
+        self.run_pass()
+        self.assertEqual(self.db.items()[0].stage, "implement")
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.launched, [])
+        self.forge.rows[0]["human_review"] = False
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+
     def test_a_consulting_work_stage_reads_the_architects_reply(self):
         self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
         self.p.stages["implement"].policy.update(architect=True, architect_persona="architect")
