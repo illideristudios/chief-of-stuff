@@ -49,6 +49,19 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
+        clock = mock.patch.object(claude_adapter, "require_worker_clock", create=True)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
+
+    def test_a_refused_clock_cuts_no_tree_and_leaves_no_run_dir(self):
+        self.clock.side_effect = claude_adapter.ClockError("no clock")
+        with mock.patch.object(worker.make_worktree, "build") as build, \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            with self.assertRaisesRegex(claude_adapter.ClockError, "no clock"):
+                self.launch()
+        build.assert_not_called()
+        start.assert_not_called()
+        self.assertFalse((supervisor.state_dir(self.root) / "runs").exists())
 
     def launch(self, stage="implement", attempt=1):
         return worker.launch(KEY, stage, attempt, None, store=self.db, root=self.root,
