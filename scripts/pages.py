@@ -526,7 +526,7 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, s
 def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
     """Probe, replace and start under the same lock, including concurrent CLI ensures.
 
-    Returns "pages: serving", "pages: started" or "pages: restarted"; raises PagesError when the port is not ours
+    Returns "pages: serving", "pages: started", "pages: restarted" or "pages: stopped"; raises PagesError when the port is not ours
     or the server does not come up."""
     who = _who(port)
     restart = False

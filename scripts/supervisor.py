@@ -156,9 +156,9 @@ def _venv_python_runs(python: Path) -> bool:
         return False
 
 
-def ensure_venv(data: Path) -> Path:
-    """The venv python for the pinned requirements.txt and the login shell's base Python identity."""
-    requirements = RELEASE / "requirements.txt"
+def ensure_venv(data: Path, *, release: Path | None = None) -> Path:
+    """The venv python for the selected (default: running) release's pins and login-shell Python identity."""
+    requirements = (release or RELEASE) / "requirements.txt"
     base = shell_setup.resolve("python3")
     if base is None:
         raise ServiceError("no python3 on the login shell's PATH to build the engine venv")

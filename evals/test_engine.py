@@ -1546,6 +1546,7 @@ class MainTest(unittest.TestCase):
         (current / "scripts").mkdir(parents=True)
         (current / "scripts/engine.py").touch()
         with mock.patch.object(supervisor, "current_release", return_value=current), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
              mock.patch.object(supervisor, "ensure_venv", side_effect=supervisor.ServiceError("pip offline")) as preflight, \
              mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
@@ -1556,27 +1557,37 @@ class MainTest(unittest.TestCase):
         execv.assert_not_called()
 
     def test_loop_relaunches_the_installed_release_when_the_pointer_moves(self):
-        newer = Path("/installs/versions/2.0.0-abc")
+        newer = self.root / "install/versions/2.0.0-abc"
+        (newer / "scripts").mkdir(parents=True)
+        (newer / "scripts/engine.py").touch()
+        python = self.root / "data/venv-new/bin/python"
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
              mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=python) as preflight, \
              mock.patch.object(engine.os, "execv") as execv, \
              mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("update ignored")]) as sleep:
             self.assertEqual(engine.main(["--root", str(self.root), "--interval", "5"]), 0)
         self.assertEqual(passed.call_count, 1)
         sleep.assert_called_once_with(5.0)
-        execv.assert_called_once_with(sys.executable, [
-            sys.executable, str(newer / "chief_of_stuff.py"), "engine", "--root", str(self.root), "--interval", "5.0"])
+        preflight.assert_called_once_with(self.root / "data", release=newer)
+        execv.assert_called_once_with(str(python), [
+            str(python), str(newer / "scripts/engine.py"), "--root", str(self.root), "--interval", "5.0"])
 
     def test_stale_launch_hands_off_before_opening_the_workspace_or_migrating(self):
         import pages
         install = self.root / "install"
         old, current = install / "versions/old", install / "versions/current"
         old.mkdir(parents=True)
-        current.mkdir()
+        (current / "scripts").mkdir(parents=True)
         (current / "chief_of_stuff.py").touch()
+        (current / "scripts/engine.py").touch()
         (install / "current").symlink_to(current)
+        python = self.root / "data/venv-new/bin/python"
         with mock.patch.object(supervisor, "RELEASE", old), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=python) as preflight, \
              mock.patch.object(engine.startup, "workspace_forge") as workspace, \
              mock.patch.object(engine.store_access, "migrated_store", side_effect=RuntimeError("unknown revision")) as migrated, \
              mock.patch.object(pages, "supervise") as serving, \
@@ -1587,8 +1598,9 @@ class MainTest(unittest.TestCase):
         migrated.assert_not_called()
         serving.assert_not_called()
         passed.assert_not_called()
-        execv.assert_called_once_with(sys.executable, [
-            sys.executable, str(current / "chief_of_stuff.py"), "engine", "--root", str(self.root), "--interval", "60"])
+        preflight.assert_called_once_with(self.root / "data", release=current)
+        execv.assert_called_once_with(str(python), [
+            str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
 
     def test_loop_keeps_running_while_the_installed_release_is_its_own(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
@@ -1606,6 +1618,8 @@ class MainTest(unittest.TestCase):
         children = []
         real_popen = subprocess.Popen
         newer = self.root / "next"
+        (newer / "scripts").mkdir(parents=True)
+        (newer / "scripts/engine.py").touch()
         board = self.root / "pages"
 
         def start(*_a, **_kw):
@@ -1627,6 +1641,8 @@ class MainTest(unittest.TestCase):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass", side_effect=passed), \
              mock.patch.object(supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=Path(sys.executable)), \
              mock.patch.object(pages, "read_config", return_value=SimpleNamespace(pages_dir=str(board), board_url="http://127.0.0.1:1/")), \
              mock.patch.object(pages, "from_config", return_value=(board, 1)), \
              mock.patch.object(pages.subprocess, "Popen", side_effect=start), \

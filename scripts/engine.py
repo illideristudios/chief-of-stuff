@@ -467,8 +467,22 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     return actions
 
 
-def _handoff(release: Path, root: Path, interval: float, once: bool) -> None:
-    os.execv(sys.executable, [sys.executable, str(release / "chief_of_stuff.py"), "engine",
+def _prepare_handoff(release: Path) -> Path | None:
+    """Prepare the selected release while this engine can still run if its dependency build fails."""
+    try:
+        if not (release / "scripts/engine.py").is_file():
+            raise supervisor.ServiceError(f"missing engine entry file: {release / 'scripts/engine.py'}")
+        data = supervisor.data_dir()
+        with supervisor.lock(data / "supervisor.lock", wait=True):
+            return supervisor.ensure_venv(data, release=release)
+    except Exception as exc:
+        print(f"engine: cannot prepare release {release}: {exc}; keeping {supervisor.RELEASE}",
+              file=sys.stderr, flush=True)
+        return None
+
+
+def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
+    os.execv(str(python), [str(python), str(release / "scripts/engine.py"),
                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
 
 
@@ -476,8 +490,8 @@ def main(argv: list[str] | None = None) -> int:
     """Run passes until stopped, or one with --once; `install`, `uninstall` and `status` manage the LaunchAgent.
 
     Exits 0 when stopped, 1 when a --once pass failed, 2 on startup or driver errors (including failed exec).
-    A different valid install pointer, including rollback, hands off before startup or after a pass;
-    that release's CLI selects its dependency venv. Invalid pointers are logged and retried."""
+    A different valid install pointer, including rollback, hands off before startup or after a pass
+    once its dependency venv is ready. Invalid pointers and failed preparation are logged and retried."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=Path("."), help="workspace holding store.db and CLAUDE.md")
     ap.add_argument("--interval", type=float, default=60, help="seconds between passes (default 60)")
@@ -493,8 +507,9 @@ def main(argv: list[str] | None = None) -> int:
     newer = None
     try:
         if (installed := supervisor.current_release()) != supervisor.RELEASE:
-            _handoff(installed, root, args.interval, args.once)
-            return 0
+            if (python := _prepare_handoff(installed)) is not None:
+                _handoff(installed, python, root, args.interval, args.once)
+                return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
             text, config, source = startup.workspace_forge(root)
             if source is None:
@@ -542,15 +557,16 @@ def main(argv: list[str] | None = None) -> int:
                         return 1 if failed else 0
                     time.sleep(args.interval)
                     if (installed := supervisor.current_release()) != supervisor.RELEASE:
-                        newer = installed
-                        break
+                        if (python := _prepare_handoff(installed)) is not None:
+                            newer = installed, python
+                            break
             finally:
                 stop_pages.set()
                 if page_thread is not None and page_thread.ident is not None:
-                    page_thread.join()  # cancellable ensure reaps an unrecorded child before handoff
+                    page_thread.join()  # supervise's I/O is bounded; cancellation reaps unrecorded children before exec
                 db.engine.dispose()
         if newer is not None:  # after the lock and board thread are released, so the new release can take them
-            _handoff(newer, root, args.interval, args.once)
+            _handoff(*newer, root, args.interval, args.once)
         return 0
     except KeyboardInterrupt:
         return 0
