@@ -133,7 +133,8 @@ class CaseLintTest(unittest.TestCase):
             root = Path(d)
             for rel in ("README.md", "docs/guide.md", "evals/results/PROGRESS.md",
                         "docs/archive/old.md", "evals/results/20260101-000000/out.txt",
-                        ".chief-of-stuff/mailbox/note.md", ".venv/lib/mod.py", "node_modules/pkg/index.js"):
+                        ".chief-of-stuff/mailbox/note.md", ".venv/lib/mod.py", "node_modules/pkg/index.js",
+                        ".git", "local.log", "local-config.toml"):
                 (root / rel).parent.mkdir(parents=True, exist_ok=True)
                 (root / rel).write_text(f"mentions {RETIRED_PROVIDER.title()}\n")
             (root / "docs/dangling.md").symlink_to(root / "nowhere")
