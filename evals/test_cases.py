@@ -132,27 +132,26 @@ def fixture_files(case: Path, suffix: str) -> list[Path]:
 class CaseLintTest(unittest.TestCase):
     def test_guard_examples_use_no_real_container_runtime(self):
         # Architecture §11: launcher examples use invented names, including in guard tests.
-        retired_runtimes = "|".join(("dock" + "er", "pod" + "man"))
-        found = []
-        for relative in (p.relative_to(EVALS.parent) for pattern in ("scripts/guard_*.py", "evals/test_guard_*.py", "evals/test_cases.py") for p in sorted(EVALS.parent.glob(pattern))):
-            for number, line in enumerate((EVALS.parent / relative).read_text(encoding="utf-8").splitlines(), 1):
-                if match := re.search(rf"\b(?:{retired_runtimes})\b", line, re.I):
-                    found.append(f"{relative}:{number}:{match.group(0)}")
-        self.assertEqual(found, [])
+        self.assertEqual(guard_runtime_hits(EVALS.parent), [])
 
-    def test_guard_runtime_lint_rejects_known_runtimes_in_any_case(self):
+    def test_guard_example_scan_covers_the_known_guard_files(self):
+        self.assertLessEqual({"scripts/guard_commands.py", "evals/test_guard_commands.py", "evals/test_cases.py"},
+                             set(guard_example_files(EVALS.parent)))
+
+    def test_guard_runtime_lint_rejects_known_runtimes_in_any_guard_file_and_case(self):
+        planted = ("scripts/guard_commands.py", "scripts/guard_new.py", "evals/test_guard_commands.py",
+                   "evals/test_guard_new.py", "evals/test_cases.py")
         for runtime in ("dock" + "er", "pod" + "man"):
             for name in (runtime, runtime.title(), runtime.upper()):
-                with self.subTest(name=name), tempfile.TemporaryDirectory() as d:
-                    root = Path(d)
-                    for relative in ("scripts/guard_commands.py", "evals/test_guard_commands.py", "evals/test_cases.py"):
-                        path = root / relative
-                        path.parent.mkdir(parents=True, exist_ok=True)
-                        path.write_text("runner exec box git status\n", encoding="utf-8")
-                    (root / "evals/test_guard_commands.py").write_text(f"{name} exec box git status\n", encoding="utf-8")
-                    with patch(__name__ + ".EVALS", root / "evals"):
-                        with self.assertRaises(AssertionError):
-                            CaseLintTest().test_guard_examples_use_no_real_container_runtime()
+                for relative in planted:
+                    with self.subTest(name=name, relative=relative), tempfile.TemporaryDirectory() as d:
+                        root = Path(d)
+                        for other in planted:
+                            (root / other).parent.mkdir(parents=True, exist_ok=True)
+                            (root / other).write_text("runner exec box git status\n", encoding="utf-8")
+                        self.assertEqual(guard_runtime_hits(root), [])
+                        (root / relative).write_text(f"x\n{name} exec box git status\n", encoding="utf-8")
+                        self.assertEqual(guard_runtime_hits(root), [f"{relative}:2:{name}"])
 
     def test_retired_deploy_provider_is_absent_outside_archives(self):
         # C20 names the open gap. Only the architect edits architecture/compliance.md.
