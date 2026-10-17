@@ -42,7 +42,7 @@ Review is policy, as the 1.0 ledger settles (D7, F10, F12, F13; plan M4). Person
 The engine runs the review panel.
 - `reconcile.py` (Use Cases) plans one review launch for each persona the policy names for the stage, and they run in parallel.
 - It plans a fix for every open finding, so review burns down to none.
-- It routes findings to the architect when the policy says to: the architect disposes of each one as fix, file, keep or discard.
+- It routes findings to the architect when the policy says to: the engine posts a request and waits, and the architect disposes of each finding as fix, file, keep or discard.
 - It pings after three fix rounds.
 - `engine.py` executes the plan through the model port.
 
@@ -61,10 +61,15 @@ Deciding which types a change has takes one model call through the port. The eng
 Each reviewer reviews only within its lens and does not fix. Findings come back in one review report shape (issue #563) and are kept as store records.
 
 The architect and the architecture reviewers are different roles, and nothing treats one as the other.
-- **The architect is the `frank-lloyd-aight` agent.** It owns the canonical architecture document and the compliance record. It is consulted when the policy says so, after the panel. It disposes of findings as fix, file, keep or discard, gives or withholds the architecture approval a merge needs, and can sit in the decision trio. It never runs as a panel reviewer, and it reports no review findings of its own.
+- **The architect is the `frank-lloyd-aight` agent.** It owns the canonical architecture document and the compliance record. It is consulted when the policy says so, after the panel. It disposes of findings as fix, file, keep or discard, and gives or withholds the architecture approval a merge needs. It never runs as a panel reviewer, never sits in the decision trio, and reports no review findings of its own.
 - **The architecture reviewers are panel personas:** Senior Architect (1) and the architectural-choice expert (11, "Uncle Bob" here). They review a change within their lens and report findings like any other reviewer. They cannot dispose of findings, approve a merge, or change the architecture documents.
 
 In policy, the name `architect` is reserved for the agent: `[personas.architect]`, with `agent = "frank-lloyd-aight"`, is what the consult and dispositions point at. Reviewer personas never use that name; they are `senior-architect` and `uncle-bob`. A finding from an architecture reviewer goes to the architect for disposition like any other finding.
+
+The engine never starts an architect run on its own (Zach, 2026-10-17). The architect is a standing session that keeps its context across consults.
+- **A consult is a request.** The engine posts it where the architect watches, on the change or its issue, in the form `Architect review requested: <sha>`, with the findings to dispose of. It then waits for the architect's reply on the same thread, and treats the issue as waiting on the architect until the reply comes.
+- **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding. A reply for any commit but the current head does not count.
+- **A new architect run happens only when Zach asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
 
 Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
 
