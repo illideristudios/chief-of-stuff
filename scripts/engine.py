@@ -31,7 +31,7 @@ import worker
 from forge_port import ForgeError
 from workspace import worktrees_dir
 
-Launch = Callable[[str, str, int, str | None], tuple | None]
+Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -291,10 +291,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
-                launch_failed = False
+                launch_failed, failed_agent = False, None
 
                 def start():
-                    nonlocal launch_failed
+                    nonlocal launch_failed, failed_agent
                     # slots.claim has already reserved this attempt before any hold is removed.
                     if by_key[key].human_review:
                         data = _resume(store, key)
@@ -320,6 +320,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         # slots drops a failed reservation. Keep the actual failed start so its
                         # attempt spends the retry budget, and replace the hold before returning.
                         launch_failed = True
+                        reserved = worker.reservation(store, key, stage, action.attempt)  # slots drops it next
+                        failed_agent = reserved.agent_type if reserved is not None else None
                         _fail_start(forge, store, key, stage, stages[key], action.attempt, board is not None, exc)
                         raise
 
@@ -330,12 +332,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 except Exception:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
-                        try:  # the failed start's type; an unreadable file leaves it unknown, not the retry unspent
-                            agent_type = worker.resolved_agent(root, policies, stage, persona)
-                        except Exception:
-                            agent_type = None
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
-                                             runtime="claude", agent_type=agent_type)
+                                             runtime="claude", agent_type=failed_agent)
                     raise
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
