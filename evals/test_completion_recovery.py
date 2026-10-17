@@ -2,7 +2,6 @@
 
 import sys
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -15,17 +14,12 @@ def tree(path, head="a", branch="work/issue-1-implement-1", **kw):
 
 
 class RecoveryTest(unittest.TestCase):
-    def test_retirement_requires_matching_readable_nonempty_snapshots(self):
-        saved = completion.RetirementSnapshot("work/issue-1-implement-1", "a", "digest")
-        self.assertTrue(completion.may_retire(saved, saved))
-        for changed in (replace(saved, branch="work/other"), replace(saved, head="b"),
-                        replace(saved, contents="different"), replace(saved, unreadable=True),
-                        replace(saved, branch=""), replace(saved, head=""), replace(saved, contents="")):
-            with self.subTest(changed=changed):
-                self.assertFalse(completion.may_retire(saved, changed))
-                self.assertFalse(completion.may_retire(changed, saved))
-                if changed.unreadable or not changed.branch or not changed.head or not changed.contents:
-                    self.assertFalse(completion.may_retire(changed, changed))
+    def test_unreadable_or_quarantined_work_is_not_reused(self):
+        for bad in (tree("/t/a", unreadable=True), tree("/t/a", quarantined=True),
+                    tree("/t/a", unreadable=True, quarantined=True)):
+            with self.subTest(bad=bad):
+                self.assertIsInstance(recovery([bad]), completion.Quarantine)
+        self.assertIsInstance(recovery([tree("/t/a"), tree("/t/b", unreadable=True)]), completion.Quarantine)
 
     def test_no_candidates_recovers_nothing(self):
         self.assertIsNone(recovery([]))
@@ -64,7 +58,6 @@ class RecoveryTest(unittest.TestCase):
 
     def test_conflicts_name_their_reason(self):
         cases = {
-            "detached or unreadable": [tree("/t/a", unreadable=True)],
             "unresolved merge conflicts": [tree("/t/a", conflicted=True)],
             "multiple orphaned worktrees have uncommitted changes": [tree("/t/a", dirty=True),
                                                                       tree("/t/b", dirty=True)],

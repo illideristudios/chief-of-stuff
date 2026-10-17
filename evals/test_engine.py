@@ -146,6 +146,30 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(self.launched), 2)
         self.cleanup.assert_called_with(self.root, self.trees, self.db, remove=True)
 
+    def test_no_clone_does_not_bypass_a_recovery_hold(self):
+        self.db.upsert_item(KEY, title="Build a thing", stage="implement")
+        self.db.add_decision(KEY, "conflict", "implement\ndiverged commits", answer="hold")
+        with mock.patch.object(engine.worker.make_worktree, "git", side_effect=AssertionError("git during planning")):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "orphan recovery held")])
+        self.assertEqual(self.launched, [])
+
+    def test_one_issues_recovery_facts_failing_does_not_stop_the_pass(self):
+        self.forge.rows.append(
+            {"issue_key": OTHER, "stage": "implement", "forge_state": "open", "merge_state": "ready"})
+
+        def facts(store, key, *, trees, repo):
+            if key == KEY:
+                raise RuntimeError("clone lock")
+            return set()
+
+        with mock.patch.object(engine.engine_facts, "held_stages", side_effect=facts):
+            actions = self.run_pass()
+        self.assertEqual(actions, [
+            reconcile.Wait(KEY, "orphan recovery held"),
+            reconcile.Dispatch(OTHER, "implement", "builder", 1)])
+        self.assertTrue(any("recovery facts failed: clone lock" in entry.message for entry in self.db.log(KEY)))
+        self.assertEqual([item[0] for item in self.launched], [OTHER])
+
     def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message):
         self.run_pass()
         self.finish("implement")
