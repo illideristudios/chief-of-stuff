@@ -10,6 +10,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, time, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 
 HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent / "scripts"), str(HERE)]
@@ -171,8 +172,27 @@ class SinceLookedTest(unittest.TestCase):
             with self.subTest(moved):
                 earlier = TRACKER.replace("| Write README | Write eval README |", earlier_row)
                 moves = tracker_log.moves(earlier + f"- 11:00 stage: {moved} → triage\n", day, NOW.tzinfo)
-                began = task_forge.hold_began({task: "triage"}, moves, {}, None, tasks, parse_tracker(earlier).tasks)
+                began = task_forge.hold_began({task: "triage"}, moves, {}, None, tasks, [(day, parse_tracker(earlier).tasks)])
                 self.assertEqual(began[task], datetime.combine(day, time(11, 0), NOW.tzinfo))
+
+    def test_an_unnamed_task_still_resolves_moves_by_its_item(self):
+        task = replace(parse_tracker(TRACKER).tasks[0], name="", issue="")
+        moves = tracker_log.moves(TRACKER + "- 09:00 stage: Cut the release branch → fix\n"
+                                  "- 10:00 stage: Cut the release branch → review\n"
+                                  "- 11:00 stage: Cut the release branch → fix\n", NOW.date(), NOW.tzinfo)
+        self.assertEqual(task_forge.looping([task], moves, {"build": st.Lane(("review", "fix", "merge"))}, None), {task})
+        self.assertEqual(task_forge.hold_began({task: "fix"}, moves, {}, None, [task])[task], NOW.replace(hour=11, minute=0))
+
+    def test_a_historical_launcher_cannot_start_a_reused_names_new_issue_hold(self):
+        day = NOW.date() - timedelta(days=1)
+        old = TRACKER.replace("| #9 |", "| #99 |")
+        old += "- 12:00 one-shot w1 started: claude, task Cut the release branch, extra prompt\n"
+        old += "- 13:00 one-shot w1: completed; awaiting integration\n"
+        html = rb.render(TRACKER.replace("| build | review |", "| build | pr |"),
+                         parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=LANES, kanban=replace(KANBAN, hold_stages=("pr",)), sources=SOURCES,
+                         stage_log=[(day, old)], looked=NOW - timedelta(days=2))
+        self.assertEqual(re.findall(r'title="(\d+) went needs input since', html), [])
 
     def test_a_gate_hold_begins_at_the_tasks_last_move_into_that_gate(self) -> None:
         # #579 review R3, R7: moves read as flow_chart reads them: by name or item, any case; the latest move into the
@@ -217,62 +237,7 @@ class SinceLookedTest(unittest.TestCase):
         self.assertEqual(self.since(None, kanban=gate, log=move), [("1 went needs input since 00:00", "1")])
 
 
-class MergeOrder(unittest.TestCase):
-    def setUp(self) -> None:
-        self.panel = rb.merge_order(SOURCES)
-
-    def test_approved_first_ready_before_failed_unshared_before_shared_then_in_review(self) -> None:
-        self.assertEqual([(r.num, r.ref) for r in self.panel.rows], [("1", "!41"), ("2", "!42"), ("3", "!52"), ("4", "!48")])
-
-    def test_drafts_and_closed_changes_are_not_in_the_order(self) -> None:
-        self.assertNotIn("!50", [r.ref for r in self.panel.rows])
-        self.assertNotIn("!37", [r.ref for r in self.panel.rows])
-
-    def test_facts_are_approval_pipeline_base_and_shared_files(self) -> None:
-        facts = {r.ref: r.facts for r in self.panel.rows}
-        self.assertEqual(facts["!41"], "approved · pipeline passed · base main · no shared files")
-        self.assertEqual(facts["!42"], "approved · pipeline passed · base main · shares 1 file with !48, !50")
-        self.assertEqual(facts["!48"], "in review · pipeline passed · base main · shares 1 file with !42, !50")
-        self.assertEqual(facts["!52"], "approved · pipeline failed · base main · no shared files")
-
-    def test_head_counts(self) -> None:
-        self.assertEqual((self.panel.id, self.panel.count, self.panel.note), ("merge", 4, "3 approved · 1 in review"))
-        self.assertEqual((self.panel.rows[0].name, self.panel.rows[0].href), ("Password reset copy", "https://forge/41"))
-
-    def test_the_order_shows_five_and_counts_the_rest(self) -> None:
-        many = bs.Sources({}, {}, {f"!{n}": change(f"!{n}") for n in range(1, 9)}, (), {})
-        p = rb.merge_order(many)
-        self.assertEqual((p.count, len(p.rows), p.foot), (8, 5, "+ 3 more"))
-
-    def test_empty_sources_leave_an_empty_order(self) -> None:
-        p = rb.merge_order(bs.EMPTY)
-        self.assertEqual((p.count, p.rows, p.note), (0, (), "0 approved · 0 in review"))
-
-
-class Workers(unittest.TestCase):
-    def test_one_row_per_worker_with_age_and_facts(self) -> None:
-        p = rb.worker_panel(SOURCES, NOW)
-        self.assertEqual((p.id, p.count, p.note), ("workers", 2, "1 one-shot · 1 session"))
-        # (#199) facts are `<kind> · <runtime model> · <task> · <tree>`, empty parts skipped: impl-04 has
-        # no tree, so nothing stands in for it — not the old "last reply" fallback.
-        self.assertEqual([(r.name, r.side, r.facts) for r in p.rows], [
-            ("impl-07", "0h42m", "one-shot · claude opus · Cut the release · trees/cut"),
-            ("impl-04", "1h23m", "session · codex · Audit"),
-        ])
-
-    def test_empty(self) -> None:
-        self.assertEqual(rb.worker_panel(bs.EMPTY, NOW).rows, ())
-
-
 class Decisions(unittest.TestCase):
-    def test_pending_rows_carry_asked_recommended_and_default(self) -> None:
-        d = {"headline": "Cache warmup: keep the pool?", "recommended": "A", "default": "pool stays"}
-        p = rb.decision_panel([("cache", d, NOW.replace(hour=1, minute=41), ""), ("bad", None, None, "no ask")], 4, NOW)
-        self.assertEqual((p.id, p.count, p.foot, p.link), ("decisions", 1, "4 answered today", ("decisions page", "/decisions")))
-        self.assertEqual(p.rows[0], panels.Row("Cache warmup: keep the pool?", "asked 01:41 · recommended A · default: pool stays",
-                                               href="/decisions/cache"))
-        self.assertEqual(p.rows[1], panels.Row("decision-bad.json", "unreadable: no ask"))
-
     def test_the_pending_list_is_the_decisions_page_list(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             pages = Path(tmp)
@@ -296,7 +261,9 @@ class Build(unittest.TestCase):
         # Both refs open the task page (#209): !48 names #9, so it lands there too.
         card = next(c for col in self.cols() for c in col.cards if c.name == "Cut the release")
         self.assertEqual(card.refs, (("#9", "/issues/9"), ("!48", "/issues/9")))
-        self.assertEqual(card.marks, (columns.Mark("passed", "passed"),))
+        self.assertEqual(card.marks, (columns.Mark("passed", "passed"),
+                                      columns.Mark("shares file with !42", "shared"),
+                                      columns.Mark("shares file with !50", "shared")))
 
     def test_approval_and_a_failed_pipeline_are_marks(self) -> None:
         self.assertEqual(rb.change_marks((SOURCES.changes["!52"],)),
@@ -360,6 +327,168 @@ class Build(unittest.TestCase):
 
 def card_named(cols: list[columns.Column], name: str) -> columns.Card:
     return next(c for col in cols for c in col.cards if c.name == name)
+
+
+class CardFactsTest(unittest.TestCase):
+    """#208: facts formerly in side panels are visible on the task's own card."""
+
+    def cols(self, changes, log="", *, earlier=(), refs=None, tracker=TRACKER, lanes=None):
+        sources = replace(SOURCES, changes={c.ref: c for c in changes})
+        lanes = lanes or {"build": st.Lane(("implement", "review", "fix", "merge"))}
+        html = rb.render(tracker + log, parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=lanes, sources=sources, pending_refs=refs,
+                         stage_log=[(d, text) for d, text in earlier if d >= NOW.date() - timedelta(days=2)],
+                         look_log=[(d, text) for d, text in earlier if d < NOW.date() - timedelta(days=2)])
+        # Capture the actual cards produced by render, including stage history and decision holds.
+        return html.split("</style>", 1)[1]
+
+    def marks(self, html, name="Cut the release"):
+        card = re.split(rf'>{re.escape(name)}</(?:a|div)>', html, maxsplit=1)[1].split('<div class="columns-card', 1)[0]
+        return re.findall(r'class="columns-tag columns-mark" data-cat="[^"]+">([^<]+)<', card)
+
+    def test_approved_cards_keep_the_complete_merge_order_past_the_old_five_row_limit(self):
+        changes = [change(f"!{i}", approved=True, issues=("#9",) if i == 8 else ()) for i in range(1, 9)]
+        self.assertIn("queue 8", self.marks(self.cols(changes)))
+
+    def test_the_queue_uses_approval_pipeline_overlap_and_change_number(self):
+        changes = [change("!3", approved=True, issues=("#9",), files=("a",)),
+                   change("!1", approved=True, files=("a",)),
+                   change("!7", approved=True), change("!2", approved=True, pipeline="failed"),
+                   change("!4", approved=False)]
+        for ref, position in (("!7", 1), ("!1", 2), ("!3", 3), ("!2", 4)):
+            with self.subTest(ref=ref):
+                rows = [replace(c, issues=("#9",) if c.ref == ref else ()) for c in changes]
+                self.assertIn(f"queue {position}", self.marks(self.cols(rows)))
+
+    def test_only_open_approved_non_draft_changes_receive_a_queue_mark(self):
+        for attrs in ({"approved": False}, {"approved": True, "draft": True},
+                      {"approved": True, "state": "merged"}, {"approved": True, "state": "closed"}):
+            with self.subTest(attrs=attrs):
+                self.assertFalse(any(m.startswith("queue ") for m in self.marks(
+                    self.cols([change("!1", issues=("#9",), **attrs)]))))
+
+    def test_shared_file_marks_include_drafts_but_exclude_closed_and_merged_changes(self):
+        changes = [change("!1", issues=("#9",), files=("a", "b")),
+                   change("!2", draft=True, files=("a", "b")),
+                   change("!3", state="closed", files=("a",)),
+                   change("!4", state="merged", files=("b",)), change("!5", files=("c",))]
+        self.assertEqual([m for m in self.marks(self.cols(changes)) if m.startswith("shares")],
+                         ["shares file with !2"])
+        self.assertNotIn("shares file with", self.cols([replace(c, state="merged") for c in changes]))
+
+    def test_a_pending_decision_marks_only_the_task_it_holds(self):
+        html = self.cols([], refs={"#9": None})
+        self.assertIn("decision pending", self.marks(html))
+        self.assertNotIn("decision pending", self.marks(html, "Write README"))
+        self.assertNotIn("decision pending", self.cols([], refs={}))
+
+    def test_looping_counts_entries_into_the_lanes_fix_stage_across_days(self):
+        earlier = TRACKER + "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+        log = "- 11:00 stage: Cut the release → fix\n"
+        self.assertIn("looping", self.marks(self.cols([], log, earlier=[(NOW.date() - timedelta(days=1), earlier)])))
+        for history in ("", "- 09:00 stage: Cut the release → fix\n",
+                        "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → fix\n"):
+            with self.subTest(history=history):
+                self.assertNotIn("looping", self.marks(self.cols([], history)))
+        self.assertNotIn("looping", self.cols([], earlier + log, lanes=LANES))  # no fix stage in this lane
+
+    def test_looping_resolves_a_renamed_task_by_its_issue_and_does_not_mark_other_cards(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft release | Draft the release |")
+        earlier += "- 09:00 stage: Draft release → fix\n- 10:00 stage: Draft the release → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertIn("looping", self.marks(html))
+        self.assertNotIn("looping", self.marks(html, "Write README"))
+
+    def test_write_reads_fix_entries_older_than_the_flow_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            (root / f"daily/{today}-tracker.md").write_text(TRACKER + "- 11:00 stage: Cut the release → fix\n")
+            earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+            earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+            (root / f"daily/{today - timedelta(days=5)}-tracker.md").write_text(earlier)
+            html = rb.write(root, day=today.isoformat())[0].read_text().split("</style>", 1)[1]
+            self.assertIn("looping", self.marks(html))
+
+    def test_a_reused_name_keeps_moves_with_the_issue_on_their_day(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Draft | Draft release |")
+        earlier += "- 09:00 stage: Draft → fix\n- 10:00 stage: Draft release → review\n"
+        tracker = TRACKER.replace("| Write README | Write eval README |", "| Draft | Draft release |")
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n- 11:30 stage: Draft → fix\n",
+                         tracker=tracker, earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertIn("looping", self.marks(html))
+        self.assertNotIn("looping", self.marks(html, "Draft"))
+
+    def test_a_new_issue_with_the_same_name_does_not_inherit_fix_visits(self):
+        earlier = TRACKER.replace("| #9 |", "| #99 |")
+        earlier += "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertNotIn("looping", self.marks(html))
+
+    def test_unrelated_workflow_rows_do_not_share_fix_visits(self):
+        earlier = TRACKER.replace("| Cut the release | Cut the release branch |", "| Prior workflow | Prior item |")
+        earlier = earlier.replace("| #9 |", "| workflow |")
+        earlier += "- 09:00 stage: Prior workflow → fix\n- 10:00 stage: Prior item → review\n"
+        html = self.cols([], "- 11:00 stage: Cut the release → fix\n",
+                         tracker=TRACKER.replace("| #9 |", "| workflow |"),
+                         earlier=[(NOW.date() - timedelta(days=4), earlier)])
+        self.assertNotIn("looping", self.marks(html))
+
+    def test_finished_tasks_have_no_looping_mark(self):
+        log = "- 09:00 stage: Cut the release → fix\n- 10:00 stage: Cut the release → review\n- 11:00 stage: Cut the release → fix\n"
+        lanes = {"build": st.Lane(("implement", "review", "fix", "merge", "main"))}
+        for tracker, changes in (
+                (TRACKER.replace("running 10:30", "done 10:30"), []),
+                (TRACKER.replace("| build | review |", "| build | main |"), []),
+                (TRACKER, [change("!3", state="merged", issues=("#9",))])):
+            with self.subTest(tracker=tracker, changes=changes):
+                self.assertNotIn("looping", self.marks(self.cols(changes, log, tracker=tracker, lanes=lanes)))
+
+    def test_old_loop_history_does_not_suppress_a_recent_launcher_hold(self):
+        old = TRACKER + "- 09:00 stage: Cut the release → review\n"
+        log = "- 12:00 one-shot w1 started: claude, task Cut the release branch\n- 13:00 one-shot w1: completed; awaiting integration\n"
+        html = rb.render(TRACKER.replace("| build | review |", "| build | pr |") + log,
+                         parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                         lanes=LANES, kanban=replace(KANBAN, hold_stages=("pr",)),
+                         look_log=[(NOW.date() - timedelta(days=5), old)], looked=NOW - timedelta(hours=3),
+                         sources=SOURCES)
+        self.assertIn('title="1 went needs input since 11:30"', html)
+
+    def test_write_stops_loop_history_at_the_tasks_first_absent_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(CLAUDE_MD + "\n- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "fix", "merge"] }\n')
+            (root / "daily").mkdir()
+            today = datetime.now(NOW.tzinfo).date()
+            for days, text in ((0, TRACKER), (5, TRACKER), (6, "## Tasks\n"), (100, TRACKER)):
+                (root / f"daily/{today - timedelta(days=days)}-tracker.md").write_text(text)
+            # Isolate board history reads from the pre-existing decision deadline/context readers.
+            original = Path.read_text
+            reads = []
+            def read(path, *args, **kwargs):
+                reads.append(path)
+                return original(path, *args, **kwargs)
+            with mock.patch.object(rb, "with_workspace_decision_deadlines", side_effect=lambda root, cfg, *a: cfg), \
+                    mock.patch.object(rb.decision_page, "decision_context", return_value=decision_page.Context(NOW)), \
+                    mock.patch.object(rb, "render", wraps=rb.render) as render, \
+                    mock.patch.object(Path, "read_text", read):
+                rb.write(root, day=today.isoformat())
+            self.assertNotIn(root / f"daily/{today - timedelta(days=100)}-tracker.md", reads)
+            self.assertEqual(render.call_args.kwargs["look_log"], [])  # no previous look: today only for holds
+
+    def test_tiles_and_tabs_still_reach_their_destinations_without_the_panels(self):
+        html = self.cols([])
+        for target in re.findall(r'class="panels-tile"[^>]+href="#([^"]+)"', html):
+            self.assertIn(f'id="{target}"', html)
+        self.assertIn('href="/workers"', html)
+        self.assertIn('href="/decisions"', html)
+        self.assertFalse('class="panels-panel"' in html)
 
 
 class HomeProjectUrlTest(unittest.TestCase):
@@ -499,11 +628,11 @@ class Page(unittest.TestCase):
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         self.html = rb.render(TRACKER, self.cfg, NOW, lanes=LANES, kanban=KANBAN, sources=SOURCES,
                               decisions=[("x", {"headline": "Pick", "recommended": "B", "default": "d"}, NOW.replace(hour=10, minute=0), "")],
-                              answered=1, tracker_at=NOW - timedelta(minutes=5))
+                              tracker_at=NOW - timedelta(minutes=5))
         self.body = self.html.split("</style>", 1)[1]
 
     def test_the_board_is_the_flow_artboard_in_order(self) -> None:
-        marks = ['class="panels-head"', 'class="panels-tiles"', '<section id="flow">', 'class="panels"']
+        marks = ['class="panels-head"', 'class="panels-tiles"', '<section id="flow">']
         at = [self.body.index(m) for m in marks]
         self.assertEqual(at, sorted(at), [m for _, m in sorted(zip(at, marks))])
 
@@ -519,17 +648,16 @@ class Page(unittest.TestCase):
     def test_tile_counts(self) -> None:
         # #349: the artboard's label. ALL counts every task (the header's 4 tasks); NEEDS INPUT is what BLOCKED counted, the held
         # cards (none: no kanban hold stage); RUNNING is the two workers; DRIFT: README at triage has stage::implement.
-        # The DECISIONS tile's count is no tile now: the tab bar's badge and the DECISIONS panel carry it.
+        # The DECISIONS tile's count is no tile now: the tab bar's badge carries it.
         tiles = re.findall(r'<span class="panels-label">([A-Z ]+)</span><b class="panels-count">(\d+)</b>', self.body)
         self.assertEqual(tiles, [("ALL", "4"), ("NEEDS INPUT", "0"), ("RUNNING", "2"), ("APPROVED", "3"), ("ORPHANED", "1"), ("DRIFT", "1")])
 
-    def test_each_tile_links_where_it_linked_before(self) -> None:
-        # #349: the artboard's label. BLOCKED linked to #flow, APPROVED to #merge, RUNNING to #workers, ORPHANED and DRIFT to #flow;
-        # ALL had no tile, and the BUILD section whose cards it counts is #flow.
+    def test_each_tile_links_to_the_cards_that_carry_its_facts(self) -> None:
+        # #208: the removed panels no longer have anchors; tiles reach BUILD, and tabs reach the detail pages.
         links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="#([a-z]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
         # #349 review: the kind is what the stylesheet colours a tile by, so each is pinned with its link and label.
-        self.assertEqual(links, [("all", "flow", "ALL"), ("blocked", "flow", "NEEDS INPUT"), ("running", "workers", "RUNNING"),
-                                 ("approved", "merge", "APPROVED"), ("orphaned", "flow", "ORPHANED"), ("drift", "flow", "DRIFT")])
+        self.assertEqual(links, [("all", "flow", "ALL"), ("blocked", "flow", "NEEDS INPUT"), ("running", "flow", "RUNNING"),
+                                 ("approved", "flow", "APPROVED"), ("orphaned", "flow", "ORPHANED"), ("drift", "flow", "DRIFT")])
 
     def test_every_tile_kind_has_a_colour_and_all_draws_in_the_artboards_ink(self) -> None:
         # #349 review: the artboard's tone map gives ALL ink (Flow.dc.html `all: '#2f2630'`, the light --fg); a tile with
@@ -612,7 +740,7 @@ class Page(unittest.TestCase):
         self.assertTrue(overrides)
         self.assertEqual(re.findall(r"#[0-9a-fA-F]{3,8}\b", overrides), [])
         self.assertIn(".panels-head,.panels-tiles,.panels{--panels-ink:var(--fg)", css)
-        self.assertIn('[data-kind="merge"]{--k:var(--stage-review)}', css)
+        self.assertIn('[data-kind="approved"]{--k:var(--stage-review)}', css)
 
     def test_the_clocks_tick_every_second_with_seconds(self) -> None:
         script = self.html.split("<script>", 1)[1]

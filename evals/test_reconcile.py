@@ -536,7 +536,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, findings={}), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 
     def test_human_review_items_wait_without_consuming_a_slot(self):
-        self.assertEqual(self.plan(replace(Item(), human_review=True)), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.plan(replace(Item(), human_review=True)), [reconcile.Wait(KEY, "needs input")])
 
     def test_dispatches_and_parallel_reviews_share_free_slots(self):
         items = [replace(Item(), issue_key=f"github:example/project#{n}", stage=stage)

@@ -238,7 +238,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([log.message for log in self.db.log(KEY)], ["wait: stage is outside the workflow"])
         self.db.set_human_review(KEY, True)
         self.run_pass()
-        self.assertEqual(self.db.log(KEY)[-1].message, "wait: human review")
+        self.assertEqual(self.db.log(KEY)[-1].message, "wait: needs input")
 
     def test_ask_and_escalate_are_recorded_once_and_preserve_resume_data(self):
         self.db.sync_from_forge(self.forge.snapshots())
@@ -351,10 +351,10 @@ class EngineTest(unittest.TestCase):
         self.finish("review")
         self.findings()
         self.assertEqual(self.forge.snapshots()[0]["merge_state"], "ready")
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
         self.assertTrue(self.db.items()[0].human_review)
         self.findings(counts={"minor": 1})
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
         self.assertEqual(len(self.launched), 2)
         gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
@@ -376,7 +376,7 @@ class EngineTest(unittest.TestCase):
             merged.assert_not_called()
             self.assertEqual(self.db.items()[0].stage, "merge")
             self.assertIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
-            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
             merged.assert_not_called()
             gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
             self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
@@ -424,7 +424,7 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
         self.assertFalse(any(call[:2] == ["pr", "merge"] for call in gh.all_calls))
         self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "merge", "expected": "review"})
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
         self.assertFalse(any(call[:2] == ["pr", "merge"] for call in gh.all_calls))
         self.assertEqual(self.db.items()[0].stage, "merge")
         self.assertTrue(self.db.items()[0].human_review)
@@ -466,6 +466,46 @@ class EngineTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
+
+    def test_undeclared_agent_type_is_refused_before_claiming_a_segment(self):
+        # Compliance C8: agent_type is checked against make_worktree.agent_types before recording a segment.
+        self.p = policy.parse({
+            "default_workflow": "standard",
+            "personas": {"builder": {"role": "implements", "model": "example", "agent_type": "nonexistent-agent"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"implement": {"persona": "builder"}, "review": {"persona": "critic"}, "merge": {}},
+            "workflows": {"standard": {"start": "implement", "edges": [
+                {"from": "implement", "to": "review"}, {"from": "review", "to": "merge"},
+            ]}},
+        })
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.db.segments(), [])
+        self.assertIn("nonexistent-agent", self.db.log(KEY)[-1].message)
+
+    def test_answered_decision_meeting_a_blocked_action_records_blocked_status(self):
+        # M6 item 2 & #288: engine calls decision_actions when a planned action meets an answered decision.
+        self.db.sync_from_forge(self.forge.snapshots())
+        dec = self.db.add_decision(KEY, "design", "Approve schema?")
+        self.db.answer_decision(dec.id, "Yes", decided_by="user")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "merge conflicts")]):
+            self.run_pass()
+        updated = next(d for d in self.db.decisions(KEY) if d.id == dec.id)
+        self.assertEqual(updated.status, "blocked")
+        resume_dec = (self.db.resume(KEY) or {}).get("decisions", {}).get(str(dec.id), {})
+        self.assertEqual(resume_dec.get("blocked_reason"), "merge conflicts")
+
+    def test_trio_gate_outcome_enters_decision_lifecycle_with_decided_by_trio(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        outcome = SimpleNamespace(status="decided", rationale="Consensus reached.", escalated_reason=None, votes=())
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "plan", "Split module?")]), \
+             mock.patch.object(engine.trio_gate, "consult", return_value=outcome):
+            self.run_pass(trio_port=mock.Mock())
+        decs = self.db.decisions(KEY)
+        self.assertEqual(len(decs), 1)
+        self.assertEqual(decs[0].status, "answered")
+        self.assertEqual(decs[0].decided_by, "trio")
+        self.assertEqual(decs[0].answer, "Consensus reached.")
 
 
 class MainTest(unittest.TestCase):

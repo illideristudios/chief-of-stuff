@@ -18,12 +18,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import notify
 import notify_service as service
 import supervisor
-from evals.test_notify import Workspace, NOW, TOML, tracker
+from evals.test_notify import KEY, NOW, TOML, Workspace
 
 
 class WorkspaceTest(unittest.TestCase):
     def setUp(self):
         self.ws = Workspace()
+        self.addCleanup(self.ws.db.engine.dispose)
         self.addCleanup(self.ws.tmp.cleanup)
         self.root = self.ws.root
         quiet = contextlib.redirect_stdout(io.StringIO())
@@ -43,31 +44,25 @@ class ServiceTest(WorkspaceTest):
         worker.tick(NOW + timedelta(minutes=1), 60)
         self.assertEqual(sync.call_count, 2)
         self.assertEqual(self.ws.queue.read_bytes(), original)
-        path = self.root / "CLAUDE.md"
-        path.write_text(path.read_text().replace("23:59", "22:59"))
+        self.ws.db.upsert_item(KEY, title="Upload size limit", stage="review", forge_state="open", human_review=True)
         worker.tick(NOW + timedelta(seconds=65), 65)
         self.assertEqual(sync.call_count, 3)
-        self.assertIn("22:59", self.ws.queue.read_text())
+        self.assertIn("Upload size limit", self.ws.queue.read_text())
         service.Service(self.root, reconcile=sync).tick(NOW, 70)
         self.assertEqual(sync.call_count, 4)
 
-    def test_historical_tracker_creation_removal_and_settings_path_change(self):
+    def test_store_change_and_settings_path_change(self):
         worker = service.Service(self.root)
         worker.tick(NOW, 0)
-        daily = self.root / "daily"
-        daily.mkdir()
-        past = daily / "2026-09-22-tracker.md"
-        past.write_text(tracker(("13:00", "deadline: Extra 2026-09-24 18:00")))
+        self.ws.db.upsert_item(KEY, title="Extra hold", stage="review", forge_state="open", human_review=True)
         worker.tick(NOW, 5)
-        self.assertIn("Extra", self.ws.queue.read_text())
-        past.unlink()
-        worker.tick(NOW, 10)
-        self.assertNotIn("Extra", self.ws.queue.read_text())
-        (self.root / "other.toml").write_text(TOML + 'day_open = "08:00"\n')
+        self.assertIn("Extra hold", self.ws.queue.read_text())
+        other_queue = "notes/OTHER_NOTIFICATIONS.md"
+        (self.root / "other.toml").write_text(f'[notify]\nadapter = "md-notify"\nqueue = "{other_queue}"\n')
         cfg = self.root / "CLAUDE.md"
         cfg.write_text(cfg.read_text().replace("chief-of-stuff.toml", "other.toml"))
         worker.tick(NOW, 15)
-        self.assertIn("daily 08:00", self.ws.queue.read_text())
+        self.assertIn("Extra hold", (self.root / other_queue).read_text())
 
     def test_failure_preserves_queue_retries_and_logs_only_changes(self):
         worker = service.Service(self.root)
@@ -99,11 +94,9 @@ class ServiceTest(WorkspaceTest):
         late = NOW.replace(hour=23, minute=59)
         worker = service.Service(self.root)
         worker.tick(late, 0)
-        (self.root / "daily").mkdir()
-        (self.root / "daily/2026-09-24-tracker.md").write_text(
-            tracker(("00:00", "deadline: Tomorrow 18:00")))
+        self.ws.db.upsert_item(KEY, title="Tomorrow hold", stage="review", forge_state="open", human_review=True)
         worker.tick(late + timedelta(minutes=1), 5)
-        self.assertIn("Tomorrow", self.ws.queue.read_text())
+        self.assertIn("Tomorrow hold", self.ws.queue.read_text())
         sync = mock.Mock(wraps=notify.sync_workspace)
         worker = service.Service(self.root, reconcile=sync)
         worker.tick(NOW, 0)
@@ -226,7 +219,9 @@ class LifecycleTest(WorkspaceTest):
 class QueueLockTest(unittest.TestCase):
     def test_simultaneous_add_and_sync_do_not_lose_or_duplicate_rows(self):
         ws = Workspace()
+        self.addCleanup(ws.db.engine.dispose)
         self.addCleanup(ws.tmp.cleanup)
+        ws.db.upsert_item(KEY, title="Held item", stage="review", forge_state="open", human_review=True)
         def edit(index):
             if index % 2:
                 notify.sync_workspace(ws.root, NOW)
@@ -236,16 +231,18 @@ class QueueLockTest(unittest.TestCase):
             list(pool.map(edit, range(12)))
         text = ws.queue.read_text()
         self.assertEqual(text.count("| One event |"), 1)
-        self.assertEqual(text.count("⏰ Early in 3h"), 1)
+        self.assertEqual(text.count("Held item"), 2)  # title and message in one row
 
     def test_cooperating_writer_is_read_after_lock_and_acknowledgment_survives(self):
         ws = Workspace()
+        self.addCleanup(ws.db.engine.dispose)
         self.addCleanup(ws.tmp.cleanup)
+        ws.db.upsert_item(KEY, title="Held item", stage="review", forge_state="open", human_review=True)
         notify.sync_workspace(ws.root, NOW)
         queue = notify.MdNotifyQueue(ws.queue)
         with queue.lock():
             original = ws.queue.read_text()
-            first = next(line for line in original.splitlines() if "⏰" in line)
+            first = next(line for line in original.splitlines() if "Held item" in line)
             ws.queue.write_text(original.replace(first + "\n", "") + "\n## Completed\n" + first + "\n")
         notify.sync_workspace(ws.root, NOW)
         self.assertEqual(ws.queue.read_text().count(first), 1)
@@ -253,6 +250,7 @@ class QueueLockTest(unittest.TestCase):
 
     def test_lock_contention_times_out_without_touching_queue(self):
         ws = Workspace()
+        self.addCleanup(ws.db.engine.dispose)
         self.addCleanup(ws.tmp.cleanup)
         notify.sync_workspace(ws.root, NOW)
         queue = notify.MdNotifyQueue(ws.queue)

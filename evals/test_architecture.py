@@ -63,6 +63,7 @@ DRAWS_NOTHING = (
     "worker_guard",  # Frameworks and Drivers: command hook JSON and store access.
     "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
     "work",
+    "decision_actions",  # Use Cases: pure decision lifecycle transitions.
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
@@ -207,7 +208,7 @@ CIRCLES: dict[str, frozenset[str]] = {
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
         "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
-        "reconcile", "guard_rules", "performance",
+        "reconcile", "guard_rules", "performance", "decision_actions",
     }),
     "adapters": frozenset({
         "fragment", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
@@ -410,6 +411,11 @@ class DependencyRuleTest(unittest.TestCase):
     def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:
         self.assertEqual(forbidden_reach(SCRIPTS, "reconcile",
                          {"store", "forge", "claude_adapter", "settings", "trio_gate"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
+
+    def test_decision_actions_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_actions",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages"},
                          frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
 
     def test_every_script_is_classified(self) -> None:
