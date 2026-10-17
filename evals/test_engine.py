@@ -182,11 +182,16 @@ class EngineTest(unittest.TestCase):
         self.assert_unconfirmed_merge_keeps_review_stage(ForgeError("head changed"), "merge refused: head changed")
 
     def test_file_ownership_conflict_reaches_the_planner_before_dispatch(self):
+        self.db.upsert_item(KEY, stage="implement", forge_state="open")
         self.db.upsert_item(OTHER, stage="implement", forge_state="open")
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         self.db.set_ownership(KEY, "src/a.py")
         self.db.set_ownership(OTHER, "src/a.py")
         self.db.record_segment(OTHER, "implement", 1, started_at=NOW.isoformat())
+        run_dir = engine.worker._run_dir(self.root, OTHER, "implement", 1)
+        self.db.set_resume(OTHER, {"runs": {"implement-1": {
+            "pid": 123, "session_id": "fake-session", "identity": "fake-start",
+            "run_dir": str(run_dir), "tree": str(self.trees / "fake")}}})
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, f"file ownership conflict with {OTHER}")])
         self.assertEqual(self.launched, [])
 

@@ -721,7 +721,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[replace(open_seg, started_at=NOW - timedelta(hours=2))], facts=stalled),
                          [reconcile.Wait(KEY, "stalled")])
         claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(other, "src/a.py"))
-        conflict = reconcile.Facts(claims=claims, alive=(((other, "implement", 1), True),))
+        conflict = reconcile.Facts(claims=claims, blockers=(), alive=(((other, "implement", 1), True),))
         actions = reconcile.plan([Item(), replace(Item(), issue_key=other)],
                                  {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=conflict)
         self.assertEqual(actions, [reconcile.Wait(KEY, f"file ownership conflict with {other}")])

@@ -15,6 +15,7 @@ from typing import Any
 import cleanup
 import clock as engine_clock
 import dispatch_prompt
+import engine_facts
 import engine_merge
 import forge
 import issue_gate
@@ -275,10 +276,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
+    facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
-                             **_planning_inputs(store, items))
+                             facts=facts, **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
@@ -341,6 +343,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                          inputs=_planning_inputs(store, [by_key[key]]),
                                          hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
+            elif isinstance(action, reconcile.Close):
+                store.end_segment(key, action.stage, action.attempt, at, action.outcome)
+                if action.human_review:
+                    store.upsert_item(key, human_review=True)
+                store.add_log(key, f"close: {action.reason or action.outcome}", at)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
                 record = {"kind": type(action).__name__, "reason": action.reason}

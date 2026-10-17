@@ -9,8 +9,10 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import engine_facts
+import forge
 import readiness
 import store
+import backlog
 
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
@@ -55,3 +57,19 @@ class GatherTest(unittest.TestCase):
         forge.blocked_by.return_value = None
         facts = engine_facts.gather(forge=forge, store=self.db, root=self.root, trees=self.trees, now=NOW)
         self.assertIsNone(facts.blockers)
+
+
+class BlockedByTest(unittest.TestCase):
+    def test_github_blocked_by_is_the_open_nodes(self):
+        self.assertEqual(forge._blocked_numbers({"nodes": [{"number": 2, "state": "OPEN"},
+                                                           {"number": 3, "state": "CLOSED"}], "totalCount": 2}), (2,))
+        self.assertIsNone(forge._blocked_numbers({"nodes": [], "totalCount": 1}))
+        self.assertEqual(forge._blocked_numbers(None), ())
+
+    def test_a_github_list_of_blockers_is_keyed_by_issue(self):
+        from evals.test_forge import FakeGh, gh_issue
+        issue = gh_issue(1, "Blocked")
+        issue["blockedBy"] = {"nodes": [{"number": 2, "state": "OPEN"}], "totalCount": 1}
+        source = forge.Forge(backlog.GitHubBacklog("example/project"), gh=FakeGh(issues=[issue, gh_issue(2, "Blocker")]))
+        self.assertEqual(source.blocked_by(), {"github:example/project#1": ("github:example/project#2",)})
+

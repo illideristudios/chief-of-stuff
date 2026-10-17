@@ -55,8 +55,12 @@ DRAWS_NOTHING = (
 
     "slots",
     "reconcile",
+    "readiness",
+    "completion",
+    "worker_health",
     "cleanup",
     "engine",
+    "engine_facts",
     "worker",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
@@ -208,7 +212,7 @@ CIRCLES: dict[str, frozenset[str]] = {
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
         "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
-        "reconcile", "guard_rules", "performance",
+        "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance",
     }),
     "adapters": frozenset({
         "fragment", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
@@ -229,7 +233,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
-        "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
+        "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
         "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",

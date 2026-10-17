@@ -18,7 +18,7 @@ class ReadinessTest(unittest.TestCase):
         return readiness.why_not(KEY, **base)
 
     def test_a_write_path_that_overlaps_a_running_issue_is_not_ready(self):
-        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(OTHER, "src/a/b.py"))
+        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(OTHER, "src/a.py"))
         self.assertEqual(self.why(claims=claims, running=(OTHER,)),
                          f"file ownership conflict with {OTHER}")
 

@@ -29,6 +29,74 @@ from settings import Kanban
 _LOCAL_CLOSE = re.compile(r"#\d+")  # a closing ref for this repository; anything else is qualified or foreign
 
 
+def _blocked_numbers(raw: Any) -> tuple[int, ...] | None:
+    """Open blocker numbers. () when the field names none. None when it is not a complete answer."""
+    if raw is None:
+        return ()
+    if isinstance(raw, dict):
+        nodes = raw.get("nodes")
+        total = raw.get("totalCount")
+        if not isinstance(nodes, list) or (isinstance(total, int) and total != len(nodes)):
+            return None
+    elif isinstance(raw, list):
+        nodes = raw
+    else:
+        return None
+    numbers = []
+    for node in nodes:
+        if not isinstance(node, dict) or type(node.get("number")) is not int:
+            return None
+        state = str(node.get("state", "OPEN")).upper()
+        if state == "CLOSED":
+            continue
+        if state not in ("OPEN", "OPENED"):
+            return None
+        numbers.append(node["number"])
+    return tuple(numbers)
+
+
+def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]] | None:
+    row, error = _gh_json(forge.gh, ["issue", "list", "-R", forge.home.repo, "--state", "open",
+                                     "--json", "number,blockedBy", "--limit", str(backlog.GH_LIMIT)])
+    if error or not isinstance(row, list) or len(row) >= backlog.GH_LIMIT:
+        return None
+    out: dict[str, tuple[str, ...]] = {}
+    for item in row:
+        if not isinstance(item, dict) or type(item.get("number")) is not int:
+            return None
+        numbers = _blocked_numbers(item.get("blockedBy"))
+        if numbers is None:
+            return None
+        if numbers:
+            out[forge.key(item["number"])] = tuple(forge.key(number) for number in numbers)
+    return out
+
+
+def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]] | None:
+    # shortcut: one links read per open issue; page the list when a workspace exceeds one issues() page
+    got = forge.issues()
+    if not got.ok:
+        return None
+    secret = forge._token()
+    if not secret:
+        return None
+    out: dict[str, tuple[str, ...]] = {}
+    for issue in got.issues:
+        body, _, error = backlog._get(f"{forge.home.issues_url}/{issue.iid}/links", secret, backlog.TIMEOUT)
+        if error or not isinstance(body, list):
+            return None
+        numbers = []
+        for link in body:
+            if not isinstance(link, dict) or link.get("link_type") != "is_blocked_by" or link.get("state") != "opened":
+                continue
+            if type(link.get("iid")) is not int:
+                return None
+            numbers.append(link["iid"])
+        if numbers:
+            out[forge.key(issue.iid)] = tuple(forge.key(number) for number in numbers)
+    return out
+
+
 def _gh_json(gh, args: list[str]):
     code, stdout, stderr = gh(args)
     if code:
@@ -572,6 +640,15 @@ class Forge:
             return review_threads.gitlab_threads(self.home, self.home.project, self.approver, self._token(), backlog._call)
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"review threads: {exc}") from exc
+
+    def blocked_by(self) -> dict[str, tuple[str, ...]] | None:
+        """Open issues blocking each open issue, keyed by issue key. None when the read fails."""
+        try:
+            if self.github:
+                return _github_blocked(self)
+            return _gitlab_blocked(self)
+        except (ForgeError, OSError, ValueError, TypeError, KeyError, AttributeError):
+            return None
 
     def snapshot(self, issue_key: str, *, issue: Any | None = None,
                  request: merge_ready.Request | None = None) -> dict[str, Any]:
