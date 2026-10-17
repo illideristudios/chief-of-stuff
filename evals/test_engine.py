@@ -1200,6 +1200,112 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
 
+    def _superseded_merge_gate(self, mode):
+        self._merge_gate()
+        if mode == "exhausted":
+            model = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+            for _ in range(8):
+                self.run_pass(model=model)
+                self.now += timedelta(hours=2)
+        else:
+            model = self._votes([(mode, "hold")] * 3)
+            self.run_pass(model=model)
+        self.assertEqual(len(self.db.resume(KEY)["decision_interrupts"]), 1)
+        self.now += timedelta(hours=1)
+        self.db.record_segment(KEY, "review", 2, self.now.isoformat(), self.now.isoformat(), "done")
+        self.findings(attempt=2)
+        fresh = self._votes([("adopt", "approve")] * 3)
+        self.assertIsInstance(self.run_pass(model=fresh)[0], reconcile.Ask)
+        self.assertEqual(fresh.n, 3)
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+        self.assertEqual(self.run_pass(model=fresh), [reconcile.Merge(KEY)])
+
+    def test_a_superseded_held_merge_gate_consults_the_new_review(self):
+        self._superseded_merge_gate("adopt")
+
+    def test_a_superseded_split_merge_gate_consults_the_new_review(self):
+        self._superseded_merge_gate("concern")
+
+    def test_a_superseded_capped_merge_gate_consults_the_new_review(self):
+        self._superseded_merge_gate("exhausted")
+
+    def test_a_standing_approval_releases_an_unanswered_earlier_gate_at_merge(self):
+        self._merge_gate()
+        self.p = policies()
+        self.db.add_decision(KEY, "plan", "Plan approved?", record={
+            "decision": {"stage": "implement", "attempt": 1}})
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
+    def test_return_gate_owner_interrupt_uses_the_review_context_not_the_policy_source(self):
+        self._merge_gate()
+        self.p.stages["architect"] = self.p.stages["review"]
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement", (
+            policy.Edge("implement", "review"), policy.Edge("review", "architect"),
+            policy.Edge("architect", "merge", "merge")))
+        self.db.record_segment(KEY, "architect", 2, (NOW - timedelta(hours=1)).isoformat(),
+                               (NOW - timedelta(minutes=5)).isoformat(), "done")
+        model = self._votes([("concern", "hold")] * 3)
+        action, = self.run_pass(model=model)
+        self.assertEqual(action.source, "architect")
+        self.assertEqual((action.stage, action.attempt), ("review", 1))
+        row, = self.db.decisions(KEY)
+        self.assertEqual((row.record["decision"]["stage"], row.record["decision"]["attempt"]),
+                         ("review", 1))
+        interrupt, = self.db.resume(KEY)["decision_interrupts"]
+        self.assertEqual((interrupt["decision"]["stage"], interrupt["decision"]["attempt"]), ("review", 1))
+        self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(self.db.resume(KEY)["decision_interrupts"], [interrupt])
+        self.assertEqual(model.n, 3)
+
+    def test_legacy_gate_hold_migrates_to_an_owner_interrupt(self):
+        self._merge_gate()
+        self.run_pass(model=self._votes([("adopt", "hold")] * 3))
+        row = self.db.decisions(KEY)[-1]
+        payload = dict(row.record["decision"])
+        payload.pop("gate", None)
+        self.db.add_decision(KEY, row.topic, row.question, "hold", "trio", {
+            **row.record, "decision": payload})
+        legacy = self.db.resume(KEY)
+        legacy["interrupt"] = legacy.pop("decision_interrupts")[0]
+        self.db.set_resume(KEY, legacy)
+        model = mock.Mock()
+        self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
+        expected = self.db.resume(KEY)
+        self.assertEqual(len(expected["decision_interrupts"]), 1)
+        self.assertNotIn("interrupt", expected)
+        self.run_pass(model=model)
+        self.assertEqual(self.db.resume(KEY), expected)
+        model.assert_not_called()
+
+    def test_a_settlement_without_an_attempt_clears_the_owner_interrupt(self):
+        self._merge_gate()
+        self.run_pass(model=self._votes([("concern", "hold")] * 3))
+        row = self.db.decisions(KEY)[-1]
+        self.db.add_decision(KEY, row.topic, row.question, "approve", "user", {})
+        self.run_pass(max_concurrency=0)
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_a_restart_clears_downstream_owner_interrupts_before_review_starts_again(self):
+        self._merge_gate()
+        self.run_pass(model=self._votes([("concern", "hold")] * 3))
+        self.now += timedelta(hours=1)
+        self.db.add_decision(KEY, "design", "Rework?", record={"reversed": True})
+        self.assertIsInstance(self.run_pass()[0], reconcile.Dispatch)
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_worker_ask_can_adopt_hold_without_gate_semantics(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Continue?", ["approve", "hold"], "ctx")
+        model = self._votes([("adopt", "hold")] * 3)
+        self.run_pass(model=model)
+        self.run_pass(model=model)
+        self.assertEqual(self.db.asks(KEY)[0].answer, "hold")
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "hold")
+        self.assertEqual(model.n, 3)
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
     def test_gate_context_excludes_out_of_band_architect_and_is_not_a_wildcard(self):
         self._merge_gate()
         self.db.record_segment(KEY, "architect", 1, NOW.isoformat(), NOW.isoformat(), "done")

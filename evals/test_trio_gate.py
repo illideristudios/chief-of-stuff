@@ -253,21 +253,21 @@ class GateTest(unittest.TestCase):
         self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
         self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), ask))
 
-    def test_needs_zach_reads_only_the_latest_row_for_a_decision_attempt(self):
+    def test_needs_owner_reads_only_the_latest_row_for_a_decision_attempt(self):
         import decision_actions as actions
         row = actions.DecisionUpdate("plan", "Gate?", None, "zach", {
             "error": "gate unavailable", "decision": {
                 "stage": "implement", "attempt": 1, "context": "implement-1"}})
-        expected = actions.NeedsZach(("plan", "Gate?", ""), "implement", 1, "gate unavailable")
-        self.assertEqual(actions.needs_zach([row]), expected)
+        expected = actions.NeedsOwner(("plan", "Gate?", ""), "implement", 1, "gate unavailable")
+        self.assertEqual(actions.needs_owner([row]), expected)
         # Split, hold and exhaustion need no special eligibility rule.
         for record in ({}, {"recommendation": "hold"}, {"retry_exhausted": 8}, None):
             pending = replace(row, record=record)
-            self.assertIsNotNone(actions.needs_zach([pending]))
+            self.assertIsNotNone(actions.needs_owner([pending]))
         for settled in (replace(row, answer="approve"), replace(row, decided_by="trio"),
                         replace(row, decided_by="")):
-            self.assertIsNone(actions.needs_zach([row, settled]))
-        self.assertIsNone(actions.needs_zach([]))
+            self.assertIsNone(actions.needs_owner([row, settled]))
+        self.assertIsNone(actions.needs_owner([]))
 
     def test_a_new_context_cannot_reuse_an_unanswered_exhaustion(self):
         decision = replace(self.decision, context="implement-1")
@@ -289,12 +289,31 @@ class GateTest(unittest.TestCase):
         self.assertEqual((got.recommendation, len(model.requests)), (OPTIONS[1], 3))
         self.assertEqual([r.record["decision"]["attempt"] for r in self.store.decisions(KEY)], [1, 2])
 
-    def test_a_gate_hold_is_recorded_as_unanswered_for_zach(self):
+    def test_a_gate_hold_is_recorded_as_unanswered_for_the_owner(self):
         decision = replace(self.decision, options=("approve", "hold"), stage="implement", attempt=1)
         self.consult([reply(choice="hold")] * 3, decision=decision)
         row, = self.store.decisions(KEY)
         self.assertEqual((row.answer, row.decided_by), (None, "zach"))
         self.assertEqual(row.record["recommendation"], "hold")
+
+    def test_invalid_options_are_escalated_and_deduplicated_by_the_use_case(self):
+        import decision_actions as actions
+        decision = replace(self.decision, options=(), topic="ask", instance="ask-1",
+                           context="ctx", stage="implement", attempt=1)
+        self.store.add_decision(KEY, decision.topic, decision.question, record={
+            "decision": asdict(decision), "answer_ask_id": 17})
+        model = FakeModel([])
+        for _ in range(2):
+            got = trio_gate.decide(decision, self.store.decisions(KEY), self.policy, PERSONAS, model, self.store)
+            self.assertTrue(got.escalated)
+        self.assertEqual(model.requests, [])
+        self.assertEqual(len(self.store.decisions(KEY)), 2)
+        row = self.store.decisions(KEY)[-1]
+        self.assertIsNotNone(actions.needs_owner([row]))
+        self.assertEqual(row.record["answer_ask_id"], 17)
+        self.assertFalse(row.record["unanimous"])
+        self.assertEqual(row.record["decision"], {**asdict(decision), "options": [], "tags": ["design"]})
+        self.assertIn("at least two", row.record["error"])
 
     def test_replacement_ask_specification_and_link_are_decision_updates(self):
         import decision_actions
