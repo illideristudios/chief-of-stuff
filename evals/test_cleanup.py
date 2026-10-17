@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from sqlalchemy.exc import SQLAlchemyError
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT / "evals"))
@@ -219,7 +221,7 @@ class CleanupTest(unittest.TestCase):
             self.run_cleanup("--remove")
         self.assertEqual(stop.call_count, 2)
 
-    def test_keep_logging_deduplicates_guard_reasons_despite_changing_teardown_warnings(self) -> None:
+    def test_each_new_teardown_warning_is_logged_while_unchanged_guard_refusals_are_deduplicated(self) -> None:
         self.configure_teardown()
         tree = self.trees / "done"
         with mock.patch.object(shell_setup, "run_command", side_effect=[
@@ -230,11 +232,157 @@ class CleanupTest(unittest.TestCase):
             # An explicitly changed command permits another attempt, even for this same tree.
             (self.root / "settings.toml").write_text('[workers]\nteardown = "stack-stop --retry"\n')
             _, second = self.run_cleanup("--remove")
+            _, repeated = self.run_cleanup("--remove")
         self.assertEqual(command.call_count, 2)
         self.assertIn("chief-command-first", first)
         self.assertIn("chief-command-second", second)
+        self.assertNotIn("teardown:", self.kept(repeated)["done"])
         self.assertEqual([entry.message for entry in self.store.log(f"{KEY}-done")],
-                         [self.kept(first)["done"]])
+                         [self.kept(first)["done"], self.kept(second)["done"]])
+
+    def test_teardown_is_one_tree_attempt_even_when_an_owner_resume_write_would_fail(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        second = f"{KEY}-second"
+        self.store.upsert_item(second, forge_state="closed")
+        self.store.set_ownership(second, str(tree / "shared.txt"))
+        real_set = store.Store.set_resume
+        writes = 0
+
+        def fail_second(db, key, state):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise SQLAlchemyError("second owner write failed")
+            real_set(db, key, state)
+
+        with mock.patch.object(store.Store, "set_resume", fail_second), \
+                mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+            self.run_cleanup("--remove")
+        stop.assert_called_once()
+        self.assertIsNone(self.store.resume(f"{KEY}-done"))
+        self.assertIsNone(self.store.resume(second))
+
+    def test_engine_resume_updates_and_cleanup_attempts_cannot_overwrite_each_other(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        key = f"{KEY}-done"
+        stale = {"pending_stage": "implement"}
+        recovered = {"pending_stage": "review"}
+        self.store.set_resume(key, stale)
+        real_resume = store.Store.resume
+
+        def recover_after_read(db, issue_key):
+            snapshot = real_resume(db, issue_key)
+            self.store.set_resume(issue_key, recovered)
+            return snapshot
+
+        with mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            with mock.patch.object(store.Store, "resume", recover_after_read):
+                self.run_cleanup("--remove")
+            # Cleanup must neither read nor replace the engine's resume document.
+            self.assertIn(self.store.resume(key), (stale, recovered))
+            self.store.set_resume(key, recovered)  # a later engine writer replaces its entire document
+            self.run_cleanup("--remove")
+        stop.assert_called_once()
+        self.assertEqual(self.store.resume(key), recovered)
+
+    def test_recorded_attempts_with_mount_refusals_skip_the_launch_lock_and_rechecks(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        with mock.patch.object(shell_setup, "teardown", return_value=[]), \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+        for mounts in ([tree / "data"], None):
+            with self.subTest(mounts=mounts), \
+                    mock.patch.object(cleanup, "trees_lock") as lock, \
+                    mock.patch.object(cleanup, "owned_items", wraps=cleanup.owned_items) as owners, \
+                    mock.patch.object(cleanup, "containers", return_value=mounts) as containers, \
+                    mock.patch.object(shell_setup, "teardown") as stop:
+                code, out = self.run_cleanup("--remove")
+            self.assertEqual(code, 0, out)
+            self.assertIn("container", self.kept(out)["done"])
+            stop.assert_not_called()
+            lock.assert_not_called()
+            owners.assert_called_once()
+            containers.assert_called_once()
+
+    def test_replacing_an_owner_resume_document_does_not_forget_the_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        key = f"{KEY}-done"
+        with mock.patch.object(shell_setup, "teardown", return_value=[]) as stop, \
+                mock.patch.object(cleanup, "containers", return_value=[tree / "data"]):
+            self.run_cleanup("--remove")
+            self.store.set_resume(key, {"pending_stage": "review"})
+            self.run_cleanup("--remove")
+        stop.assert_called_once()
+        self.assertEqual(self.store.resume(key), {"pending_stage": "review"})
+
+    def test_attempt_store_failures_skip_teardown_and_postchecks_but_retain_mount_diagnostics(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        for method in ("teardown_attempt", "claim_teardown"):
+            with self.subTest(method=method), \
+                    mock.patch.object(store.Store, method, side_effect=SQLAlchemyError("unreadable"), create=True), \
+                    mock.patch.object(cleanup, "owned_items", wraps=cleanup.owned_items) as owners, \
+                    mock.patch.object(cleanup, "containers", return_value=[tree / "data"]) as containers, \
+                    mock.patch.object(shell_setup, "teardown") as stop:
+                code, out = self.run_cleanup("--remove")
+            self.assertEqual(code, 1, out)
+            self.assertIn("store teardown attempt cannot be checked", self.kept(out)["done"])
+            self.assertIn("a container binds a path in it", self.kept(out)["done"])
+            self.assertEqual(owners.call_count, 1 if method == "teardown_attempt" else 2)
+            containers.assert_called_once()
+            stop.assert_not_called()
+            self.assertTrue(tree.is_dir())
+
+    def test_locked_precheck_refusals_retain_mount_diagnostics_without_running_teardown(self) -> None:
+        self.configure_teardown()
+        tree = self.trees / "done"
+        real_lock = cleanup.trees_lock
+        admin = cleanup.git_view.locate(tree).gitdir
+        for refusal in ("layout", "claim", "git", "owner", "store"):
+            for mounts, reason in (([tree / "data"], "a container binds a path in it"),
+                                   (None, "containers cannot be checked")):
+                with self.subTest(refusal=refusal, mounts=mounts):
+                    @contextlib.contextmanager
+                    def refuse(trees):
+                        with real_lock(trees):
+                            if refusal == "layout":
+                                (admin / "locked").touch()
+                            elif refusal == "claim":
+                                self.lsof.return_value = subprocess.CompletedProcess(
+                                    ["lsof"], 0, f"p12345\nn{tree}\n", "")
+                            elif refusal == "git":
+                                (tree / "new.txt").write_text("unsaved\n")
+                            elif refusal == "owner":
+                                self.finish("done", state="open")
+                            with contextlib.ExitStack() as stack:
+                                if refusal == "store":
+                                    stack.enter_context(mock.patch.object(
+                                        cleanup, "owned_items", side_effect=SQLAlchemyError("unreadable")))
+                                yield
+
+                    with mock.patch.object(cleanup, "trees_lock", refuse), \
+                            mock.patch.object(cleanup, "containers", return_value=mounts) as containers, \
+                            mock.patch.object(shell_setup, "teardown") as stop:
+                        code, out = self.run_cleanup("--remove")
+                    (admin / "locked").unlink(missing_ok=True)
+                    (tree / "new.txt").unlink(missing_ok=True)
+                    self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 1, "", "")
+                    self.finish("done")
+                    stop.assert_not_called()
+                    containers.assert_called_once()
+                    self.assertEqual(code, 1 if refusal == "store" else 0, out)
+                    line = self.kept(out)["done"]
+                    self.assertIn(reason, line)
+                    self.assertEqual(self.store.log(f"{KEY}-done")[-1].message, line)
+                    if refusal == "owner":
+                        self.assertEqual(line, f"keep done — {KEY}-done is not finished; {reason}")
 
     def test_teardown_deleting_the_tree_or_its_git_link_reports_partial_removal(self) -> None:
         self.configure_teardown()
