@@ -636,6 +636,30 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(failed.call_count, calls)
             self.now += timedelta(seconds=1)
 
+    def test_quota_reset_clears_a_limit_stamped_with_the_planned_stage(self):
+        self._trio(quota_percent=80)
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        self.db.set_resume(KEY, {"quota_percent": 100, "review_findings": {"attempt": 1, "counts": {}},
+                                 "quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
+        self.assertEqual(self.run_pass(max_concurrency=0), [reconcile.Limit(KEY, "quota", "reached quota limit")])
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["stage"], "review")
+        self.now += timedelta(hours=1)
+        self.run_pass(max_concurrency=0)
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+
+    def test_retryable_trio_failures_stop_at_a_cap_and_exhaust_once(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        for _ in range(engine.MAX_TRIO_RETRIES + 3):
+            self.run_pass(model=failed)
+            self.now += timedelta(hours=2)
+        self.assertEqual(failed.call_count, 3 * engine.MAX_TRIO_RETRIES)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "exhausted")
+        self.assertEqual(sum(e.message.startswith("exhausted:") for e in self.db.log(KEY)), 1)
+
     def test_answered_short_ask_clears_its_ambiguity(self):
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
