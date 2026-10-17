@@ -216,7 +216,7 @@ class EngineTest(unittest.TestCase):
         self.launch = mock.Mock(side_effect=[RuntimeError("spawn failed"), ("model", "low")])
         self.run_pass()
         self.assertEqual(self.launch.call_args_list[-1].args, (OTHER, "implement", 1, "builder"))
-        self.assertEqual([s.issue_key for s in self.db.segments()], [OTHER])
+        self.assertEqual([(s.issue_key, s.outcome) for s in self.db.segments()], [(KEY, "failed"), (OTHER, None)])
         self.assertIn("spawn failed", self.db.log(KEY)[-1].message)
         self.cleanup.assert_called_once()
 
@@ -536,6 +536,15 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([(s.attempt, s.outcome) for s in self.db.segments(KEY)], [(1, "failed"), (2, "failed")])
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 2})
         self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "retry limit reached for implement")])
+
+    def test_failed_hold_restoration_survives_the_next_forge_sync(self):
+        self.pending_release(held=False)
+        with mock.patch.object(self.forge, "add_human_hold", create=True, return_value="offline"):
+            with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
+                self.run_pass()
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.launched, [])
 
     def test_manual_hold_after_quota_is_not_released_again(self):
         self.pending_release()
