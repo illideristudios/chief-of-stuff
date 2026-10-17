@@ -304,15 +304,34 @@ class FetchBaseTest(Repo):
                 self.assertIsInstance(err, str)
                 self.assertTrue(err.strip())
 
-    def test_a_fetch_timeout_reports_only_its_bound(self) -> None:
+    def test_a_fetch_timeout_names_the_first_attempt_and_its_bound(self) -> None:
         for timeout in (7, 30):
             with self.subTest(timeout=timeout), patch.object(
                 git_trees.subprocess, "run", side_effect=subprocess.TimeoutExpired(
                     ["git", "-C", str(self.clone), "fetch"], timeout,
                 ),
-            ):
+            ) as run:
                 err = git_trees.fetch_base(self.clone, timeout=timeout)
-            self.assertEqual(err, f"git fetch timed out after {timeout}s")
+            run.assert_called_once()
+            self.assertEqual(run.call_args.kwargs["timeout"], timeout)
+            self.assertEqual(err, f"git fetch timed out after {timeout}s (attempt 1 of 2)")
+
+    def test_a_timeout_after_a_ref_lock_names_the_second_attempt_and_its_bound(self) -> None:
+        """#804: a fast ref-lock failure then a timeout names the second call's budget and attempt, not elapsed time."""
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(kw["timeout"])
+            if len(seen) == 1:
+                return subprocess.CompletedProcess(argv, 1, "", "fatal: cannot lock ref 'refs/remotes/origin/main'")
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+        for timeout in (7, 30):
+            seen.clear()
+            with self.subTest(timeout=timeout), patch.object(git_trees.subprocess, "run", run):
+                err = git_trees.fetch_base(self.clone, timeout=timeout)
+            self.assertEqual(seen, [timeout, timeout])
+            self.assertEqual(err, f"git fetch timed out after {timeout}s (attempt 2 of 2)")
 
     def test_the_error_never_carries_the_exceptions_text(self) -> None:
         """#49 round 9, 5: a timeout's text repeats its command, which holds the tree's path; the error is printed."""

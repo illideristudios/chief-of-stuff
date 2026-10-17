@@ -207,7 +207,7 @@ def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
     `branch` names a branch the caller has checked (`check_branch`); it is an argv element, never a shell word."""
     ref = f"refs/remotes/origin/{branch}"
     try:
-        for _ in range(2):  # a concurrent fetch holding the ref has moved it by the second try
+        for attempt in range(2):  # a concurrent fetch holding the ref has moved it by the second try
             out = subprocess.run(
                 ["git", *GIT_WRITE_PINS, "-C", str(tree), "fetch", "-q", "--no-tags", "origin", f"+refs/heads/{branch}:{ref}"],
                 capture_output=True, text=True, errors="backslashreplace", timeout=timeout,  # stderr from ssh or a helper may hold any byte
@@ -215,8 +215,8 @@ def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
             )
             if out.returncode == 0 or "cannot lock ref" not in out.stderr:
                 break
-    except subprocess.TimeoutExpired:
-        return f"git fetch timed out after {timeout}s"
+    except subprocess.TimeoutExpired:  # name this call's budget and attempt, not the total elapsed time (#804)
+        return f"git fetch timed out after {timeout}s (attempt {attempt + 1} of 2)"
     except (OSError, subprocess.SubprocessError) as exc:  # not `exc`'s text: it can repeat the tree's path
         return f"git fetch did not run ({type(exc).__name__})"
     if out.returncode == 0:
