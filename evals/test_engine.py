@@ -364,6 +364,102 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
         self.assertFalse(self.db.items()[0].human_review)
 
+    def test_implementation_relaunch_releases_hold_before_starting_the_next_worker(self):
+        self.assert_relaunch_releases_hold("implement")
+
+    def test_review_relaunch_releases_hold_before_starting_the_next_worker(self):
+        self.assert_relaunch_releases_hold("review")
+
+    def assert_relaunch_releases_hold(self, stage):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "needs human", "bug"])])
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
+        gh.issues[1]["labels"][0]["name"] = board.label_for(stage)
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, stage, 1, NOW.isoformat(), NOW.isoformat(), "quota")
+        self.db.set_resume(KEY, {"keep": "context"})
+
+        def launch(key, launched_stage, attempt, persona):
+            self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
+            self.assertFalse(self.db.items()[0].human_review)
+            return self.launch(key, launched_stage, attempt, persona)
+
+        with mock.patch.object(self.forge.__class__, "write_stage",
+                               side_effect=self.forge.write_stage) as write:
+            actions = engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
+                                      trees=self.trees, launch=launch, clock=lambda: self.now)
+        self.assertIsInstance(actions[0], reconcile.Review if stage == "review" else reconcile.Dispatch)
+        write.assert_called_once_with(1, stage, expected=stage, initialize=False, commit=True,
+                                      release_hold=True)
+        self.assertEqual(self.launched[-1][1:3], (stage, 2))
+        self.assertIn("bug", [x["name"] for x in gh.issues[1]["labels"]])
+        self.assertEqual(self.db.resume(KEY)["keep"], "context")
+
+    def test_failed_hold_release_keeps_human_review_and_does_not_launch(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "needs human"])],
+                       fail=[("issue", "edit")])
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "quota")
+        self.run_pass()
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
+        self.assertEqual(self.launched, [])
+        self.assertEqual(len(self.db.segments(KEY)), 1)
+        self.assertIn("hold release failed", self.db.log(KEY)[-1].message)
+        self.assertIn("rate limited", self.db.log(KEY)[-1].message)
+        gh.fail.clear()
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 2, "builder")])
+
+    def test_relaunch_keeps_a_stage_required_hold(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held retry", ["stage: doing", "needs human"])])
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
+                       hold_stages=("implement",))
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "failed")
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.launched, [])
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertFalse(any(c[:2] == ["issue", "edit"] for c in gh.all_calls))
+
+    def test_unverified_release_is_retried_even_if_the_label_was_already_removed(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "needs human"])])
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "quota")
+        real_gh = gh.__call__
+
+        def fail_verification(args, input_text=None):
+            result = real_gh(args, input_text)
+            if args[:2] == ["issue", "edit"]:
+                gh.fail.add(("issue", "view"))
+            return result
+
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board,
+                                        gh=fail_verification)
+        self.run_pass()
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.launched, [])
+        self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
+        self.assertTrue(self.db.resume(KEY)["pending_stage"]["release_hold"])
+        gh.fail.clear()
+        # A cached snapshot now says the label is absent, but the guarded release must still verify.
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        with mock.patch.object(self.forge.__class__, "write_stage",
+                               return_value=SimpleNamespace(ok=False, error="verification offline")):
+            self.run_pass()
+        self.assertEqual(self.launched, [])
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertIn("verification offline", self.db.log(KEY)[-1].message)
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 2, "builder")])
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+
     def test_merge_hold_is_written_before_merging_and_waits_for_release(self):
         gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held merge", ["stage: doing"])],
                        prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})

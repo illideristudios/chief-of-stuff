@@ -538,6 +538,29 @@ class ReconcileTest(unittest.TestCase):
     def test_human_review_items_wait_without_consuming_a_slot(self):
         self.assertEqual(self.plan(replace(Item(), human_review=True)), [reconcile.Wait(KEY, "human review")])
 
+    def test_retry_releases_an_extra_hold_only_for_the_current_failed_stage(self):
+        for stage, action in (("implement", reconcile.Dispatch(KEY, "implement", "builder", 2)),
+                              ("review", reconcile.Review(KEY, 2))):
+            for outcome in ("failed", "quota", "unknown"):
+                with self.subTest(stage=stage, outcome=outcome):
+                    item = replace(Item(), stage=stage, human_review=True)
+                    history = [Segment(stage, outcome=outcome)]
+                    self.assertEqual(self.plan(item, history), [action])
+                    self.assertEqual(self.plan(item, history, hold_stages=(stage,)),
+                                     [reconcile.Wait(KEY, "human review")])
+                    self.assertEqual(self.plan(item, history, slots=0),
+                                     [reconcile.Wait(KEY, "no free worker slots")])
+                    self.assertEqual(self.plan(item, history, quota_resets={KEY: NOW + timedelta(hours=1)}),
+                                     [reconcile.Wait(KEY, "quota reset pending")])
+
+    def test_extra_holds_remain_for_completion_human_outcomes_and_other_stages(self):
+        item = replace(Item(), human_review=True)
+        for history in ([Segment("implement", outcome=outcome)]
+                        for outcome in ("done", "human_review", "blocked", None)):
+            self.assertEqual(self.plan(item, history), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.plan(item, [Segment("review", outcome="failed")]),
+                         [reconcile.Wait(KEY, "human review")])
+
     def test_dispatches_and_parallel_reviews_share_free_slots(self):
         items = [replace(Item(), issue_key=f"github:example/project#{n}", stage=stage)
                  for n, stage in ((1, "review"), (2, "review"), (3, "implement"))]
