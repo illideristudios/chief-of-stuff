@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Read a pipeline's status, or a branch head and its latest pipeline, from the configured forge."""
+"""Read a pipeline's status, or a branch head and its CI status, from the configured forge.
+
+GitLab uses the latest pipeline. GitHub aggregates the latest run of every workflow on that head.
+GitHub results use the newest run's id and url with the aggregate status.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", type=Path, required=True, help="workspace holding CLAUDE.md and its Backlog: line")
     selector = ap.add_mutually_exclusive_group(required=True)
     selector.add_argument("--id", type=int, help="GitLab pipeline ID or GitHub Actions run ID")
-    selector.add_argument("--ref", help="branch whose head and latest pipeline to read")
+    selector.add_argument("--ref", help="branch whose head and CI status to read")
     args = ap.parse_args(argv)
     if args.id is not None and args.id <= 0:
         ap.error("--id must be a positive integer")

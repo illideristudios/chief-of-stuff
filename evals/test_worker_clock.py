@@ -169,14 +169,14 @@ class ClockPreflightTest(unittest.TestCase):
             with self.assertRaisesRegex(claude_adapter.ClockError, "enabled.*user"):
                 claude_adapter.command(self.request)
         with self.popen([self.clock]), mock.patch.object(engine_clock, "version_ok", return_value=False):
-            with self.assertRaisesRegex(claude_adapter.ClockError, self.declared_range()):
+            with self.assertRaisesRegex(claude_adapter.ClockError, re.escape(self.declared_range())):
                 claude_adapter.command(self.request)
         with self.popen([self.clock]), mock.patch.object(engine_clock, "declared_clock", return_value="^9.9"):
             with self.assertRaisesRegex(claude_adapter.ClockError, r"\^9\.9"):
                 claude_adapter.command(self.request)
 
     def test_inventory_is_exposed_without_applying_clock_policy(self):
-        with self.popen([[{**self.clock, "enabled": False}]]):
+        with self.popen([{**self.clock, "enabled": False}]):
             got = claude_adapter.plugin_inventory(cwd="/worktree")
         self.assertFalse(got[0]["enabled"])
 

@@ -52,3 +52,42 @@ def done_clock(value: str, now: datetime, zone: ZoneInfo) -> datetime | None:
 def dur(td: timedelta) -> str:
     h, m = divmod(int(td.total_seconds()) // 60, 60)
     return f"{h}h{m:02d}m" if h else f"{m}m"
+
+
+def user_clock(plugins: object) -> dict | None:
+    """The enabled user-scoped datetime-inject record, or None. No filesystem and no process."""
+    if not isinstance(plugins, list):
+        return None
+    return next((plugin for plugin in plugins
+                 if isinstance(plugin, dict) and plugin.get("id") == "datetime-inject@ai-additions"
+                 and plugin.get("scope") == "user" and plugin.get("enabled") is True), None)
+
+
+def declared_clock(manifest: object) -> str:
+    """The datetime-inject range declared in a plugin manifest. Raises ValueError when it is absent."""
+    dependencies = manifest.get("dependencies", []) if isinstance(manifest, dict) else None
+    if not isinstance(dependencies, list):
+        raise ValueError("plugin.json dependencies must be a list")
+    dep = next((item for item in dependencies
+                if isinstance(item, dict) and item.get("name") == "datetime-inject"
+                and item.get("marketplace") == "ai-additions"), None)
+    version = dep.get("version") if isinstance(dep, dict) else None
+    if not isinstance(version, str):
+        raise ValueError("datetime-inject@ai-additions is not declared")
+    return version
+
+
+def version_ok(version: str, spec: str) -> bool:
+    # shortcut: caret ranges only, the form plugin.json declares; another operator needs a semver library.
+    declared = re.fullmatch(r"\^(\d+)\.(\d+)(?:\.(\d+))?", spec)
+    got = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?", version)
+    if not declared or not got:
+        return False
+    major, minor = int(declared[1]), int(declared[2])
+    patch = int(declared[3]) if declared[3] is not None else 0
+    numbers = (int(got[1]), int(got[2]), int(got[3]))
+    if major > 0:
+        return (major, minor, patch) <= numbers < (major + 1, 0, 0)
+    if minor > 0:
+        return (0, minor, patch) <= numbers < (0, minor + 1, 0)
+    return (0, 0, patch) <= numbers < (0, 0, patch + 1)

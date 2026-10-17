@@ -560,7 +560,7 @@ class MainTest(unittest.TestCase):
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         sleep.assert_not_called()
-        with mock.patch.object(engine.worker, "require_clock", create=True) as clock, \
+        with mock.patch.object(engine.worker, "require_clock") as clock, \
              mock.patch.object(engine.worker, "launch", return_value=("m", "")) as launch:
             passed.call_args.kwargs["before"]()
             passed.call_args.kwargs["launch"]("github:example/repo#1", "implement", 1, None)

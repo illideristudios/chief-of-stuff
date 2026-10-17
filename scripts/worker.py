@@ -107,7 +107,22 @@ def _declared_agent(text: str, agent: str) -> str:
 
 
 def require_clock(claude_as_profile: str = "", cwd: str | None = None) -> None:
+    """Refuse a new launch when the worker clock is missing or its inventory cannot be spawned."""
     claude_adapter.require_worker_clock(claude_as_profile, cwd)
+
+
+def recoverable(issue_key: str, stage: str, attempt: int, *, store: Any, root: Path, trees: Path,
+                clock: engine_clock.Clock = engine_clock.system) -> bool:
+    """True when launch would adopt a detached run and needs no new-launch clock preflight."""
+    try:
+        run_dir = _run_dir(root, issue_key, stage, attempt)
+    except ValueError:
+        return False
+    try:
+        found = _existing_run(_resume(store, issue_key), run_dir, stage, attempt, trees, clock)
+    except Exception:
+        return False
+    return found is not None
 
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,

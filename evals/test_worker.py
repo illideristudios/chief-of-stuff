@@ -49,7 +49,7 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
-        self.clock_patch = mock.patch.object(claude_adapter, "require_worker_clock", create=True)
+        self.clock_patch = mock.patch.object(claude_adapter, "require_worker_clock")
         self.clock = self.clock_patch.start()
         self.addCleanup(self.clock_patch.stop)
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import signal
 import subprocess
 import sys
@@ -18,6 +17,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
+import clock
 import runtimes
 from model_port import Failure, Reply, Request, quota_reset
 from shell_setup import ShellError, clean_env, login_argv, resolve
@@ -26,7 +26,7 @@ RUNTIME = runtimes.get("claude")
 
 
 class ClockError(ShellError):
-    """The host is present and the worker clock is not usable. Not a missing binary."""
+    """The host is present and the worker clock is not usable, including when inventory cannot be spawned."""
 
 
 def command(request: Request, claude_as_profile: str = "", *, check_clock: bool = True) -> list[str]:
@@ -54,8 +54,27 @@ def _host(claude_as_profile: str) -> tuple[str, list[str]]:
     return binary, lead
 
 
+def plugin_inventory(claude_as_profile: str = "", cwd: str | None = None) -> list:
+    """Unbilled user-scope plugin list. Returns the records; clock policy is applied by the caller."""
+    binary, lead = _host(claude_as_profile)
+    return _plugins(binary, lead, cwd)
+
+
 def _check_clock(binary: str, lead: list[str], cwd: str | None) -> None:
     """Unbilled preflight in the worker's account. Workers load user settings only, never project plugins."""
+    chosen = clock.user_clock(_plugins(binary, lead, cwd))
+    if chosen is None:
+        raise ClockError("worker requires datetime-inject@ai-additions installed and enabled at user scope "
+                         "in its Claude account; install/enable it there before retrying")
+    if not _payload(chosen.get("installPath")):
+        raise ClockError("worker requires datetime-inject@ai-additions installed at user scope with its hook "
+                         "payload on disk; reinstall it in its Claude account")
+    spec = _manifest_spec()
+    if not clock.version_ok(str(chosen.get("version", "")), spec):
+        raise ClockError(f"worker requires datetime-inject@ai-additions version {spec}; update it in its Claude account")
+
+
+def _plugins(binary: str, lead: list[str], cwd: str | None) -> list:
     try:
         code, out, err = _inventory(login_argv([binary, *lead, "--setting-sources", "user", "plugin", "list", "--json"]), cwd)
         if code:
@@ -66,17 +85,7 @@ def _check_clock(binary: str, lead: list[str], cwd: str | None) -> None:
             raise ValueError("plugin list must be an array of objects")
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         raise ClockError(f"worker clock preflight failed: {exc}") from None
-    clock = next((p for p in plugins if p.get("id") == "datetime-inject@ai-additions"
-                  and p.get("scope") == "user" and p.get("enabled") is True), None)
-    if clock is None:
-        raise ClockError("worker requires datetime-inject@ai-additions installed and enabled at user scope "
-                         "in its Claude account; install/enable it there before retrying")
-    if not _payload(clock.get("installPath")):
-        raise ClockError("worker requires datetime-inject@ai-additions installed at user scope with its hook "
-                         "payload on disk; reinstall it in its Claude account")
-    spec = _declared_clock()
-    if not _in_range(str(clock.get("version", "")), spec):
-        raise ClockError(f"worker requires datetime-inject@ai-additions version {spec}; update it in its Claude account")
+    return plugins
 
 
 def _inventory(argv: list[str], cwd: str | None) -> tuple[int, str, str]:
@@ -99,7 +108,7 @@ def _inventory(argv: list[str], cwd: str | None) -> tuple[int, str, str]:
             raise
         stdout.seek(0)
         stderr.seek(0)
-        return code, stdout.read().decode(), stderr.read().decode()
+        return code, stdout.read().decode(), stderr.read().decode(errors="replace")
 
 
 def _payload(path: object) -> bool:
@@ -107,36 +116,19 @@ def _payload(path: object) -> bool:
     return isinstance(path, str) and path != "" and (Path(path) / "hooks" / "hooks.json").is_file()
 
 
-def _declared_clock() -> str:
-    manifest = json.loads((Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json").read_text())
-    dep = next((item for item in manifest.get("dependencies", [])
-                if item.get("name") == "datetime-inject" and item.get("marketplace") == "ai-additions"), None)
-    version = dep.get("version") if isinstance(dep, dict) else None
-    if not isinstance(version, str):
-        raise ClockError("worker requires datetime-inject@ai-additions declared in plugin.json")
-    return version
-
-
-def _in_range(version: str, spec: str) -> bool:
-    # shortcut: caret ranges only, the form plugin.json declares; another operator needs a semver library.
-    declared = re.fullmatch(r"\^(\d+)\.(\d+)(?:\.(\d+))?", spec)
-    got = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:\+[0-9A-Za-z.-]+)?", version)
-    if not declared or not got:
-        return False
-    major, minor = int(declared[1]), int(declared[2])
-    patch = int(declared[3]) if declared[3] is not None else 0
-    numbers = (int(got[1]), int(got[2]), int(got[3]))
-    if major > 0:
-        return (major, minor, patch) <= numbers < (major + 1, 0, 0)
-    if minor > 0:
-        return (0, minor, patch) <= numbers < (0, minor + 1, 0)
-    return (0, 0, patch) <= numbers < (0, 0, patch + 1)
+def _manifest_spec() -> str:
+    try:
+        manifest = json.loads((Path(__file__).resolve().parent.parent / ".claude-plugin" / "plugin.json").read_text())
+        return clock.declared_clock(manifest)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        raise ClockError(f"worker clock manifest unreadable: {exc}") from None
 
 
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
           env: dict[str, str] | None = None) -> subprocess.Popen:
     """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
-    # The launch port checks the clock before it creates this directory.
+    # engine.before preflights a new launch once per pass and skips a recoverable run (clock_checked).
+    # A direct launch preflights in launch() before mkdir. start() does not check the clock.
     prepared = command(request, claude_as_profile, check_clock=False)
     (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
                                                     "session_id": request.session_id,
