@@ -41,7 +41,7 @@ class CompletionTest(unittest.TestCase):
     def test_a_gone_worker_is_closed_from_its_evidence(self):
         self.assertEqual(completion.abandoned(False), completion.Verdict("failed", "worker gone"))
         self.assertEqual(completion.abandoned(False, read_only=True, changed=True),
-                         completion.Verdict("done", "read-only run left changes", True))
+                         completion.Verdict("failed", "read-only run left changes", True))
         self.assertEqual(completion.abandoned(False, report="done", on_main=True, suite_on_main=True),
                          completion.Verdict("done", ""))
         self.assertEqual(completion.abandoned(False, report="done", on_main=False, suite_on_main=True),
@@ -66,3 +66,34 @@ class CompletionTest(unittest.TestCase):
                 verdict = completion.abandoned(False, report="done", tree=CLEAN, on_main=False,
                                                suite_on_main=False, landing_required=final)
                 self.assertEqual(verdict.human_review, held)
+
+
+class StageCompletionRegressionTest(unittest.TestCase):
+    def test_clean_detached_or_untracked_premerge_done_is_not_an_orphan(self):
+        for branch in ("feature", "(detached)"):
+            with self.subTest(branch=branch):
+                verdict = completion.abandoned(
+                    False, report="done", tree=TreeState(branch, 0, 3, None), on_main=False,
+                    tree_name="review-tree", tree_claims=(orphans.Claim("worker", False, "exited"),),
+                    landing_required=False)
+                self.assertEqual(verdict, completion.Verdict("done", ""))
+
+    def test_premerge_done_still_holds_uncommitted_or_unpushed_work(self):
+        for tree in (TreeState("feature", 1, 3, None), TreeState("feature", 0, 3, 1)):
+            with self.subTest(tree=tree):
+                verdict = completion.abandoned(False, report="done", tree=tree, landing_required=False)
+                self.assertEqual((verdict.outcome, verdict.human_review), ("done", True))
+
+    def test_unreadable_trees_hold_every_outcome_without_turning_failure_into_done(self):
+        for read_only in (False, True):
+            for report in (None, "failed", "done", "quota", "unknown", "blocked"):
+                with self.subTest(read_only=read_only, report=report):
+                    verdict = completion.abandoned(False, report=report, read_only=read_only,
+                                                   changed=None, tree_unreadable=True, landing_required=False)
+                    self.assertEqual(verdict, completion.Verdict(report or "failed", "worker tree could not be read", True))
+
+    def test_read_only_changes_preserve_a_failed_or_retryable_outcome(self):
+        for report in (None, "failed", "quota", "unknown", "blocked", "done"):
+            with self.subTest(report=report):
+                verdict = completion.abandoned(False, report=report, read_only=True, changed=True)
+                self.assertEqual(verdict, completion.Verdict(report or "failed", "read-only run left changes", True))

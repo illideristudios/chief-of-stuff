@@ -242,6 +242,22 @@ class WorkerTest(unittest.TestCase):
             self.launch("review")
         self.assertEqual(build.call_args.kwargs["from_branch"], "feature/existing")
 
+    def test_starting_head_is_saved_before_the_worker_can_change_the_tree_and_survives_adoption(self):
+        def start(request, run_dir, **kwargs):
+            self.assertEqual((run_dir / "starting_head").read_text(), "head")
+            return self.start(request, run_dir, **kwargs)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=start), \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.launch()
+            data = self.db.resume(KEY)
+            record = data["runs"]["implement-1"]
+            self.assertEqual(record.get("starting_head"), "head")
+            data["runs"] = {}
+            self.db.set_resume(KEY, data)
+            self.launch()
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["starting_head"], "head")
+
     def test_reviewed_head_round_trips_through_run_and_collected_result(self):
         run = self.launched("review")
         record = self.db.resume(KEY)["runs"]["review-1"]

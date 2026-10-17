@@ -740,14 +740,24 @@ class ReconcileTest(unittest.TestCase):
                                  {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=conflict)
         self.assertEqual(actions, [reconcile.Wait(KEY, f"file ownership conflict with {other}")])
 
-    def test_a_finished_read_only_run_that_left_changes_waits(self):
-        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, True),))
-        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts),
-                         [reconcile.Wait(KEY, "read-only run left changes")])
+    def test_released_read_only_hold_is_not_reinstated_from_a_retained_tree(self):
+        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, True),), blockers=())
+        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(item=replace(Item(), human_review=True), history=[Segment("implement")], facts=facts),
+                         [reconcile.Wait(KEY, "human review")])
 
     def test_unknown_finished_tree_does_not_reinstate_a_released_read_only_hold(self):
         facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, None),), blockers=())
         self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
+
+    def test_workflow_terminal_worker_requires_landing_when_it_disappears(self):
+        import readiness
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement")
+        facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),),
+                                reports=(readiness.Report(KEY, "done", "implement", 1),),
+                                on_main=((KEY, False),), changed=((KEY, False),))
+        action = self.plan(history=[Segment("implement", ended_at=None)], facts=facts)[0]
+        self.assertEqual(action, reconcile.Close(KEY, "implement", 1, "done", "not on main", True))
 
 
 class SuiteHoldTest(unittest.TestCase):

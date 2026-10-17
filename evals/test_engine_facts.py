@@ -1,6 +1,7 @@
 """One pass's facts are gathered before the planner runs."""
 
 import subprocess
+import os
 import sys
 import tempfile
 import unittest
@@ -128,6 +129,48 @@ class GatherTest(unittest.TestCase):
                 self.assertEqual(facts.changed, ((KEY, False),))
                 self.assertEqual(facts.progress, ((KEY, NOW),))
                 self.assertEqual(facts.on_main, ((KEY, True),))
+
+    def test_recorded_tree_outside_the_workspace_is_unknown_without_reading_git(self):
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["tree"] = str(self.root.parent / "other-workspace")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(engine_facts, "_tree_facts") as read:
+            self.assertEqual(self.gather().changed, ((KEY, None),))
+        read.assert_not_called()
+
+    def test_read_only_changes_are_relative_to_starting_head_in_a_real_detached_tree(self):
+        tree = self.trees / "review"
+        tree.mkdir()
+        env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull}
+        def git(*args):
+            return subprocess.run(["git", "-C", str(tree), *args], env=env, check=True,
+                                  text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.strip()
+        git("init", "-b", "main")
+        git("config", "user.name", "Example")
+        git("config", "user.email", "example@example.test")
+        (tree / "file").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        git("update-ref", "refs/remotes/origin/main", git("rev-parse", "HEAD"))
+        git("checkout", "-b", "feature")
+        (tree / "file").write_text("feature")
+        git("commit", "-am", "feature")
+        head = git("rev-parse", "HEAD")
+        git("checkout", "--detach")
+        self.db.replace_file_ownership(KEY, [(".", "read")])
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"].update(tree=str(tree), starting_head=head)
+        self.db.set_resume(KEY, data)
+        facts = self.gather(SimpleNamespace(blocked_by=lambda: {}))
+        self.assertEqual(dict(facts.changed)[KEY], False)
+        self.assertGreater(dict(facts.trees)[KEY].off_origin, 0)
+        self.assertIsNone(dict(facts.trees)[KEY].unpushed)
+        (tree / "file").write_text("changed during review")
+        git("commit", "-am", "review changed a file")
+        self.assertEqual(dict(self.gather().changed)[KEY], True)
+        git("reset", "--hard", head)
+        (tree / "untracked").write_text("left behind")
+        self.assertEqual(dict(self.gather().changed)[KEY], True)
 
     def test_late_reports_from_an_older_run_do_not_replace_the_latest_stop(self):
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")

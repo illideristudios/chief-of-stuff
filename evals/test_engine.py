@@ -285,6 +285,7 @@ class EngineTest(unittest.TestCase):
                             for row in self.db.log(KEY)))
             self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
             self.assertEqual(len(self.launched), 1)
+
     def test_writable_control_with_the_same_clean_on_main_tree_has_no_hold(self):
         self.run_pass()
         self.publish_exit()
@@ -304,6 +305,46 @@ class EngineTest(unittest.TestCase):
         self.assertFalse(self.db.items()[0].human_review)
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
 
+    def test_clean_detached_review_finishes_without_a_human_hold(self):
+        self.forge.rows[0].update(stage="review", body="## File ownership\n- read-only: `.`")
+        self.run_pass()
+        self.publish_exit(stage="review")
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("(detached)", 0, 2, None), False, NOW)), \
+             mock.patch.object(engine.engine_facts, "_changed", return_value=False):
+            self.run_pass()
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+
+    def test_releasing_a_read_only_completion_hold_allows_the_next_stage(self):
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
+        self.forge.kanban = SimpleNamespace(stage_map={}, holds=lambda stage: False)
+        self.forge.add_human_hold = lambda number: self.forge.rows[0].update(human_review=True)
+        self.run_pass()
+        self.publish_exit()
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+            self.forge.rows[0]["human_review"] = False
+            self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertEqual(len(self.launched), 2)
+
+    def test_terminal_worker_exit_requires_landing_from_its_workflow(self):
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement")
+        self.run_pass()
+        self.publish_exit()
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 2, 0), False, NOW)):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertTrue(any("not on main" in row.message for row in self.db.log(KEY)))
+
+    def test_unreadable_failed_and_quota_runs_are_held_without_advancing(self):
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
+        self.run_pass()
+        self.publish_exit("failed")
+        self.run_pass()  # the fake recorded tree is missing
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertTrue(any("worker tree could not be read" in row.message for row in self.db.log(KEY)))
+
     def test_retryable_exits_keep_their_outcome_and_tree_without_an_orphan_hold(self):
         self.run_pass()
         self.publish_exit()
@@ -322,15 +363,15 @@ class EngineTest(unittest.TestCase):
                 self.assertEqual(self.db.segments(KEY)[-1].outcome, outcome)
                 self.assertIn("retry later", self.db.log(KEY)[-1].message)
 
-    def test_read_only_verdict_preserves_done_after_a_failed_adapter_exit(self):
+    def test_read_only_verdict_preserves_failure_after_a_failed_adapter_exit(self):
         self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
         self.run_pass()
         self.publish_exit("failed")
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 1, 0), False, NOW)), \
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 1, 0), False, NOW)), \
              mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
             self.run_pass()
         self.assertTrue(self.db.items()[0].human_review)
-        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
         self.assertTrue(any("worker implement attempt 1:" in row.message and "read-only run left changes" in row.message
                             for row in self.db.log(KEY)))
 

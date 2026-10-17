@@ -29,6 +29,15 @@ class IssueScopesTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + path), [(".", "write")])
 
+    def test_cells_that_cannot_round_trip_through_overlap_default_to_repository_write(self):
+        for paths in ("`none`", "`none, src`", "`src,a.py`", "`src/a; worktree hidden`",
+                      "`src/a` src/b", "src/a, `src/b`", "`src/a` and `src/b`", "`src/a` `src/b`",
+                      "`src/a", "`src/a` trailing", "` src/a `"):
+            with self.subTest(paths=paths):
+                scopes = ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + paths)
+                self.assertEqual(scopes, [(".", "write")])
+                self.assertTrue(ownership.overlaps(scopes[0][0], "src/anything"))
+
 
 class ReadOnlyTest(unittest.TestCase):
     def test_a_cell_that_starts_with_the_word_none_is_read_only(self):
