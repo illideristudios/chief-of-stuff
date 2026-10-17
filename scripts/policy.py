@@ -166,6 +166,8 @@ def _trio(where: str, value, personas: set[str]) -> tuple[str, ...]:
     trio = _names(where, value)
     if len(trio) != 3 or len(set(trio)) != 3 or not set(trio) <= personas:
         raise PolicyError(f"{where} must be three distinct personas of {', '.join(sorted(personas))}")
+    if "architect" in trio:
+        raise PolicyError(f"{where}: architect cannot be a decision-trio member")
     return trio
 
 

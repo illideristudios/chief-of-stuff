@@ -55,15 +55,27 @@ def is_restarted(row: Any, history: Sequence[Any] = (), start: str = "implement"
     return False
 
 
+def identity(row: Any) -> tuple[str, str, str]:
+    record = row.record if isinstance(getattr(row, "record", None), dict) else {}
+    decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    return row.topic, row.question, decision.get("instance", "")
+
+
+def latest(decisions: Sequence[Any]) -> dict[tuple[str, str, str], Any]:
+    """Append-only state, independently for every decision instance."""
+    return {identity(d): d for d in decisions}
+
+
 def open_reversal(decisions: Sequence[Any], history: Sequence[Any] = (), start: str = "implement") -> bool:
     """True when the latest row for any question is a reversal not yet restarted at `start`."""
-    latest = {(d.topic, d.question): d for d in decisions}
-    return any(is_reversed(d) and not is_restarted(d, history, start) for d in latest.values())
+    rows = latest(decisions)
+    return any(is_reversed(d) and not is_restarted(d, history, start) for d in rows.values())
 
 
-def reverse(decisions: Sequence[Any], topic: str, question: str) -> Reversal:
+def reverse(decisions: Sequence[Any], topic: str, question: str, *, instance: str | None = None) -> Reversal:
     """Board reversal: reopen an adopted decision so the planner routes the work again."""
-    rows = [row for row in decisions if row.topic == topic and row.question == question]
+    rows = [row for row in decisions if row.topic == topic and row.question == question
+            and (instance is None or identity(row)[2] == instance)]
     if not rows or not (rows[-1].answer or "").strip():
         raise ValueError("only an adopted decision can be reversed")
     prior = rows[-1].record if isinstance(rows[-1].record, dict) else {}
@@ -72,23 +84,42 @@ def reverse(decisions: Sequence[Any], topic: str, question: str) -> Reversal:
                             "decision": prior.get("decision")})
 
 
-def restarted(decisions: Sequence[Any], stage: str) -> list[Reversal]:
+def restarted(decisions: Sequence[Any], stage: str, attempt: int | None = None) -> list[Reversal]:
     """Resolving rows for open reversals once `stage` (`workflow.start`) is dispatched."""
-    latest = {(d.topic, d.question): d for d in decisions}
+    rows = latest(decisions)
     return [Reversal(topic=d.topic, question=d.question, answer=None, decided_by="",
-                     record={"restarted": stage, "recommendation": d.record.get("recommendation"),
+                     record={"restarted": stage, "restart_attempt": attempt, "recommendation": d.record.get("recommendation"),
                              "decision": d.record.get("decision")})
-            for d in latest.values() if is_reversed(d)]
+            for d in rows.values() if is_reversed(d)]
 
 
-def replacements(decisions: Sequence[Any]) -> list[Any]:
-    """Restarted decisions still requiring a replacement consultation."""
-    latest = {(d.topic, d.question): d for d in decisions}
-    restarted_keys = set()
+def replacements(decisions: Sequence[Any], history: Sequence[Any], start: str,
+                 gates: Sequence[str] = ()) -> list[tuple[Any, Any]]:
+    """Recover replacements from restart evidence, only after that worker completes successfully.
+
+    The segment is durable before a restarted marker, so a missing marker must not lose a reversal.
+    Gate replacements are routed by the planner at the reworked gate instead.
+    """
+    origins = {}
     for row in decisions:
-        key = (row.topic, row.question)
+        key = identity(row)
         if is_reversed(row):
-            restarted_keys.discard(key)
+            origins[key] = row
         elif isinstance(row.record, dict) and row.record.get("restarted"):
-            restarted_keys.add(key)
-    return [d for key, d in latest.items() if key in restarted_keys and not d.answer]
+            if row.record.get("restart_attempt") is not None or key not in origins:
+                origins[key] = row
+    result = []
+    for key, row in latest(decisions).items():
+        origin = origins.get(key)
+        if origin is None or row.answer or row.topic in gates:
+            continue
+        record = origin.record
+        attempt = record.get("restart_attempt")
+        candidates = [s for s in history if s.stage == start and s.started_at and (
+            s.attempt >= attempt if attempt is not None else
+            not origin.created_at or _time(s.started_at) >= _time(origin.created_at))]
+        segment = min((s for s in candidates if s.ended_at and s.outcome == "done"),
+                      key=lambda s: (_time(s.started_at), s.attempt), default=None)
+        if segment is not None:
+            result.append((origin, segment))
+    return result

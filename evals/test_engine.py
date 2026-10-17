@@ -865,6 +865,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
         self.assertEqual(self.forge.merges, [])
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["merge"])
+        self.forge.rows[0]["human_review"] = False
         self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
         self.assertEqual(len(self.forge.merges), 1)
         self.assertNotIn("waived_gates", self.db.resume(KEY))

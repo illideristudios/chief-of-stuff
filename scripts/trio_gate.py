@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
-from decision_actions import retryable_failure
+from decision_actions import identity, retryable_failure
 from model_port import Failure, Model, Reply, Request
 from policy import Persona, Policy, PolicyError
 
@@ -21,6 +21,7 @@ class Decision:
     options: tuple[str, ...]
     tags: tuple[str, ...] = ()
     context: str = ""
+    instance: str = ""
 
     def __post_init__(self):
         if (len(self.options) < 2 or not all(isinstance(option, str) and option.strip() for option in self.options)
@@ -45,6 +46,8 @@ def select(policy: Policy, personas: Mapping[str, Persona], tags: Sequence[str])
     if (len(names) != 3 or not all(isinstance(name, str) and name in personas for name in names)
             or len(set(names)) != 3):
         raise PolicyError("trio must be three distinct known personas")
+    if "architect" in names:
+        raise PolicyError("architect cannot be a decision-trio member")
     return tuple(personas[name] for name in names)
 
 
@@ -96,7 +99,7 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
 
 def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
     latest = next((row for row in reversed(earlier)
-                   if row.topic == decision.topic and row.question == decision.question), None)
+                   if identity(row) == (decision.topic, decision.question, decision.instance)), None)
     if latest is None:
         return None
     record = latest.record if isinstance(getattr(latest, "record", None), dict) else {}
