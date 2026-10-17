@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -222,6 +223,48 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(list(self.db.segments()), [])
         self.assertEqual(self.launched, [])
         self.assertEqual([log.message for log in self.db.log(KEY)], ["dispatch failed: clock refused"])
+
+    def test_a_recoverable_run_launches_while_the_clock_preflight_is_down(self):
+        tree = self.trees / "kept"
+        tree.mkdir()
+        run_dir = supervisor.state_dir(self.root) / "runs" / "1-implement-1"
+        run_dir.mkdir(parents=True)
+        (run_dir / "started.json").write_text(json.dumps({"pid": 5, "runner_pid": 6, "session_id": "s"}))
+        (run_dir / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        self.db.upsert_item(KEY, title="Kept", stage="implement")
+        self.db.set_resume(KEY, {"worktree": str(tree), "work_branch": "work/kept"})
+        calls = []
+
+        def before():
+            calls.append("preflight")
+            raise RuntimeError("clock down")
+
+        self.run_pass(before=before)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+
+    def test_one_pass_runs_the_clock_preflight_once(self):
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        calls = []
+
+        def before():
+            calls.append("preflight")
+
+        self.run_pass(before=before)
+        self.assertEqual(calls, ["preflight"])
+        self.assertEqual(len(self.launched), 2)
+
+    def test_a_failed_preflight_is_not_repeated_for_later_actions(self):
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        calls = []
+
+        def before():
+            calls.append("preflight")
+            raise RuntimeError("clock down")
+
+        self.run_pass(before=before)
+        self.assertEqual(calls, ["preflight"])
+        self.assertEqual(self.launched, [])
 
     def test_one_failed_action_does_not_stop_the_next(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})

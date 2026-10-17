@@ -22,6 +22,7 @@ from unittest import mock
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import claude_adapter
+import clock as engine_clock
 from model_port import Reply, Request
 from shell_setup import ShellError
 
@@ -52,14 +53,14 @@ class ClockPreflightTest(unittest.TestCase):
         self.clock = {**CLOCK, "installPath": self.payload.name}
         self.request = Request(prompt="work", worker=True, cwd="/worktree", plugin_dirs=("/guard",))
 
-    def popen(self, plugins, *, code=0, stderr="", fail=None):
+    def popen(self, plugins, *, code=0, stderr="", stderr_bytes=None, fail=None):
         def spawn(argv, **kwargs):
             self.seen = (argv, kwargs)
             if isinstance(fail, OSError):
                 raise fail
             body = plugins if isinstance(plugins, str) else json.dumps(plugins)
             kwargs["stdout"].write(body.encode())
-            kwargs["stderr"].write(stderr.encode())
+            kwargs["stderr"].write(stderr_bytes if stderr_bytes is not None else stderr.encode())
             proc = mock.Mock(pid=44)
             proc.wait.side_effect = fail if isinstance(fail, subprocess.TimeoutExpired) else None
             proc.wait.return_value = code
@@ -162,6 +163,50 @@ class ClockPreflightTest(unittest.TestCase):
         self.assertEqual(good.returncode, 0, good.stderr)
         row = json.loads(good.stdout)[0]
         self.assertTrue((Path(row["installPath"]) / "hooks" / "hooks.json").is_file())
+
+    def test_preflight_uses_the_inner_clock_judgement(self):
+        with self.popen([self.clock]), mock.patch.object(engine_clock, "user_clock", return_value=None):
+            with self.assertRaisesRegex(claude_adapter.ClockError, "enabled.*user"):
+                claude_adapter.command(self.request)
+        with self.popen([self.clock]), mock.patch.object(engine_clock, "version_ok", return_value=False):
+            with self.assertRaisesRegex(claude_adapter.ClockError, self.declared_range()):
+                claude_adapter.command(self.request)
+        with self.popen([self.clock]), mock.patch.object(engine_clock, "declared_clock", return_value="^9.9"):
+            with self.assertRaisesRegex(claude_adapter.ClockError, r"\^9\.9"):
+                claude_adapter.command(self.request)
+
+    def test_inventory_is_exposed_without_applying_clock_policy(self):
+        with self.popen([[{**self.clock, "enabled": False}]]):
+            got = claude_adapter.plugin_inventory(cwd="/worktree")
+        self.assertFalse(got[0]["enabled"])
+
+    def test_manifest_and_stderr_failures_stay_clock_results(self):
+        real = Path.read_text
+
+        def broken(self, *args, **kwargs):
+            if self.name == "plugin.json":
+                raise OSError("denied")
+            return real(self, *args, **kwargs)
+
+        def malformed(self, *args, **kwargs):
+            if self.name == "plugin.json":
+                return "{"
+            return real(self, *args, **kwargs)
+
+        with self.popen([self.clock]), mock.patch.object(Path, "read_text", broken):
+            self.assertEqual(claude_adapter.call(self.request).kind, "clock")
+        with self.popen([self.clock]), mock.patch.object(Path, "read_text", malformed):
+            self.assertEqual(claude_adapter.call(self.request).kind, "clock")
+        with self.popen([self.clock], stderr_bytes=b"\xff\xfe"):
+            claude_adapter.command(self.request)
+
+    def test_a_captured_user_inventory_is_accepted(self):
+        captured = json.loads((ROOT / "evals" / "fixtures" / "claude-plugin-list-user.json").read_text())
+        self.assertIn("projectEnabled", captured[0])
+        self.assertIn("errors", captured[0])
+        row = {**captured[0], "installPath": self.payload.name}
+        with self.popen([row]):
+            claude_adapter.command(self.request)
 
 
 @unittest.skipUnless(os.environ.get("CHIEF_CLOCK_LIVE") == "1", "opt-in: two real Claude worker calls")

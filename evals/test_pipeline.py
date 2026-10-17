@@ -128,6 +128,8 @@ class PipelineCliTest(unittest.TestCase):
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn("--id", done.stdout)
         self.assertIn("--ref", done.stdout)
+        self.assertIn("GitHub aggregates", done.stdout)
+        self.assertIn("newest run", done.stdout)
 
 
 class ForgePipelineTest(unittest.TestCase):
