@@ -522,6 +522,89 @@ class WorkerTeardownTest(unittest.TestCase):
                 self.fx._run(self.fx._fake(None, write_partial=False))
         self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), f"{os.getpid()} Security audit\n")
 
+    def test_missing_launch_tracker_preserves_the_interrupt_and_marker(self):
+        for rollover in (False, True):
+            with self.subTest(rollover=rollover):
+                self.fx.tracker.write_text(fixtures.TRACKER)
+                (self.tree / dispatch_prompt.DISPATCH_FILE).unlink(missing_ok=True)
+                def teardown(*args):
+                    self.fx.tracker.unlink()
+                    raise KeyboardInterrupt
+                with mock.patch.object(one_shot, "_run_worker", return_value=127), \
+                     mock.patch.object(shell_setup, "teardown", side_effect=teardown), \
+                     mock.patch.object(one_shot, "datetime", wraps=one_shot.datetime) as clock:
+                    clock.now.return_value = one_shot.datetime.fromisoformat(
+                        "2026-09-19T12:00:00+00:00" if rollover else "2026-09-18T12:00:00+00:00")
+                    with self.assertRaises(KeyboardInterrupt):
+                        self.fx._run(self.fx._fake(None, write_partial=False))
+                self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), f"{os.getpid()} Security audit\n")
+                (self.tree / one_shot.PIDFILE).unlink()
+
+    def test_reconcile_refuses_missing_or_unreadable_launch_tracker(self):
+        end = self.root / self.fx.END_TRACKER
+        original = Path.read_text
+        for rollover in (False, True):
+            for failure in (FileNotFoundError("launch missing"), PermissionError("launch unreadable"),
+                            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")):
+                with self.subTest(rollover=rollover, failure=failure):
+                    end.write_text(fixtures.TRACKER.replace("| unassigned | open |", "| worker01 | open |"))
+                    before = end.read_text()
+                    one_shot.launcher_copy(self.root, self.tree).unlink(missing_ok=True)
+                    def read(path, *args, **kwargs):
+                        if path == self.fx.tracker:
+                            raise failure
+                        return original(path, *args, **kwargs)
+                    with mock.patch.object(Path, "read_text", read), \
+                         mock.patch.object(one_shot, "datetime", wraps=one_shot.datetime) as clock:
+                        clock.now.return_value = one_shot.datetime.fromisoformat(
+                            "2026-09-19T12:00:00+00:00" if rollover else "2026-09-18T12:00:00+00:00")
+                        with self.assertRaises(type(failure)):
+                            one_shot.reconcile(self.root, "2026-09-18", "Security audit", "worker01", self.tree, 0)
+                        cfg = dispatch_prompt.config(self.root)
+                        self.assertTrue(one_shot._pending_run(self.root, cfg, "2026-09-18", "Security audit", "worker01"))
+                    self.assertEqual(end.read_text(), before)
+                    self.assertFalse(one_shot.launcher_copy(self.root, self.tree).exists())
+
+    def test_adoption_continues_other_trees_after_tracker_read_errors(self):
+        good = self.tree.parent / "good"
+        subprocess.run(["git", "clone", "-q", str(self.tree), str(good)], check=True)
+        today = self.root / self.fx.END_TRACKER
+        original = Path.read_text
+        now = one_shot.datetime.fromisoformat("2026-09-19T12:00:00+00:00")
+        for during_reconcile in (False, True):
+            with self.subTest(during_reconcile=during_reconcile):
+                self.fx.tracker.write_text(fixtures.TRACKER)
+                one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
+                                       "codex", "", "10:00")
+                today.write_text(fixtures.TRACKER.replace("Security audit", "Export header"))
+                one_shot.record_launch(today, "Export header", "worker02", "worktree `good` (main)",
+                                       "codex", "", "10:00")
+                bad_reads = 0
+                def read(path, *args, **kwargs):
+                    nonlocal bad_reads
+                    if path == self.fx.tracker:
+                        bad_reads += 1
+                        if not during_reconcile or bad_reads > 1:
+                            raise PermissionError("bad tracker unavailable")
+                    return original(path, *args, **kwargs)
+                for tree, task in ((self.tree, "Security audit"), (good, "Export header")):
+                    pidfile = tree / one_shot.PIDFILE
+                    pidfile.parent.mkdir(exist_ok=True)
+                    pidfile.write_text(f"999999999 {task}\n")
+                    one_shot.launcher_copy(self.root, tree).unlink(missing_ok=True)
+                with mock.patch.object(Path, "read_text", read), \
+                     mock.patch.object(one_shot, "datetime", wraps=one_shot.datetime) as clock, \
+                     mock.patch.object(one_shot, "pidfile_runs", return_value=[
+                         (self.tree, 999999999, "Security audit"), (good, 999999999, "Export header")]):
+                    clock.now.return_value = now
+                    with self.assertRaisesRegex(PermissionError, "bad tracker unavailable"):
+                        one_shot.adopt(self.root)
+                self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), "999999999 Security audit\n")
+                self.assertFalse((good / one_shot.PIDFILE).exists())
+                self.assertNotIn("| worker02 | running", today.read_text())
+                self.assertEqual(decode(one_shot.launcher_copy(self.root, good).read_text())["task"], "Export header")
+                self.assertIn("| worker01 | running", self.fx.tracker.read_text())
+
     def test_unreadable_adoption_tracker_keeps_evidence_and_retries_after_recovery(self):
         one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
                                "codex", "", "10:00")
