@@ -22,6 +22,7 @@ import shell_setup
 import worker
 import engine
 import process_status
+import tree_claims
 from _vendor.toon_format import decode
 
 
@@ -196,29 +197,30 @@ class WorkerTeardownTest(unittest.TestCase):
                                    max_concurrency=1, clock=lambda: engine_fixtures.NOW, launch=lambda: ("example", ""))
         run = Path(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"]["run_dir"])
         self.assertFalse(list((fx.root / ".chief-of-stuff/sessions").glob("*.json")))
-        self.assertIn(fx.tree, process_status.engine_trees(fx.root))
+        self.assertIn(fx.tree, self.engine_live(fx.root))
         (fx.root / "CLAUDE.md").write_text(fixtures.CLAUDE + '- Settings: `settings.toml`\n')
         (fx.root / "daily").mkdir()
         (fx.root / "daily/2026-09-18-tracker.md").write_text(fixtures.TRACKER)
         command = self.list_command([{"stack": "engine-vm", "worktree": str(fx.tree)}])
         (fx.root / "settings.toml").write_text(f"[workers]\nteardown_list = {json.dumps(command)}\n")
         self.assertEqual(audit_tasks.audit(fx.root, "2026-09-18", check_issues=False).stacks, [])
-        # A live unrelated PID must not resurrect a run's ownership.
-        started = json.loads((run / "started.json").read_text())
-        (run / "started.json").write_text(json.dumps({**started, "session_id": "wrong-session"}))
-        self.assertNotIn(fx.tree, process_status.engine_trees(fx.root))
-        (run / "started.json").write_text(json.dumps(started))
+        # Matching session ids on a closed segment: a dead PID is not ownership, and identity has to run.
+        record = fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"]
+        with mock.patch.object(process_status, "identity", return_value=None) as reused:
+            claims = tree_claims.engine_claims(fx.root, process_status.identity, [("done", record)])
+        reused.assert_called()
+        self.assertFalse(any(claim.live for rows in claims.values() for claim in rows))
         child = worker._runners[str(run)]
         child.terminate()
         child.wait(timeout=5)
-        self.assertIn(fx.tree, process_status.engine_trees(fx.root))
+        self.assertIn(fx.tree, self.engine_live(fx.root))
         fx.report(run)
         (run / "stdout").write_text('{"is_error": false, "result": "done"}')
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code": 0}')
-        self.assertIn(fx.tree, process_status.engine_trees(fx.root))
+        self.assertIn(fx.tree, self.engine_live(fx.root))
         def cleanup(*args):
-            self.assertIn(fx.tree, process_status.engine_trees(fx.root))
+            self.assertIn(fx.tree, self.engine_live(fx.root))
             self.assertEqual(audit_tasks.audit(fx.root, "2026-09-18", check_issues=False).stacks, [])
             return []
         with mock.patch.object(worker, "teardown", side_effect=cleanup):
@@ -226,8 +228,55 @@ class WorkerTeardownTest(unittest.TestCase):
         self.assertEqual(fx.db.segments()[0].outcome, "done")
         fx.launch()  # Recovering durable exit evidence must not register the exited PID.
         self.assertFalse(list((fx.root / ".chief-of-stuff/sessions").glob("*.json")))
-        self.assertNotIn(fx.tree, process_status.engine_trees(fx.root))
+        self.assertNotIn(fx.tree, self.engine_live(fx.root))
         self.assertIn("engine-vm", str(audit_tasks.audit(fx.root, "2026-09-18", check_issues=False).stacks[0]))
+
+    def _started_engine(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        def start(request, run_dir, **kwargs):
+            child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", request.session_id], start_new_session=True)
+            self.addCleanup(lambda: child.poll() is None and (child.kill(), child.wait()))
+            (run_dir / "command.json").write_text(json.dumps({"cwd": request.cwd, "session_id": request.session_id}))
+            (run_dir / "started.json").write_text(json.dumps({"pid": child.pid, "runner_pid": child.pid,
+                                                             "session_id": request.session_id}))
+            return child
+        with mock.patch.object(worker.make_worktree, "build", return_value=type("Tree", (), {"path": fx.tree})()), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=start):
+            fx.launch()
+        engine_fixtures.slots.claim(fx.trees, fx.db, issue_key=engine_fixtures.KEY, stage="implement", attempt=1,
+                                   max_concurrency=1, clock=lambda: engine_fixtures.NOW, launch=lambda: ("example", ""))
+        run = Path(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"]["run_dir"])
+        return fx, run
+
+    def test_a_closed_segment_does_not_hide_a_live_pid(self):
+        fx, _run = self._started_engine()
+        fx.db.end_segment(engine_fixtures.KEY, "implement", 1, "2026-09-18T00:00:00+00:00", "done")
+        with mock.patch.object(process_status, "identity", return_value="still-here"):
+            self.assertIn(fx.tree, self.engine_live(fx.root))
+
+    def test_an_open_segment_with_exit_json_stays_claimed_before_resume_is_saved(self):
+        fx, run = self._started_engine()
+        fx.db.set_resume(engine_fixtures.KEY, {})
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        with mock.patch.object(process_status, "identity", return_value=None):
+            self.assertIn(fx.tree, self.engine_live(fx.root))
+
+    def test_a_non_dict_resume_entry_does_not_crash_claim_lookup(self):
+        fx, _run = self._started_engine()
+        claims = tree_claims.engine_claims(fx.root, process_status.identity, [(None, ["not-a-dict"])])
+        self.assertIsInstance(claims, dict)
+
+    def test_unreadable_engine_store_is_a_stack_finding(self):
+        self.configure(teardown_list="printf '[]'")
+        (self.root / "store.db").write_bytes(b"not a database")
+        report = audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
+        self.assertTrue(any("engine ownership unreadable" in line for line in report.lines), report.lines)
+
+    def engine_live(self, root):
+        found = audit_tasks.engine_ownership(root)
+        return {path for path, rows in found.items() if any(claim.live for claim in rows)}
 
     def list_command(self, rows):
         script = self.root / "stacks.py"
@@ -368,17 +417,17 @@ class WorkerTeardownTest(unittest.TestCase):
         (run / "started.json").write_text(json.dumps(started))
         (run / "command.json").write_text(json.dumps(command))
         with mock.patch.object(process_status, "identity", side_effect=[None, "runner-start"]) as identity:
-            self.assertIn(self.tree, process_status.engine_trees(self.root))
+            self.assertIn(self.tree.resolve(), self.engine_live(self.root))
             self.assertEqual(identity.call_args_list, [mock.call(123, "session", host=True), mock.call(456, "session")])
         with mock.patch.object(process_status, "identity", side_effect=RuntimeError("ps timed out")):
             with self.assertRaisesRegex(RuntimeError, "ps timed out"):
-                process_status.engine_trees(self.root)
+                self.engine_live(self.root)
         for field, value in (("pid", 0), ("pid", -1), ("pid", True), ("runner_pid", 0), ("cwd", "")):
             with self.subTest(field=field, value=value):
                 (run / "started.json").write_text(json.dumps({**started, **({field: value} if field != "cwd" else {})}))
                 (run / "command.json").write_text(json.dumps({**command, **({field: value} if field == "cwd" else {})}))
                 with mock.patch.object(process_status, "identity") as identity:
-                    self.assertEqual(process_status.engine_trees(self.root), set())
+                    self.assertEqual(self.engine_live(self.root), set())
                     identity.assert_not_called()
 
     def test_worker_pid_restoration_tolerates_removed_metadata_and_symlinks(self):
@@ -410,15 +459,19 @@ class WorkerTeardownTest(unittest.TestCase):
             self.assertEqual(one_shot._run_worker(self.tree, external_logs, ["worker"], {}, "task", 1), 0)
 
     def test_interrupted_worker_keeps_its_own_pid_for_adoption(self):
-        logs = self.tree / dispatch_prompt.PROMPT_DIR
-        logs.mkdir(exist_ok=True)
         child = mock.Mock(pid=123)
         child.wait.side_effect = KeyboardInterrupt
         child.poll.return_value = None
-        with mock.patch.object(one_shot.subprocess, "Popen", return_value=child):
+        real_popen = subprocess.Popen
+        def popen(argv, *args, **kwargs):
+            if argv and argv[0] == "git":
+                return real_popen(argv, *args, **kwargs)
+            return child
+        with mock.patch.object(one_shot.subprocess, "Popen", side_effect=popen), \
+             contextlib.redirect_stdout(io.StringIO()):
             with self.assertRaises(KeyboardInterrupt):
-                one_shot._run_worker(self.tree, logs, ["worker"], {}, "task", 1)
-        self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), "123 task\n")
+                self.fx._run(self.fx._fake(None, write_partial=False))
+        self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), "123 Security audit\n")
 
     def test_finished_command_does_not_wait_for_daemon_stderr(self):
         script = "import os,time; pid=os.fork(); (os.setsid(),time.sleep(2),os._exit(0)) if pid == 0 else None"
@@ -436,12 +489,24 @@ class WorkerTeardownTest(unittest.TestCase):
                 discover.assert_not_called()
                 self.assertTrue(any("stack: discovery failed:" in line for line in report.lines))
 
+    def test_discovery_keeps_a_stack_whose_owner_exits_during_the_command(self):
+        self.configure(teardown_list="printf '[]'")
+        tree = self.tree.resolve()
+        active = {tree: "task"}
+        def discover(*args):
+            active.clear()
+            return [("vm", tree)]
+        with mock.patch.object(audit_tasks, "discover_stacks", side_effect=discover), \
+             mock.patch.object(audit_tasks, "running_trees", side_effect=lambda *args: dict(active)):
+            self.assertEqual(audit_tasks.audit(self.root, "2026-09-18", check_issues=False).stacks, [])
+
     def test_discovery_samples_claims_after_command_and_sanitizes_facts(self):
         self.configure(teardown_list="printf '[]'")
+        tree = self.tree.resolve()
         active = {}
         def discover(*args):
-            active[self.tree] = "task"
-            return [("vm", self.tree)]
+            active[tree] = "task"
+            return [("vm", tree)]
         with mock.patch.object(audit_tasks, "discover_stacks", side_effect=discover), \
              mock.patch.object(audit_tasks, "running_trees", side_effect=lambda *args: dict(active)):
             self.assertEqual(audit_tasks.audit(self.root, "2026-09-18", check_issues=False).stacks, [])
@@ -489,6 +554,28 @@ class WorkerTeardownTest(unittest.TestCase):
         with mock.patch.object(one_shot.subprocess, "Popen", return_value=child):
             self.assertEqual(one_shot._run_worker(self.tree, external_logs, ["worker"], {}, "task", 1), 0)
         self.assertEqual(target.read_text(), "original")
+
+    def test_adoption_keeps_the_dead_worker_pid_when_the_tracker_update_fails(self):
+        self.configure(teardown="cleanup")
+        one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
+                               "codex", "", "10:00")
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        pidfile.write_text("999999999 Security audit\n")
+        report = {"status": "human_review", "errors": [f"{dispatch_prompt.TRACKER_ERROR} disk full"]}
+        with mock.patch.object(one_shot, "reconcile", return_value=report):
+            self.assertEqual(one_shot.adopt(self.root, day="2026-09-18"), [report])
+        self.assertEqual(pidfile.read_text(), "999999999 Security audit\n")
+
+    def test_a_launch_refuses_a_tree_that_already_names_a_live_worker(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(lambda: child.poll() is None and (child.kill(), child.wait()))
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        pidfile.write_text(f"{child.pid} Security audit\n")
+        with self.assertRaisesRegex(ValueError, "live one-shot worker"):
+            self.fx._run(self.fx._fake('status: done\nreason: r\nchanges: c\n', write_partial=False))
+        self.assertEqual(pidfile.read_text(), f"{child.pid} Security audit\n")
 
     def test_failed_adoption_releases_claim_for_a_later_retry(self):
         self.configure(teardown="cleanup")

@@ -8,8 +8,6 @@ are read where the tracker is parsed.
 from __future__ import annotations
 
 import json
-import sqlite3
-from contextlib import closing
 from pathlib import Path
 
 from orphans import Claim
@@ -35,28 +33,33 @@ def one_shot_claims(trees: Path, running_trees) -> Claims:
     return {path.resolve(): [Claim(task, True)] for path, task in running_trees(trees).items()}
 
 
-def engine_claims(root: Path, identity) -> Claims:
+def _same_launch(record: dict, started: dict, tree: Path, started_path: Path) -> bool:
+    return (all(record.get(field) == started[field] for field in ("session_id", "pid", "runner_pid"))
+            and record.get("tree") == str(tree) and record.get("run_dir") == str(started_path.parent.resolve()))
+
+
+def engine_claims(root: Path, identity, segments) -> Claims:
     """Keep verified engine runs owned until their store segment closes, including teardown.
 
-    Read the engine's durable segment snapshot without loading its optional ORM into base-Python
-    audit callers. Runs not yet saved by launch still have the adapter's process identities.
+    `segments` is `(ended_at, resume run entry)` from the store, already carrying `run_dir`.
+    An open segment stays claimed when that launch matches, and when `exit.json` is on disk,
+    until collection closes it. A closed segment does not hide a later process in the same directory.
     An unavailable process view raises rather than proving the tree unowned.
     """
-    segments = {}
-    database = root / "store.db"
-    if database.exists():
-        with closing(sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True)) as db:
-            for key, stage, attempt, ended, data in db.execute(
-                    "SELECT s.issue_key, s.stage, s.attempt, s.ended_at, r.data "
-                    "FROM segment s LEFT JOIN resume r ON r.issue_key = s.issue_key"):
-                record = (json.loads(data) if data else {}).get("runs", {}).get(f"{stage}-{attempt}", {})
-                directory = root / ".chief-of-stuff/runs" / f"{int(key.rpartition('#')[2])}-{stage}-{attempt}"
-                segments[directory.resolve()] = (ended, record)
+    located: dict[Path, list[tuple]] = {}
+    for ended, record in segments:
+        if not isinstance(record, dict):
+            continue
+        run_dir = record.get("run_dir")
+        if isinstance(run_dir, str) and run_dir.strip():
+            located.setdefault(Path(run_dir).resolve(), []).append((ended, record))
     out: Claims = {}
     for path in (root / ".chief-of-stuff/runs").glob("*/started.json"):
         try:
             started = json.loads(path.read_text())
             command = json.loads((path.parent / "command.json").read_text())
+            if not isinstance(started, dict) or not isinstance(command, dict):
+                continue
             session = started["session_id"]
             if (not isinstance(session, str) or not session or session != command["session_id"]
                     or any(type(started.get(field)) is not int or started[field] <= 0
@@ -64,17 +67,11 @@ def engine_claims(root: Path, identity) -> Claims:
                     or not isinstance(command.get("cwd"), str) or not command["cwd"].strip()):
                 continue
             tree = Path(command["cwd"]).resolve()
-            segment = segments.get(path.parent.resolve())
-            if segment is not None:
-                ended, record = segment
-                if ended is not None:
-                    continue
-                # The engine verified both identities before saving this launch. Its open segment
-                # retains ownership when the host/runner exits and while collect runs teardown.
-                if (all(record.get(field) == started[field] for field in ("session_id", "pid", "runner_pid"))
-                        and record.get("tree") == str(tree) and record.get("run_dir") == str(path.parent.resolve())):
-                    out.setdefault(tree, []).append(Claim("engine worker", True))
-                    continue
+            open_records = [record for ended, record in located.get(path.parent.resolve(), []) if ended is None]
+            if open_records and (any(_same_launch(record, started, tree, path) for record in open_records)
+                                 or (path.parent / "exit.json").exists()):
+                out.setdefault(tree, []).append(Claim("engine worker", True))
+                continue
             host = identity(started["pid"], session, host=True)
             runner = identity(started["runner_pid"], session)
             if host is not None or runner is not None:

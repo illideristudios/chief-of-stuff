@@ -153,12 +153,6 @@ def running_trees(trees: Path) -> dict[Path, str]:
     return {tree: task for tree, _, task in one_shot_runs(trees)}
 
 
-def engine_trees(root: Path) -> set[Path]:
-    """Engine trees claimed through process execution and collection of their segment."""
-    from tree_claims import engine_claims
-    return set(engine_claims(root, identity))
-
-
 def check(root: Path, pids: list[int]) -> list[dict[str, str | int]]:
     registered = registrations(root)
     selected = pids if pids else list(registered)

@@ -476,6 +476,44 @@ def trees_lock(trees: Path):
         os.close(lock)
 
 
+def _pidfile_pid(pidfile: Path) -> int | None:
+    """The pid in a regular pid file, or None when it is missing, a symlink, or unreadable."""
+    try:
+        if pidfile.parent.is_symlink() or pidfile.is_symlink() or not pidfile.is_file():
+            return None
+        line = (pidfile.read_text().splitlines() or [""])[0]
+    except OSError:
+        return None
+    pid, _, _ = line.partition(" ")
+    if pid.isascii() and pid.isdecimal() and (value := int(pid)) > 0:
+        return value
+    return None
+
+
+def _write_pidfile(trees: Path, cwd: Path, text: str, replace: set[int]) -> bool:
+    """Under the worktrees lock, write only when the pid file is absent or still names `replace`."""
+    with trees_lock(trees):
+        pidfile = cwd / PIDFILE
+        if pidfile.parent.is_symlink() or pidfile.is_symlink():
+            return False
+        current = _pidfile_pid(pidfile)
+        if pidfile.exists() and current not in replace:
+            return False
+        pidfile.parent.mkdir(exist_ok=True)
+        if pidfile.parent.is_symlink() or pidfile.is_symlink():
+            return False
+        pidfile.write_text(text)
+        return True
+
+
+def _unlink_own_pidfile(trees: Path, cwd: Path, pid: int) -> None:
+    with trees_lock(trees):
+        with suppress(OSError):
+            pidfile = cwd / PIDFILE
+            if _pidfile_pid(pidfile) == pid:
+                pidfile.unlink()
+
+
 @contextmanager
 def slot(trees: Path, cwd: Path, task: str, cap: int | None):
     """Claim a worker slot under the Worktrees dir's lock, so two sessions launching at once cannot both
@@ -485,12 +523,21 @@ def slot(trees: Path, cwd: Path, task: str, cap: int | None):
         if cap is not None and len(busy) >= cap:
             raise ValueError(f"{len(busy)} one-shot workers running; [workers] max_concurrency is {cap} "
                              "(list them: chief-of-stuff processes --root <workspace>)")
-        (cwd / PIDFILE).parent.mkdir(exist_ok=True)
-        (cwd / PIDFILE).write_text(f"{os.getpid()} {task}\n")
+        pidfile = cwd / PIDFILE
+        held = _pidfile_pid(pidfile)
+        # A live detached worker's pid is the adoption marker; do not replace it.
+        if held is not None and held != os.getpid() and process_exists(held):
+            raise ValueError(f"{cwd.name} already has a live one-shot worker (pid {held})")
+        if pidfile.parent.is_symlink() or pidfile.is_symlink():
+            raise ValueError(f"{cwd.name} pid file is a symlink")
+        pidfile.parent.mkdir(exist_ok=True)
+        if pidfile.parent.is_symlink() or pidfile.is_symlink():
+            raise ValueError(f"{cwd.name} pid file is a symlink")
+        pidfile.write_text(f"{os.getpid()} {task}\n")
     try:
         yield
     finally:
-        (cwd / PIDFILE).unlink(missing_ok=True)
+        _unlink_own_pidfile(trees, cwd, os.getpid())
 
 
 def _clear_stale_dispatch(cwd: Path, task: str) -> None:
@@ -622,7 +669,8 @@ def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: 
             worker = subprocess.Popen(launch_argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                                       stdout=stdout, stderr=stderr, start_new_session=True)
             try:
-                (cwd / PIDFILE).write_text(f"{worker.pid} {task}\n")
+                if not _write_pidfile(cwd.parent, cwd, f"{worker.pid} {task}\n", {os.getpid()}):
+                    raise OSError("pid file names another worker")
             except OSError:
                 with suppress(ProcessLookupError):
                     os.killpg(worker.pid, signal.SIGKILL)  # no untracked worker may survive
@@ -643,11 +691,13 @@ def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: 
         return 127
     finally:
         # The launcher owns the tree throughout cleanup, retry setup and reconciliation.
+        # A still-running worker keeps its own pid so adoption can find it (#99).
         if worker is None or worker.poll() is not None:
             with suppress(OSError):
-                pidfile = cwd / PIDFILE
-                if not pidfile.parent.is_symlink() and not pidfile.is_symlink():
-                    pidfile.write_text(f"{os.getpid()} {task}\n")
+                replace = {os.getpid()}
+                if worker is not None:
+                    replace.add(worker.pid)
+                _write_pidfile(cwd.parent, cwd, f"{os.getpid()} {task}\n", replace)
 
 
 ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's running row
@@ -696,30 +746,43 @@ def adopt(root: Path, day: str | None = None, *,
         if found is None:
             continue
         # Recheck under the launch/cleanup lock before taking the dead worker's slot.
-        with trees_lock(trees):
-            current = next(((held_pid, held_task) for tree, held_pid, held_task in pidfile_runs(trees) if tree == cwd), None)
-            if current != (pid, task) or process_exists(pid) or launcher_copy(root, cwd).exists():
-                continue
-            pidfile = cwd / PIDFILE
-            if pidfile.parent.is_symlink() or pidfile.is_symlink():
-                continue
-            pidfile.write_text(f"{os.getpid()} {task}\n")
+        pidfile = cwd / PIDFILE
+        claimed = False
         try:
+            with trees_lock(trees):
+                current = next(((held_pid, held_task) for tree, held_pid, held_task in pidfile_runs(trees) if tree == cwd), None)
+                if current != (pid, task) or process_exists(pid) or launcher_copy(root, cwd).exists():
+                    continue
+                if pidfile.parent.is_symlink() or pidfile.is_symlink():
+                    continue
+                try:
+                    pidfile.write_text(f"{os.getpid()} {task}\n")
+                except OSError:
+                    continue
+                claimed = True
             row_day, name = found
             stale = cwd / dispatch_prompt.DISPATCH_FILE
             body = stale.read_text() if stale.is_file() else ""
             # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
-            adopted.append(reconcile(root, row_day, task, name, cwd, 0,
-                                     read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
-                                     expected_common=commons.get(cwd.resolve()),
-                                     teardown_errors=teardown(root, cwd, name, settings.workers.teardown)))
+            report = reconcile(root, row_day, task, name, cwd, 0,
+                               read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
+                               expected_common=commons.get(cwd.resolve()),
+                               teardown_errors=teardown(root, cwd, name, settings.workers.teardown))
+            adopted.append(report)
         except BaseException:
             # Preserve the dead worker evidence so a later sweep can retry interrupted adoption.
-            with suppress(OSError):
-                if not pidfile.parent.is_symlink() and not pidfile.is_symlink():
-                    pidfile.write_text(f"{pid} {task}\n")
+            if claimed:
+                with suppress(OSError):
+                    _write_pidfile(trees, cwd, f"{pid} {task}\n", {os.getpid(), pid})
             raise
         else:
-            with suppress(OSError):
-                pidfile.unlink(missing_ok=True)
+            errors = report["errors"]
+            unfinished = (not launcher_copy(root, cwd).exists()
+                          or any(str(error).startswith((dispatch_prompt.TRACKER_ERROR, "report copy:"))
+                                 for error in errors))
+            if unfinished:
+                with suppress(OSError):
+                    _write_pidfile(trees, cwd, f"{pid} {task}\n", {os.getpid(), pid})
+            else:
+                _unlink_own_pidfile(trees, cwd, os.getpid())
     return adopted

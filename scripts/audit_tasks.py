@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import json
 import re
+import sqlite3
 import subprocess
 import sys
 from dataclasses import dataclass, field, replace
@@ -37,8 +38,10 @@ import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
 from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
-from process_status import process_exists, registrations, running_trees, identity  # noqa: E402
+import process_status  # noqa: E402
+from process_status import process_exists, registrations, running_trees  # noqa: E402
 from tree_claims import Claims, engine_claims, one_shot_claims, registry_claims  # noqa: E402
+import worker  # noqa: E402
 
 # Preserve branch names from ownership rows when worktrees disappear.
 WORKTREE = re.compile(r"\bworktrees?\s+(?P<tick>`)?(?P<name>[A-Za-z0-9._\-/]+)`?(?:\s*\((?P<branch>[^)]*)\))?")
@@ -845,6 +848,63 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
     return faults, lines, len(open_rows)
 
 
+def _ownership_errors() -> tuple[type[BaseException], ...]:
+    import sqlalchemy.exc
+    import supervisor
+    return (OSError, RuntimeError, sqlite3.Error, sqlalchemy.exc.SQLAlchemyError, supervisor.ServiceError, ImportError)
+
+
+def _sample_claims(root: Path, trees: str) -> tuple[Claims, BaseException | None]:
+    """Process claims, or the store/probe error that kept them from being read."""
+    try:
+        errors = _ownership_errors()
+    except ImportError as exc:
+        return {}, exc
+    try:
+        return _process_claims(root, trees), None
+    except errors as exc:
+        return {}, exc
+
+
+def engine_ownership(root: Path) -> Claims:
+    """Open the store through its gateway and return engine tree claims. Failures propagate."""
+    import store_access
+    rows = []
+    if (root / "store.db").exists():
+        db = store_access.migrated_store(root)
+        try:
+            rows = db.segment_runs()
+        finally:
+            db.engine.dispose()
+    located = []
+    for key, stage, attempt, ended, record in rows:
+        if not isinstance(record, dict):
+            record = {}
+        run_dir = record.get("run_dir")
+        if not isinstance(run_dir, str) or not run_dir.strip():
+            try:
+                run_dir = str(worker._run_dir(root, key, stage, attempt).resolve())
+            except ValueError:
+                run_dir = ""
+            if run_dir:
+                record = {**record, "run_dir": run_dir}
+        located.append((ended, record))
+    return engine_claims(root, process_status.identity, located)
+
+
+def _process_claims(root: Path, trees: str) -> Claims:
+    claims = registry_claims(root, registrations, process_exists)
+    for found in (one_shot_claims((root / trees).resolve(), running_trees), engine_ownership(root)):
+        for path, rows in found.items():
+            claims.setdefault(path, []).extend(rows)
+    return claims
+
+
+def _live_trees(claims: Claims, workspace: Path) -> set[Path]:
+    return {path.relative_to(workspace) if path.is_relative_to(workspace) else path
+            for path, found in claims.items() if any(claim.live for claim in found)}
+
+
 def discover_stacks(root: Path, command: str) -> list[tuple[str, Path]]:
     """Gather stack facts; invalid command output raises rather than claiming no stacks."""
     if not command:
@@ -900,26 +960,48 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     discovered = []
     workspace = root.resolve()
     base = (workspace / trees).resolve()
+    before: Claims = {}
+    after: Claims = {}
+    saw_after = False
+
+    def _note(claims: Claims, exc: BaseException | None) -> Claims:
+        if exc is not None and not any("engine ownership unreadable" in str(item) for item in report.stacks):
+            report.stacks.append(StackFault(git_trees.clean(f"engine ownership unreadable: {exc}")))
+        return claims
+
     if settings.workers.teardown_list:
-        try:
-            if not trees or base == workspace or not base.is_relative_to(workspace):
-                raise ValueError("stack discovery requires a nonempty Worktrees directory inside the workspace")
-            discovered = discover_stacks(root, settings.workers.teardown_list)
-        except (OSError, ValueError) as exc:
-            report.stacks.append(StackFault(git_trees.clean(f"discovery failed: {exc}")))
-    # Discovery may take up to 120 seconds. Gather ownership after it, so newly launched
-    # workers are included when judging the returned stacks.
-    process_claims: Claims = registry_claims(root, registrations, process_exists)
-    for claims in (one_shot_claims((root / trees).resolve(), running_trees), engine_claims(root, identity)):
-        for path, found in claims.items():
-            process_claims.setdefault(path, []).extend(found)
+        if not trees or base == workspace or not base.is_relative_to(workspace):
+            report.stacks.append(StackFault(git_trees.clean(
+                "discovery failed: stack discovery requires a nonempty Worktrees directory inside the workspace")))
+        else:
+            before, exc = _sample_claims(root, trees)
+            if exc is not None:
+                _note(before, exc)
+            else:
+                try:
+                    discovered = discover_stacks(root, settings.workers.teardown_list)
+                except (OSError, ValueError) as exc:
+                    report.stacks.append(StackFault(git_trees.clean(f"discovery failed: {exc}")))
+                else:
+                    after, exc = _sample_claims(root, trees)
+                    if exc is not None:
+                        # A failed second sample cannot prove a stack unowned.
+                        _note(after, exc)
+                        discovered = []
+                    else:
+                        saw_after = True
+    if saw_after:
+        process_claims = after
+    elif before:
+        process_claims = before
+    else:
+        process_claims, exc = _sample_claims(root, trees)
+        _note(process_claims, exc)
     if discovered:
         base = base.relative_to(workspace)
         rows = [(name, path.relative_to(workspace) if path.is_relative_to(workspace) else path)
                 for name, path in discovered]
-        live = {path.relative_to(workspace) if path.is_relative_to(workspace) else path
-                for path, found in process_claims.items() if any(claim.live for claim in found)}
-        report.stacks.extend(stale_stacks(rows, base, live))
+        report.stacks.extend(stale_stacks(rows, base, _live_trees(before, workspace) | _live_trees(after, workspace)))
     report.lines.extend(str(stack) for stack in report.stacks)
     handled: set[str] = set()
     seen: set[Path] = set()
