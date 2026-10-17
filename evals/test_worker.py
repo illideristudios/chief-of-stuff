@@ -1006,7 +1006,7 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             used = worker.launch(KEY, "implement", 1, "builder", store=self.db, root=self.root,
                                  trees=self.trees, policies=self.p, forge=self.forge, claude_as_profile="secondary")
-        self.assertEqual(used, ("opus", "high", "specialist"))
+        self.assertEqual(used, ("opus", "high"))
         self.assertEqual(start.call_args.args[0].agent, "specialist")
         self.assertEqual(start.call_args.kwargs["claude_as_profile"], "secondary")
 
@@ -1068,20 +1068,29 @@ class WorkerTest(unittest.TestCase):
         (self.root / "CLAUDE.md").write_text(claude_md)
         self.p.personas["builder"] = SimpleNamespace(name="builder", role="build", rules=(), agent=agent,
                                                        model="opus", effort="")
-        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
-             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
-             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
-            return self.launch()
+        self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())  # slots.claim's reservation
+        spawned = []
 
-    def test_launch_reports_the_declared_agent_type_it_launched_with(self):
+        def start(request, run_dir, **kwargs):
+            spawned.append(self.db.segments(KEY)[0].agent_type)
+            return self.start(request, run_dir, **kwargs)
+
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=start), \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.launch()
+        return spawned
+
+    def test_launch_stamps_the_declared_agent_type_on_its_reservation_before_it_spawns(self):
         declared = "## Coordinator\n- User: Robin\n- Agent: specialist task\n"
-        self.assertEqual(self.launch_as(declared), ("opus", "", "specialist"))
+        self.assertEqual(self.launch_as(declared), ["specialist"])
         self.db.engine.dispose()
         self.setUp()
-        self.assertEqual(self.launch_as(declared.replace("specialist", "implementer")), ("opus", "", None))
+        self.assertEqual(self.launch_as(declared.replace("specialist", "implementer")), [""])
 
     def test_the_claimed_segment_takes_the_type_launch_resolved_once(self):
         self.launch_as("## Coordinator\n- User: Robin\n- Agent: specialist task\n")
+        self.db.drop_segment(KEY, "implement", 1)
         # A restart adopts the run: the type it started with, not whatever the file says now.
         (self.root / "CLAUDE.md").write_bytes(b"\xff")
         with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
