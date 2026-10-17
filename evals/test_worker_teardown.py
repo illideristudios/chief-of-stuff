@@ -118,6 +118,20 @@ class WorkerTeardownTest(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs["worktree"], str(fx.tree.resolve()))
         self.assertTrue(any("teardown failed" in log.message for log in fx.db.log(engine_fixtures.KEY)))
 
+    def test_failed_start_still_tears_down_when_cancel_raises(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        config = settings.Settings(workers=settings.Workers(teardown="exit 0"))
+        with mock.patch.object(worker.make_worktree, "build", return_value=mock.Mock(path=fx.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", return_value=mock.Mock(pid=78, poll=lambda: 1)), \
+             mock.patch.object(worker.claude_adapter, "cancel", side_effect=RuntimeError("survived SIGKILL")), \
+             mock.patch.object(worker, "teardown", return_value=[]) as torn:
+            with self.assertRaises(RuntimeError):
+                worker.launch(engine_fixtures.KEY, "implement", 1, None, store=fx.db, root=fx.root, trees=fx.trees,
+                              policies=fx.p, forge=fx.forge, clock=lambda: engine_fixtures.NOW, config=config)
+        torn.assert_called_once_with(fx.root, fx.tree, fx.tree.name, "exit 0")
+
     def test_missing_tree_and_shell_lookup_errors_are_cleanup_warnings(self):
         missing = self.root / "trees/removed"
         self.assertEqual(shell_setup.teardown(self.root, missing, "removed", self.cleanup_command()), [])

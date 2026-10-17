@@ -985,6 +985,27 @@ class MainTest(unittest.TestCase):
         self.assertIs(configs[0], configs[1])
         self.assertIn("settings reload failed", errors.getvalue())
 
+    def test_reload_that_exceeds_a_stage_budget_keeps_the_snapshot(self):
+        configs = []
+        validated = []
+
+        def validate(root, config, policies):
+            validated.append(config)
+            if len(validated) > 1:
+                raise engine.dispatch_prompt.RefusedError("[workers] rules do not fit the implement assignment")
+
+        errors = io.StringIO()
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine.dispatch_prompt, "validate_worker_rules", side_effect=validate), \
+             mock.patch.object(engine, "run_pass", side_effect=lambda **kw: configs.append(kw["launch"].keywords["config"])), \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(configs), 2)
+        self.assertIs(configs[0], configs[1])
+        self.assertIn("settings reload failed", errors.getvalue())
+        self.assertIn("do not fit", errors.getvalue())
+
     def test_once_bad_reload_runs_on_the_valid_startup_snapshot(self):
         path = self.root / "settings.toml"
         original = engine.startup.workspace_forge
