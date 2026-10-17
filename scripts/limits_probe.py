@@ -47,6 +47,31 @@ def _unknown(runtime: str, account: str, reason: str, limit: str = "limits") -> 
 _scans: dict[tuple[str, int, int], tuple[dict, ...]] = {}
 
 
+def _nearby_timestamp(data, at: int) -> str | None:
+    """A limit event can omit its own timestamp; the nearest other record supplies one."""
+    key = b'"timestamp":'
+    forward = data.find(key, at)
+    backward = data.rfind(key, 0, at)
+    if forward < 0 and backward < 0:
+        return None
+    if backward < 0 or (forward >= 0 and forward - at <= at - backward):
+        chosen = forward
+    else:
+        chosen = backward
+    start = chosen + len(key)
+    while start < len(data) and data[start] in (32, 9):
+        start += 1
+    if start >= len(data) or data[start] != 34:
+        return None
+    end = data.find(b'"', start + 1)
+    if end < 0:
+        return None
+    try:
+        return data[start + 1:end].decode()
+    except UnicodeDecodeError:
+        return None
+
+
 def _scan_file(path: Path, needles: tuple[bytes, ...]) -> tuple[dict, ...] | None:
     """Search bytes before decoding: transcripts mostly contain unrelated conversation text."""
     found = []
@@ -70,6 +95,10 @@ def _scan_file(path: Path, needles: tuple[bytes, ...]) -> tuple[dict, ...] | Non
                             except (ValueError, UnicodeDecodeError):
                                 event = None
                             if isinstance(event, dict):
+                                if "timestamp" not in event:
+                                    stamp = _nearby_timestamp(data, left)
+                                    if stamp:
+                                        event["timestamp"] = stamp
                                 found.append(event)
                         start = right + 1
     except (OSError, ValueError):
@@ -193,19 +222,24 @@ def claude(account: str) -> list[Reading]:
             continue
         if not isinstance(data, dict):
             continue
-        name = data.get("rateLimitType")
-        if not isinstance(name, str) or not name:
-            continue
-        try:
-            r = _reading("claude", account, name, _number(data.get("utilization")) * 100,
-                         data.get("resetsAt"), event.get("timestamp"))
-        except (ValueError, TypeError, OverflowError, OSError):
-            try:
-                r = Reading("claude", account, name, None, None, "", None,
-                            _time(event.get("timestamp")), "local Claude limit event has no numeric usage/reset")
-            except (ValueError, TypeError, OverflowError, OSError):
+        windows = data.get("unifiedWindows")
+        if isinstance(windows, dict) and windows:
+            items = windows.items()
+        else:
+            items = [(data.get("rateLimitType"), data)]
+        for name, window in items:
+            if not isinstance(name, str) or not name or not isinstance(window, dict):
                 continue
-        candidates.append(r)
+            try:
+                r = _reading("claude", account, name, _number(window.get("utilization")) * 100,
+                             window.get("resetsAt"), event.get("timestamp"))
+            except (ValueError, TypeError, OverflowError, OSError):
+                try:
+                    r = Reading("claude", account, name, None, None, "", None,
+                                _time(event.get("timestamp")), "local Claude limit event has no numeric usage/reset")
+                except (ValueError, TypeError, OverflowError, OSError):
+                    continue
+            candidates.append(r)
     return _latest("claude", account, candidates)
 
 
