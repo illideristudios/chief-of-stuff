@@ -83,7 +83,7 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(sorted(results), [303, 409])
         self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 1)
 
-    def test_reverse_at_merge_persists_next_work_attempt_and_persona(self):
+    def test_reverse_at_merge_records_the_stage_that_did_the_work(self):
         self.db.upsert_item(KEY, stage="merge")
         self.db.record_segment(KEY, "implement", 1, (NOW - timedelta(hours=2)).isoformat(),
                                (NOW - timedelta(hours=1)).isoformat(), "done")
@@ -93,9 +93,9 @@ class PanelTest(unittest.TestCase):
         with mock.patch.object(pages.forge, "for_workspace", return_value=fg):
             status, _ = self.request("POST", "/", {"decision_id": dec.id, "action": "reverse", "answer": "No"})
         self.assertEqual(status, 303)
-        pending = self.db.resume(KEY)["redispatch"]
-        self.assertEqual((pending["stage"], pending["attempt"], pending["persona"]), ("implement", 2, "implementer"))
-        self.assertEqual(self.db.decision(dec.id).status, "reversed")
+        saved = self.db.decisions(KEY)[-1]
+        self.assertEqual((saved.status, saved.rerouted_to, saved.intent), ("reversed", "implement", "run"))
+        self.assertEqual((self.db.decision(dec.id).status, self.db.decision(dec.id).superseded_by), ("superseded", saved.id))
 
     def test_record_update_supersedes_old_resume_status(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
@@ -104,7 +104,7 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(self.db.decision(dec.id).status, "answered")
         self.assertEqual(self.db.decisions()[0].blocked_reason, "")
 
-    def test_reroute_survives_comment_failure_and_persists_redispatch(self):
+    def test_reroute_survives_comment_failure_and_persists_its_intent(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         fg = mock.Mock()
         fg.write_stage.return_value = SimpleNamespace(ok=True, done=True, error="")
@@ -113,13 +113,11 @@ class PanelTest(unittest.TestCase):
         with mock.patch.object(pages.forge, "for_workspace", return_value=fg):
             self.assertEqual(self.request("POST", "/", data)[0], 303)
             self.assertEqual(self.request("POST", "/", data)[0], 409)
-        self.assertEqual(fg.write_stage.call_count, 1)
+        fg.write_stage.assert_not_called()
         # The re-route is its own row; the asked decision is closed as superseded by it, so the replay is refused.
         rerouted = self.db.decisions(KEY)[-1]
         self.assertEqual((rerouted.status, self.db.decision(dec.id).status), ("re-routed", "superseded"))
-        pending = self.db.resume(KEY)["redispatch"]
-        self.assertEqual((pending["stage"], pending["attempt"]), ("implement", 1))
-        self.assertEqual(self.db.item(KEY).stage, "implement")
+        self.assertEqual((rerouted.rerouted_to, rerouted.intent), ("implement", "write"))
 
     def test_store_busy_is_an_http_error(self):
         from sqlalchemy.exc import OperationalError

@@ -220,7 +220,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.assertRegex(html, r"(?i)blocked.*merge conflicts|merge conflicts.*blocked")
         self.assertNotRegex(html, r"(?i)>\s*closed\s*<")
 
-    def test_pages_post_answer_reverse_and_reroute_write_store_and_forge(self) -> None:
+    def test_pages_post_answer_reverse_and_reroute_only_record_in_the_store(self) -> None:
         fake_forge = mock.MagicMock()
         fake_forge.write_stage.return_value = SimpleNamespace(ok=True, done=True, error="")
         fake_forge.comment.return_value = ""
@@ -248,14 +248,16 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             self.assertEqual(d1.answer, "Split into two")
             self.assertEqual(d1.decided_by, "user")
 
-            # 2. Reverse the answered decision:
+            # 2. Reverse the answered decision: its own row, a run intent; the answered one is closed by it.
             resp = post("/", {"decision_id": str(self.d_open.id), "action": "reverse", "answer": "Keep single pass"})
             self.assertEqual(resp.status, 303)
-            d2 = next(d for d in self.db.decisions(KEY) if d.id == self.d_open.id)
-            self.assertEqual(d2.status, "reversed")
-            self.assertEqual(d2.answer, "Keep single pass")
+            d2 = self.db.decisions(KEY)[-1]
+            self.assertNotEqual(d2.id, self.d_open.id)
+            self.assertEqual((d2.status, d2.answer, d2.intent), ("reversed", "Keep single pass", "run"))
+            self.assertEqual((self.db.decision(self.d_open.id).status, self.db.decision(self.d_open.id).superseded_by),
+                             ("superseded", d2.id))
 
-            # 3. Re-route another decision to another stage:
+            # 3. Re-route another decision to another stage: a write intent; the earlier intent is left for the engine.
             reroute_dec = self.db.add_decision(KEY, "plan", "Return to implementation?")
             resp = post("/", {
                 "decision_id": str(reroute_dec.id),
@@ -267,10 +269,13 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             d3 = self.db.decisions(KEY)[-1]
             self.assertNotEqual(d3.id, reroute_dec.id)
             self.assertEqual(self.db.decision(reroute_dec.id).status, "superseded")
-            self.assertEqual(d3.status, "re-routed")
-            self.assertEqual(self.db.item(KEY).stage, "implement")
-            fake_forge.write_stage.assert_called_once_with(12, "implement", expected="review", commit=True)
+            self.assertEqual((d3.status, d3.rerouted_to, d3.intent), ("re-routed", "implement", "write"))
+            self.assertEqual((self.db.decision(d2.id).status, self.db.decision(d2.id).intent), ("reversed", "run"))
+            # The page server records only: no forge call, no card move, no slot.
+            fake_forge.write_stage.assert_not_called()
             fake_forge.comment.assert_not_called()
+            self.assertEqual(self.db.item(KEY).stage, "review")
+            self.assertEqual(set(self.db.resume(KEY)), {"decision_comments"})
             self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 3)
 
 
@@ -428,18 +433,15 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
                 self.assertEqual(pg.fresh(self.root, self.root / "pages", name), "")
                 opened.assert_called_once_with(self.root)
 
-    def test_reroute_refusal_keeps_stage_and_blocks_answer(self):
+    def test_a_reroute_post_records_an_intent_and_never_reaches_the_forge(self):
         dec = self.db.add_decision(KEY, "design", "Choose parser")
-        fg = mock.Mock()
-        fg.write_stage.return_value = SimpleNamespace(ok=False, done=False, error="write refused")
-        with mock.patch.object(pg.forge, "for_workspace", return_value=fg):
-            status, body = self.request("POST", "/", {"decision_id": dec.id, "action": "reroute",
-                                                         "target_stage": "review", "answer": "Review again"})
-        self.assertEqual(status, 409)
+        with mock.patch.object(pg.forge, "for_workspace", side_effect=AssertionError("the page server never writes")):
+            status, _ = self.request("POST", "/", {"decision_id": dec.id, "action": "reroute",
+                                                     "target_stage": "review", "answer": "Review again"})
+        self.assertEqual(status, 303)
         self.assertEqual(self.db.item(KEY).stage, "implement")
-        self.assertEqual(self.db.decisions(KEY)[-1].status, "blocked")
-        self.assertIn("write refused", self.db.decisions(KEY)[-1].blocked_reason)
-        fg.write_stage.assert_called_once_with(12, "review", expected="implement", commit=True)
+        saved = self.db.decisions(KEY)[-1]
+        self.assertEqual((saved.status, saved.rerouted_to, saved.intent, saved.blocked_reason), ("re-routed", "review", "write", ""))
 
     def test_board_command_uses_migrated_driver(self):
         import contextlib
@@ -450,18 +452,6 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         opened.assert_called_once_with(self.root)
         board = next((self.root / "pages").glob("*-board.html")).read_text()
         self.assertIn("Upload size limit", board)
-
-    def test_reroute_preview_does_not_close_decision(self):
-        dec = self.db.add_decision(KEY, "design", "Choose parser")
-        fg = mock.Mock()
-        fg.write_stage.return_value = SimpleNamespace(ok=True, done=False, error="")
-        with mock.patch.object(pg.forge, "for_workspace", return_value=fg):
-            status, _ = self.request("POST", "/", {"decision_id": dec.id, "action": "reroute",
-                                                     "target_stage": "review", "answer": "Review again"})
-        self.assertEqual(status, 409)
-        self.assertEqual(self.db.item(KEY).stage, "implement")
-        self.assertEqual(self.db.decisions(KEY)[-1].status, "blocked")
-        self.assertIn("not committed", self.db.decisions(KEY)[-1].blocked_reason)
 
     def test_store_decisions_have_only_board_post(self):
         dec = self.db.add_decision(KEY, "design", "Choose parser")
