@@ -147,7 +147,7 @@ def missing_workspace_files(config: Path, settings: str | None) -> list[str]:
         if st is not None and stat.S_ISREG(st.st_mode):
             continue
         exists = st is not None
-        command = item.command.format(root=shlex.quote(str(root.resolve())))
+        command = item.command.replace("{root}", shlex.quote(str(root.resolve())))
         fix = f"move it aside, then {command}" if exists else command
         lines.append(f"workspace file {name} {'not a file' if exists else 'missing'} (advice); {fix}")
     return lines
