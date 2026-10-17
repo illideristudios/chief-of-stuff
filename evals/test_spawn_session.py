@@ -2309,8 +2309,14 @@ class CheckTest(unittest.TestCase):
         """The real CLI: `chief-of-stuff worker --check` from a directory that is not the workspace."""
         root = self.workspace(TRACKER.replace("| Security audit | `src/a/` |\n", ""))
         entry = Path(ss.__file__).resolve().parent.parent / "chief_of_stuff.py"
+        # The suite already runs with the pinned dependencies. Reuse that interpreter for the
+        # CLI's bootstrap; provisioning a venv is covered by test_cli and needs network access.
+        bootstrap = ("import runpy, sys; from pathlib import Path; "
+                     "entry = sys.argv.pop(1); sys.path[:0] = [str(Path(entry).parent), str(Path(entry).parent / 'scripts')]; "
+                     "import supervisor; supervisor.ensure_venv = lambda data: Path(sys.executable); "
+                     "sys.argv[0] = entry; runpy.run_path(entry, run_name='__main__')")
         with tempfile.TemporaryDirectory() as elsewhere:
-            run = subprocess.run([sys.executable, str(entry), "worker", "--check", "--root", str(root),
+            run = subprocess.run([sys.executable, "-c", bootstrap, str(entry), "worker", "--check", "--root", str(root),
                                   "--date", "2026-09-18", "--task", "Security audit"],
                                  capture_output=True, text=True, timeout=30, cwd=elsewhere)
             self.assertEqual(os.listdir(elsewhere), [])
