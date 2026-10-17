@@ -334,30 +334,40 @@ def _legacy_worktree(issue_key: str, number: int, stage: str, attempt: int, tree
 
 
 def _tree_contents(tree: Path, common: Path) -> str:
-    """Snapshot files (including ignored work) and the index, which may hold a staged-only version.
-    Do not follow symlinks or open special files. An unreadable snapshot must prevent retirement."""
+    """Fingerprint what git tracks or would track, and the index, which may hold a staged-only version (#774).
+    Ignored paths (node_modules, .venv, build output) are neither read nor hashed. Nothing is followed or opened
+    unless it is a regular file: a socket, FIFO or device is recorded by name and type. An unreadable listing or
+    file must prevent retirement."""
     layout = git_view.locate(tree, expected_common=common)
     digest = hashlib.sha256()
+    names: set[str] = set()
+    for options in (["-z"], ["-z", "--others", "--exclude-standard"]):
+        listed = git_view.run(["ls-files", *options], tree, env=git_trees.audit_env(),
+                              timeout=git_trees.GIT_TIMEOUT, expected_common=common)
+        if listed.returncode:
+            raise RuntimeError("cannot list orphan files")
+        names.update(name.rstrip("/") for name in listed.stdout.split("\0") if name)
 
     def include(path: Path, name: str) -> None:
-        mode = path.lstat().st_mode
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:  # tracked and deleted: the index hash holds the rest
+            digest.update(os.fsencode(name) + b"\0missing\0")
+            return
         digest.update(os.fsencode(name) + b"\0" + str(mode).encode() + b"\0")
         if stat.S_ISLNK(mode):
             digest.update(os.fsencode(os.readlink(path)) + b"\0")
-        elif stat.S_ISDIR(mode):
+        elif stat.S_ISDIR(mode):  # a nested repository or submodule: its own files are work too
             for child in sorted(path.iterdir()):
-                if path == tree and child.name == ".git":
-                    continue
                 include(child, f"{name}/{child.name}")
         elif stat.S_ISREG(mode):
             with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as source:
-                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):
-                    raise RuntimeError("orphan snapshot contains a special file")
+                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):  # swapped for a FIFO since lstat
+                    raise RuntimeError("orphan snapshot file changed type while hashing")
                 digest.update(hashlib.file_digest(source, "sha256").digest())
-        else:
-            raise RuntimeError("orphan snapshot contains a special file")
 
-    include(tree, ".")
+    for name in sorted(names):
+        include(tree / name, name)
     include(layout.gitdir / "index", "<index>")
     return digest.hexdigest()
 
@@ -370,14 +380,22 @@ def _ref_head(repo: Path, common: Path, ref: str) -> str | None:
     return next((line.split()[1] for line in out.splitlines() if line.split()[0] == ref), None)
 
 
+def _observe(path: Path, common: Path) -> completion.RetirementSnapshot:
+    """What is on disk now. A read that fails proves nothing about the work, so it is preserved."""
+    try:
+        actual = _read_tree(path, common)
+        contents = None if actual.unreadable else _tree_contents(path, common)
+    except (OSError, git_view.Unviewable) as exc:
+        raise RuntimeError("cannot verify orphaned worktree snapshot; preserving work") from exc
+    return completion.RetirementSnapshot(actual.branch, actual.head, contents, actual.unreadable)
+
+
 def _snapshot_orphans(found: list[completion.OrphanTree], repo: Path, common: Path) -> list[dict]:
     """Save abort's state under the discovery lock, before preparing a replacement."""
     snapshots = []
     for c in found:
-        actual = _read_tree(Path(c.path), common) if c.path else c
-        contents = _tree_contents(Path(c.path), common) if c.path and not actual.unreadable else None
-        expected = completion.RetirementSnapshot(c.branch, c.head, contents, c.unreadable)
-        current = completion.RetirementSnapshot(actual.branch, actual.head, contents, actual.unreadable)
+        current = _observe(Path(c.path), common) if c.path else completion.RetirementSnapshot(c.branch, c.head, None)
+        expected = completion.RetirementSnapshot(c.branch, c.head, current.contents, c.unreadable)
         if not completion.may_retire(expected, current):
             raise RuntimeError("cannot snapshot unreadable or changed orphaned worktree; preserving work")
         saved = {"path": c.path, **asdict(current)}
@@ -388,6 +406,21 @@ def _snapshot_orphans(found: list[completion.OrphanTree], repo: Path, common: Pa
     return snapshots
 
 
+def _checked_out(repo: Path) -> dict[str, list[Path]]:
+    """Each branch ref and every worktree, the clone included, that has it checked out."""
+    code, out = make_worktree.git_trusted(["worktree", "list", "--porcelain"], repo)
+    if code:
+        raise RuntimeError("cannot list worktrees before retiring orphaned refs; preserving work")
+    held: dict[str, list[Path]] = {}
+    path = None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = Path(line.removeprefix("worktree "))
+        elif line.startswith("branch ") and path is not None:
+            held.setdefault(line.removeprefix("branch "), []).append(path.resolve())
+    return held
+
+
 def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
     """Retire only the saved state. The caller holds clone_lock across the re-read, comparison and removal."""
     common = git_view.locate(repo).common
@@ -396,17 +429,11 @@ def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
         if not c["path"] or not os.path.lexists(c["path"]):
             return  # already retired before an interruption
         path = Path(c["path"])
-        try:
-            if not path.resolve().is_relative_to(trees.resolve()):
-                raise RuntimeError("orphaned worktree is outside the worktrees directory")
-            actual = _read_tree(path, common)
-            saved = completion.RetirementSnapshot(c["branch"], c["head"], c.get("contents"), c.get("unreadable", False))
-            current = completion.RetirementSnapshot(actual.branch, actual.head,
-                _tree_contents(path, common) if not actual.unreadable else None, actual.unreadable)
-            if not completion.may_retire(saved, current):
-                raise RuntimeError("orphaned worktree changed since abort snapshot; preserving work")
-        except (OSError, git_view.Unviewable) as exc:
-            raise RuntimeError("cannot verify orphaned worktree snapshot; preserving work") from exc
+        if not path.resolve().is_relative_to(trees.resolve()):
+            raise RuntimeError("orphaned worktree is outside the worktrees directory")
+        saved = completion.RetirementSnapshot(c["branch"], c["head"], c.get("contents"), c.get("unreadable", False))
+        if not completion.may_retire(saved, _observe(path, common)):
+            raise RuntimeError("orphaned worktree changed since abort snapshot; preserving work")
 
     # Check every candidate before deleting any, including refs whose trees were already removed.
     refs = {}
@@ -419,19 +446,24 @@ def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
         current = _ref_head(repo, common, ref)
         if current is not None and current != expected:
             raise RuntimeError("orphaned ref changed since abort snapshot; preserving work")
+    # A branch checked out beyond the saved trees stays whole: refuse before any tree is removed.
+    leaving = {Path(c["path"]).resolve() for c in found if c["path"]}
+    held = _checked_out(repo)
+    for ref, expected in refs.items():
+        if expected is not None and (others := [p for p in held.get(ref, []) if p not in leaving]):
+            raise RuntimeError(f"could not retire orphaned ref {ref}: checked out at {others[0]}")
     for c in found:
         if not c["path"] or not os.path.lexists(c["path"]):
             continue
+        check_tree(c)  # the window is one tree's hash, not every tree's
         path = Path(c["path"])
         _, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
         if os.path.lexists(path):
             raise RuntimeError(f"could not retire orphaned worktree: {detail}")
     for ref, expected in refs.items():
         if expected is not None:
-            # branch -D preserves refs checked out in the clone or any surviving worktree.
-            command = (["branch", "-D", ref.removeprefix("refs/heads/")] if ref.startswith("refs/heads/")
-                       else ["update-ref", "-d", ref, expected])
-            _, detail = make_worktree.git_trusted(command, repo)
+            # Compare-and-delete: a tip moved by a writer outside clone_lock survives. Checkouts were refused above.
+            _, detail = make_worktree.git_trusted(["update-ref", "-d", ref, expected], repo)
             if _ref_head(repo, common, ref) is not None:
                 raise RuntimeError(f"could not retire orphaned ref {ref}: {detail}")
 
