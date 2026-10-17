@@ -857,15 +857,80 @@ class ClaudeAdapterRunTest(unittest.TestCase):
             self.assertTrue((out / "fixture-turn1").is_dir())
             self.assertTrue((out / "fixture-turn2").is_dir())
 
-    def test_wait_turn_is_unmeasured_without_launching_a_stream(self):
+    def test_wait_turn_grades_inline_notification_without_an_extra_call(self):
+        for notification in (True, False):
+            with self.subTest(notification=notification), tempfile.TemporaryDirectory() as d:
+                base = Path(d); work = base / "work"; work.mkdir(); out = base / "out"; out.mkdir()
+                reply = self.reply()
+                if notification:
+                    reply.events.insert(-1, {"type": "system", "subtype": "task_notification"})
+                spec = {"turns": [{"prompt": "go", "graders": []},
+                                  {"wait_seconds": 240, "graders": [{"type": "regex", "pattern": "done"}]}]}
+                with unittest.mock.patch.object(run.claude_adapter, "call", return_value=reply) as call:
+                    results, error, _ = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None,
+                                                     base / "calls", "America/Chicago")
+                self.assertIsNone(error)
+                self.assertEqual(call.call_count, 1)
+                self.assertEqual(results[0][1], notification, results)
+
+    def test_failed_single_and_multi_turn_calls_keep_the_fixture(self):
+        for multi in (False, True):
+            with self.subTest(multi=multi), tempfile.TemporaryDirectory() as d:
+                base = Path(d); fixture = base / 'fixture'; fixture.mkdir()
+                (fixture / 'evidence.txt').write_text('fixture evidence')
+                spec = {'turns': [{'prompt': 'p', 'graders': []}]} if multi else {'prompt': 'p', 'graders': []}
+                with unittest.mock.patch.object(run.claude_adapter, 'call', return_value=run.Failure('error', 'failed')):
+                    _, error, _ = run.run_one(run.Case('failure', base, spec), 'baseline', 'sonnet', base / 'out')
+                self.assertIn('failed', error)
+                self.assertEqual((base / 'out/fixture/evidence.txt').read_text(), 'fixture evidence')
+
+    def test_baseline_rejects_an_agent_flag_in_the_executed_command(self):
+        def call(request, *, artifacts, **kwargs):
+            artifacts.mkdir(parents=True, exist_ok=True)
+            (artifacts / 'command.json').write_text(json.dumps({'argv': ['/host', '--agent', 'chief-of-stuff', '--', 'p']}))
+            return self.reply()
+        for multi in (False, True):
+            with self.subTest(multi=multi), tempfile.TemporaryDirectory() as d:
+                base = Path(d)
+                spec = {'turns': [{'prompt': 'p', 'graders': []}]} if multi else {'prompt': 'p', 'graders': []}
+                with unittest.mock.patch.object(run.claude_adapter, 'call', side_effect=call):
+                    _, error, _ = run.run_one(run.Case('arm', base, spec), 'baseline', 'sonnet', base / 'out')
+                self.assertIn('baseline', error)
+
+    def test_snapshot_failure_still_stops_pages_and_cleans_sessions(self):
         with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            with unittest.mock.patch.object(run.claude_adapter, "call") as call:
-                results, error, _ = run.run_turns({"turns": [{"prompt": "go"}, {"graders": []}]},
-                    "baseline", "sonnet", base, base, {}, None, base / "calls", "America/Chicago")
-            call.assert_not_called()
-            self.assertEqual(results, [])
-            self.assertIn("wait turn", error)
+            base = Path(d); work = base / 'work'; work.mkdir(); out = base / 'out'; out.mkdir()
+            spec = {'turns': [{'prompt': 'one', 'graders': []}]}
+            with unittest.mock.patch.object(run, 'start_fixture_pages'), \
+                 unittest.mock.patch.object(run, 'before_snapshot'), \
+                 unittest.mock.patch.object(run.claude_adapter, 'call', return_value=self.reply()), \
+                 unittest.mock.patch.object(run.claude_adapter, 'forget_session') as forget, \
+                 unittest.mock.patch.object(run.shutil, 'copytree', side_effect=OSError('snapshot failed')), \
+                 unittest.mock.patch.object(run, 'stop_pages') as stop:
+                with self.assertRaisesRegex(OSError, 'snapshot failed'):
+                    run.run_one(run.Case('failure', base, spec), 'baseline', 'sonnet', out)
+            stop.assert_called_once()
+            forget.assert_called_once()
+
+    def test_multi_turn_sessions_are_removed_even_when_a_later_turn_fails(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as d:
+                base = Path(d); work = base / 'work'; work.mkdir(); out = base / 'out'; out.mkdir()
+                config = base / 'claude-config'; project = config / 'projects' / '-fixture'; project.mkdir(parents=True)
+                unrelated = project / 'other-session.jsonl'; unrelated.write_text('keep')
+                ids = []
+                def call(request, **kwargs):
+                    ids.append(request.session_id)
+                    (project / f'{request.session_id}.jsonl').write_text('session')
+                    subagents = project / request.session_id / 'subagents'; subagents.mkdir(parents=True, exist_ok=True)
+                    (subagents / 'agent.jsonl').write_text('child')
+                    return run.Failure('error', 'failed') if failure and request.resume else self.reply(session_id=request.session_id)
+                spec = {'turns': [{'prompt': 'one', 'graders': []}, {'prompt': 'two', 'graders': []}]}
+                with unittest.mock.patch.object(run.claude_adapter, 'call', side_effect=call):
+                    run.run_turns(spec, 'baseline', 'sonnet', out, work, {'CLAUDE_CONFIG_DIR': str(config)},
+                                  None, base / 'calls', 'America/Chicago')
+                self.assertTrue(ids)
+                self.assertEqual(list(project.iterdir()), [unrelated])
 
 
 class UnknownGraderTest(unittest.TestCase):

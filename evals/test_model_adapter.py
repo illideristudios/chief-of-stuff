@@ -90,11 +90,26 @@ class AvailabilityTest(unittest.TestCase):
         with mock.patch.object(claude_adapter, "resolve", return_value="/login/claude") as resolve:
             self.assertEqual(claude_adapter.available(), "/login/claude")
         resolve.assert_called_once_with("claude")
+        with mock.patch.object(claude_adapter, "resolve", return_value="/login/claude"), \
+             mock.patch.object(claude_adapter, "available", wraps=claude_adapter.available) as available:
+            cmd = claude_adapter.command(Request(prompt="p"))
+            self.assertIn("/login/claude", cmd)
+            available.assert_called_once_with()
         with mock.patch.object(claude_adapter, "resolve", return_value=None):
             self.assertIsNone(claude_adapter.available())
+            with self.assertRaises(claude_adapter.ShellError):
+                claude_adapter.command(Request(prompt="p"))
 
 
 class EventsTest(unittest.TestCase):
+    def test_startup_noise_and_events_after_result_do_not_hide_a_reply(self):
+        raw = 'shell startup\n' + json.dumps({'type': 'result', 'is_error': False, 'result': 'done'})
+        raw += '\n' + json.dumps({'type': 'system', 'subtype': 'task_notification'}) + '\nlogout noise\n'
+        got = claude_adapter.classify(0, raw, 'warning', keep_events=True)
+        self.assertIsInstance(got, Reply)
+        self.assertEqual(got.text, 'done')
+        self.assertEqual(len(got.events), 2)
+
     def test_events_are_opt_in_and_preserve_tool_calls_and_denials(self):
         events = [
             {"type": "system", "subtype": "init", "model": "sonnet"},
@@ -249,19 +264,87 @@ class CallTest(unittest.TestCase):
 
     def test_driver_options_and_environment_reach_the_cli_with_a_literal_prompt(self):
         capture = self.dir / "capture.py"
-        capture.write_text("import json,os,sys\nprint(json.dumps({'type':'result','is_error':False,"
+        capture.write_text(f"#!{sys.executable}\nimport json,os,sys\nprint(json.dumps({{'type':'result','is_error':False,"
                            "'result':json.dumps([sys.argv[1:], os.environ.get('CHIEF_EVAL_TEST'), "
                            "os.environ.get('UNRELATED_SECRET')])}))\n")
         capture.chmod(0o755)
-        with mock.patch.object(claude_adapter, "command", return_value=[sys.executable, str(capture)]) as command:
+        with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
             got = claude_adapter.call(Request(prompt="-literal"), extra_args=("--max-turns", "4"),
                                       env={"CHIEF_EVAL_TEST": "set", "UNRELATED_SECRET": "discard"})
-        self.assertEqual(json.loads(got.text), [[], "set", None])
-        self.assertEqual(command.call_args.kwargs["extra_args"], ("--max-turns", "4"))
-        with mock.patch.object(claude_adapter, "resolve", return_value=str(self.cli)), \
-             mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}):
-            cmd = claude_adapter.command(Request(prompt="-literal"), extra_args=("--max-turns", "4"))
-        self.assertEqual(cmd[-4:], ["--max-turns", "4", "--", "-literal"])
+        args, marker, secret = json.loads(got.text)
+        self.assertEqual(args[-4:], ["--max-turns", "4", "--", "-literal"])
+        self.assertEqual((marker, secret), ("set", None))
+
+    def test_supported_auth_routing_and_network_environment_reaches_process(self):
+        names = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                 "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_REGION",
+                 "AWS_PROFILE", "AWS_SECRET_ACCESS_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
+                 "HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR")
+        capture = self.dir / "environment"
+        capture.write_text(f"#!{sys.executable}\nimport json,os\n"
+                           "print(json.dumps({'type':'result','is_error':False,'result':json.dumps(dict(os.environ))}))\n")
+        capture.chmod(0o755)
+        env = {name: "fixture-value" for name in names}
+        with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+            got = claude_adapter.call(Request(prompt="p"), env={**env, "UNRELATED_SECRET": "drop"})
+        received = json.loads(got.text)
+        self.assertEqual({name: received.get(name) for name in names}, env)
+        self.assertNotIn("UNRELATED_SECRET", received)
+
+    def test_login_setup_cannot_replace_the_eval_shim_path(self):
+        shell = self.dir / "bash"
+        # Python stand-in for a login shell that resets PATH before executing its command source.
+        shell.write_text(f"#!{sys.executable}\nimport os,sys\nos.environ['PATH']='/usr/bin:/bin'\n"
+                         "os.execv('/bin/bash', ['/bin/bash', '-c', *sys.argv[2:]])\n")
+        shell.chmod(0o755)
+        capture = self.dir / "path-capture"
+        capture.write_text(f"#!{sys.executable}\nimport json,os\n"
+                           "print(json.dumps({'type':'result','is_error':False,'result':os.environ['PATH']}))\n")
+        capture.chmod(0o755)
+        with mock.patch.dict(os.environ, {"SHELL": str(shell)}), \
+             mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+            got = claude_adapter.call(Request(prompt="p"), env={"CHIEF_OF_STUFF_PATH_PREFIX": "/eval/shims"})
+        self.assertEqual(got.text.split(os.pathsep)[0], "/eval/shims")
+
+    def test_raw_output_stderr_and_executed_command_survive_a_failed_call(self):
+        capture = self.dir / "failure"
+        capture.write_text(f"#!{sys.executable}\nimport sys\nprint('startup noise')\n"
+                           "print('{\"type\":\"system\"}')\nprint('diagnostic', file=sys.stderr)\nsys.exit(2)\n")
+        capture.chmod(0o755)
+        artifacts = self.dir / "artifacts"
+        with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+            got = claude_adapter.call(Request(prompt="p", keep_events=True), artifacts=artifacts,
+                                      env={"ANTHROPIC_API_KEY": "never-record-this", "UNRELATED_SECRET": "drop"})
+        self.assertIsInstance(got, Failure)
+        self.assertIn('startup noise', (artifacts / 'stdout').read_text())
+        self.assertEqual((artifacts / 'stderr').read_text(), 'diagnostic\n')
+        command = json.loads((artifacts / 'command.json').read_text())
+        self.assertIn(str(capture), command['argv'])
+        self.assertEqual(command['argv'][-2:], ['--', 'p'])
+        self.assertIn('ANTHROPIC_API_KEY', command['env_keys'])
+        self.assertNotIn('UNRELATED_SECRET', command['env_keys'])
+        self.assertNotIn('never-record-this', (artifacts / 'command.json').read_text())
+
+    def test_timeout_kills_pipe_holding_descendants_and_preserves_partial_output(self):
+        capture = self.dir / "descendant"
+        capture.write_text(f"#!{sys.executable}\nimport subprocess,sys\n"
+                           "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])\n"
+                           "print(child.pid, flush=True)\n")
+        capture.chmod(0o755)
+        artifacts = self.dir / "timeout"
+        with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+            got = claude_adapter.call(Request(prompt="p", timeout_s=0.3), artifacts=artifacts)
+        self.assertEqual(got.kind, "unknown")
+        pid = int((artifacts / 'stdout').read_text().strip())
+        # A zombie may remain until the system reaps it; a running descendant may not.
+        status = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+        self.assertTrue(not status or status.startswith('Z'), status)
+
+    def test_extra_options_do_not_depend_on_the_prompt_being_the_last_two_tokens(self):
+        with mock.patch.object(claude_adapter, "argv", return_value=[str(self.cli), '--', 'p', '--future']), \
+             mock.patch.object(claude_adapter, "resolve", return_value=str(self.cli)):
+            cmd = claude_adapter.command(Request(prompt='p'), extra_args=('--max-turns', '4'))
+        self.assertEqual(cmd[-5:], ['--max-turns', '4', '--', 'p', '--future'])
 
     def test_a_session_minted_then_resumed_recalls_the_first_call(self):
         self.call("the code word is heron", session_id=SID)

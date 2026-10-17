@@ -648,6 +648,19 @@ class RuntimeCheckTest(unittest.TestCase):
                 self.assertFalse(any(line.startswith("runtimes") for line in lines))
                 self.assertEqual((code, err), (0, ""))
 
+    def test_shell_fault_redacts_every_private_path_shape(self):
+        for message in ("configured shell '/Users/private/a shell' failed",
+                        "paths ['/Users/private/a', '/home/private/b'] failed",
+                        "[Errno 2] No such file: '/Users/private/a'",
+                        "cannot execute /home/private/a",
+                        "cannot execute /home/private/a or '/Users/private/b'"):
+            with self.subTest(message=message), mock.patch.object(ph.claude_adapter, "available", side_effect=ShellError(message)):
+                code, lines, err = self.run_health(SETTINGS, MODELS)
+            self.assertEqual(code, 1)
+            self.assertNotIn('/Users', ' '.join(lines))
+            self.assertNotIn('/home', ' '.join(lines))
+            self.assertEqual(err, '')
+
     def test_shell_fault_is_one_fault_with_no_private_path(self):
         with mock.patch.object(ph.claude_adapter, "available", side_effect=ShellError("configured login shell '/Users/private/bin/fish' is not executable")):
             code, lines, err = self.run_health(SETTINGS, MODELS)
