@@ -307,14 +307,19 @@ class EngineTest(unittest.TestCase):
     def test_retryable_exits_keep_their_outcome_and_tree_without_an_orphan_hold(self):
         self.run_pass()
         self.publish_exit()
-        for outcome in ("quota", "unknown", "blocked"):
+        for attempt, outcome in enumerate(("quota", "unknown", "blocked"), 1):
+            if attempt > 1:
+                self.db.record_segment(KEY, "implement", attempt, started_at=NOW.isoformat())
+                data = self.db.resume(KEY)
+                data["runs"][f"implement-{attempt}"] = dict(data["runs"]["implement-1"])
+                self.db.set_resume(KEY, data)
             with self.subTest(outcome=outcome), \
                  mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)), \
                  mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
-                segment = self.db.segments(KEY)[0]
+                segment = self.db.segments(KEY)[-1]
                 engine._finish_worker(self.forge, self.db, self.root, self.trees, segment, outcome, "retry later", NOW)
                 self.assertFalse(self.db.items()[0].human_review)
-                self.assertEqual(self.db.segments(KEY)[0].outcome, outcome)
+                self.assertEqual(self.db.segments(KEY)[-1].outcome, outcome)
                 self.assertIn("retry later", self.db.log(KEY)[-1].message)
 
     def test_read_only_verdict_preserves_done_after_a_failed_adapter_exit(self):

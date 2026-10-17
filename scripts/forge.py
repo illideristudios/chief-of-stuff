@@ -692,7 +692,7 @@ class Forge:
                 for ref in r.closes:
                     latest[int(ref[1:])] = r
             request = latest.get(issue.iid)
-        snap: dict[str, Any] = {"issue_key": issue_key, "title": issue.title,
+        snap: dict[str, Any] = {"issue_key": issue_key, "title": issue.title, "body": issue.body,
                                 "forge_state": "open" if issue.state == backlog.OPEN else "closed",
                                 "stage_mark": None}
         if self.kanban is not None:
@@ -736,7 +736,7 @@ class Forge:
         out = []
         for one in sorted((*got.issues, *closed.issues), key=lambda i: i.iid):
             r = latest.get(one.iid)
-            snap = {"issue_key": self.key(one.iid), "title": one.title,
+            snap = {"issue_key": self.key(one.iid), "title": one.title, "body": one.body,
                     "forge_state": "open" if one.state == backlog.OPEN else "closed"}
             if self.kanban is not None:
                 snap["stage"] = self._stage(one, statuses if self.kanban.github_project and self.github else None)

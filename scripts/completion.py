@@ -1,7 +1,7 @@
 """Judgements on a finished or abandoned run. Use Cases; no I/O.
 
-Done means on main, with the suite run on main: unknown does not clear. A read-only run that left
-a change goes to review. Unlanded work and orphans come from the tree and its claims. A running
+Landing means on main, with the suite run there: unknown does not clear. Stage completion can
+precede landing. A read-only run that left a change goes to review. Unlanded work and orphans come from the tree and its claims. A running
 segment whose worker is gone is closed from that evidence instead of suppressing the planner.
 """
 
@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from model_port import RETRYABLE
 from orphans import Claim, judge
 from tree_state import TreeState, at_risk
 
@@ -54,13 +55,16 @@ def orphan_reason(name: str, state: TreeState | None, claims: Sequence[Claim]) -
 def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only: bool = False,
               changed: bool | None = None, on_main: bool | None = None, suite_on_main: bool | None = None,
               tree: TreeState | None = None, tree_name: str = "",
-              tree_claims: Sequence[Claim] = (), tree_unreadable: bool = False) -> Verdict | None:
-    """How to close an open segment whose worker is gone. None while the worker may still be running."""
+              tree_claims: Sequence[Claim] = (), tree_unreadable: bool = False,
+              landing_required: bool = True) -> Verdict | None:
+    """Close a gone worker; only a final stage requires landing. Retryable stops retain their tree for resumption."""
     if worker_alive is not False:
         return None
     why = read_only_left_changes(read_only, changed)
     if why:
         return Verdict("done", why, True)
+    if report in (*RETRYABLE, "blocked"):
+        return Verdict(report, "")
     left = unlanded(tree)
     # Keep the explicit done outcome behind a human hold, so recovery does not retry and overwrite the delivered work.
     if report == "done" and left and on_main is not True:
@@ -68,11 +72,11 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
     orphaned = orphan_reason(tree_name, tree, tree_claims)
     if orphaned:
         return Verdict("failed", orphaned, True)
+    if tree_unreadable:
+        return Verdict("done" if report == "done" else "failed", "worker tree could not be read", True)
     if report == "done":
-        gate = done_on_main(on_main, suite_on_main)
+        gate = done_on_main(on_main, suite_on_main) if landing_required else None
         if gate:
             return Verdict("done", gate, True)
         return Verdict("done", "")
-    if tree_unreadable:
-        return Verdict("failed", "worker tree could not be read", True)
     return Verdict("failed", "worker gone")

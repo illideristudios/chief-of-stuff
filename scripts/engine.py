@@ -192,6 +192,20 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
                 store.add_log(key, message, at)
 
 
+def _close_segment(forge: Any, store: Any, key: str, stage: str, attempt: int,
+                   outcome: str, reason: str, human_review: bool, now: datetime) -> None:
+    """Both closure paths persist a forge hold before ending the segment."""
+    if human_review:
+        if getattr(forge, "kanban", None) is not None:
+            error = forge.add_human_hold(int(key.rpartition("#")[2]))
+            if error:
+                raise ForgeError(error)
+        store.upsert_item(key, human_review=True)
+    store.end_segment(key, stage, attempt, now.isoformat(), outcome)
+    store.add_log(key, f"worker {stage} attempt {attempt}: {outcome}" +
+                  (f": {reason}" if reason else ""), now.isoformat())
+
+
 def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any,
                    outcome: str, reason: str, now: datetime) -> None:
     """Adapter classification precedes completion judgement; a forge hold must precede closure."""
@@ -202,18 +216,12 @@ def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any
         on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
         tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
         tree_claims=(Claim(key, False, "worker exited"),),
-        tree_unreadable=dict(facts.changed).get(key) is None)
+        tree_unreadable=dict(facts.changed).get(key) is None, landing_required=segment.stage == "merge")
     held = verdict.human_review or reason.startswith("unreadable worker run:")
-    if held:
-        if getattr(forge, "kanban", None) is not None:
-            error = forge.add_human_hold(int(key.rpartition("#")[2]))
-            if error:
-                raise ForgeError(error)
-        store.upsert_item(key, human_review=True)
-        reason = verdict.reason if verdict.human_review else reason
-    store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
-    store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" +
-                  (f": {reason}" if reason else ""), now.isoformat())
+    if verdict.human_review:
+        outcome = verdict.outcome
+        reason = "; ".join(part for part in (reason, verdict.reason) if part)
+    _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
 
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
@@ -229,10 +237,21 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     snapshots = list(forge.snapshots())
     scopes = {}
     for row in snapshots:
-        got = forge.issue(int(row["issue_key"].rpartition("#")[2]))
-        if not got.ok or got.issue is None:
-            raise ForgeError(f"ownership of {row['issue_key']}: {got.error or 'issue not found'}")
-        scopes[row["issue_key"]] = ownership.issue_scopes(got.issue.body)
+        key = row["issue_key"]
+        body = row.get("body")
+        if not isinstance(body, str):
+            try:
+                got = forge.issue(int(key.rpartition("#")[2]))
+                if not got.ok or got.issue is None:
+                    raise ForgeError(got.error or "issue not found")
+                body = got.issue.body
+            except (ForgeError, OSError, ValueError, TypeError) as exc:
+                store.add_log(key, f"ownership read failed: {exc}", clock().isoformat())
+                # A failed per-issue fallback preserves prior claims; a new issue owns the repository.
+                if not any(row.mode != "tree" for row in store.ownership(key)):
+                    scopes[key] = [(".", "write")]
+                continue
+        scopes[key] = ownership.issue_scopes(body)
     board = getattr(forge, "kanban", None)
     if board is not None:
         stored_stages = {item.issue_key: item.stage for item in store.items()}
@@ -382,15 +401,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                          hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
             elif isinstance(action, reconcile.Close):
-                if action.human_review and board is not None:
-                    # human_review is forge-owned: write the label first, so a failed write retries the Close.
-                    held = forge.add_human_hold(int(key.rpartition("#")[2]))
-                    if held:
-                        raise ForgeError(held)
-                store.end_segment(key, action.stage, action.attempt, at, action.outcome)
-                if action.human_review:
-                    store.upsert_item(key, human_review=True)
-                store.add_log(key, f"close: {action.reason or action.outcome}", at)
+                _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
+                               action.reason, action.human_review, now)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 data = _resume(store, key)
                 record = {"kind": type(action).__name__, "reason": action.reason}

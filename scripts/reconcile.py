@@ -153,7 +153,7 @@ class Facts:
     trees: tuple[tuple[str, TreeState], ...] = ()
     tree_names: tuple[tuple[str, str], ...] = ()
     tree_claims: tuple[tuple[str, tuple], ...] = ()
-    progress: tuple[tuple[str, datetime | None], ...] = ()  # present None: looked, no commit; absent: unknown
+    progress: tuple[tuple[str, datetime | None], ...] = ()  # present None: no usable progress evidence; absent: not gathered
     blockers_error: str = ""  # why `blockers` is None
     stall_after: timedelta = timedelta(minutes=45)
 
@@ -285,7 +285,7 @@ def _abandoned(item: WorkItem, segment: Segment, facts: Facts) -> Close | None:
         on_main=dict(facts.on_main).get(item.issue_key), suite_on_main=dict(facts.suite_on_main).get(item.issue_key),
         tree_unreadable=item.issue_key in dict(facts.changed) and dict(facts.changed)[item.issue_key] is None,
         tree=dict(facts.trees).get(item.issue_key), tree_name=dict(facts.tree_names).get(item.issue_key, ""),
-        tree_claims=dict(facts.tree_claims).get(item.issue_key, ()))
+        tree_claims=dict(facts.tree_claims).get(item.issue_key, ()), landing_required=segment.stage == "merge")
     if verdict is None:
         return None
     return Close(item.issue_key, segment.stage, segment.attempt, verdict.outcome, verdict.reason, verdict.human_review)
@@ -420,7 +420,7 @@ def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment
                 running: Sequence[str]) -> Action | None:
     if isinstance(action, (Dispatch, Review, Merge)) and item.issue_key in facts.read_only:
         changed = dict(facts.changed)
-        if any(s.ended_at and s.outcome == "done" for s in history) and item.issue_key in changed and changed[item.issue_key] is not False:
+        if any(s.ended_at and s.outcome == "done" for s in history) and item.issue_key in changed and changed[item.issue_key] is True:
             return Wait(item.issue_key, "read-only run left changes")
     if not isinstance(action, (Dispatch, Review)):
         return action
