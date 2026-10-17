@@ -346,6 +346,9 @@ class LandingTest(unittest.TestCase):
         requests = mock.patch.object(forge.Forge, "requests", return_value=[])
         self.requests = requests.start()
         self.addCleanup(requests.stop)
+        call = mock.patch.object(forge.backlog, "_call", return_value=([], {}, ""))
+        call.start()
+        self.addCleanup(call.stop)
 
     def test_squash_landing_uses_the_merge_commit_and_current_main_pipeline(self):
         merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "squashed"}}
@@ -363,7 +366,7 @@ class LandingTest(unittest.TestCase):
                 self.assertEqual(result[key], expected)
         merged["baseRefName"] = "release"
         gh.merged = [merged]
-        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""), [key])[key], (False, False))
+        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""), [key])[key], (None, None))
 
     def test_gitlab_uses_the_squash_sha_and_merge_base(self):
         adapter = forge.Forge(GL)
@@ -389,7 +392,7 @@ class LandingTest(unittest.TestCase):
 
     def test_only_the_newest_closing_request_can_prove_a_landing(self):
         body = "Closes #3"
-        release = {"number": 9, "body": body, "baseRefName": "release", "headRefOid": "head", "mergeCommit": {"oid": "side"},
+        release = {"number": 40, "body": body, "baseRefName": "release", "headRefOid": "head", "mergeCommit": {"oid": "side"},
                    "updatedAt": "2026-03-03"}
         missed = {"number": 22, "body": body, "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "other"},
                   "updatedAt": "2026-03-02"}
@@ -424,17 +427,57 @@ class LandingTest(unittest.TestCase):
             self.assertEqual(adapter.landings(pipeline, [key])[key], (False, False))
         self.assertEqual(len(read.paths), 1)
 
+    def test_landings_read_open_closers_without_review_or_discussion_reads(self):
+        for home in (GH, GL):
+            for target, expected in (("main", (None, None)), ("release", (True, True))):
+                with self.subTest(home=home, target=target):
+                    if home == GH:
+                        merged = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
+                                  "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+                        opened = {"number": 40, "headRefOid": "new-head", "baseRefName": target,
+                                  "closingIssuesReferences": [{"number": 3, "repository": {
+                                      "owner": {"login": "example"}, "name": "app"}}]}
+                    else:
+                        merged = {"iid": 21, "sha": "old-head", "description": "Closes #3",
+                                  "target_branch": "main", "merge_commit_sha": "squashed"}
+                        opened = {"iid": 40, "sha": "new-head", "target_branch": target, "description": "Closes #3"}
+                    gh = FakeGh(prs=[opened] if home == GH else [])
+                    adapter = forge.Forge(home, gh=gh, token="test-token")
+                    with mock.patch.object(adapter.__class__, "_merged_requests", return_value=[merged]), \
+                         mock.patch.object(forge.backlog, "_call", return_value=([opened], {}, "")) as call:
+                        self.requests.side_effect = forge.ForgeError("unrelated request review failed")
+                        key = adapter.key(3)
+                        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                                          [key])[key], expected)
+                    self.requests.assert_not_called()
+                    if home == GH:
+                        self.assertEqual(len(gh.all_calls), 1)
+                        args = gh.all_calls[0]
+                        self.assertEqual(args[:2], ["pr", "list"])
+                        self.assertEqual(args[args.index("--state") + 1], "open")
+                        self.assertEqual(set(args[args.index("--json") + 1].split(",")),
+                                         {"number", "headRefOid", "baseRefName", "closingIssuesReferences"})
+                        call.assert_not_called()
+                    else:
+                        call.assert_called_once()
+                        self.assertEqual(parse_qs(urlsplit(call.call_args.args[1]).query)["state"], ["opened"])
+                        self.assertTrue(urlsplit(call.call_args.args[1]).path.endswith("/merge_requests"))
+
     def test_a_newer_open_request_or_changed_head_cannot_use_an_old_landing(self):
         merged = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
                   "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
-        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged]))
+        opened = {"number": 22, "headRefOid": "new-head", "baseRefName": "main",
+                  "closingIssuesReferences": [{"number": 3, "repository": {
+                      "owner": {"login": "example"}, "name": "app"}}]}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged], prs=[opened]))
         key = adapter.key(3)
         for number in (21, 22):
             with self.subTest(number=number):
-                self.requests.return_value = [SimpleNamespace(number=number, head="new-head", closes=("#3",))]
+                opened["number"] = number
+                adapter.gh.prs = [dict(opened)]
                 self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
                                                   [key])[key], (None, None))
-        self.requests.return_value = [SimpleNamespace(number=21, head="old-head", closes=("#3",))]
+        adapter.gh.prs = [{**opened, "number": 21, "headRefOid": "old-head"}]
         self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
                                           [key])[key], (True, True))
 

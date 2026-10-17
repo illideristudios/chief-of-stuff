@@ -392,6 +392,50 @@ class EngineTest(unittest.TestCase):
         (run / "exit.json").write_text('{"exit_code": 0}')
         self.db.add_report(KEY, stage, 1, "fake-session", outcome, "finished", [])
 
+    def test_exited_workers_and_planning_share_one_facts_gather_per_pass(self):
+        self.forge.rows.append({**self.forge.rows[0], "issue_key": OTHER})
+        for key in (KEY, OTHER):
+            self.db.upsert_item(key, stage="implement")
+            self.db.record_segment(key, "implement", 1, started_at=NOW.isoformat())
+            self.launch(key, "implement", 1, "builder")
+            run = Path(self.db.resume(key)["runs"]["implement-1"]["run_dir"])
+            run.mkdir(parents=True)
+            (run / "stdout").write_text('{"is_error": false, "result": "finished"}')
+            (run / "stderr").write_text("")
+            (run / "exit.json").write_text('{"exit_code": 0}')
+            self.db.add_report(key, "implement", 1, "fake-session", "done", "finished", [])
+        with mock.patch.object(engine.engine_facts, "gather", wraps=engine.engine_facts.gather) as gather, \
+             mock.patch.object(engine.reconcile, "completion_verdict", wraps=engine.reconcile.completion_verdict) as verdict, \
+             mock.patch.object(engine.reconcile, "plan", return_value=[]) as plan:
+            self.run_pass()
+        gather.assert_called_once()
+        self.assertEqual(verdict.call_count, 2)
+        for call in verdict.call_args_list:
+            self.assertIs(call.args[2], plan.call_args.kwargs["facts"])
+        self.assertTrue(all(s.ended_at is not None for s in self.db.segments()))
+
+    def test_a_failed_open_closer_read_waits_for_this_pass_and_recovers_next_pass(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged")
+        self.forge.rows.append({**self.forge.rows[0], "issue_key": OTHER})
+        pipeline = tf.forge.Pipeline(1, "main", "squashed", "passed", "")
+        self.forge.branch_head = lambda ref: pipeline
+        gh = tf.FakeGh(fail=[("pr", "list")])
+        adapter = tf.forge.Forge(tf.backlog.GitHubBacklog("example/project"), gh=gh)
+        self.forge.landings = adapter.landings
+        merged = {"number": 21, "headRefOid": "head", "body": "Closes #1, #2",
+                  "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+        with mock.patch.object(tf.forge.Forge, "_merged_requests", return_value=[merged]):
+            actions = self.run_pass()
+            self.assertEqual({a.issue_key for a in actions if isinstance(a, reconcile.Wait)}, {KEY, OTHER})
+            self.assertEqual(self.cleanup.call_args.kwargs["completed"], set())
+            for key in (KEY, OTHER):
+                self.assertFalse((self.db.resume(key) or {}).get("verified_landing"))
+            gh.fail.clear()
+            self.assertEqual(self.run_pass(), [])
+        self.assertEqual(self.cleanup.call_args.kwargs["completed"], {KEY, OTHER})
+        for key in (KEY, OTHER):
+            self.assertIs(self.db.resume(key)["verified_landing"], True)
+
     def test_normal_exit_enforces_read_only_scope_before_closing(self):
         self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
         self.run_pass()
