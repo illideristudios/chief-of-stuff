@@ -1,5 +1,4 @@
 """Backfill proposes bounded claims; only a reviewed, unchanged plan can write."""
-import hashlib
 import json
 import sys
 import tempfile
@@ -49,6 +48,22 @@ class DerivationTest(unittest.TestCase):
         scopes, why = ownership.derive_scopes('Implement stage M4', 'Plan: `docs/design.md`.', SOURCES)
         self.assertEqual(scopes, [])
         self.assertTrue(why)
+
+    def test_stage_words_are_not_inferred_as_python_functions(self):
+        scopes, why = ownership.derive_scopes('Implement fix stage', 'The `fix` stage needs a policy.', {'scripts/tasks.py': 'def fix():\n    pass\n'})
+        self.assertEqual(scopes, [])
+        self.assertTrue(why)
+
+    def test_explicit_function_call_resolves_to_its_definition(self):
+        scopes, why = ownership.derive_scopes('Fix', 'Repair `repair()`.', SOURCES)
+        self.assertIn(('scripts/widget.py', 'write'), scopes)
+        self.assertFalse(why)
+
+    def test_read_instructions_keep_reference_documents_read_only(self):
+        scopes, why = ownership.derive_scopes('Repair widget.py', 'Read `docs/design.md` first.', SOURCES)
+        self.assertIn(('docs/design.md', 'read'), scopes)
+        self.assertIn(('scripts/widget.py', 'write'), scopes)
+        self.assertFalse(why)
 
     def test_explicit_path_wins_over_ambiguous_basename(self):
         scopes, why = ownership.derive_scopes('Fix', '`scripts/widget.py:23`', dict(SOURCES, **{'other/widget.py': ''}))
@@ -132,6 +147,26 @@ class ApplyTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'approval'):
             self.apply()
         self.assertEqual(self.writes, [])
+
+    def test_last_verdict_in_a_comment_controls_approval(self):
+        self.comments = [{'body': f'Architect: APPROVED {self.head}\nArchitect: CHANGES {self.head}'}]
+        with self.assertRaisesRegex(ValueError, 'approval'):
+            self.apply()
+        self.assertEqual(self.writes, [])
+
+    def test_one_issue_failure_does_not_lose_the_rest_of_the_report(self):
+        plan = mb.ownership_plan('example/repo', [issue(), issue(2)], SOURCES, validator)
+        self.plan['workspaces'] = [plan]
+        self.plan_text = json.dumps(self.plan, indent=2) + '\n'
+        self.approved_text = self.plan_text
+        self.approve()
+        real_gh = self.gh
+        def gh(args, body=None):
+            if args[:3] == ['issue', 'edit', '1']:
+                raise ValueError('temporary failure')
+            return real_gh(args, body)
+        got = mb.apply_ownership(self.plan, self.plan_text, 'https://github.com/example/repo/pull/7', 'docs/reports/ownership-plan.json', gh, validator)
+        self.assertEqual([r['status'] for r in got], ['failed', 'written'])
 
     def test_approved_plan_writes_through_gh_and_is_idempotent(self):
         self.approve()
