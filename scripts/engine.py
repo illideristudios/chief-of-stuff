@@ -155,10 +155,18 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         if pending and pending.get("release_hold"):
             # A release is part of dispatch, never an independent pre-plan write. Adopt board drift.
             if (item.forge_state != "open" or not item.stage or item.stage != pending["expected"]
-                    or item.stage != pending["stage"] or not owned):
+                    or item.stage != pending["stage"]):
                 data.pop("pending_stage")
                 data.pop("launcher_hold", None)
                 store.set_resume(item.issue_key, data)
+            elif not owned or owned.get("stage") != item.stage:
+                # Older engines saved no provenance. The write may already have removed the label;
+                # replace it as a normal human hold rather than adopting it as our own.
+                data.pop("pending_stage")
+                data.pop("launcher_hold", None)
+                data["pending_hold"] = {"stage": item.stage, "attempt": 0, "retry": False}
+                store.set_resume(item.issue_key, data)
+                store.set_human_review(item.issue_key, True)
             else:
                 # The mutation may have succeeded before verification failed. Keep the local gate
                 # through every sync, while planning still checks quota, slots and retry budgets.
