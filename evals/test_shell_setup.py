@@ -1,6 +1,7 @@
 """The configured login shell chooses runtime executables and receives exact argv."""
 
 import sys
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
@@ -44,6 +45,41 @@ class ShellSetupTest(unittest.TestCase):
     def test_bad_configured_shell_is_reported(self):
         with self.assertRaises(shell.ShellError):
             shell.login_shell({"SHELL": "/missing/shell"})
+
+    def test_command_cleanup_is_bounded_and_preserves_the_original_failure(self):
+        """#798: even SIGKILL cannot guarantee that a child can be reaped promptly."""
+        for failure in (subprocess.TimeoutExpired("workspace command", 0.1), KeyboardInterrupt()):
+            for stuck in (False, True):
+                with self.subTest(failure=type(failure).__name__, stuck=stuck):
+                    child = mock.MagicMock(pid=123, returncode=None)
+                    child.__enter__.return_value = child
+                    # Popen.__exit__ waits implicitly, even when an explicit wait was bounded.
+                    child.__exit__.side_effect = lambda *args: child.wait()
+                    child.poll.return_value = None
+                    waits = []
+
+                    def wait(timeout=None):
+                        self.assertIsNotNone(timeout, "cleanup must never wait without a timeout")
+                        self.assertGreater(timeout, 0)
+                        waits.append(timeout)
+                        if len(waits) == 1:
+                            raise failure
+                        if stuck:
+                            raise subprocess.TimeoutExpired("unreapable child", timeout)
+                        child.returncode = -shell.signal.SIGKILL
+                        return child.returncode
+
+                    child.wait.side_effect = wait
+                    with tempfile.TemporaryDirectory() as directory, \
+                         mock.patch.object(shell, "login_shell", return_value="/bin/sh"), \
+                         mock.patch.object(shell.subprocess, "Popen", return_value=child), \
+                         mock.patch.object(shell.os, "killpg") as kill:
+                        root = Path(directory)
+                        with self.assertRaises(type(failure)) as raised:
+                            shell.run_command("exit 0", root, workspace=root, timeout=0.1)
+                    self.assertIs(raised.exception, failure)
+                    kill.assert_called_once_with(child.pid, shell.signal.SIGKILL)
+                    self.assertEqual(len(waits), 2)
 
     def standin(self, path: Path, knows: Path) -> Path:
         """An executable at `path` that answers `-lic "command -v <knows' name>"` with `knows`, and nothing else."""
