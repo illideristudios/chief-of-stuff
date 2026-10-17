@@ -379,15 +379,16 @@ def request_records(requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> 
 def consultation_state(head: str | None, known: Mapping[str, Sequence[dict]] | Sequence[str],
                        pending: Mapping[str, Sequence[dict]], posted: Mapping[str, bool]
                        ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
-    """Confirmed posts become requests; absent or superseded intents no longer suppress a consult."""
+    """A confirmed post stays a request after the head moves; an unconfirmed intent for another head does not."""
     confirmed = request_records(known)
     uncertain = {}
     for token, findings in pending.items():
-        if head and token.split("@", 1)[0] != head:
-            continue
         if posted.get(token) is True:
             confirmed[token] = list(findings)
-        elif token not in posted:
+            continue
+        if head and token.split("@", 1)[0] != head:
+            continue
+        if token not in posted:
             uncertain[token] = list(findings)
     return confirmed, uncertain
 
