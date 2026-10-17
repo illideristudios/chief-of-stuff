@@ -44,7 +44,8 @@ class WorkerTest(unittest.TestCase):
         self.persona = self.p.personas["builder"]
         self.forge = SimpleNamespace(
             issue=lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Forge title", body="Issue body")),
-            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"),
+            requests=lambda: [],
+            closing_request=lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="head"),
             protected_branches=lambda: ("trunk", "main"))
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
@@ -200,16 +201,35 @@ class WorkerTest(unittest.TestCase):
         data = self.db.resume(KEY)
         data["runs"]["review-1"] = {"session_id": "review-session"}
         self.db.set_resume(KEY, data)
+        key = reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY),
+                                        sessions={1: "review-session"})[0]["finding_key"]
         with mock.patch.object(worker.make_worktree, "git", return_value=(0, "work/issue-1-implement-1")), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=2,
-                        max_concurrency=1, finding_key="1/1/0", clock=lambda: NOW,
+                        max_concurrency=1, finding_key=key, clock=lambda: NOW,
                         launch=lambda: self.launch("implement", 2))
         prompt = start.call_args.args[0].prompt
         self.assertIn("Handle the boundary", prompt)
         self.assertIn("push the existing request branch", prompt)
         self.assertIn("do not open a new request", prompt)
+
+    def test_architect_consult_gets_a_detached_checkout_and_leaves_the_work_branch(self):
+        data = self.db.resume(KEY) or {}
+        data.update(worktree=str(self.tree), work_branch="work/issue-1-implement-1")
+        self.db.set_resume(KEY, data)
+        fresh = self.trees / "consult"
+        fresh.mkdir()
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=fresh)) as build, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            worker.launch(KEY, "architect", 1, "critic", store=self.db, root=self.root, trees=self.trees,
+                          policies=self.p, forge=self.forge, clock=lambda: NOW)
+        self.assertEqual(build.call_args.kwargs["from_branch"], "feature/existing")
+        self.assertEqual(start.call_args.args[0].cwd, str(fresh))
+        resume = self.db.resume(KEY)
+        self.assertEqual((resume["worktree"], resume["work_branch"]), (str(self.tree), "work/issue-1-implement-1"))
+        self.assertEqual(resume["review_trees"]["architect-1"]["head"], "head")
 
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \

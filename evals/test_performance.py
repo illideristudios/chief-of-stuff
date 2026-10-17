@@ -41,6 +41,13 @@ def seg(**fields: object) -> SimpleNamespace:
 
 
 class PerformanceTableTest(unittest.TestCase):
+    def test_a_panels_second_reviewer_is_not_a_relaunch_but_a_persona_retry_is(self) -> None:
+        panel = dict(issue_key=KEY, stage="review", review_round=1, started_at="2026-10-09T09:00:00+00:00")
+        rows = performance.table([seg(**panel, persona="critic", attempt=1), seg(**panel, persona="security", attempt=2),
+                                  seg(**panel, persona="critic", attempt=3)],
+                                 since=date(2026, 10, 9), until=date(2026, 10, 9), zone=UTC)
+        self.assertEqual([(r.runs, r.relaunched) for r in rows], [(3, 1)])
+
     def test_counts_runs_completed_human_review_and_relaunched_per_day_and_key(self) -> None:
         rows = performance.table([
             seg(runtime="claude", model="opus", effort="high", agent_type="implementer",

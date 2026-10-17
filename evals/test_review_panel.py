@@ -156,9 +156,90 @@ class ReviewPanelTest(unittest.TestCase):
         self.assertEqual(len(findings), 1)
         self.assertIsNone(reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY), sessions={}))
 
-    def test_store_upgrade_preserves_review_identity_on_completion(self):
+    def test_a_review_from_before_the_upgrade_is_rerun_under_the_panel_not_trusted_or_dropped(self):
+        # test_store pins that a migrated 0003 segment has no persona, head or round.
+        self.segment("review", 1)
+        self.db.add_report(KEY, "review", 1, "session-1", "done", "Reviewed", [finding()])
+        actions = self.plan()
+        self.assertEqual([(a.persona, a.review_round) for a in actions], [("critic", 1), ("security", 1)])
+
+    def test_an_earlier_failed_peer_with_a_later_clean_peer_is_retried(self):
         self.review(1, "critic")
-        store.migrate(self.db.engine.url.database)
-        self.db.end_segment(KEY, "review", 1, NOW.isoformat(), "done")
-        segment, = self.db.segments(KEY)
-        self.assertEqual((segment.persona, segment.reviewed_head, segment.review_round), ("critic", "head", 1))
+        self.review(2, "security")
+        # Keep the original start: the failed segment must not become the newest, or _item retries it unaided.
+        self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(), outcome="failed")
+        action, = self.plan()
+        self.assertEqual((action.persona, action.attempt, action.review_round), ("critic", 3, 1))
+
+    def test_a_failed_review_that_never_pinned_a_head_stays_in_its_round_until_the_retry_limit(self):
+        self.review(1, "critic")
+        for attempt in range(2, 6):
+            self.db.record_segment(KEY, "review", attempt, NOW.isoformat(), NOW.isoformat(), "failed",
+                                   persona="security", review_round=1)
+        action, = self.plan()
+        self.assertEqual(action, reconcile.Escalate(KEY, "retry limit reached for review (security)"))
+
+    def test_merge_with_one_finished_reviewer_launches_only_the_missing_one_in_the_same_round(self):
+        self.db.upsert_item(KEY, stage="merge")
+        self.review(1, "critic")
+        action, = self.plan()
+        self.assertEqual((action.persona, action.review_round), ("security", 1))
+
+    def test_successful_consults_do_not_consume_the_architect_retry_budget(self):
+        self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
+        for attempt in range(1, 5):
+            self.db.record_segment(KEY, "architect", attempt, (NOW - timedelta(hours=2)).isoformat(),
+                                   (NOW - timedelta(hours=1)).isoformat(), "done", persona="architect")
+        self.review(5, "critic", [finding()])
+        self.review(6, "security")
+        action, = self.plan()
+        self.assertEqual((action.stage, action.persona, action.attempt), ("architect", "architect", 5))
+
+    def consulted(self, *dispositions):
+        self.p.stages["review"].policy.update(architect=True, architect_persona="architect")
+        self.review(1, "critic", [finding(title) for title, _ in dispositions])
+        self.review(2, "security")
+        keys = [f["finding_key"] for f in reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))]
+        self.segment("architect", 1, persona="architect")
+        self.db.add_report(KEY, "architect", 1, "session-3", "done", "Judged",
+                           [dict(finding(title), finding_key=key, disposition=disposition)
+                            for key, (title, disposition) in zip(keys, dispositions)])
+
+    def test_the_architect_decides_which_findings_get_a_fix(self):
+        self.consulted(("Keep me", "keep"), ("Fix me", "fix"), ("Not real", "discard"), ("Later", "file"))
+        action, = self.plan()
+        self.assertEqual((action.stage, action.finding["title"]), ("fix", "Fix me"))
+        self.segment("fix", 1, finding_key=action.finding_key)
+        self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan()))
+
+    def test_findings_the_architect_did_not_fix_do_not_block_the_merge(self):
+        self.consulted(("Keep me", "keep"), ("Later", "file"))
+        self.assertEqual(self.plan(), [reconcile.Merge(KEY)])
+
+    def test_a_consult_that_leaves_a_finding_undisposed_escalates_instead_of_fixing(self):
+        self.consulted(("Fix me", "fix"))
+        self.db.add_report(KEY, "architect", 1, "session-4", "done", "Judged again", [])
+        action, = self.plan()
+        self.assertEqual(action, reconcile.Escalate(KEY, "architect left a review finding undisposed"))
+
+    def test_findings_from_a_superseded_head_are_re_reviewed_not_fixed(self):
+        self.review(1, "critic", [finding()], head="old")
+        self.review(2, "security", head="old")
+        actions = self.plan(head="new")
+        self.assertEqual([(type(a), a.persona, a.review_round) for a in actions],
+                         [(reconcile.Review, "critic", 2), (reconcile.Review, "security", 2)])
+
+    def test_a_head_that_moved_under_a_running_reviewer_does_not_relaunch_that_reviewer(self):
+        self.db.record_segment(KEY, "review", 1, NOW.isoformat(), persona="critic", reviewed_head="old", review_round=1)
+        action, = self.plan(head="new")
+        self.assertEqual((action.persona, action.review_round), ("security", 2))
+
+    def test_finding_keys_follow_the_finding_not_its_position_in_the_report(self):
+        a, b = finding("A"), finding("B")
+        self.segment("review", 1, persona="critic", reviewed_head="head", review_round=1)
+        self.db.add_report(KEY, "review", 1, "session-1", "done", "Reviewed", [a, b])
+        first = {f["title"]: f["finding_key"] for f in reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))}
+        self.db.add_report(KEY, "review", 1, "session-1", "done", "Revised", [b])
+        second, = reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))
+        self.assertEqual(second["finding_key"], first["B"])
+        self.assertNotEqual(first["A"], first["B"])

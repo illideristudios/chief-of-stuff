@@ -64,7 +64,10 @@ class FakeForge:
         next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))["stage"] = stage
         return SimpleNamespace(ok=True, done=True, error="")
 
-    def closing_request(self, issue_key):
+    def requests(self):
+        return []
+
+    def closing_request(self, issue_key, requests=None):
         return SimpleNamespace(number=10, verdict="ready", approval="", head=tf.tma.HEAD)
 
     def issue(self, number):
@@ -75,6 +78,31 @@ class FakeForge:
         self.merges.append((number, commit, issue_key))
         next(row for row in self.rows if row["issue_key"] == issue_key)["forge_state"] = "closed"
         return "merged #10"
+
+
+class PlanningInputsTest(unittest.TestCase):
+    def test_the_request_list_is_read_once_and_an_unreadable_head_is_logged_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            other = KEY.rpartition("#")[0] + "#2"
+            for key in (KEY, other):
+                db.upsert_item(key, stage="review")
+            def closing_request(key, requests):
+                if key != KEY:
+                    raise ForgeError("no open request")
+                return SimpleNamespace(head="h")
+
+            forge = SimpleNamespace(requests=mock.Mock(return_value=["listed"]),
+                                    closing_request=mock.Mock(side_effect=closing_request))
+            for _ in range(2):
+                inputs = engine._planning_inputs(db, db.items(), forge, NOW.isoformat())
+            self.assertEqual(inputs["heads"], {KEY: "h", other: None})
+            forge.closing_request.assert_called_with(other, ["listed"])
+            self.assertEqual(forge.requests.call_count, 2)  # once per call, not once per item
+            self.assertEqual([e.message for e in db.log(other)], ["change head unreadable: no open request"])
 
 
 class EngineTest(unittest.TestCase):

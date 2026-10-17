@@ -91,6 +91,12 @@ class MCPTest(unittest.TestCase):
         from policy import SEVERITIES
         self.assertEqual(Finding.model_json_schema()["properties"]["severity"]["enum"], list(SEVERITIES))
 
+    def test_an_architect_report_carries_a_disposition_per_finding_key(self):
+        self.tools.report("done", "Judged", [{**FINDING, "finding_key": "1/1/abc", "disposition": "keep"}])
+        self.assertEqual(self.db.reports(KEY)[0].findings[0]["disposition"], "keep")
+        with self.assertRaises(ValueError):
+            self.tools.report("done", "bad", [{**FINDING, "finding_key": "1/1/abc", "disposition": "ignore"}])
+
     def test_stdio_sdk_round_trip(self):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
