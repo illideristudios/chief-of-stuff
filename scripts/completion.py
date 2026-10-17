@@ -84,7 +84,7 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
         return Verdict(outcome, reason, bool(left))
     left = unlanded(tree)
     # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
-    if report == "done" and left and on_main is not True:
+    if report == "done" and left:
         return Verdict("done", left, True)
     orphaned = orphan_reason(tree_name, tree, tree_claims)
     if orphaned:
