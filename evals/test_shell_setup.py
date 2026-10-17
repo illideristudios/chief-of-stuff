@@ -72,14 +72,17 @@ class ShellSetupTest(unittest.TestCase):
                         return child.returncode
 
                     child.wait.side_effect = wait
+                    pending = []
                     with tempfile.TemporaryDirectory() as directory, \
                          mock.patch.object(shell, "login_shell", return_value="/bin/sh"), \
                          mock.patch.object(shell.subprocess, "Popen", return_value=child), \
-                         mock.patch.object(shell, "_unreaped_children", [], create=True), \
+                         mock.patch.object(shell, "_unreaped_children", pending, create=True), \
                          mock.patch.object(shell.os, "killpg") as kill:
                         root = Path(directory)
                         with self.assertRaises(type(failure)) as raised:
                             shell.run_command("exit 0", root, workspace=root, timeout=0.1)
+                        self.assertEqual(pending, [child] if stuck else [],
+                                         "retain only children that outlast bounded cleanup")
                     self.assertIs(raised.exception, failure)
                     kill.assert_called_once_with(child.pid, shell.signal.SIGKILL)
                     self.assertEqual(len(waits), 2)
