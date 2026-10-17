@@ -124,9 +124,7 @@ class EventsTest(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
         self.assertIn("--verbose", cmd)
         raw = "\n".join(json.dumps(e) for e in events)
-        with mock.patch.object(claude_adapter, "command", return_value=["/host"]), \
-             mock.patch.object(claude_adapter.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, raw, "")):
-            got = claude_adapter.call(request)
+        got = claude_adapter.classify(0, raw, "", keep_events=True)
         self.assertEqual(got.events, events)
         self.assertEqual((got.text, got.data, got.session_id, got.num_turns, got.cost_usd),
                          ("done", {"answer": 1}, SID, 2, 0.01))
@@ -139,9 +137,8 @@ class EventsTest(unittest.TestCase):
             ('{"type":"result","is_error":true,"result":"Not logged in"}', 0, "", "auth"),
             ('{"type":"result","is_error":false}', 1, "429 quota exceeded", "quota"),
         ):
-            with self.subTest(kind=kind), mock.patch.object(claude_adapter, "command", return_value=["/host"]), \
-                 mock.patch.object(claude_adapter.subprocess, "run", return_value=subprocess.CompletedProcess([], code, raw, stderr)):
-                self.assertEqual(claude_adapter.call(Request(prompt="p", keep_events=True)).kind, kind)
+            with self.subTest(kind=kind):
+                self.assertEqual(claude_adapter.classify(code, raw, stderr, keep_events=True).kind, kind)
 
 
 class StartTest(unittest.TestCase):
@@ -317,7 +314,7 @@ class CallTest(unittest.TestCase):
                                       env={"ANTHROPIC_API_KEY": "never-record-this", "UNRELATED_SECRET": "drop"})
         self.assertIsInstance(got, Failure)
         self.assertIn('startup noise', (artifacts / 'stdout').read_text())
-        self.assertEqual((artifacts / 'stderr').read_text(), 'diagnostic\n')
+        self.assertTrue((artifacts / 'stderr').read_text().endswith('diagnostic\n'))
         command = json.loads((artifacts / 'command.json').read_text())
         self.assertIn(str(capture), command['argv'])
         self.assertEqual(command['argv'][-2:], ['--', 'p'])

@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 import uuid
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta
 from datetime import time as dtime
@@ -1091,13 +1091,29 @@ def claude_options(spec: dict[str, Any], mcp_config: dict[str, Any] | None = Non
 
 def call_claude(request: Request, options: tuple[str, ...], env: dict[str, str], out: Path,
                 suffix: str = "") -> Reply | Failure:
-    """Record the call inputs and the adapter's completed events for later regrading."""
-    (out / f"command{suffix}.json").write_text(json.dumps({"request": asdict(request), "extra_args": options}, indent=1))
-    got = claude_adapter.call(request, extra_args=options, env=env)
-    (out / f"stream{suffix}.jsonl").write_text(
-        "".join(json.dumps(e) + "\n" for e in got.events or []) if isinstance(got, Reply) else "")
-    (out / f"stderr{suffix}.txt").write_text(got.message if isinstance(got, Failure) else "")
+    """Save the adapter's exact launch and raw output, including failed and timed-out calls."""
+    artifacts = out / f"claude{suffix}"
+    got = claude_adapter.call(request, extra_args=options, env=env, artifacts=artifacts)
+    command = artifacts / "command.json"
+    if command.exists():
+        shutil.copyfile(command, out / f"command{suffix}.json")
+    raw = artifacts / "stdout"
+    errors = artifacts / "stderr"
+    stream = ("".join(json.dumps(e) + "\n" for e in got.events or []) if isinstance(got, Reply)
+              else raw.read_text() if raw.exists() else "")
+    (out / f"stream{suffix}.jsonl").write_text(stream)
+    (out / f"stderr{suffix}.txt").write_text(errors.read_text() if errors.exists() else
+                                            got.message if isinstance(got, Failure) else "")
     return got
+
+
+def claude_agent_flag(out: Path, suffix: str = "") -> bool:
+    """Check the final executed argv, before the prompt delimiter, rather than the request intent."""
+    path = out / f"command{suffix}.json"
+    if not path.exists():
+        return False
+    argv = json.loads(path.read_text())["argv"]
+    return "--agent" in argv[:argv.index("--")] if "--" in argv else "--agent" in argv
 
 
 def host_command(runtime: str, model: str, prompt: str, work: Path, root: Path,
@@ -1448,6 +1464,7 @@ def eval_environment(out: Path, calls_log: Path, tz: str, root: Path | None = No
         shell = {"CHIEF_OF_STUFF_SHELL": str(standin.resolve())}
     return dict(os.environ, **shell,
                 PATH=f"{shims}{os.pathsep}{os.environ['PATH']}",
+                CHIEF_OF_STUFF_PATH_PREFIX=str(shims.resolve()),
                 CHIEF_OF_STUFF_GH=str((shims / "gh").resolve()),
                 CHIEF_OF_STUFF_RELEASE=str(release),
                 CHIEF_OF_STUFF_LAUNCHER=json.dumps(write_recorder(shims, calls_log, tz)))
@@ -1532,12 +1549,14 @@ def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = Non
             (out / "stream.jsonl").write_text(proc.stdout)
             (out / "stderr.txt").write_text(proc.stderr)
         t_end = datetime.now(ZoneInfo(tz))
-        shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
     finally:
-        stop_pages(work, int(ctx["pages_port"]))
-        shutil.rmtree(work, ignore_errors=True)
-        stop_server(health)
-        stop_server(taken)  # a daemon thread would otherwise outlive this case and serve the next one
+        try:
+            shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
+        finally:
+            stop_pages(work, int(ctx["pages_port"]))
+            shutil.rmtree(work, ignore_errors=True)
+            stop_server(health)
+            stop_server(taken)  # a daemon thread would otherwise outlive this case and serve the next one
 
     stream = (load_stream(out / "stream.jsonl") if runtime == "claude" else
               parse_host_stream((out / "stream.jsonl").read_text(), runtime, model))
@@ -1551,7 +1570,8 @@ def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = Non
         detail = stream.init.get("error") or proc.stderr.strip()
         return [], f"{runtime} exit {proc.returncode}: {str(detail)[:300]}", meta
     if runtime == "claude":
-        ok, detail = check_arm(stream.init, arm, needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
+        ok, detail = check_arm(stream.init, arm, needs_calendar="calendar" in spec, model=model,
+                               needs_peers="peers" in spec, agent_flag_used=claude_agent_flag(out))
         if not ok:
             return [], f"arm check: {detail}", meta
     elif str((stream.result or {}).get("status", "SUCCESS")).upper() not in ("SUCCESS", "COMPLETED"):
@@ -1626,45 +1646,58 @@ def run_host_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: 
 
 def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path, env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str, case_root: Path = Path("."), ctx: dict[str, str] | None = None, root: Path | None = None, effort: str | None = None) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
     """Prompted turns are completed adapter calls, resumed by explicit session ID."""
-    if any("prompt" not in turn for turn in spec["turns"]):
-        return [], "claude cannot safely wake an idle conversation for a wait turn through the model port", {"runtime": "claude"}
-    turns: list[Turn] = []
-    request = claude_request(Case("", case_root, spec), arm, model, "", work, root, effort)
-    request = replace(request, session_id=str(uuid.uuid4()))
-    options = claude_options(spec, mcp_config, root)
-    deadline = time.monotonic() + request.timeout_s
-    for n, turn_spec in enumerate(spec["turns"], 1):
-        if "peers" in turn_spec:
-            (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return [], f"timeout before claude turn {n}", {"turns_reached": len(turns)}
-        request = replace(request, prompt=turn_spec["prompt"], timeout_s=remaining)
-        started = datetime.now(ZoneInfo(tz))
-        got = call_claude(request, options, env, out, suffix=f"-turn{n}")
-        if isinstance(got, Failure):
-            return [], f"claude turn {n} {got.kind}: {got.message}", {"turns_reached": len(turns)}
-        turns.append(Turn(got.events or [], started, datetime.now(ZoneInfo(tz))))
-        shutil.copytree(work, out / f"fixture-turn{n}", dirs_exist_ok=True)
-        if n < len(spec["turns"]):
-            if not got.session_id:
-                return [], f"claude returned no conversation ID after turn {n}", {"turns_reached": len(turns)}
-            request = replace(request, session_id=got.session_id, resume=True)
-    shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
-    (out / "stream.jsonl").write_text("".join(json.dumps(e) + "\n" for t in turns for e in t.events))
-    streams = [parse_stream(t.events) for t in turns]
-    meta = {
-        "runtime": "claude", "turns_reached": len(turns),
-        "notional_usd": round(sum((st.result or {}).get("total_cost_usd", 0) for st in streams), 4),
-        "denials": sum(len(st.denied_ids) for st in streams),
-    }
-    if not streams or streams[0].result is None:
-        return [], "claude produced no result for turn 1", meta
-    ok, detail = check_arm(streams[0].init, arm, needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
-    if not ok:
-        return [], f"arm check: {detail}", meta
-    calls = [json.loads(l) for l in calls_log.read_text().splitlines() if l.strip()] if calls_log.exists() else []
-    return grade_turns(spec, turns, tz, out, calls), None, meta
+    owned_sessions: set[str] = set()
+    try:
+        turns: list[Turn] = []
+        request = claude_request(Case("", case_root, spec), arm, model, "", work, root, effort)
+        request = replace(request, session_id=str(uuid.uuid4()))
+        options = claude_options(spec, mcp_config, root)
+        deadline = time.monotonic() + request.timeout_s
+        for n, turn_spec in enumerate(spec["turns"], 1):
+            if "prompt" not in turn_spec:
+                # Completed calls already contain inline background notifications. Missing notifications
+                # are graded as "turn not reached", never as an unmeasured harness error.
+                continue
+            if "peers" in turn_spec:
+                (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return [], f"timeout before claude turn {n}", {"turns_reached": len(turns)}
+            request = replace(request, prompt=turn_spec["prompt"], timeout_s=remaining)
+            started = datetime.now(ZoneInfo(tz))
+            owned_sessions.add(request.session_id)
+            got = call_claude(request, options, env, out, suffix=f"-turn{n}")
+            if isinstance(got, Failure):
+                return [], f"claude turn {n} {got.kind}: {got.message}", {"turns_reached": len(turns)}
+            turns.append(Turn(got.events or [], started, datetime.now(ZoneInfo(tz))))
+            shutil.copytree(work, out / f"fixture-turn{len(turns)}", dirs_exist_ok=True)
+            if n < len(spec["turns"]):
+                if not got.session_id:
+                    return [], f"claude returned no conversation ID after turn {n}", {"turns_reached": len(turns)}
+                request = replace(request, session_id=got.session_id, resume=True)
+        (out / "stream.jsonl").write_text("".join(json.dumps(e) + "\n" for t in turns for e in t.events))
+        streams = [parse_stream(t.events) for t in turns]
+        meta = {
+            "runtime": "claude", "turns_reached": len(turns),
+            "notional_usd": round(sum((st.result or {}).get("total_cost_usd", 0) for st in streams), 4),
+            "denials": sum(len(st.denied_ids) for st in streams),
+        }
+        if not streams or streams[0].result is None:
+            return [], "claude produced no result for turn 1", meta
+        ok, detail = check_arm(streams[0].init, arm, needs_calendar="calendar" in spec, model=model,
+                               needs_peers="peers" in spec,
+                               agent_flag_used=any(claude_agent_flag(out, f"-turn{n}")
+                                                   for n in range(1, len(spec["turns"]) + 1)))
+        if not ok:
+            return [], f"arm check: {detail}", meta
+        calls = [json.loads(l) for l in calls_log.read_text().splitlines() if l.strip()] if calls_log.exists() else []
+        return grade_turns(spec, turns, tz, out, calls), None, meta
+    finally:
+        try:
+            shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
+        finally:
+            for session_id in owned_sessions:
+                claude_adapter.forget_session(session_id, env)
 
 
 def main(argv: list[str]) -> int:
