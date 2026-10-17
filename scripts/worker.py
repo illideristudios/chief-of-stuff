@@ -158,7 +158,9 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
         store.set_ownership(issue_key, str(tree))
     elif not prepared_review:
-        if stage == "fix" or (stage != "review" and attempt > 1):
+        started = any(name.startswith(f"{stage}-") for name in data.get("runs", {}))
+        # A failed start before any worker (such as an unreadable issue) left no tree to lose.
+        if stage == "fix" or (stage != "review" and attempt > 1 and started):
             raise RuntimeError("fix/retry has no existing worktree; refusing a fresh branch")
         from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
