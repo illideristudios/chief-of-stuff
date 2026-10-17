@@ -481,7 +481,7 @@ def _git_simple_command(words: list[str], depth: int) -> list[str]:
             elif not flag.startswith(("-", "+")):
                 raise ValueError("shell script is not inspectable")
         raise ValueError("shell program is not inspectable")
-    if name in {"for", "select", "case", "function", "eval", "source", ".", "xargs"}:
+    if name in {"for", "select", "case", "function", "eval", "source", ".", "xargs", "coproc"}:
         raise ValueError("unsupported shell construct")
     return []
 
