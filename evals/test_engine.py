@@ -549,10 +549,10 @@ class EngineTest(unittest.TestCase):
         self.db.set_resume(KEY, {"runs": []})
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
         self.forge.add_human_hold = lambda number: "forge offline"
-        with self.assertRaisesRegex(ForgeError, "forge offline"):
-            self.run_pass()
+        self.run_pass()
         self.assertIsNone(self.db.segments(KEY)[0].ended_at)
         self.assertFalse(self.db.items()[0].human_review)
+        self.assertIn("close failed: forge offline", self.db.log(KEY)[-1].message)
 
     def test_snapshot_bodies_avoid_per_issue_reads_even_for_closed_issues(self):
         self.run_pass()
