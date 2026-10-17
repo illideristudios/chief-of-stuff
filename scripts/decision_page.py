@@ -805,6 +805,7 @@ header .chip.answered{color:var(--surface);background:#009E73;border-color:#009E
 .ask{border-top:3px solid var(--brass);display:flex;flex-direction:column;gap:4px}
 .ask strong{font-size:16px}
 .ask p{color:var(--muted)}
+.ask>.prose:first-of-type p{color:var(--fg);font-size:16px}
 code{font-family:ui-monospace,monospace;font-size:.88em;background:var(--ref-bg);padding:0 3px;border-radius:3px;overflow-wrap:normal}
 .ref{font-family:ui-monospace,monospace;font-size:.88em;color:var(--link);text-decoration:none;border-bottom:1px dotted var(--brass);background:var(--ref-bg);padding:0 3px;border-radius:3px;white-space:nowrap}
 .ref::before{content:attr(data-k);font-size:.8em;color:var(--muted);margin-right:3px}

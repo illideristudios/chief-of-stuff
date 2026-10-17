@@ -18,7 +18,7 @@ HTML_SEQUENCES: list[tuple[re.Pattern[str], re.Pattern[str], bool]] = [
         re.compile(r"<\/(script|pre|style|textarea)>", re.IGNORECASE),
         True,
     ),
-    (re.compile(r"^<!--"), re.compile(r"-->"), True),
+    (re.compile(r"^<!--"), re.compile(r"--!?>"), True),
     (re.compile(r"^<\?"), re.compile(r"\?>"), True),
     (re.compile(r"^<![A-Z]"), re.compile(r">"), True),
     (re.compile(r"^<!\[CDATA\["), re.compile(r"\]\]>"), True),

@@ -117,6 +117,15 @@ class MarkdownTest(unittest.TestCase):
                 self.assert_blocks(dp.render(decision(**{field: BLOCK}), '2026-10-16'))
         self.assert_blocks(dp.render(decision(sides=[{'label':'Plan','status':'open','text':BLOCK}]), '2026-10-16'))
 
+    def test_decision_question_prose_stays_prominent(self):
+        # The ask's first prose is the question; the muted `.ask p` rule must not flatten it.
+        self.assertIn('.ask>.prose:first-of-type p{color:var(--fg);font-size:16px}', dp.PAGE_CSS)
+
+    def test_html_comment_block_ends_at_bang_close(self):
+        from _vendor.markdown_it import MarkdownIt
+        html = MarkdownIt('commonmark').render('<!-- note --!>\n\nafter\n')
+        self.assertIn('<p>after</p>', html)
+
     def test_issue_body_and_review_notes_render_blocks(self):
         self.assert_blocks(page(src=sources(MR, issue=replace(ISSUE, body=BLOCK))))
         thread = bs.ReviewThread(False, '**author**', BLOCK, NOW, 'https://example.com')
