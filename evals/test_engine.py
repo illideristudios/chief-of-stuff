@@ -1230,11 +1230,19 @@ class EngineTest(unittest.TestCase):
         self._superseded_merge_gate("exhausted")
 
     def test_a_standing_approval_releases_an_unanswered_earlier_gate_at_merge(self):
-        self._merge_gate()
-        self.p = policies()
-        self.db.add_decision(KEY, "plan", "Plan approved?", record={
-            "decision": {"stage": "implement", "attempt": 1}})
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        self.run_pass(model=self._votes([("adopt", "hold")] * 3))
+        self.assertIsNone(self.db.decisions(KEY)[-1].answer)
+        self.p.stages["implement"] = policy.Place("implement", "builder", {
+            "zach_gates": ("plan",), "approvals": (policy.Approval("plan", NOW + timedelta(days=1)),)})
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.finish("review")
+        self.findings()
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
 
     def test_return_gate_owner_interrupt_uses_the_review_context_not_the_policy_source(self):
         self._merge_gate()
@@ -1286,13 +1294,27 @@ class EngineTest(unittest.TestCase):
         self.run_pass(max_concurrency=0)
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
 
-    def test_a_restart_clears_downstream_owner_interrupts_before_review_starts_again(self):
+    def _restart_clears_downstream_owner_interrupts(self, start):
         self._merge_gate()
+        if start == "plan":
+            self.p.stages["plan"] = policy.Place("plan", "builder")
+            self.p.workflows["standard"] = policy.Workflow("standard", "plan", (
+                policy.Edge("plan", "implement"), *self.p.workflows["standard"].edges))
+        self.db.record_segment(KEY, start, 1, (NOW - timedelta(hours=1)).isoformat(),
+                               (NOW - timedelta(minutes=5)).isoformat(), "done")
         self.run_pass(model=self._votes([("concern", "hold")] * 3))
+        self.assertEqual(len(self.db.resume(KEY)["decision_interrupts"]), 1)
         self.now += timedelta(hours=1)
         self.db.add_decision(KEY, "design", "Rework?", record={"reversed": True})
-        self.assertIsInstance(self.run_pass()[0], reconcile.Dispatch)
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, start, "builder", 2)])
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_an_implement_restart_clears_downstream_owner_interrupts_before_review_starts_again(self):
+        self._restart_clears_downstream_owner_interrupts("implement")
+
+    def test_a_plan_restart_clears_downstream_owner_interrupts_before_review_starts_again(self):
+        self._restart_clears_downstream_owner_interrupts("plan")
+
 
     def test_worker_ask_can_adopt_hold_without_gate_semantics(self):
         self._trio()
