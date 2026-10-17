@@ -230,6 +230,28 @@ class GateTest(unittest.TestCase):
             "recommendation": "Split the parser", "unanimous": True,
         })
 
+    def test_direct_answer_settlement_belongs_to_decision_actions(self):
+        import decision_actions
+        ask_id = self.store.add_ask(KEY, "implement", 1, "session", self.decision.question, list(OPTIONS), "ctx")
+        decision = replace(self.decision, topic="ask", instance=f"ask-{ask_id}", context="ctx")
+        self.consult([reply("concern")] * 3, decision=decision)
+        self.store.answer_ask(ask_id, OPTIONS[1])
+        ask, = self.store.asks(KEY)
+        settled = decision_actions.answer_ask(self.store.decisions(KEY), ask)
+        self.assertEqual((settled.topic, settled.question, settled.answer, settled.decided_by),
+                         ("ask", ask.question, OPTIONS[1], "user"))
+        self.assertEqual(settled.record["recommendation"], OPTIONS[1])
+        self.assertFalse(settled.record["unanimous"])
+        self.assertEqual(settled.record["decision"]["instance"], f"ask-{ask_id}")
+        for field, value in (("context", "other"), ("options", ["New", "Old"]), ("id", ask_id + 1)):
+            from types import SimpleNamespace
+            mismatched = SimpleNamespace(**{name: getattr(ask, name) for name in
+                                           ("id", "question", "options", "context", "answer")})
+            setattr(mismatched, field, value)
+            self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), mismatched))
+        self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
+        self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), ask))
+
     def test_decision_actions_reverse_and_restarted_manage_board_reversals(self):
         import decision_actions
         self.consult([reply()] * 3)

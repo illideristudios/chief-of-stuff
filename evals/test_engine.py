@@ -591,6 +591,88 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
         self.assertEqual([stage for _, stage, _, _ in self.launched], ["implement", "review"])
 
+    def test_planner_limit_tracks_review_destination_until_review_can_launch(self):
+        self._trio()
+        self.p.stages["review"] = policy.Place("review", "critic", {"spend_usd": 1})
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        self.db.set_resume(KEY, {"spend_usd": 1})
+        self.run_pass()
+        interrupt = self.db.resume(KEY)["interrupt"]
+        self.assertEqual(interrupt["stage"], "review")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Implementation choice?", ["Yes", "No"], "")
+        self.run_pass(model=self._votes([("adopt", "Yes")] * 3))
+        self.assertEqual(self.db.resume(KEY)["interrupt"], interrupt)
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+
+    def test_planner_retry_exhaustion_tracks_destination_stage(self):
+        self._merge_gate()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"retry_limit": 0})
+        self.forge.rows[0]["stage"] = "review"
+        self.db.record_segment(KEY, "implement", 1, (NOW - timedelta(hours=1)).isoformat(),
+                               (NOW - timedelta(minutes=40)).isoformat(), "done")
+        self.findings(counts={"important": 1})
+        self.assertIsInstance(self.run_pass()[0], reconcile.Escalate)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["stage"], "implement")
+
+    def test_slow_consultations_start_backoff_when_the_failure_is_recorded(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        def fail(request):
+            self.now += timedelta(seconds=60)
+            return model_port.Failure("unknown", "timeout")
+        failed = mock.Mock(side_effect=fail)
+        for delay in (60, 120):
+            self.run_pass(model=failed)
+            completed = self.now
+            calls = failed.call_count
+            retry, = self.db.resume(KEY)["trio_retries"].values()
+            self.assertEqual(datetime.fromisoformat(retry["retry_at"]), completed + timedelta(seconds=delay))
+            self.now += timedelta(seconds=delay - 1)
+            self.run_pass(model=failed)
+            self.assertEqual(failed.call_count, calls)
+            self.now += timedelta(seconds=1)
+
+    def test_answered_short_ask_clears_only_its_own_ambiguity(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        ask = self.db.add_ask(KEY, "implement", 1, "s1", "Which credentials?", [], "ctx")
+        self.run_pass(model=mock.Mock())
+        self.assertEqual(self.db.decisions(KEY), [])
+        self.db.answer_ask(ask, "Use the test account")
+        self.run_pass()
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+
+    def test_failed_launch_crash_before_resume_rollback_drops_route_on_recovery(self):
+        import decision_actions
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
+                             record={"decision": {"options": ["Split", "Keep"]}})
+        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        real_set = self.db.set_resume
+        def crash_on_rollback(key, data):
+            if "pending_stage" not in data:
+                raise SystemExit("crash between segment deletion and rollback")
+            real_set(key, data)
+        with mock.patch.object(self, "launch", side_effect=RuntimeError("launch failed")), \
+                mock.patch.object(self.db, "set_resume", side_effect=crash_on_rollback):
+            with self.assertRaises(SystemExit):
+                self.run_pass()
+        self.assertIn("pending_stage", self.db.resume(KEY))
+        self.assertFalse(any(s.stage == "implement" for s in self.db.segments(KEY)))
+        with mock.patch.object(engine.slots, "claim", side_effect=ValueError("slot unavailable")):
+            self.run_pass()
+        self.assertEqual(self.forge.writes, [])
+        self.assertEqual(self.forge.rows[0]["stage"], "merge")
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+
     def test_retryable_gate_consultation_waits_for_persisted_backoff(self):
         self._trio()
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
@@ -671,6 +753,16 @@ class EngineTest(unittest.TestCase):
         self.run_pass(model=split)
         self.assertIsNone(self.db.decisions(KEY)[-1].answer)
         self.assertEqual(split.n, 3)
+        replacement, = [ask for ask in self.db.asks(KEY) if not ask.answer]
+        self.assertIn("Restart completed: implement-2", replacement.context)
+        self.db.answer_ask(replacement.id, "Keep")
+        self.run_pass()
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.finish("review", 2)
+        self.findings(2)
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(len(self.forge.merges), 1)
 
     def test_short_asks_keep_the_question_in_the_interrupt(self):
         self._trio()
