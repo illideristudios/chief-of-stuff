@@ -254,7 +254,10 @@ def skills_line(skills: tuple[str, ...]) -> str:
 
 def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
                   skills: tuple[str, ...] = (), rules: tuple[str, ...] = (), require_green: bool = False) -> str:
-    """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or a header over BODY_CAP raises RefusedError (E3)."""
+    """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or an assignment prefix over BODY_CAP raises RefusedError (E3).
+
+    The cap covers metadata, persona rules, delivery, review, skills and architecture,
+    before the forge title and body are appended."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
     delivery = (f"{COMMITS}\nPut `Closes #{key.rpartition('#')[2]}` in the pull/merge request body "

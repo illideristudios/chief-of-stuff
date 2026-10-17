@@ -7,6 +7,7 @@ this module only reads.
 from __future__ import annotations
 
 import subprocess
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -110,7 +111,14 @@ def _changed(state: Any, tree: Path, starting_head: str | None) -> bool | None:
 def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]:
     try:
         with git_view.opened(tree, git_trees.audit_env()) as view:
-            return git_trees.read_state(tree, view), _on_main(tree, view), _progress(tree, view)
+            state = git_trees.read_state(tree, view)
+            if state.dirty is not None and state.unpushed is None:
+                # Detached and --no-track checkouts can still be retained by a remote branch.
+                code, refs = git_trees.git(["for-each-ref", "--format=%(objectname)", "refs/remotes"], tree, view)
+                if code == 0:
+                    code, count = git_trees.git(["rev-list", "--count", "HEAD", *("^" + oid for oid in refs.splitlines())], tree, view)
+                    state = replace(state, unpushed=int(count) if code == 0 and count.isdecimal() else None)
+            return state, _on_main(tree, view), _progress(tree, view)
     except (OSError, git_view.Unviewable, git_view.CacheError, subprocess.SubprocessError, ValueError, RuntimeError):
         return None, None, object()
 
@@ -120,8 +128,37 @@ def _in_trees(root: Path, trees: Path, path: str) -> bool:
         return False  # file scopes remain scopes even when Worktrees: .
     try:
         return (root / path).resolve().is_relative_to(trees.resolve())
-    except OSError:
+    except (OSError, RuntimeError, ValueError):
         return False
+
+
+def _recorded_tree(raw: Any, root: Path, trees: Path) -> Path | None:
+    try:
+        tree = None
+        if isinstance(raw, str) and raw:
+            try:
+                tree = Path(raw).resolve(strict=True)
+            except FileNotFoundError:
+                tree = Path(raw).resolve()
+        return tree if tree is not None and any(tree.is_relative_to(base.resolve()) for base in (root, trees)) else None
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _starting_head(record: dict | None) -> str | None:
+    """Older records may still have a durable launch baseline or a pinned review head."""
+    if not record:
+        return None
+    head = record.get("starting_head") or record.get("reviewed_head")
+    if isinstance(head, str) and head.strip():
+        return head.strip()
+    run = record.get("run_dir")
+    if isinstance(run, str) and run:
+        try:
+            return (Path(run) / "starting_head").read_text().strip() or None
+        except OSError:
+            pass
+    return None
 
 
 def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) -> Facts:
@@ -142,6 +179,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
         asks.extend(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt) for row in store.asks(item.issue_key))
     alive: list[tuple[tuple[str, str, int], bool]] = []
     changed: list[tuple[str, bool | None]] = []
+    unreadable: list[str] = []
     on_main: list[tuple[str, bool | None]] = []
     tree_rows: list[tuple[str, Any]] = []
     names: list[tuple[str, str]] = []
@@ -163,9 +201,10 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
         if flag is not None:
             alive.append(((segment.issue_key, segment.stage, segment.attempt), flag))
         raw = record.get("tree") if record else None
-        tree = Path(raw) if isinstance(raw, str) and raw else None
-        tree = tree if tree is None or any(tree.resolve().is_relative_to(base.resolve()) for base in (root, trees)) else None
+        tree = _recorded_tree(raw, root, trees)
         state, landed, stamp = (None, None, None) if tree is None else _tree_facts(tree)
+        if state is None or state.dirty is None:
+            unreadable.append(segment.issue_key)
         if state is not None:
             tree_rows.append((segment.issue_key, state))
             names.append((segment.issue_key, tree.name))
@@ -173,7 +212,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
                                                          "" if flag is not False else "has no process"),)))
         changes = None if state is None or state.dirty is None else bool(state.dirty)
         if segment.issue_key in read_only:
-            changes = _changed(state, tree, record.get("starting_head") if record else None)
+            changes = _changed(state, tree, _starting_head(record))
         changed.append((segment.issue_key, changes))
         if landed is not None:
             on_main.append((segment.issue_key, landed))
@@ -185,6 +224,18 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
             if code == 0:
                 suite = pipeline.status == "passed"
         suite_on_main.append((segment.issue_key, suite))
+    merged = [item.issue_key for item in store.items()
+              if item.forge_state == "closed" and item.merge_state == "merged"]
+    landings = {}
+    if merged and pipeline is not None and callable(getattr(forge, "landings", None)):
+        try:
+            landings = forge.landings(pipeline, merged)
+        except (ForgeError, OSError, ValueError, TypeError):
+            pass
+    for key in merged:
+        landed, suite = landings.get(key, (None, None))
+        on_main.append((key, landed))
+        suite_on_main.append((key, suite))
     # Read after liveness, in insertion order, limited to the latest segment's stage and attempt.
     for item in store.items():
         segment = latest.get(item.issue_key)
@@ -194,6 +245,6 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
     blockers, why = _blockers(forge)
     return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
                  asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
-                 changed=tuple(changed), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
+                 changed=tuple(changed), unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
                  trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress))

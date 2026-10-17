@@ -147,7 +147,8 @@ class Facts:
     reports: tuple[readiness.Report, ...] = ()
     alive: tuple[tuple[tuple[str, str, int], bool], ...] = ()  # (issue, stage, attempt) → worker alive
     read_only: tuple[str, ...] = ()
-    changed: tuple[tuple[str, bool | None], ...] = ()  # present None: the tree could not be read
+    changed: tuple[tuple[str, bool | None], ...] = ()  # dirty; read-only also checks the launch HEAD
+    unreadable: tuple[str, ...] = ()  # git tree/status could not be read; independent of baseline evidence
     on_main: tuple[tuple[str, bool | None], ...] = ()
     suite_on_main: tuple[tuple[str, bool | None], ...] = ()
     trees: tuple[tuple[str, TreeState], ...] = ()
@@ -275,17 +276,22 @@ def _running_segment(history: Sequence[Segment]) -> Segment | None:
     return next((segment for segment in history if segment.started_at and not segment.ended_at), None)
 
 
+def completion_verdict(key: str, segment: Segment, facts: Facts, workflow: Workflow, *,
+                       report: str | None, worker_alive: bool | None) -> completion.Verdict | None:
+    """One completion input mapping for collected exits and abandoned workers."""
+    return completion.abandoned(
+        worker_alive, report=report,
+        read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
+        on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
+        tree_unreadable=key in facts.unreadable,
+        tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
+        tree_claims=dict(facts.tree_claims).get(key, ()), landing_required=not workflow.next(segment.stage))
+
+
 def _abandoned(item: WorkItem, segment: Segment, facts: Facts, workflow: Workflow) -> Close | None:
-    alive = dict(facts.alive).get((item.issue_key, segment.stage, segment.attempt))
-    if alive is not False:
-        return None
-    verdict = completion.abandoned(
-        False, report=_report_outcome(facts, item.issue_key, segment),
-        read_only=item.issue_key in facts.read_only, changed=dict(facts.changed).get(item.issue_key),
-        on_main=dict(facts.on_main).get(item.issue_key), suite_on_main=dict(facts.suite_on_main).get(item.issue_key),
-        tree_unreadable=item.issue_key in dict(facts.changed) and dict(facts.changed)[item.issue_key] is None,
-        tree=dict(facts.trees).get(item.issue_key), tree_name=dict(facts.tree_names).get(item.issue_key, ""),
-        tree_claims=dict(facts.tree_claims).get(item.issue_key, ()), landing_required=not workflow.next(segment.stage))
+    verdict = completion_verdict(item.issue_key, segment, facts, workflow,
+        report=_report_outcome(facts, item.issue_key, segment),
+        worker_alive=dict(facts.alive).get((item.issue_key, segment.stage, segment.attempt)))
     if verdict is None:
         return None
     return Close(item.issue_key, segment.stage, segment.attempt, verdict.outcome, verdict.reason, verdict.human_review)
@@ -312,6 +318,10 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
             return None
         return _abandoned(item, running, facts, workflow) or _stalled(item, running, facts, now)
     if item.forge_state == "closed":
+        if item.merge_state == "merged" and facts is not None:
+            gate = completion.done_on_main(dict(facts.on_main).get(key), dict(facts.suite_on_main).get(key))
+            if gate:
+                return Wait(key, gate)
         return None
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}

@@ -1,8 +1,10 @@
 """Judgements on a finished or abandoned run. Use Cases; no I/O.
 
 Landing means on main, with the suite run there: unknown does not clear. Stage completion can
-precede landing. A read-only run that left a change goes to review. Unlanded work and orphans come from the tree and its claims. A running
-segment whose worker is gone is closed from that evidence instead of suppressing the planner.
+precede landing. Before landing, dirty files and commits absent from remote refs need recovery;
+inherited, published PR commits do not. Missing tree or read-only baseline evidence requires a
+human hold without changing the reported outcome. Retryable and blocked writable runs keep
+their outcome and tree unless the tree is unreadable. Final completion also judges orphans.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ def done_on_main(on_main: bool | None, suite_on_main: bool | None) -> str | None
 def read_only_left_changes(read_only: bool, changed: bool | None) -> str | None:
     """A read-only run that left a commit or a file, or whose tree could not be shown clean."""
     if read_only and changed is not False:
-        return "read-only run left changes"
+        return "read-only run left changes" if changed else "worker starting HEAD could not be verified"
     return None
 
 
@@ -57,7 +59,7 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
               tree: TreeState | None = None, tree_name: str = "",
               tree_claims: Sequence[Claim] = (), tree_unreadable: bool = False,
               landing_required: bool = True) -> Verdict | None:
-    """Close a gone worker; only a final stage requires landing. Retryable stops retain their tree for resumption."""
+    """Close a gone worker using the module contract; holds preserve its report or failed outcome."""
     if worker_alive is not False:
         return None
     outcome = report or "failed"
@@ -68,15 +70,17 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
         return Verdict(outcome, why, True)
     if report in (*RETRYABLE, "blocked"):
         return Verdict(report, "")
-    if report == "done" and not landing_required:
-        # Detached reviews inherit unmerged commits. Only files or known unpushed commits need recovery here.
+    if not landing_required:
         left = []
         if tree is not None:
             if tree.dirty:
                 left.append(f"{tree.dirty} uncommitted")
-            if tree.unpushed:
+            if tree.unpushed is None:
+                left.append("unpushed commits unknown")
+            elif tree.unpushed:
                 left.append(f"{tree.unpushed} unpushed")
-        return Verdict("done", ", ".join(left), bool(left))
+        reason = ", ".join(left) if left else ("" if report == "done" else "worker gone")
+        return Verdict(outcome, reason, bool(left))
     left = unlanded(tree)
     # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
     if report == "done" and left and on_main is not True:

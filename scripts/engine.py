@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any
 
 import cleanup
-import completion
 import clock as engine_clock
 import dispatch_prompt
 import engine_facts
@@ -32,7 +31,6 @@ import store_access
 import supervisor
 import worker
 from forge_port import ForgeError
-from orphans import Claim
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
@@ -210,16 +208,10 @@ def _finish_worker(forge: Any, store: Any, root: Path, trees: Path, segment: Any
                    outcome: str, reason: str, now: datetime, *, policies: policy.Policies) -> None:
     """Adapter classification precedes completion judgement; a forge hold must precede closure."""
     key = segment.issue_key
-    item = next(item for item in store.items() if item.issue_key == key)
-    issue_type = _resume(store, key).get("issue_type") or getattr(item, "issue_type", None)
-    workflow = policies.workflow_for(issue_type)
+    inputs = _planning_inputs(store, [item for item in store.items() if item.issue_key == key])
+    workflow = policies.workflow_for(inputs["issue_types"].get(key))
     facts = engine_facts.gather(forge=forge, store=store, root=root, trees=trees, now=now)
-    verdict = completion.abandoned(
-        False, report=outcome, read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
-        on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
-        tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
-        tree_claims=(Claim(key, False, "worker exited"),),
-        tree_unreadable=dict(facts.changed).get(key) is None, landing_required=not workflow.next(segment.stage))
+    verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
     held = verdict.human_review or reason.startswith("unreadable worker run:")
     if verdict.human_review:
         outcome = verdict.outcome

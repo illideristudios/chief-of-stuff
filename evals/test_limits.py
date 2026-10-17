@@ -20,6 +20,7 @@ import limits
 import limits_cli
 import limits_history
 import limits_probe
+import session_logs
 import settings
 import store
 
@@ -111,7 +112,7 @@ class Sources(unittest.TestCase):
         self.write(".claude/projects/work/session.jsonl", [event])
         import mmap
         with patch("limits_probe._now", return_value=NOW), \
-                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
+                patch("session_logs.mmap.mmap", wraps=mmap.mmap) as mapped:
             first = limits_probe.read("claude", "")
             scans = mapped.call_count
             second = limits_probe.read("claude", "")
@@ -123,7 +124,7 @@ class Sources(unittest.TestCase):
             "resetsAt": (NOW + timedelta(hours=2)).timestamp()})
         self.write(".claude/projects/work/session.jsonl", [later])
         with patch("limits_probe._now", return_value=NOW), \
-                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
+                patch("session_logs.mmap.mmap", wraps=mmap.mmap) as mapped:
             third = limits_probe.read("claude", "")
             self.assertEqual(mapped.call_count, 1)
         self.assertEqual(third[0].used, 10)

@@ -136,6 +136,7 @@ def migration_config(path: Path | str, metadata, versions: Path | None = None) -
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
     cfg.set_main_option("path_separator", "os")
+    # ConfigParser interpolates percent signs; escape literal URL characters.
     cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}".replace("%", "%%"))
     if versions is not None:
         cfg.set_main_option("version_locations", str(versions))

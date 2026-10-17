@@ -608,14 +608,14 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}") from exc
 
-    def _merged_closes(self) -> set[int]:
-        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+    def _merged_requests(self) -> list[dict]:
+        """Recently merged requests (bounded by REQUEST_LIMIT), including landing evidence."""
         try:
             if self.github:
                 code, out, err = self.gh(
                     ["pr", "list", "-R", self.home.repo, "--state", "merged",
                      "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json",
-                     "number,body,closingIssuesReferences"])
+                     "number,body,closingIssuesReferences,baseRefName,mergeCommit"])
                 if code:
                     raise ForgeError(f"merged requests: {err.strip() or code}")
                 rows = json.loads(out)
@@ -632,16 +632,63 @@ class Forge:
             # shortcut: only the REQUEST_LIMIT most recently updated merged requests annotate closed issues (merging
             # updates a request; later edits can shift the window). Other closed issues keep their terminal stage mark
             # and read merge_state "". Page the list if a rebuild needs every merge.
-            if not isinstance(rows, list):
-                raise TypeError(f"expected a list, got {type(rows).__name__}")
-            closed: set[int] = set()
-            for row in rows:  # inside the guard: a malformed row is a forge read error, not a crash
-                refs = (forge_review.github_closes(row, self.home.repo) if self.github else
-                        forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
-                closed.update(int(ref[1:]) for ref in refs if _LOCAL_CLOSE.fullmatch(ref))
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise TypeError("expected a list of merged request objects")
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
-        return closed
+        return rows
+
+    def _closed_refs(self, row: dict) -> list[str]:
+        refs = (forge_review.github_closes(row, self.home.repo) if self.github else
+                forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
+        return [ref for ref in refs if _LOCAL_CLOSE.fullmatch(ref)]
+
+    def _merged_closes(self) -> set[int]:
+        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+        try:
+            return {int(ref[1:]) for row in self._merged_requests() for ref in self._closed_refs(row)}
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"merged requests: {exc}") from exc
+
+    def landings(self, pipeline: Pipeline, keys: list[str]) -> dict[str, tuple[bool | None, bool | None]]:
+        """Prove each merged result is in current main and its suite passed, including squash merges.
+
+        Uses forge ancestry, so a stale local checkout or an original PR head is no landing proof.
+        Missing bounded history or unreadable comparisons remain unknown.
+        """
+        found = {key: (None, None) for key in keys}
+        if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
+            return found
+        seen = set()
+        for row in self._merged_requests():
+            mine = [self.key(int(ref[1:])) for ref in self._closed_refs(row)]
+            mine = [key for key in mine if key in found and key not in seen]
+            if not mine:
+                continue
+            seen.update(mine)
+            try:
+                target = row.get("baseRefName" if self.github else "target_branch")
+                commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
+                          row.get("squash_commit_sha") or row.get("merge_commit_sha"))
+                landed = None
+                if target != "main":
+                    landed = False if isinstance(target, str) and target else None
+                elif isinstance(commit, str) and commit:
+                    if commit == pipeline.sha:
+                        landed = True
+                    elif self.github:
+                        compared = self._pipeline_read(f"compare/{quote(commit, safe='')}...{quote(pipeline.sha, safe='')}")
+                        base = compared.get("merge_base_commit", {}).get("sha")
+                        landed = base == commit if isinstance(base, str) and base else None
+                    else:
+                        query = urlencode({"refs[]": [commit, pipeline.sha]}, doseq=True)
+                        base = self._pipeline_read(f"repository/merge_base?{query}").get("id")
+                        landed = base == commit if isinstance(base, str) and base else None
+                result = landed, pipeline.status == "passed" if landed is True else landed
+            except (ForgeError, RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError):
+                result = None, None
+            found.update((key, result) for key in mine)
+        return found
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
         """The newest open request closing only the assigned issue; extra or cross-repo closing refs are unsafe to merge."""

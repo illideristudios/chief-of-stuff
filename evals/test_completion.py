@@ -23,7 +23,7 @@ class CompletionTest(unittest.TestCase):
 
     def test_a_read_only_run_that_left_a_change_goes_to_review(self):
         self.assertEqual(completion.read_only_left_changes(True, True), "read-only run left changes")
-        self.assertEqual(completion.read_only_left_changes(True, None), "read-only run left changes")
+        self.assertEqual(completion.read_only_left_changes(True, None), "worker starting HEAD could not be verified")
         self.assertIsNone(completion.read_only_left_changes(True, False))
         self.assertIsNone(completion.read_only_left_changes(False, True))
 

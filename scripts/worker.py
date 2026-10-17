@@ -66,7 +66,7 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
     else:
         record = dict(record)
     if "starting_head" not in record and (run_dir / "starting_head").is_file():
-        record["starting_head"] = (run_dir / "starting_head").read_text()
+        record["starting_head"] = (run_dir / "starting_head").read_text().strip()
     if stage == "review":
         record.setdefault("reviewed_head", data.get("review_trees", {}).get(str(attempt), {}).get("head"))
     if (any(type(record.get(field)) is not int or record[field] <= 0 for field in ("pid", "runner_pid"))
@@ -282,6 +282,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             run_dir = _run_dir(root, key, segment.stage, segment.attempt)
             if Path(record["run_dir"]).resolve() != run_dir or run_dir.is_relative_to(Path(record["tree"]).resolve()):
                 raise ValueError("run record is outside the engine evidence directory")
+            if not record.get("starting_head") and (run_dir / "starting_head").is_file():
+                record["starting_head"] = (run_dir / "starting_head").read_text().strip()
+                _save_run(store, key, segment.stage, segment.attempt, record)
+                data = _resume(store, key)
             runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))

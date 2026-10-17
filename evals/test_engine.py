@@ -354,6 +354,21 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertTrue(any("not on main" in row.message for row in self.db.log(KEY)))
 
+    def test_both_completion_paths_use_the_same_missing_and_unknown_facts(self):
+        self.run_pass()
+        segment = self.db.segments(KEY)[0]
+        for changed, unreadable in (((), ()), (((KEY, None),), ()), (((KEY, None),), (KEY,))):
+            facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),), changed=changed, unreadable=unreadable)
+            planned = reconcile._abandoned(self.db.items()[0], segment, facts, self.p.workflow_for(None))
+            with self.subTest(changed=changed, unreadable=unreadable), \
+                 mock.patch.object(engine.engine_facts, "gather", return_value=facts), \
+                 mock.patch.object(engine, "_close_segment") as close:
+                engine._finish_worker(self.forge, self.db, self.root, self.trees, segment,
+                                      "failed", "", NOW, policies=self.p)
+                self.assertEqual((close.call_args.args[5], close.call_args.args[7]), (planned.outcome, planned.human_review))
+                if planned.human_review:
+                    self.assertEqual(close.call_args.args[6], planned.reason)
+
     def test_unreadable_failed_and_quota_runs_are_held_without_advancing(self):
         self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
         self.run_pass()
