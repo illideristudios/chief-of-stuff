@@ -281,6 +281,13 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
+                if (stage != stages[key] and stage == _workflow_for(policies, store, by_key[key]).start
+                        and decision_actions.open_reversal(store.decisions(key), store.segments(key), stage)):
+                    # Persist the restart route before its durable segment consumes the
+                    # reversal, so a crash still retries/advances from workflow.start.
+                    data = _resume(store, key)
+                    data["pending_stage"] = {"stage": stage, "expected": stages[key]}
+                    store.set_resume(key, data)
                 slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                             max_concurrency=max_concurrency, clock=clock,
                             launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
