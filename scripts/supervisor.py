@@ -161,6 +161,8 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
 
     Callers hold supervisor.lock. The total preparation budget includes shell lookup and all subprocesses.
     Published generations stay at their original paths: other workspaces and launchd may still use them.
+    The returned interpreter is reached through the `venv-<key>.current` symlink, so a LaunchAgent that
+    recorded it follows every later repair without being reinstalled.
     """
     deadline = time.monotonic() + timeout
 
@@ -185,22 +187,22 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
     # Changed pins or Python identity use a separate venv; repairs also get a new generation.
     # shortcut: superseded venvs are never removed, prune them once an engine per workspace is common.
     key = hashlib.sha256(requirements.read_bytes() + b"\0" + identity.stdout.encode()).hexdigest()[:16]
-    pointer = data / f"venv-{key}.current"
+    legacy, pointer = f"venv-{key}", data / f"venv-{key}.current"
     try:
-        name = pointer.read_text()
+        name = os.readlink(pointer)
     except FileNotFoundError:
-        name = f"venv-{key}"  # reuse environments published before generation pointers
-    if Path(name).name != name or not name.startswith(f"venv-{key}"):
-        raise ServiceError(f"invalid venv generation: {pointer}")
-    venv = data / name
-    python, done = venv / "bin/python", venv / ".installed"
-    if done.exists() and _venv_python_runs(python, timeout=remaining(30)):
-        return python
-    if Path(sys.executable).absolute().parent.parent == venv.absolute() or Path(sys.prefix).resolve() == venv.resolve():
-        raise ServiceError(f"cannot rebuild the running interpreter's venv: {venv}")
+        name = legacy  # reuse environments published before generation pointers
+    except OSError:
+        name = ""  # not a symlink: a cache miss, replaced by the build below
+    if name.startswith(legacy) and Path(name).name == name:
+        # The pointer is a symlink, so a LaunchAgent recording its path follows every later repair.
+        launch = data / legacy if name == legacy else pointer
+        if (data / name / ".installed").exists() and _venv_python_runs(launch / "bin/python", timeout=remaining(30)):
+            return launch / "bin/python"
     data.mkdir(parents=True, exist_ok=True)
-    building = Path(tempfile.mkdtemp(dir=data, prefix=f"venv-{key}-"))
+    building = Path(tempfile.mkdtemp(dir=data, prefix=f"{legacy}-"))
     python = building / "bin/python"
+    staged = data / f".{pointer.name}.{building.name}"
     try:
         for argv in ([base, "-m", "venv", str(building)],
                      [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
@@ -209,12 +211,15 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
                 raise ServiceError(f"engine dependencies failed to install: "
                                    f"{(result.stderr or result.stdout).strip()[-2000:]}")
         (building / ".installed").touch()
+        os.symlink(building.name, staged)
+        os.replace(staged, pointer)
     except BaseException:
-        shutil.rmtree(building, ignore_errors=True)
+        staged.unlink(missing_ok=True)
+        # A published generation stays: even cancellation after the replace leaves it available to other callers.
+        if not (pointer.is_symlink() and os.readlink(pointer) == building.name):
+            shutil.rmtree(building, ignore_errors=True)
         raise
-    # After publication, even cancellation must leave this generation available to other callers.
-    atomic_write(pointer, building.name.encode())
-    return python
+    return pointer / "bin/python"
 
 
 def require_macos():

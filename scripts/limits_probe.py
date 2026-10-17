@@ -124,7 +124,7 @@ def _claude_error(event: dict, account: str) -> Reading | None:
 
 def claude(account: str) -> list[Reading]:
     candidates = []
-    for _path, _line, event in session_logs.claude_events(account):
+    for _path, _line, event in session_logs.limit_events(account):
         native = _claude_error(event, account)
         if native is not None:
             candidates.append(native)

@@ -114,7 +114,7 @@ class Sources(unittest.TestCase):
             first = limits_probe.read("claude", "")
             scans = decoded.call_count
             second = limits_probe.read("claude", "")
-            self.assertEqual(scans, 3)
+            self.assertEqual(scans, 1)
             self.assertEqual(decoded.call_count, scans)
         self.assertEqual(first[0].used, second[0].used)
         later = dict(event, rate_limit_info={
@@ -124,7 +124,7 @@ class Sources(unittest.TestCase):
         with patch("limits_probe._now", return_value=NOW), \
                 patch("session_logs.json.loads", wraps=json.loads) as decoded:
             third = limits_probe.read("claude", "")
-            self.assertEqual(decoded.call_count, 3)
+            self.assertEqual(decoded.call_count, 1)
         self.assertEqual(third[0].used, 10)
 
     def test_unknown_event_keeps_an_unexpired_numeric_limit(self):

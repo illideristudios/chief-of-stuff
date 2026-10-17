@@ -40,7 +40,7 @@ def activity(tree: Path, *, account: str = "") -> tuple[datetime | None, int]:
     """(last timestamp, tokens) from the selected Claude account, counting each message id once."""
     last, usage = None, {}
     try:
-        for log, n, event in session_logs.claude_events(account, tree=tree):
+        for log, n, event in session_logs.activity_events(account, tree):
             try:
                 at = datetime.fromisoformat(event["timestamp"])
                 last = at if last is None or at > last else last
