@@ -14,6 +14,9 @@ verified:
 - no container binds a path inside it;
 - nothing on it is unpushed or unmerged (`tree_state.at_risk`).
 
+Removal runs the configured workspace teardown under the launch lock before checking mounts. Its warnings are
+reported and logged; all guards are checked again after it runs. Preview never runs teardown.
+
 A guard that cannot be verified keeps the tree. Worker-written repositories are read only through git_view, and a tree
 is removed by deleting it and then its admin dir, so no git command runs on its config. Engine code only: the model and
 workers never remove a tree (B10).
@@ -32,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
 import git_view  # noqa: E402
+import shell_setup  # noqa: E402
 from git_trees import audit_env, clean, discover, git, read_state, trusted_commons  # noqa: E402
 from one_shot import launcher_copy, trees_lock  # noqa: E402
 from process_status import PIDFILE, check, one_shot_runs, registrations  # noqa: E402
@@ -201,12 +205,16 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
     settings = load_settings(root, settings_path((root / "CLAUDE.md").read_text()))
     commons = trusted_commons([root / path for path in settings.repos.values()])
     owned = owned_items(root, db)
-    mounts = containers()
+    teardown_command = settings.workers.teardown if remove else ""
+    # A mounted stack is what teardown is meant to stop. In removal mode with teardown configured, defer the
+    # mount query until after teardown, while every other guard must pass before any command can run.
+    mounts = [] if teardown_command else containers()
     failed = False
     for tree in discover(root, trees_dir):
         common = commons.get(tree)
         layout, kept = layout_guards(tree, common)
         partial: list[str] = []
+        warnings: list[str] = []
         items, owners_kept = owner_guards(tree, owned)
         kept += owners_kept
         kept += claims(root, trees, tree)
@@ -224,6 +232,21 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
                     kept += claims(root, trees, tree)
                     if layout is not None and layout.tree is not None:
                         kept += git_guards(tree, common)
+                    if not kept and teardown_command:
+                        try:
+                            items, owners_kept = owner_guards(tree, owned_items(root, db))
+                            kept += owners_kept
+                        except SQLAlchemyError as exc:
+                            failed = True
+                            kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
+                        if not kept:
+                            warnings = shell_setup.teardown(root, tree, tree.name, teardown_command)
+                            # A workspace command may change files, metadata or claims. Its success never
+                            # substitutes for a guard, nor does a warning prevent an otherwise safe removal.
+                            layout, kept = layout_guards(tree, common)
+                            kept += claims(root, trees, tree)
+                            if layout is not None and layout.tree is not None:
+                                kept += git_guards(tree, common)
                     current_mounts = containers()
                     if current_mounts is None:
                         kept.append("containers cannot be checked")
@@ -250,6 +273,8 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
         verb = "keep" if kept else "removed" if remove else "remove"
         line = clean(f"partially removed {tree.name}: {'; '.join(partial + kept)}" if partial else
                      f"{verb} {tree.name} — {'; '.join(kept) if kept else keys}")
+        if warnings:
+            line = clean(f"{line}; {'; '.join(warnings)}")
         print(line)
         if remove:
             at = db.clock().isoformat()
