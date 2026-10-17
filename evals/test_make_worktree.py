@@ -1050,17 +1050,12 @@ class FetchFailureTest(CloneCase):
         self.assert_refused_with_nothing_made(self.refuse_build())
 
     def test_the_refusal_includes_the_reported_age_of_local_main(self):
-        real_git = mw.git
-
-        def read(args, *a, **kw):
-            if args == ["log", "-1", "--format=%h %cr", "refs/heads/main"]:
-                return 0, "abc1234 age-from-git"
-            return real_git(args, *a, **kw)
-
-        with mock.patch.object(mw, "git", side_effect=read), \
-                mock.patch.object(git_trees, "fetch_base", return_value="offline"):
+        with mock.patch.dict(make_repo.ENV, {"GIT_COMMITTER_DATE": f"{int(time.time()) - 2 * 86400} +0000"}):
+            make_repo.git(["commit", "--amend", "--no-edit"], self.clone)
+        local = make_repo.git(["log", "-1", "--format=%h %cr", "refs/heads/main"], self.clone)
+        with mock.patch.object(git_trees, "fetch_base", return_value="offline"):
             message = self.refuse_build()
-        self.assertIn("local main (abc1234 age-from-git)", message)
+        self.assertIn(f"local main ({local})", message)
         self.assertFalse(self.tree.exists())
         self.assertEqual(self.branches(), "")
 
@@ -1429,6 +1424,7 @@ class BaseRefTest(unittest.TestCase):
     def test_from_local_cuts_from_the_local_branch(self):
         """Not the bare `main`: a tag called `main` would shadow it. The full ref names the branch alone."""
         self.assertEqual(mw.base_ref("", True), "refs/heads/main")
+        self.assertEqual(mw.base_ref("fatal: could not read from remote", True), "refs/heads/main")
 
     def test_a_failed_fetch_without_from_local_is_refused(self):
         with self.assertRaises(mw.RefusedError):
