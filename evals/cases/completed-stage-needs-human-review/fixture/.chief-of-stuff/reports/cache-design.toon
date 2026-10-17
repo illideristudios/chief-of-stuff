@@ -2,6 +2,7 @@ status: done
 task: Cache design
 worker: cache-design
 runtime_exit: 0
-reason: completed
+reason: specify needs your review; completed
 changes: "Design artifact: notes/cache-design.md. Working tree clean."
+review_stage: specify
 errors[0]:

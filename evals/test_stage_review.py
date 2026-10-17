@@ -98,3 +98,61 @@ class StageReviewTest(unittest.TestCase):
         page = issue_page.render(3, [(DAY, text)], board_sources.EMPTY, now, lanes, cfg,
                                  review_stages=settings.Settings().review_stages())
         self.assertIn(task_forge.REVIEW_LABEL, page)
+
+    def test_a_terminal_stage_stays_open_only_for_a_confirmed_review(self):
+        task = replace(parse_tracker(TRACKER).tasks[2], stage="merge")
+        lanes = {"code": settings.Lane(("implement", "plan", "merge"))}
+        bare = task_forge.hold_causes([task], None, board_sources.EMPTY, lanes, {"#3"}, {"merge"})
+        self.assertNotIn(task, bare)
+        held = task_forge.hold_causes([task], None, board_sources.EMPTY, lanes, (), {"merge"},
+                                      moves=completion(stage="merge"))
+        self.assertEqual(held[task], task_forge.STAGE_REVIEW)
+
+    def test_an_item_completion_and_a_renamed_row_are_one_task(self):
+        task = replace(parse_tracker(TRACKER).tasks[2], item="Cache design")
+        earlier = replace(task, name="Old plan", item="Old plan")
+        lanes = {"code": settings.Lane(("implement", "plan", "merge"))}
+        old = completion("Old plan")
+        held = task_forge.hold_causes([task], None, board_sources.EMPTY, lanes, (), {"plan"},
+                                      moves=old, earlier=[earlier])
+        self.assertEqual(held[task], task_forge.STAGE_REVIEW)
+        later = tracker_log.moves("## Log\n" + tracker_log.stage_line("11:00", "Review plan", "implement"), DAY, timezone.utc)
+        held = task_forge.hold_causes([task], None, board_sources.EMPTY, lanes, (), {"plan"},
+                                      moves=old + later, earlier=[earlier])
+        self.assertNotEqual(held.get(task), task_forge.STAGE_REVIEW)
+        named = replace(parse_tracker(TRACKER).tasks[2], item="Cache design")
+        by_item = completion("Cache design")
+        held = task_forge.hold_causes([named], None, board_sources.EMPTY, lanes, (), {"plan"}, moves=by_item)
+        self.assertEqual(held[named], task_forge.STAGE_REVIEW)
+        moved = tracker_log.moves("## Log\n" + tracker_log.stage_line("11:00", "Review plan", "implement"), DAY, timezone.utc)
+        held = task_forge.hold_causes([named], None, board_sources.EMPTY, lanes, (), {"plan"}, moves=by_item + moved)
+        self.assertNotEqual(held.get(named), task_forge.STAGE_REVIEW)
+
+    def test_review_evidence_outside_the_chart_window_and_across_midnight_still_holds(self):
+        import flow_chart
+        import issue_page
+        from workspace import Config
+        lanes = {"code": settings.Lane(("plan",))}
+        now = datetime(2000, 1, 8, 12, tzinfo=timezone.utc)
+        today = TRACKER
+        started = tracker_log.started_line("23:00", "w", "claude", "opus", "trees/w", "Review plan")
+        ended = tracker_log.ended_line("00:10", "w", "done", "completed", "artifact", review_stage="plan")
+        review_log = [(date(2000, 1, 1), TRACKER + "## Log\n" + started + "\n"),
+                      (date(2000, 1, 2), "## Log\n" + ended + "\n")]
+        cfg = Config("", "", "", "UTC", (), None, None)
+        board = render_board.render(today, cfg, now, lanes, tracker_day=now.date(),
+                                    review_log=review_log, review_stages={"plan"})
+        self.assertIn(task_forge.REVIEW_LABEL, board)
+        page = issue_page.render(3, [(now.date(), today)], board_sources.EMPTY, now, lanes, cfg,
+                                 review_stages={"plan"}, review_log=review_log)
+        self.assertIn(task_forge.REVIEW_LABEL, page)
+        log = tracker_log.day_moves(review_log, timezone.utc)
+        self.assertEqual(log[-1].stage, "plan")
+        built = flow_chart.build(log, parse_tracker(today).tasks, lanes,
+                                 { "Review plan": task_forge.REVIEW_LABEL }, {}, now)
+        self.assertEqual(built[0][0], "needs input")
+
+    def test_the_golden_fixture_carries_the_launcher_review_contract(self):
+        root = Path(__file__).resolve().parents[0] / "cases/completed-stage-needs-human-review/fixture"
+        self.assertIn("[review_after=specify]", (root / "daily/{{today}}-tracker.md").read_text())
+        self.assertIn("review_stage: specify", (root / ".chief-of-stuff/reports/cache-design.toon").read_text())

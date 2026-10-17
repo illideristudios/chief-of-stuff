@@ -79,9 +79,6 @@ class FakeForge:
 
 class EngineTest(unittest.TestCase):
     def test_review_after_holds_completed_stage_until_the_user_clears_the_forge_hold(self):
-        (self.root / "CLAUDE.md").write_text('## Coordinator\n- Settings: `cos.toml`\n')
-        (self.root / "cos.toml").write_text('[lanes.code]\nstages = ["implement", "review"]\n'
-                                            '[stages.implement]\nreview_after = true\n')
         self.db.upsert_item(KEY, stage="implement")
         self.db.record_segment(KEY, "implement", 1, started_at=(NOW - timedelta(hours=1)).isoformat())
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
@@ -92,15 +89,15 @@ class EngineTest(unittest.TestCase):
             return ""
 
         self.forge.add_human_hold = mock.Mock(side_effect=hold)
-        self.run_pass()
+        self.run_pass(review_stages={"implement"})
         self.forge.add_human_hold.assert_called_once_with(1)
         self.assertEqual(self.launched, [])
         self.assertEqual(self.db.items()[0].stage, "implement")
-        self.run_pass()
+        self.run_pass(review_stages={"implement"})
         self.forge.add_human_hold.assert_called_once()
         self.assertEqual(self.launched, [])
         self.forge.rows[0]["human_review"] = False
-        self.run_pass()
+        self.run_pass(review_stages={"implement"})
         self.assertEqual(self.launched[0][1], "review")
 
     def completed_review(self, held=False):
@@ -156,6 +153,37 @@ class EngineTest(unittest.TestCase):
                     self.assertNotIn("pending_review", self.db.resume(KEY))
                 self.forge.rows[0].update(stage="implement", forge_state="open")
 
+    def test_architect_consultation_and_a_blank_stage_still_release_the_same_attempt(self):
+        self.completed_review(held=True)
+        self.run_pass(review_stages={"implement"})
+        later = (NOW + timedelta(minutes=5)).isoformat()
+        self.db.record_segment(KEY, "architect", 1, started_at=later)
+        self.db.end_segment(KEY, "architect", 1, (NOW + timedelta(minutes=6)).isoformat(), "done")
+        self.forge.rows[0]["human_review"] = False
+        self.run_pass(review_stages={"implement"})
+        self.assertEqual(self.db.resume(KEY).get("reviewed_stages"), ["review_after:implement:1"])
+        self.completed_review(held=True)
+        self.run_pass(review_stages={"implement"})
+        self.forge.rows[0].update(stage="", human_review=False)
+        self.run_pass(review_stages={"implement"})
+        self.assertIn("review_after:implement:1", self.db.resume(KEY).get("reviewed_stages", []))
+
+    def test_a_missing_snapshot_drops_pending_review_without_approving_it(self):
+        self.completed_review(held=True)
+        self.run_pass(review_stages={"implement"})
+        self.forge.rows.clear()
+        self.run_pass(review_stages={"implement"})
+        self.assertEqual(self.db.items()[0].forge_state, "closed")
+        resume = self.db.resume(KEY)
+        self.assertNotIn("pending_review", resume)
+        self.assertNotIn("pending_review_applied", resume)
+        self.assertFalse(resume.get("reviewed_stages"))
+        self.forge.rows.append({"issue_key": KEY, "stage": "implement", "forge_state": "open",
+                                "merge_state": "ready", "human_review": False})
+        actions = self.run_pass(review_stages={"implement"})
+        self.assertFalse(self.db.resume(KEY).get("reviewed_stages"))
+        self.assertTrue(any(isinstance(a, reconcile.Ask) and a.review_stage == "implement" for a in actions))
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
@@ -190,7 +218,7 @@ class EngineTest(unittest.TestCase):
     def run_pass(self, **kwargs):
         return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
                                trees=self.trees, launch=self.launch, clock=lambda: self.now,
-                               review_stages=kwargs.pop("review_stages", {"implement"} if (self.root / "cos.toml").exists() else {"plan"}), **kwargs)
+                               review_stages=kwargs.pop("review_stages", frozenset({"plan"})), **kwargs)
 
     def finish(self, stage, attempt=1, outcome="done"):
         seg = next(s for s in self.db.segments(KEY) if s.stage == stage and s.attempt == attempt)
@@ -582,6 +610,15 @@ class MainTest(unittest.TestCase):
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         sleep.assert_not_called()
+        self.assertEqual(passed.call_args.kwargs["review_stages"], frozenset({"plan"}))
+
+    def test_once_omits_plan_when_its_review_is_disabled(self):
+        (self.root / "settings.toml").write_text((self.root / "settings.toml").read_text()
+                                                 + "[stages.plan]\nreview_after = false\n")
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep"):
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        self.assertNotIn("plan", passed.call_args.kwargs["review_stages"])
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()

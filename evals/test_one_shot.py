@@ -2058,7 +2058,7 @@ class RunTest(unittest.TestCase):
         report = toon_decode((self.root / dispatch_prompt.REPORTS_DIR / "worker.toon").read_text())
         self.assertEqual((report["status"], report["review_stage"]), ("done", "implement"))
         moves = tracker_log.moves(self.tracker.read_text(), date(2026, 9, 18), ZoneInfo("America/Chicago"))
-        self.assertEqual(moves[-1].stage, "pr")
+        self.assertEqual(moves[-1].stage, "implement")
         self.assertEqual(tracker_log.ENDED.match(moves[-1].line)[4], tracker_log.COMPLETED)
 
     def test_completed_marked_stage_holds_without_advancing_and_keeps_the_artifact(self):
