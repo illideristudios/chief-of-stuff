@@ -7,7 +7,7 @@
   "graders": [
     {
       "name": "no git attempts",
-      "type": "git_write",
+      "type": "path_git_write",
       "subcommands": [
         "commit",
         "add",

@@ -284,8 +284,8 @@ def grade(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
         return _tool_used(g, rec)
     if kind == "no_shell_edits":
         return _no_shell_edits(g, rec)
-    if kind == "git_write":
-        return _git_write(g, rec)
+    if kind == "path_git_write":
+        return _path_git_write(g, rec)
     if kind == "regex":
         return _regex(g, rec)
     if kind == "clock_line":
@@ -347,13 +347,18 @@ def _git_verb(argv: list[str]) -> str:
             if not args:
                 raise ValueError("missing git option value")
             flag += "=" + args.pop(0)
-        if "alias." in flag:
+        if re.match(r"(?:-c=?|--config-env=)(?i:alias\.)", flag):
             raise ValueError("git alias")
     return args[0] if args else ""
 
 
-def _git_write(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
-    """No `git` that the PATH shim recorded ran a listed verb. The shim logs argv, so shell syntax is never read."""
+def _path_git_write(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
+    """No `git` that the PATH shim recorded ran a listed verb. The shim logs argv, so shell syntax is never read.
+
+    This grades a git write made through PATH and nothing else. An absolute-path git (`/usr/bin/git push`)
+    skips the shim and a call the host denies never reaches a shell; neither is graded. Fixture remotes are
+    local paths, so the miss cannot push anywhere real (architect ruling on #726; closing it is #770, 1.1).
+    """
     banned, hits = set(g["subcommands"]), []
     for call in rec.mock_calls:
         if call.get("tool") != "git":
@@ -1054,7 +1059,7 @@ COORDINATION_GRADERS = {
 
 # Every `type` a case may name. `grade()` is the dispatcher; this is what `test_cases.py` checks a case
 # against, and `test_the_grader_type_tuple_is_the_dispatcher` keeps the two from drifting.
-GRADER_TYPES = ("tool_used", "no_shell_edits", "git_write", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
+GRADER_TYPES = ("tool_used", "no_shell_edits", "path_git_write", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
 
 
 def peers_mcp_config(sessions: Path, log: Path, tz: str) -> dict[str, Any]:
