@@ -338,7 +338,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 if reply.retryable:
                     outcome = reply.kind
                     reason = reply.message
-                    stops = 1
+                    stops = 1  # consecutive retryable stops in this stage; a stage change or other outcome restarts the backoff
                     for previous in reversed(store.segments(key)):
                         if previous.ended_at is None:
                             continue  # The current attempt is still open until collection finishes.

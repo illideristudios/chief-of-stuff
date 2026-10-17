@@ -509,7 +509,10 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> s
 
 
 def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None) -> str:
-    """Probe, replace and start under the same lock, including concurrent CLI ensures."""
+    """Probe, replace and start under the same lock, including concurrent CLI ensures.
+
+    Returns "pages: serving", "pages: started" or "pages: restarted"; raises PagesError when the port is not ours
+    or the server does not come up."""
     who = _who(port)
     restart = False
     if who is not None:
@@ -552,19 +555,23 @@ def from_config(root: Path) -> tuple[Path, int]:
 
 
 def supervise(root: Path, stop: threading.Event) -> None:
-    """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts."""
+    """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts.
+
+    A workspace with no board is polled again, so one added later is served. Returns when `stop` is set or
+    another engine already holds `pages-supervisor.lock`; an unexpected error is logged and retried."""
     try:
         with supervisor.lock(supervisor.state_dir(root) / "pages-supervisor.lock"):
             retry, last_error = RETRY_MIN, None
             while not stop.is_set():
                 try:
                     cfg = read_config(root)
-                    if not cfg.pages_dir and not cfg.board_url:
-                        return
-                    pages_dir, port = from_config(root)
-                    status = ensure(pages_dir, port, supervisor.state_dir(root) / "pages.log", root)
+                    if cfg.pages_dir or cfg.board_url:
+                        pages_dir, port = from_config(root)
+                        status = ensure(pages_dir, port, supervisor.state_dir(root) / "pages.log", root)
+                    else:
+                        status = "pages: serving"  # nothing to serve; poll for a board added later
                     last_error = None
-                except (PagesError, ConfigError, OSError, ValueError) as exc:
+                except Exception as exc:  # a thread that dies silently leaves the board unserved until restart
                     status = None
                     if str(exc) != last_error:
                         print(f"pages: {exc}", file=sys.stderr, flush=True)

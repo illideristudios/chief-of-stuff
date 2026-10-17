@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
@@ -467,18 +468,23 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Run passes until stopped, or one with --once; `install`, `uninstall` and `status` manage the LaunchAgent.
+
+    Exits 0 when stopped, 1 when a --once pass failed, 2 when startup refused. When the install pointer
+    moves to a newer release, the loop re-executes that release's `engine`, which rebuilds the venv if needed."""
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", type=Path, default=Path("."), help="workspace holding store.db and CLAUDE.md")
     ap.add_argument("--interval", type=float, default=60, help="seconds between passes (default 60)")
     ap.add_argument("--once", action="store_true", help="run one pass and exit")
-    ap.add_argument("cmd", nargs="?", choices=("install", "uninstall", "status"),
+    ap.add_argument("cmd", nargs="?", choices=supervisor.ACTIONS,
                     help="manage the engine's LaunchAgent")
     args = ap.parse_args(argv)
     if args.cmd:
-        return supervisor.main(argv)
+        return supervisor.main(["--root", str(args.root), args.cmd])
     if not 0 < args.interval < float("inf"):
         ap.error("--interval must be a finite positive number")
     root = args.root.resolve()
+    newer = None
     try:
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
             text, config, source = startup.workspace_forge(root)
@@ -510,9 +516,8 @@ def main(argv: list[str] | None = None) -> int:
             stop_pages = threading.Event()
             page_thread = None
             try:
-                version = supervisor.version()
                 if not args.once:
-                    import pages
+                    import pages  # deferred: --once never serves the board
                     page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
                     page_thread.start()
                 while True:
@@ -527,13 +532,18 @@ def main(argv: list[str] | None = None) -> int:
                     if args.once:
                         return 1 if failed else 0
                     time.sleep(args.interval)
-                    if supervisor.version() != version:
-                        return 0  # launchd restarts with the updated instructions and scripts.
+                    if (installed := supervisor.current_release()) != supervisor.RELEASE:
+                        newer = installed
+                        break
             finally:
                 stop_pages.set()
                 if page_thread is not None and page_thread.ident is not None:
-                    page_thread.join()
+                    page_thread.join(timeout=5)  # a daemon blocked in ensure's flock cannot hold the exit
                 db.engine.dispose()
+        if newer is not None:  # after the lock and board thread are released, so the new release can take them
+            os.execv(sys.executable, [sys.executable, str(newer / "chief_of_stuff.py"), "engine",
+                                      "--root", str(root), "--interval", str(args.interval)])
+        return 0
     except KeyboardInterrupt:
         return 0
     except Exception as exc:

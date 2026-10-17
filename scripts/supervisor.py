@@ -19,6 +19,8 @@ import shell_setup
 
 RELEASE = Path(__file__).resolve().parent.parent
 
+ACTIONS = ("install", "uninstall", "status")
+
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
 ENGINE: tuple[str, ...] = (str(RELEASE / "scripts/engine.py"),)
 
@@ -132,6 +134,12 @@ def version() -> str:
     return json.loads((RELEASE / ".claude-plugin/plugin.json").read_text())["version"]
 
 
+def current_release() -> Path:
+    """The release the install pointer names now. A tree not run from `<install>/versions/` is its own current."""
+    pointer = RELEASE.parent.parent / "current"
+    return pointer.resolve() if RELEASE.parent.name == "versions" and pointer.is_symlink() else RELEASE
+
+
 def _venv_python_runs(python: Path) -> bool:
     try:
         return python.is_file() and subprocess.run(
@@ -182,7 +190,7 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
     if engine is None:
         engine = (str(RELEASE / "scripts/engine.py"),)
     if not engine:
-        raise ServiceError("the engine entry command is not set yet (supervisor.ENGINE, M3 engine loop)")
+        raise ServiceError("the engine entry command is empty")
     require_macos()
     root, data = root.resolve(), data_dir()
     with lock(data / "supervisor.lock"):
@@ -224,7 +232,7 @@ def status(root: Path, jobs_dir: Path | None = None) -> dict:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default=".", help="workspace root the engine serves")
-    ap.add_argument("cmd", choices=("install", "uninstall", "status"))
+    ap.add_argument("cmd", choices=ACTIONS)
     args = ap.parse_args(argv)
     root = Path(args.root).resolve()
     try:
