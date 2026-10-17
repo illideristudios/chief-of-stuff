@@ -129,6 +129,39 @@ class EngineCompletionTest(unittest.TestCase):
         self.assertEqual(self.db.item(engines.KEY).stage, "implement")
         self.assertEqual(self.db.resume(engines.KEY)["pending_stage"], newer)
 
+    def test_a_late_engine_refusal_does_not_log_or_block_a_newer_intent(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        old = {"stage": "review", "expected": "implement", "decision_id": 1}
+        newer = {"stage": "implement", "expected": "review", "decision_id": 2}
+        self.db.set_resume(engines.KEY, {"pending_stage": old})
+
+        def replace_intent(*args, **kwargs):
+            self.db.set_resume(engines.KEY, {"pending_stage": newer})
+            return SimpleNamespace(ok=False, done=False, error="stale refusal")
+
+        with mock.patch.object(self.forge, "write_stage", side_effect=replace_intent):
+            self.run_pass()
+        self.assertEqual(self.db.resume(engines.KEY)["pending_stage"], newer)
+        self.assertFalse(any("stale refusal" in entry.message for entry in self.db.log(engines.KEY)))
+
+    def test_a_launch_completion_keeps_the_newer_board_stage_intent(self):
+        self.forge.rows[0]["stage"] = "review"
+        self.db.sync_from_forge(self.forge.snapshots())
+        old = {"stage": "implement", "persona": "builder", "attempt": 1, "decision_id": 1}
+        newer = {"stage": "review", "expected": "implement", "decision_id": 2}
+        self.db.set_resume(engines.KEY, {"redispatch": old})
+        launch = self.launch
+
+        def newer_intent(*args):
+            result = launch(*args)
+            self.db.update_resume(engines.KEY, lambda data: data.update(
+                pending_stage=newer, redispatch={**old, "stage": "review", "decision_id": 2}))
+            return result
+
+        self.launch = newer_intent
+        self.run_pass()
+        self.assertEqual(self.db.resume(engines.KEY)["pending_stage"], newer)
+
     def test_a_spent_reversal_waits_after_earlier_completed_work(self):
         self.db.sync_from_forge(self.forge.snapshots())
         self.db.record_segment(engines.KEY, "implement", 1, engines.NOW.isoformat(), engines.NOW.isoformat(), "done")
