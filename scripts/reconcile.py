@@ -376,6 +376,22 @@ def request_records(requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> 
         token: [] for token in requested}
 
 
+def consultation_state(head: str | None, known: Mapping[str, Sequence[dict]] | Sequence[str],
+                       pending: Mapping[str, Sequence[dict]], posted: Mapping[str, bool]
+                       ) -> tuple[dict[str, list[dict]], dict[str, list[dict]]]:
+    """Confirmed posts become requests; absent or superseded intents no longer suppress a consult."""
+    confirmed = request_records(known)
+    uncertain = {}
+    for token, findings in pending.items():
+        if head and token.split("@", 1)[0] != head:
+            continue
+        if posted.get(token) is True:
+            confirmed[token] = list(findings)
+        elif token not in posted:
+            uncertain[token] = list(findings)
+    return confirmed, uncertain
+
+
 def _requested(head: str, findings: Sequence[dict], requested: Mapping[str, Sequence[dict]] | Sequence[str]) -> bool:
     if request_token(head, findings) in requested:
         return True
@@ -534,6 +550,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          heads: Mapping[str, str | None] | None = None,
          architect_replies: Mapping[str, ArchitectReply] | None = None,
          consult_requests: Mapping[str, Mapping[str, Sequence[dict]] | Sequence[str]] | None = None,
+         consult_pending: Mapping[str, Mapping[str, Sequence[dict]]] | None = None,
+         consult_postings: Mapping[str, Mapping[str, bool]] | None = None,
          hold_stages: Sequence[str] = (),
          launcher_holds: Mapping[str, Mapping[str, object]] | None = None) -> list[Action]:
     """Actions oldest issue first; each panel reviewer and each fix consumes one slot.
@@ -561,7 +579,10 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         head = (heads or {}).get(key)
         findings = open_findings.get(key)
         panel = _panel_history(history)
-        requested = (consult_requests or {}).get(key, ())
+        confirmed, pending = consultation_state(head, (consult_requests or {}).get(key, ()),
+                                                (consult_pending or {}).get(key, {}),
+                                                (consult_postings or {}).get(key, {}))
+        requested = {**confirmed, **pending}
         reply = (architect_replies or {}).get(key)
         dispositions = reply.dispositions if reply else {}
         # Approval counts only for this forge head. Dispositions apply by finding key whatever head they came from.

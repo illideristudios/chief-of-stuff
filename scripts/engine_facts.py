@@ -42,7 +42,7 @@ def architect_comments(comments: list, *, head: str | None = None, author: str |
             internal = re.search(r"(?m)^Request: (\S+)$", body)
             if internal:
                 token = internal[1]
-            payload = re.search(r"```(?:json)?\s*(.*?)```", body, re.S)
+            payload = re.search(r"^```(?:json)?[ \t]*\n(.*?)^```[ \t]*$", body, re.S | re.M)
             try:
                 findings = json.loads(payload[1]).get("findings") if payload else None
             except (ValueError, TypeError, AttributeError):
@@ -97,7 +97,8 @@ def architect_comments(comments: list, *, head: str | None = None, author: str |
     when, index, sha, status, created_at, _ = matched[-1]
     prior = [row for row in postings if row[:2] <= (when, index) and row[2].split("@", 1)[0] == sha]
     # A successful local post remains trusted even when the independent login read is unavailable.
-    token = max(prior)[2] if prior else next((t for t in reversed(records) if t.split("@", 1)[0] == sha), "")
+    same_head = [t for t in records if t.split("@", 1)[0] == sha]
+    token = max(prior)[2] if prior else same_head[0] if len(same_head) == 1 else ""
     return reconcile.ArchitectReply(sha, status, created_at, dict(dispositions), token), requested
 
 
@@ -109,7 +110,10 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
     issue_types = {item.issue_key: states[item.issue_key].get("issue_type") or getattr(item, "issue_type", None)
                    for item in items}
     findings = {}
-    heads, replies, requested = {}, {}, {}
+    heads, replies, postings = {}, {}, {}
+    requested = {key: reconcile.request_records(state.get("architect_requests") or {}) for key, state in states.items()}
+    pending_requests = {key: reconcile.request_records(state.get("architect_pending_requests") or {})
+                        for key, state in states.items()}
     requests, listing = None, None
     engine_author, identity_read = None, False
     if forge is not None:
@@ -138,10 +142,8 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
             if request is None or not (policies is None or reconcile.consults_architect(
                     policies, segments[key], issue_types[key], states[key].get("room"))):
                 continue
-            known = reconcile.request_records(states[key].get("architect_requests") or {})
-            pending = reconcile.request_records(states[key].get("architect_pending_requests") or {})
-            # Uncertain delivery waits until both the identity and comments can be verified.
-            requested[key] = {**known, **pending}
+            known = requested[key]
+            pending = pending_requests[key]
             if not identity_read:
                 identity_read = True
                 try:
@@ -160,19 +162,10 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
             if pending and engine_author:
                 _, posted = architect_comments(comments, head=heads[key], author=architect_login or None,
                                                 engine_author=engine_author, requests={**known, **pending})
-                for token in posted:
-                    if token in pending:
-                        known[token] = pending.pop(token)
-                data = states[key]
-                data["architect_requests"] = known
-                if pending:
-                    data["architect_pending_requests"] = pending
-                else:
-                    data.pop("architect_pending_requests", None)
-                store.set_resume(key, data)
-                requested[key] = known  # a verified absent post can be attempted again
+                postings[key] = {token: token in posted for token in pending}
+            confirmed = {token: asked for token, asked in pending.items() if postings.get(key, {}).get(token)}
             reply, _ = architect_comments(comments, head=heads[key], author=architect_login or None,
-                                           engine_author=engine_author, requests=known)
+                                           engine_author=engine_author, requests={**known, **confirmed})
             if reply is not None:
                 replies[key] = reply
 
@@ -184,6 +177,8 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
         "heads": heads,
         "architect_replies": replies,
         "consult_requests": requested,
+        "consult_pending": pending_requests,
+        "consult_postings": postings,
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()

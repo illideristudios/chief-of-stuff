@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import backlog
+from forge_port import ForgeError
 from forge_review import Request, forge, github_requests, gitlab_requests, scrub
 from settings import SettingsError
 from workspace import ConfigError
@@ -50,10 +51,10 @@ def github_ready(repo: str, gh=backlog.run_gh, approver: str = "") -> list[Reque
         args += ["-f", f"cursor={cursor}"] if cursor else ["-F", "cursor=null"]
         code, out, err = gh(args)
         if code != 0:
-            raise RuntimeError(f"gh api graphql: {err.strip() or code}")
+            raise ForgeError(f"gh api graphql: {err.strip() or code}", retryable=bool(getattr(err, "retryable", False)))
         answer = json.loads(out)
         if answer.get("errors"):
-            raise RuntimeError(f"gh api graphql: {answer['errors']}")
+            raise ForgeError(f"gh api graphql: {answer['errors']}", retryable=backlog.graphql_rate_limited(answer))
         page = answer["data"]["repository"]["pullRequests"]
         for n in page["nodes"]:
             nodes[n["number"]] = n

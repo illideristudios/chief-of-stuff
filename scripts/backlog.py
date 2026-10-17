@@ -50,17 +50,23 @@ class TransportError(str):
         return error
 
 
-def _gh_error(stderr: str) -> TransportError:
+def graphql_rate_limited(answer: object) -> bool:
+    """Read GitHub's GraphQL error type, including HTTP 200 error responses."""
+    return isinstance(answer, dict) and any(isinstance(error, dict) and error.get("type") == "RATE_LIMITED"
+                                            for error in answer.get("errors", []) or [])
+
+
+def _gh_error(stderr: str, *, rate_limited: bool = False) -> TransportError:
     """Decode gh's protocol diagnostics once, before callers add resource names and context."""
     lines = stderr.strip().splitlines()
     status = next((int(m[1]) for line in lines
                    if (m := re.fullmatch(r"gh: .* \(HTTP ([0-9]{3})\)", line)
-                       or re.fullmatch(r"HTTP ([0-9]{3}): .* \(https?://[^\s]+\)", line))), None)
+                       or re.fullmatch(r"(?:gh: )?HTTP ([0-9]{3}): .* \(https?://[^\s]+\)", line))), None)
     # gh is a subprocess: its Go HTTP client's method/URL diagnostic identifies a transport failure.
-    transport = any(re.match(r'^(?:Get|Post|Put|Patch|Delete|Head) "https?://[^"\s]+": ', line)
+    transport = any(re.match(r'^(?:gh: )?(?:Get|Post|Put|Patch|Delete|Head) "https?://[^"\s]+": ', line)
                     or re.fullmatch(r"error connecting to [^\s]+", line) for line in lines)
-    limited = status == 403 and any(re.match(
-        r"^(?:gh: |HTTP 403: )(?:(?:API |secondary )?rate limit exceeded|"
+    limited = rate_limited or any(re.match(
+        r"^(?:gh: )?(?:HTTP 403: )?(?:(?:API |secondary )?rate limit (?:already )?exceeded|"
         r"You have exceeded a secondary rate limit)\b", line, re.I) for line in lines)
     return TransportError(stderr, status=status, transport=transport, rate_limited=limited)
 
@@ -74,7 +80,13 @@ def run_gh(args: list[str], input_text: str | None = None) -> tuple[int, str, st
         done = subprocess.run([binary, *args], input=input_text, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         return 127, "", "gh not found"
-    return done.returncode, done.stdout, _gh_error(done.stderr) if done.returncode else done.stderr
+    if done.returncode:
+        try:
+            limited = graphql_rate_limited(json.loads(done.stdout))
+        except ValueError:
+            limited = False
+        return done.returncode, done.stdout, _gh_error(done.stderr, rate_limited=limited)
+    return done.returncode, done.stdout, done.stderr
 
 
 @dataclass(frozen=True)

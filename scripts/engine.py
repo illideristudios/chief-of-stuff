@@ -183,6 +183,25 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
                 store.add_log(key, message, at)
 
 
+def _sync_architect_requests(store: Any, inputs: dict) -> None:
+    """Commit request delivery facts after gathering; the planner owns their lifecycle rules."""
+    for key, pending in inputs.get("consult_pending", {}).items():
+        if not pending:
+            continue
+        data = _resume(store, key)
+        known = inputs["consult_requests"].get(key, {})
+        confirmed, uncertain = reconcile.consultation_state(inputs["heads"].get(key), known, pending,
+                                                           inputs["consult_postings"].get(key, {}))
+        if confirmed == known and uncertain == pending:
+            continue
+        data["architect_requests"] = confirmed
+        if uncertain:
+            data["architect_pending_requests"] = uncertain
+        else:
+            data.pop("architect_pending_requests", None)
+        store.set_resume(key, data)
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None, require_green: bool = False,
@@ -271,10 +290,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
+    inputs = _planning_inputs(store, items, forge, at, policies, architect_login)
+    _sync_architect_requests(store, inputs)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
-                             **_planning_inputs(store, items, forge, at, policies, architect_login))
+                             **inputs)
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
