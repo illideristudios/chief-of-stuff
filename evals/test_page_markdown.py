@@ -1,12 +1,17 @@
 """#231: CommonMark plus tables in prose, with plain metadata and offline installs."""
+import copy
+import os
 import re
 import subprocess
 import tempfile
 import sys
 import unittest
+import threading
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from dataclasses import replace
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'scripts'))
@@ -29,19 +34,32 @@ class Structure(HTMLParser):
         self.stack = []
         self.nested_links = False
         self.blocks_in_p = False
+        self.nodes = []
+        self.parents = []
         self.feed(html)
 
     def handle_starttag(self, tag, attrs):
+        node = dict(tag=tag, attrs=dict(attrs), parent=self.parents[-1] if self.parents else None, text='')
+        self.nodes.append(node)
         if tag == 'a' and 'a' in self.stack:
             self.nested_links = True
         if tag in ('h2', 'ul', 'pre', 'table', 'p') and 'p' in self.stack:
             self.blocks_in_p = True
         if tag not in ('img', 'input', 'br', 'hr', 'meta', 'link'):
             self.stack.append(tag)
+            self.parents.append(node)
+
+    def handle_data(self, data):
+        for node in self.parents:
+            node['text'] += data
+
+    def by_class(self, cls):
+        return [n for n in self.nodes if cls in n['attrs'].get('class', '').split()]
 
     def handle_endtag(self, tag):
         if tag in self.stack:
             self.stack = self.stack[:len(self.stack) - 1 - self.stack[::-1].index(tag)]
+            self.parents = self.parents[:len(self.stack)]
 
 
 class MarkdownTest(unittest.TestCase):
@@ -83,6 +101,67 @@ class MarkdownTest(unittest.TestCase):
         block = page_common.markdown_blocks('```\n#12 src/app.py:3\n```', dp.Linker(GH).resolve)
         self.assertNotIn('<a', block)
 
+    def test_angle_brackets_and_literal_backticks_do_not_hide_references(self):
+        for render in (page_common.markdown_inline, page_common.markdown_blocks):
+            for text in ('<#12>', 'a < b and #12 > 0', '``literal ` and #12`` #13'):
+                with self.subTest(render=render.__name__, text=text):
+                    html = render(text, dp.Linker(GH).resolve)
+                    number = 13 if 'literal' in text else 12
+                    self.assertIn(f'href="https://github.com/o/app/issues/{number}"', html)
+                    if number == 13:
+                        self.assertNotIn('issues/12', html)
+
+    def test_escaped_and_entity_references_stay_literal(self):
+        for render in (page_common.markdown_inline, page_common.markdown_blocks):
+            html = render(r'\#12 &#35;13 &num;14 \!15 #16', dp.Linker(GH).resolve)
+            self.assertEqual(html.count('class="ref"'), 1)
+            self.assertIn('issues/16', html)
+            self.assertIn('#12 #13 #14 !15', html)
+
+    def test_concurrent_cold_renders_match_sequential_results(self):
+        from _vendor.markdown_it.ruler import Ruler
+        cold = copy.copy(page_common._MARKDOWN)
+        for name in ('core', 'block', 'inline'):
+            parser = copy.copy(getattr(cold, name))
+            parser.ruler = copy.deepcopy(parser.ruler)
+            if name == 'inline':
+                parser.ruler2 = copy.deepcopy(parser.ruler2)
+            setattr(cold, name, parser)
+        compiling, release, second_started = threading.Event(), threading.Event(), threading.Event()
+        compile_rules = Ruler.__compile__
+
+        def paused_compile(ruler):
+            if ruler is cold.core.ruler:
+                # Reproduce the parser's published-but-incomplete cache deterministically.
+                ruler.__cache__ = {}
+                compiling.set()
+                if not release.wait(5):
+                    raise AssertionError('compiler was never released')
+            compile_rules(ruler)
+
+        def second_render():
+            second_started.set()
+            return page_common.markdown_inline('**other** #12', dp.Linker(GH).resolve)
+
+        with mock.patch.object(page_common, '_MARKDOWN', cold):
+            expected = (page_common.markdown_blocks(BLOCK), second_render())
+            for ruler in (cold.core.ruler, cold.block.ruler, cold.inline.ruler, cold.inline.ruler2):
+                ruler.__cache__ = None
+            second_started.clear()
+            with mock.patch.object(Ruler, '__compile__', paused_compile), ThreadPoolExecutor(2) as pool:
+                first = pool.submit(page_common.markdown_blocks, BLOCK)
+                try:
+                    self.assertTrue(compiling.wait(5))
+                    second = pool.submit(second_render)
+                    self.assertTrue(second_started.wait(5))
+                    try:
+                        second.result(timeout=0.1)
+                    except TimeoutError:
+                        pass  # Serialized rendering waits for the first compilation.
+                finally:
+                    release.set()
+                self.assertEqual((first.result(5), second.result(5)), expected)
+
     def test_vendored_packages_load_without_site_packages(self):
         proc = subprocess.run([sys.executable, '-S', '-c',
             'import sys; sys.path.insert(0, sys.argv[1]); from page_common import markdown_blocks; '
@@ -118,8 +197,17 @@ class MarkdownTest(unittest.TestCase):
         self.assert_blocks(dp.render(decision(sides=[{'label':'Plan','status':'open','text':BLOCK}]), '2026-10-16'))
 
     def test_decision_question_prose_stays_prominent(self):
-        # The ask's first prose is the question; the muted `.ask p` rule must not flatten it.
-        self.assertIn('.ask>.prose:first-of-type p{color:var(--fg);font-size:16px}', dp.PAGE_CSS)
+        for yes in ('', 'A yes does this.'):
+            html = dp.render(decision(ask='Should we proceed?', yes=yes), '2026-10-16')
+            dom = Structure(html)
+            ask, = dom.by_class('ask')
+            divs = [n for n in dom.nodes if n['parent'] is ask and n['tag'] == 'div']
+            # Match the actual selector in the rendered page, including :first-of-type.
+            self.assertIn('.ask>.prose:first-of-type p{color:var(--fg);font-size:16px}', html)
+            self.assertIn('prose', divs[0]['attrs'].get('class', '').split())
+            prominent = [n for n in dom.nodes if n['tag'] == 'p' and n['parent'] is divs[0]]
+            self.assertEqual([n['text'] for n in prominent], ['Should we proceed?'])
+            self.assertNotIn(yes, [n['text'] for n in prominent])
 
     def test_html_comment_block_ends_at_bang_close(self):
         from _vendor.markdown_it import MarkdownIt
@@ -131,6 +219,21 @@ class MarkdownTest(unittest.TestCase):
         thread = bs.ReviewThread(False, '**author**', BLOCK, NOW, 'https://example.com')
         self.assert_blocks(page(src=sources(replace(MR, threads=(thread,)))))
         self.assert_blocks(sp._note(sp.Note('src/a.py', 1, 'new', thread), NOW))
+
+    def test_detail_pages_include_prose_styles_in_their_rendered_head(self):
+        from fragment import PROSE_CSS
+        from test_issue_page import TODAY, today_tracker
+        htmls = (page(src=sources(MR, issue=replace(ISSUE, body=BLOCK))),
+                 sp.render(109, [(TODAY, today_tracker())], sources(MR), NOW))
+        for html in htmls:
+            self.assertIn(PROSE_CSS, html.split('</head>')[0])
+
+    def test_diff_note_spacing_only_applies_to_the_outer_cell(self):
+        thread = bs.ReviewThread(False, 'author', BLOCK, NOW, 'https://example.com')
+        note = sp._note(sp.Note('src/a.py', 1, 'new', thread), NOW)
+        self.assertIn('<table>', note)
+        self.assertIn('tr.note>td{padding:4px 14px 8px 100px', sp.CSS)
+        self.assertNotRegex(sp.CSS, r'tr\.note\s+td\s*\{')
 
     def test_issue_prose_links_forge_references(self):
         from workspace import parse_coordinator
@@ -151,15 +254,33 @@ class MarkdownTest(unittest.TestCase):
         self.assertIn('<em>check</em>', html)
         self.assertIn('**label**', html)
 
-    def test_board_passes_markdown_and_forge_resolver_into_cards(self):
+    def test_board_card_names_keep_navigation_for_references_and_links(self):
         import render_board
         from workspace import parse_coordinator
         from test_render_board import CLAUDE_MD, LANED_TRACKER, NOW
         cfg = parse_coordinator(CLAUDE_MD.replace('- Calendar tool:', '- Backlog: GitHub; repo o/app\n- Calendar tool:'), today=NOW.date())
-        html = render_board.render(LANED_TRACKER.replace('Write eval README', '**Write** *README* #12'), cfg, NOW)
-        self.assertIn('<b>Write</b> <em>README</em>', html)
-        self.assertIn('href="https://github.com/o/app/issues/12"', html)
-        self.assertFalse(Structure(html).nested_links)
+        tracker = LANED_TRACKER.replace('| implement |  |', '| implement | #12 |')
+        for suffix in ('#12', '(#12)', 'https://example.com', '[docs](https://example.com)', '`src/app.py:3`'):
+            with self.subTest(suffix=suffix):
+                html = render_board.render(tracker.replace('Write eval README', '**Write** *README* ' + suffix), cfg, NOW)
+                dom = Structure(html)
+                name, = dom.by_class('columns-card-name')
+                self.assertEqual(name['tag'], 'a')
+                self.assertEqual(name['attrs'].get('href'), '/issues/12')
+                self.assertIn('<b>Write</b> <em>README</em>', html)
+                self.assertIn('<div class="columns-refs"><a href="/issues/12"', html)
+                self.assertFalse(dom.nested_links)
+
+    def test_merged_card_names_keep_the_change_link(self):
+        import render_board
+        from workspace import parse_coordinator
+        from test_render_board import CLAUDE_MD
+        merged = replace(MR, title='**Merged** change (#12)', state='merged', merged_at=NOW)
+        html = render_board.render('', parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW,
+                                   sources=sources(merged))
+        name, = Structure(html).by_class('columns-card-name')
+        self.assertEqual(name['tag'], 'a')
+        self.assertEqual(name['attrs'].get('href'), MR.url)
 
     def test_checklist_and_log_prose_use_inline_markdown(self):
         import issue_page
@@ -173,6 +294,48 @@ class MarkdownTest(unittest.TestCase):
         html = dp.render(decision(headline='**name**', references=[{'kind':'issue', 'label':'**label**', 'value':'#12'}]), '2026-10-16', GH)
         self.assertIn('<h1>**name**</h1>', html)
         self.assertIn('**label**', html)
+
+    def test_local_reference_reads_fail_softly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'app.py').write_text('def start():\n    pass\n')
+            for error in (PermissionError('denied'), FileNotFoundError('removed')):
+                with self.subTest(error=type(error).__name__):
+                    linker = dp.Linker(GH, root)
+                    with mock.patch.object(Path, 'resolve', side_effect=error):
+                        self.assertEqual(linker._find('app.py', None, 'start'), '')
+                    # Missing metadata/open permissions must not stop prose rendering either.
+                    linker = dp.Linker(GH, root)
+                    with mock.patch('os.open', side_effect=error):
+                        self.assertNotIn('#L1', dp._md('app.py:start', linker))
+
+    def test_local_reference_reads_are_bounded_and_cached_per_linker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / 'app.py'
+            path.write_text('def start():\n    pass\n' + 'x' * (2 * 1024 * 1024))
+            self.assertEqual(dp.Linker(GH, root)._find('app.py', None, 'start'), '')
+            path.write_text('def start():\n    pass\n\ndef stop():\n    pass\n')
+            linker = dp.Linker(GH, root)
+            self.assertEqual(linker._find('app.py', None, 'start'), '#L1')
+            path.unlink()
+            self.assertEqual(linker._find('app.py', None, 'stop'), '#L4')
+            self.assertEqual(dp.Linker(GH, root)._find('app.py', None, 'stop'), '')
+
+    def test_local_reference_never_reads_a_fifo_or_a_path_outside_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / 'root'
+            root.mkdir()
+            (root.parent / 'outside.py').write_text('def start():\n    pass\n')
+            (root / 'link.py').symlink_to(root.parent / 'outside.py')
+            os.mkfifo(root / 'pipe.py')
+            linker = dp.Linker(GH, root)
+            self.assertEqual(linker._find('link.py', None, 'start'), '')
+            self.assertEqual(linker._find('pipe.py', None, 'start'), '')
+
+    def test_saved_numeric_words_render_as_text(self):
+        d = dp.parse(decision(answer={'words': 42, 'at': NOW.isoformat()}))
+        self.assertIn('“42”', dp.render(d, NOW.date().isoformat()))
 
 
 if __name__ == '__main__':
