@@ -948,6 +948,122 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(make_repo.git(["branch", "--list", "work/issue-1-implement-1"], clone), "")
             self.assertEqual(len(self.db.asks(KEY)), 1)
 
+    def abort_fixture(self):
+        from evals import make_repo
+        clone = self.diverged()
+        old = sorted(self.trees.glob("issue-1-*"))
+        for tree in old:
+            (tree / "scratch.txt").write_text("uncommitted work\n")
+        self.db.set_resume(KEY, {"worktree": str(old[0]), "work_branch": f"work/{old[0].name}"})
+        with self.assertRaisesRegex(RuntimeError, "orphaned"):
+            self.launch_in(clone, attempt=3)
+        self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="abort")
+        heads = {tree: make_repo.git(["rev-parse", "HEAD"], tree) for tree in old}
+        return clone, heads
+
+    def assert_abort_work_preserved(self, clone, heads):
+        from evals import make_repo
+        for tree, head in heads.items():
+            self.assertEqual((tree / "scratch.txt").read_text(), "uncommitted work\n")
+            self.assertEqual(make_repo.git(["rev-parse", f"refs/heads/work/{tree.name}"], clone), head)
+            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], tree), head)
+
+    def test_abort_fetch_failure_preserves_the_old_work_and_can_retry(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            before = self.db.resume(KEY)
+            with mock.patch.object(worker.git_trees, "fetch_base", return_value="offline"):
+                with self.assertRaisesRegex(worker.make_worktree.RefusedError, "offline"):
+                    self.launch_in(clone, attempt=3)
+            self.assert_abort_work_preserved(clone, heads)
+            self.assertEqual(self.db.resume(KEY), before)
+            self.assertTrue(Path(self.launch_in(clone, attempt=3).cwd).is_dir())
+
+    def test_abort_add_failure_preserves_the_old_work_and_refs(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            trusted = worker.make_worktree.git_trusted
+
+            def fail_add(args, cwd):
+                return (1, "cannot add") if args[:2] == ["worktree", "add"] else trusted(args, cwd)
+
+            with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=fail_add):
+                with self.assertRaisesRegex(worker.make_worktree.RefusedError, "cannot add"):
+                    self.launch_in(clone, attempt=3)
+            self.assert_abort_work_preserved(clone, heads)
+
+    def test_abort_verifies_the_replacement_before_retiring_or_saving_it(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            before = self.db.resume(KEY)
+            with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=next(iter(heads)))):
+                with self.assertRaisesRegex(RuntimeError, "replacement"):
+                    self.launch_in(clone, attempt=3)
+            self.assert_abort_work_preserved(clone, heads)
+            self.assertEqual(self.db.resume(KEY), before)
+
+    def test_abort_store_failure_preserves_the_old_work_and_refs(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            with mock.patch.object(self.db, "set_resume", side_effect=RuntimeError("store unavailable")):
+                with self.assertRaisesRegex(RuntimeError, "store unavailable"):
+                    self.launch_in(clone, attempt=3)
+            self.assert_abort_work_preserved(clone, heads)
+
+    def test_abort_interrupted_retirement_resumes_the_persisted_replacement(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            with mock.patch.object(worker, "_retire_orphans", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    self.launch_in(clone, attempt=3)
+            self.assert_abort_work_preserved(clone, heads)
+            fresh = Path(self.db.resume(KEY)["worktree"])
+            self.assertNotIn(fresh, heads)
+            self.assertTrue(fresh.is_dir())
+            self.p.stages["fix"] = self.p.stages["implement"]
+            with mock.patch.object(worker.make_worktree, "build", side_effect=AssertionError("replacement rebuilt")):
+                self.assertEqual(Path(self.launch_in(clone, stage="fix").cwd), fresh)
+            self.assertTrue(all(not tree.exists() for tree in heads))
+
+    def test_abort_ref_retirement_failure_is_verified_and_retried_without_rebuilding(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            trusted = worker.make_worktree.git_trusted
+
+            def fail_delete(args, cwd):
+                return (1, "ref locked") if args[:2] == ["update-ref", "-d"] else trusted(args, cwd)
+
+            branch = f"work/{next(iter(heads)).name}"
+            make_repo.git(["update-ref", f"refs/remotes/origin/{branch}", next(iter(heads.values()))], clone)
+            with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=fail_delete):
+                with self.assertRaisesRegex(RuntimeError, "retire.*ref"):
+                    self.launch_in(clone, attempt=3)
+            fresh = Path(self.db.resume(KEY)["worktree"])
+            with mock.patch.object(worker.make_worktree, "build", side_effect=AssertionError("replacement rebuilt")):
+                self.assertEqual(Path(self.launch_in(clone, attempt=4).cwd), fresh)
+            self.assertEqual(make_repo.git(["for-each-ref", "--format=%(refname)", f"refs/remotes/origin/{branch}"], clone), "")
+
+    def test_abort_never_retires_a_live_canceled_workers_tree_without_a_segment(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            run = worker._run_dir(self.root, KEY, "implement", 1)
+            # collect may have archived this marked run and released its segment before cancellation succeeded.
+            run = run.with_name(run.name + "-canceled-interrupted")
+            run.mkdir(parents=True)
+            (run / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": "live"}))
+            (run / "canceled").write_text("canceled\n")
+            self.assertEqual(self.db.segments(), [])
+            with self.assertRaisesRegex(RuntimeError, "live|unverified"):
+                self.launch_in(clone, attempt=3)
+            self.assert_abort_work_preserved(clone, heads)
+
     def test_abort_starts_fresh_on_the_next_engine_pass(self):
         from evals import git_taint as taint
         from evals.test_engine import FakeForge
