@@ -36,6 +36,20 @@ class RecoveryTest(unittest.TestCase):
         only_old = recovery([old, tree(None, head="b", ancestors=frozenset({"a"}))])
         self.assertEqual((only_old.path, only_old.head), ("/t/old", "b"))
 
+    def test_fast_forwarding_a_saved_base_tree_counts_as_recovery(self):
+        self.assertTrue(recovery([tree("/t/base", head="a"),
+                                  tree(None, head="b", ancestors=frozenset({"a"}))]).recovered)
+
+    def test_the_only_dirty_tree_wins_over_preferred_clean_tree_at_same_tip(self):
+        clean, dirty = tree("/t/clean"), tree("/t/dirty", dirty=True)
+        self.assertEqual(recovery([clean, dirty], preferred=clean.path).path, dirty.path)
+
+    def test_explicit_answer_matches_complete_branch_even_without_a_directory(self):
+        a = tree("/t/a", branch="work/issue-1-implement-1")
+        b = tree(None, head="b", branch="work/issue-1-implement-10")
+        chosen = recovery([a, b], preferred=a.path, answer="Keep `work/issue-1-implement-10`.")
+        self.assertEqual((chosen.path, chosen.branch, chosen.head), (None, b.branch, b.head))
+
     def test_the_preferred_tree_wins_among_equal_heads(self):
         a, b = tree("/t/a"), tree("/t/b", branch="work/issue-1-implement-2")
         self.assertEqual(recovery([a, b], preferred="/t/b").path, "/t/b")
