@@ -7,6 +7,7 @@ import argparse
 import json
 import sys
 import time
+from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from functools import partial
@@ -116,20 +117,26 @@ def _clear_waived_gates(store: Any, key: str) -> None:
 
 
 def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str, ...],
-            resolved: policy.Policy, personas, model, at: str, *, context: str = "", instance: str = "",
+            resolved: policy.Policy, personas, model, *, context: str = "", instance: str = "",
+            stage: str = "", attempt: int = 0,
             clock: engine_clock.Clock = engine_clock.system) -> str | None:
     """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
-    scope = {"decision": {"topic": topic, "question": question, "instance": instance, "context": context}}
     try:
-        decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance)
+        decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
+                                      stage=stage, attempt=attempt)
     except ValueError as exc:
-        _interrupt(store, key, "ambiguity", f"{question}: {exc}", at, scope=scope)
+        update = decision_actions.DecisionUpdate(topic, question, None, "zach", {
+            "error": f"{question}: {exc}", "decision": {"instance": instance, "context": context,
+                "options": list(options), "stage": stage, "attempt": attempt}})
+        prior = decision_actions.latest(store.decisions(key)).get((topic, question, instance))
+        if prior is None or prior.record != update.record:
+            trio_gate.record(store, key, update)
         return None
     earlier = store.decisions(key)
-    retry_key = json.dumps([topic, question, instance, context, options])
+    retry_key = json.dumps([topic, question, instance, stage, attempt, context, options])
     retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
     prior = decision_actions.latest(earlier).get((topic, question, instance))
-    failures = max(retry.get("failures", 0), decision_actions.stamped_failures(prior, context, options))
+    failures = max(retry.get("failures", 0), decision_actions.stamped_failures(prior, context, options, stage, attempt))
     if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
             and datetime.fromisoformat(retry["retry_at"]) > clock()):
         return None
@@ -150,12 +157,7 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
         if not retries:
             data.pop("trio_retries", None)
         store.set_resume(key, data)
-    if outcome.unanimous:
-        _sync_decision_interrupt(store, key, at)
-        return outcome.recommendation
-    _sync_decision_interrupt(store, key, at, proposed={
-        "kind": "ambiguity", "reason": outcome.reason or question, **scope})
-    return None
+    return outcome.recommendation if outcome.unanimous else None
 
 
 def _clear_interrupt(store: Any, key: str, kind: str, *, scope: dict) -> None:
@@ -204,21 +206,40 @@ def _settle_asks(store: Any, key: str) -> None:
             if settled is not None:
                 store.add_decision(key, settled.topic, settled.question, settled.answer,
                                    settled.decided_by, settled.record)
-        else:
+
+
+def _sync_decision_interrupts(store: Any, item: Any, at: str) -> None:
+    """Derive one interrupt per decision attempt, changing only decision-scoped state."""
+    key = item.issue_key
+    grouped = defaultdict(list)
+    attempts = {}
+    for source in (*store.segments(key), *store.asks(key)):
+        attempts[source.stage] = max(attempts.get(source.stage, 0), source.attempt)
+    for row in store.decisions(key):
+        record = row.record if isinstance(row.record, dict) else {}
+        decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+        grouped[(decision_actions.identity(row), decision.get("stage", ""), decision.get("attempt", 0))].append(row)
+    desired = {}
+    for rows in grouped.values():
+        pending = decision_actions.needs_zach(rows)
+        if pending is None or item.forge_state == "closed" or pending.attempt < attempts.get(pending.stage, 0):
             continue
-        _clear_interrupt(store, key, "ambiguity", scope=decision_actions.ask_scope(rows, ask))
-
-
-def _sync_decision_interrupt(store: Any, key: str, at: str, *, proposed: dict | None = None) -> None:
-    """Persist the lifecycle judgement, also repairing a kill after a capped row's commit."""
+        scope = {"id": list(pending.decision_id), "stage": pending.stage, "attempt": pending.attempt}
+        desired[json.dumps(scope, sort_keys=True)] = {"kind": "ambiguity", "reason": pending.reason, "decision": scope}
     data = _resume(store, key)
-    selected = decision_actions.pending_interrupt(store.decisions(key), data.get("interrupt"),
-                                                 asks=store.asks(key), proposed=proposed)
-    if selected is None:
-        if data.pop("interrupt", None) is not None:
-            store.set_resume(key, data)
-    elif selected != data.get("interrupt"):
-        _interrupt(store, key, selected["kind"], selected["reason"], at, scope={"decision": selected["decision"]})
+    current = {json.dumps(i["decision"], sort_keys=True): i for i in data.get("decision_interrupts", ())}
+    for added in desired.keys() - current.keys():
+        store.add_log(key, f"ambiguity: {desired[added]['reason']}", at)
+    # The old singleton may contain a decision interrupt from an earlier engine version.
+    legacy = isinstance((data.get("interrupt") or {}).get("decision"), dict)
+    if current != desired or legacy:
+        if desired:
+            data["decision_interrupts"] = list(desired.values())
+        else:
+            data.pop("decision_interrupts", None)
+        if legacy:
+            data.pop("interrupt")
+        store.set_resume(key, data)
 
 
 def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
@@ -232,10 +253,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
         # Repair an interrupted ask/link write before accepting any direct answer.
         _link_replacement_asks(store, key, replacements)
         _settle_asks(store, key)
-        _sync_decision_interrupt(store, key, at)
         asks = store.asks(key)
-        if model is None:
-            continue
         for ask in (ask for ask in asks if not ask.answer):
             stage = ask.stage or item.stage or workflow.start
             resolved = _resolved(policies, store, key, stage)
@@ -245,7 +263,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
             topic, question, instance = decision_actions.identity(row) if row is not None else (
                 "ask", ask.question, f"ask-{ask.id}")
             choice = _choice(store, key, topic, question, tuple(ask.options), resolved, policies.personas,
-                             model, at, context=ask.context, instance=instance, clock=clock)
+                             model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock)
             if choice:
                 store.answer_ask(ask.id, choice)
         for row, segment in replacements:
@@ -258,8 +276,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                 continue
             context = decision_actions.replacement_context(row, segment)
             _choice(store, key, row.topic, row.question, tuple(prior.get("options") or ()),
-                    resolved, policies.personas, model, at, context=context,
-                    instance=prior.get("instance", ""), clock=clock)
+                    resolved, policies.personas, model, context=context,
+                    instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock)
         _link_replacement_asks(store, key, replacements)
         _settle_asks(store, key)
 
@@ -408,14 +426,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if _consultation_blocked(store, key, resolved, at, stage=action.source):
                     continue
                 choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
-                                 resolved, policies.personas, model, at, context=action.context, clock=clock)
+                                 resolved, policies.personas, model, context=action.context, stage=action.source,
+                                 attempt=int(action.context.rpartition("-")[2]) if action.context else 0, clock=clock)
                 if choice == "approve":
                     data = _resume(store, key)
                     data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
                     store.set_resume(key, data)
-                elif choice == "hold":
-                    _interrupt(store, key, "ambiguity", action.reason, at, scope={"decision": {
-                        "topic": action.gate, "question": action.reason, "instance": "", "context": action.context}})
             elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
                 kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
                 _interrupt(store, key, kind, action.reason, at,
@@ -432,6 +448,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 _write_stage(forge, store, key, stage, stages[key])
         except Exception as exc:
             store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
+    for item in store.items():
+        _sync_decision_interrupts(store, item, at)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions

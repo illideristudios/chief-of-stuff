@@ -729,9 +729,11 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(interrupt["decision"], {"id": ["ask", "Which parser?", f"ask-{ask_id}"],
                                                 "stage": "implement", "attempt": 2})
         self.assertEqual(interrupt["reason"], "trio unavailable after 8 attempts: Which parser?")
-        # The old gate row survives while the ask prevents any new gate consultation.
-        self.assertEqual(self.db.decisions(KEY)[0].record["decision"]["context"], "implement-1")
-        self.assertIsNone(self.db.decisions(KEY)[0].answer)
+        # The capped gate remains unanswered while the ask blocks its next consultation.
+        gate = [r for r in self.db.decisions(KEY) if r.topic == "plan"][-1]
+        self.assertEqual((gate.answer, gate.decided_by, gate.record["decision"]["context"]),
+                         (None, "zach", "implement-1"))
+        self.assertEqual(gate.record["retry_exhausted"], 8)
         self.db.answer_ask(ask_id, "Keep")
         model = self._votes([("adopt", "approve")] * 3)
         self.run_pass(model=model)
@@ -767,6 +769,33 @@ class EngineTest(unittest.TestCase):
         self.run_pass(max_concurrency=0)
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.assertEqual(self.db.resume(KEY)["interrupt"], other)
+
+    def test_split_and_hold_survive_a_crash_immediately_after_the_decision_write(self):
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, stage="implement")
+        write = self.db.add_decision
+        def crash(*args, **kwargs):
+            write(*args, **kwargs)
+            raise KeyboardInterrupt("after committed decision")
+        for attempt, vote in enumerate(("concern", "adopt"), 1):
+            with self.subTest(vote=vote):
+                self.now += timedelta(hours=1)
+                self.db.record_segment(KEY, "implement", attempt, self.now.isoformat(), self.now.isoformat(), "done")
+                self.db.set_resume(KEY, {})
+                model = self._votes([(vote, "hold")] * 3)
+                with mock.patch.object(self.db, "add_decision", side_effect=crash), self.assertRaises(KeyboardInterrupt):
+                    self.run_pass(model=model)
+                row = self.db.decisions(KEY)[-1]
+                self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+                self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+                self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
+                interrupts = self.db.resume(KEY)["decision_interrupts"]
+                self.assertEqual(len(interrupts), 1)
+                self.assertEqual(interrupts[0]["decision"]["attempt"], attempt)
+                self.run_pass()
+                self.assertEqual(self.db.resume(KEY)["decision_interrupts"], interrupts)
+                self.assertEqual(model.n, 3)
 
     def test_unscoped_replacement_interrupt_survives_with_or_without_a_model(self):
         self._trio()

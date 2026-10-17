@@ -22,6 +22,8 @@ class Decision:
     tags: tuple[str, ...] = ()
     context: str = ""
     instance: str = ""
+    stage: str = ""
+    attempt: int = 0
 
     def __post_init__(self):
         if (len(self.options) < 2 or not all(isinstance(option, str) and option.strip() for option in self.options)
@@ -82,6 +84,11 @@ def _verdict(persona: Persona, got: Reply | Failure, options: tuple[str, ...]) -
     return {"persona": persona.name, "vote": "concern", "choice": None, "reasoning": reasoning}
 
 
+def record(store: Any, key: str, update: DecisionUpdate) -> None:
+    """One writer for a trio result, including an unavailable consultation."""
+    store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record)
+
+
 def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any,
             failures: int = 0) -> Outcome:
     """Consult all three under a resolved policy, then record adoption or escalation on the existing issue.
@@ -93,17 +100,19 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
     unanimous = (all(v["vote"] == "adopt" for v in verdicts)
                  and len({v["choice"] for v in verdicts}) == 1)
     recommendation = verdicts[0]["choice"] if unanimous else None
+    hold = unanimous and recommendation == "hold" and decision.options == ("approve", "hold")
     update = preserve_ask_link(store.decisions(decision.issue_key), DecisionUpdate(
-        decision.topic, decision.question, recommendation, "trio" if unanimous else "zach",
+        decision.topic, decision.question, recommendation if not hold else None,
+        "trio" if unanimous and not hold else "zach",
         {"decision": described, "verdicts": verdicts,
          "recommendation": recommendation, "unanimous": unanimous}))
     if retryable_failure(update.record):
-        update = DecisionUpdate(update.topic, update.question, update.answer, update.decided_by,
+        update = DecisionUpdate(update.topic, update.question, update.answer, "",
                                 {**update.record, "failures": failures + 1})
         update = exhaust_retry(update, failures + 1) or update
-    store.add_decision(decision.issue_key, update.topic, update.question, update.answer,
-                       update.decided_by, update.record)
-    return Outcome(recommendation, unanimous, "" if unanimous else str(update.record.get("error") or decision.question))
+    record(store, decision.issue_key, update)
+    return Outcome(update.answer, unanimous and not hold,
+                   "" if unanimous and not hold else str(update.record.get("error") or decision.question))
 
 
 def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
@@ -118,7 +127,8 @@ def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
     if prior is not None:
         if "options" in prior and tuple(prior["options"]) != decision.options:
             return None
-        if prior.get("context", "") != decision.context:
+        if ((prior.get("stage", ""), prior.get("attempt", 0)) != (decision.stage, decision.attempt)
+                or prior.get("context", "") != decision.context):
             return None
     answer = latest.answer if isinstance(latest.answer, str) and latest.answer.strip() else None
     if answer is not None:
@@ -134,15 +144,14 @@ def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas:
     settled = _settled(decision, earlier)
     if settled is not None:
         return settled
-    if model is None:
-        return Outcome(None, False, decision.question)
     try:
+        if model is None:
+            raise ValueError(decision.question)
         return consult(decision, policy, personas, model, store, failures)
     except (PolicyError, ValueError) as exc:
         described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
         update = preserve_ask_link(earlier, DecisionUpdate(
             decision.topic, decision.question, None, "zach",
             {"decision": described, "error": str(exc), "unanimous": False}))
-        store.add_decision(decision.issue_key, update.topic, update.question, update.answer,
-                           update.decided_by, update.record)
+        record(store, decision.issue_key, update)
         return Outcome(None, False, str(exc))

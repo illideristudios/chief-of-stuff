@@ -41,12 +41,13 @@ def exhaust_retry(row: Any, failures: int) -> DecisionUpdate | None:
                           {**row.record, "retry_exhausted": failures, "error": reason})
 
 
-def stamped_failures(row: Any, context: str, options: Sequence[str]) -> int:
+def stamped_failures(row: Any, context: str, options: Sequence[str], stage: str = "", attempt: int = 0) -> int:
     """Failed consultations a retryable row recorded in its own commit, for this context and these options."""
     record = row.record if row is not None and isinstance(row.record, dict) else {}
     prior = record.get("decision") if isinstance(record.get("decision"), dict) else {}
     if (row is None or row.answer or not retryable_failure(record) or prior.get("context", "") != context
-            or tuple(prior.get("options") or ()) != tuple(options)):
+            or tuple(prior.get("options") or ()) != tuple(options)
+            or (prior.get("stage", ""), prior.get("attempt", 0)) != (stage, attempt)):
         return 0
     return int(record.get("failures", 0))
 
@@ -90,46 +91,25 @@ def latest(decisions: Sequence[Any]) -> dict[tuple[str, str, str], Any]:
     return {identity(d): d for d in decisions}
 
 
-def _pending_ambiguity(decisions: Sequence[Any], interrupt: dict, asks: Sequence[Any]) -> bool:
-    scope = interrupt.get("decision")
-    if not isinstance(scope, dict):
-        return False
-    row = latest(decisions).get((scope.get("topic"), scope.get("question"), scope.get("instance", "")))
-    if row is None:
-        # A gate may be waiting before any consultation (for example, with no model).
-        matching = [ask for ask in asks if ask_scope(decisions, ask)["decision"] == scope]
-        return not matching or any(not ask.answer for ask in matching)
+@dataclass(frozen=True)
+class NeedsZach:
+    decision_id: tuple[str, str, str]
+    stage: str
+    attempt: int
+    reason: str
+
+
+def needs_zach(rows: Sequence[Any]) -> NeedsZach | None:
+    """The latest row of one decision attempt alone says whether it waits on Zach."""
+    if not rows:
+        return None
+    row = rows[-1]
+    if (row.answer or "").strip() or row.decided_by != "zach":
+        return None
     record = row.record if isinstance(row.record, dict) else {}
-    prior = record.get("decision")
-    if ((isinstance(prior, dict) and prior.get("context", "") != scope.get("context", ""))
-            or is_reversed(row) or is_restarted(row)):
-        return False
-    # A unanimous hold still waits at its gate; other adopted answers settle their decision.
-    return (not row.answer and not retryable_failure(record)) or (
-        row.answer == "hold" and isinstance(prior, dict) and tuple(prior.get("options") or ()) == ("approve", "hold"))
-
-
-def pending_interrupt(decisions: Sequence[Any], current: dict | None = None, *,
-                      asks: Sequence[Any] = (), proposed: dict | None = None) -> dict | None:
-    """Queue capped decisions behind a pending scope, discarding settled or superseded ambiguities.
-
-    The driver persists the selected interrupt, including recovery after a capped row's commit.
-    """
-    if current and (current.get("kind") != "ambiguity" or _pending_ambiguity(decisions, current, asks)):
-        return current
-    if proposed is not None:
-        return proposed
-    for row in latest(decisions).values():
-        record = row.record if isinstance(row.record, dict) else {}
-        prior = record.get("decision")
-        if not record.get("retry_exhausted") or row.answer or not isinstance(prior, dict):
-            continue
-        topic, question, instance = identity(row)
-        interrupt = {"kind": "ambiguity", "reason": str(record.get("error") or question), "decision": {
-            "topic": topic, "question": question, "instance": instance, "context": prior.get("context", "")}}
-        if _pending_ambiguity(decisions, interrupt, asks):
-            return interrupt
-    return None
+    decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
+    return NeedsZach(identity(row), decision.get("stage", ""), decision.get("attempt", 0),
+                     str(record.get("error") or row.question))
 
 
 def open_reversal(decisions: Sequence[Any], history: Sequence[Any] = (), start: str = "implement") -> bool:
@@ -262,12 +242,6 @@ def answer_ask(decisions: Sequence[Any], ask: Any) -> DecisionUpdate | None:
         return None
     return DecisionUpdate(row.topic, row.question, ask.answer, "user",
                           {**row.record, "recommendation": ask.answer})
-
-
-def ask_scope(decisions: Sequence[Any], ask: Any) -> dict:
-    row = ask_decision(decisions, ask)
-    topic, question, instance = identity(row) if row is not None else ("ask", ask.question, f"ask-{ask.id}")
-    return {"decision": {"topic": topic, "question": question, "instance": instance, "context": ask.context}}
 
 
 def replacement_context(row: Any, segment: Any) -> str:
