@@ -132,12 +132,12 @@ def fixture_files(case: Path, suffix: str) -> list[Path]:
 class CaseLintTest(unittest.TestCase):
     def test_guard_examples_use_no_real_container_runtime(self):
         # Architecture §11: launcher examples use invented names, including in guard tests.
-        retired_runtime = "dock" + "er"
+        retired_runtimes = "|".join(("dock" + "er", "pod" + "man"))
         found = []
-        for relative in ("scripts/guard_commands.py", "evals/test_guard_commands.py", "evals/test_cases.py"):
-            for number, line in enumerate((EVALS.parent / relative).read_text().splitlines(), 1):
-                if re.search(rf"\b{retired_runtime}\b", line):
-                    found.append(f"{relative}:{number}")
+        for relative in (p.relative_to(EVALS.parent) for pattern in ("scripts/guard_*.py", "evals/test_guard_*.py", "evals/test_cases.py") for p in sorted(EVALS.parent.glob(pattern))):
+            for number, line in enumerate((EVALS.parent / relative).read_text(encoding="utf-8").splitlines(), 1):
+                if match := re.search(rf"\b(?:{retired_runtimes})\b", line, re.I):
+                    found.append(f"{relative}:{number}:{match.group(0)}")
         self.assertEqual(found, [])
 
     def test_guard_runtime_lint_rejects_known_runtimes_in_any_case(self):
