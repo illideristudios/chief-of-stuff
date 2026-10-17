@@ -537,6 +537,34 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 2})
         self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
+    def test_launch_failure_creates_the_owned_hold_used_by_the_next_pass(self):
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])])
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
+            self.run_pass()
+        self.assertIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
+        self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 1})
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 2, "builder")])
+        self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
+        self.assertNotIn("launcher_hold", self.db.resume(KEY))
+
+    def test_exhausted_release_returns_to_a_human_releasable_hold(self):
+        self.pending_release(held=False)
+        self.p = replace(self.p, base=policy.Policy(retry_limit=0))
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="refused")):
+            self.run_pass()
+            self.run_pass()
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        def restore(number):
+            self.forge.rows[0]["human_review"] = True
+            return ""
+        with mock.patch.object(self.forge, "add_human_hold", create=True, side_effect=restore):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.forge.rows[0]["human_review"] = False
+        self.assertIsInstance(self.run_pass()[0], reconcile.Dispatch)
+
     def test_failed_hold_restoration_survives_the_next_forge_sync(self):
         self.pending_release(held=False)
         with mock.patch.object(self.forge, "add_human_hold", create=True, return_value="offline"):
