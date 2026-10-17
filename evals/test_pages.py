@@ -20,6 +20,7 @@ import urllib.error
 from unittest import mock
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -1456,6 +1457,29 @@ class SuperviseTest(unittest.TestCase):
              mock.patch.object(stop2, "wait", side_effect=lambda _s: (stop2.set(), True)[1]):
             pg.supervise(self.root, stop2)
         ensured.assert_not_called()
+
+    def test_keeps_supervising_through_an_unreadable_config_and_a_board_added_later(self):
+        stop, waits = threading.Event(), []
+        configs = iter([KeyError("America/Nowhere"), SimpleNamespace(pages_dir=None, board_url=None),
+                        SimpleNamespace(pages_dir="pages/", board_url="http://127.0.0.1:1/")])
+
+        def read(_root):
+            item = next(configs)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def fake_wait(seconds):
+            waits.append(seconds)
+            return len(waits) == 3 and (stop.set() or True)
+
+        with mock.patch.object(pg, "read_config", side_effect=read), \
+             mock.patch.object(pg, "from_config", return_value=(self.pages, self.port)), \
+             mock.patch.object(pg, "ensure", return_value="pages: serving") as ensured, \
+             mock.patch.object(stop, "wait", side_effect=fake_wait):
+            pg.supervise(self.root, stop)
+        self.assertEqual(len(waits), 3)
+        ensured.assert_called_once()
 
 
 if __name__ == "__main__":

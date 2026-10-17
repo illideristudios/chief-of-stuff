@@ -123,8 +123,8 @@ class EngineTest(unittest.TestCase):
             "run_dir": str(supervisor.state_dir(self.root) / "runs" / f"{key.rpartition('#')[2]}-{stage}-{attempt}"),
             "tree": str(self.trees / "fake"), "starting_head": "starting-head",
         }}
-        data.pop("quota", None)  # Match worker._save_run when a launch succeeds.
         self.db.set_resume(key, data)
+        engine.worker._save_run(self.db, key, stage, attempt, data["runs"][f"{stage}-{attempt}"])
         return "used-model", "high"
 
     def run_pass(self, **kwargs):
@@ -1493,22 +1493,38 @@ class MainTest(unittest.TestCase):
     def test_the_supervisor_starts_the_engine_driver(self):
         self.assertEqual(supervisor.ENGINE, (str(Path(engine.__file__).resolve()),))
 
-    def test_loop_exits_cleanly_when_plugin_version_changes_so_launchd_restarts_it(self):
-        versions = iter(["1.0.0", "1.0.1"])
+    def test_loop_relaunches_the_installed_release_when_the_pointer_moves(self):
+        newer = Path("/installs/versions/2.0.0-abc")
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
-             mock.patch.object(engine.supervisor, "version", side_effect=lambda: next(versions)), \
-             mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("plugin update ignored")]) as sleep:
+             mock.patch.object(engine.supervisor, "current_release", return_value=newer), \
+             mock.patch.object(engine.os, "execv") as execv, \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("update ignored")]) as sleep:
             self.assertEqual(engine.main(["--root", str(self.root), "--interval", "5"]), 0)
         self.assertEqual(passed.call_count, 1)
-        sleep.assert_called_once_with(5)
+        sleep.assert_called_once_with(5.0)
+        execv.assert_called_once_with(sys.executable, [
+            sys.executable, str(newer / "chief_of_stuff.py"), "engine", "--root", str(self.root), "--interval", "5.0"])
 
-    def test_subcommands_delegate_to_supervisor(self):
-        for argv in (["--root", str(self.root), "install"], ["status"], ["uninstall", "--root", str(self.root)]):
+    def test_loop_keeps_running_while_the_installed_release_is_its_own(self):
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.supervisor, "current_release", return_value=engine.supervisor.RELEASE), \
+             mock.patch.object(engine.os, "execv") as execv, \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(passed.call_count, 2)
+        execv.assert_not_called()
+
+    def test_subcommands_delegate_to_supervisor_with_only_the_flags_it_accepts(self):
+        for argv, expected in ((["--root", str(self.root), "install"], ["--root", str(self.root), "install"]),
+                               (["status"], ["--root", str(Path(".")), "status"]),
+                               (["--interval", "5", "--once", "uninstall", "--root", str(self.root)],
+                                ["--root", str(self.root), "uninstall"])):
             with self.subTest(argv=argv), \
                  mock.patch.object(engine.supervisor, "main", return_value=0) as sup:
                 self.assertEqual(engine.main(argv), 0)
-                sup.assert_called_once_with(argv)
+                sup.assert_called_once_with(expected)
 
     def test_loop_supervises_the_page_server_and_stops_it_on_exit(self):
         import pages

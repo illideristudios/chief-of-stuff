@@ -78,6 +78,22 @@ class SupervisorTest(unittest.TestCase):
         return [call.args[0] for call in self.launchctl_mock.call_args_list]
 
 
+class CurrentReleaseTest(SupervisorTest):
+    def test_the_installed_pointer_names_the_release_to_run(self):
+        install = self.release.parent / "install"
+        old, new = install / "versions/1.0.0-aaa", install / "versions/1.0.1-bbb"
+        old.mkdir(parents=True), new.mkdir(parents=True)
+        (install / "current").symlink_to(old.relative_to(install))
+        with mock.patch.object(supervisor, "RELEASE", old.resolve()):
+            self.assertEqual(supervisor.current_release(), old.resolve())
+            (install / "current").unlink()
+            (install / "current").symlink_to(new.relative_to(install))
+            self.assertEqual(supervisor.current_release(), new.resolve())
+
+    def test_a_release_run_from_a_checkout_is_its_own_current(self):
+        self.assertEqual(supervisor.current_release(), supervisor.RELEASE)
+
+
 class VenvTest(SupervisorTest):
     def test_changed_base_python_identity_builds_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
