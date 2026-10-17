@@ -1544,7 +1544,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         self.assertEqual(passed.call_count, 3, "backoff must leave engine passes running")
-        self.assertEqual(preflight.call_args_list, [mock.call(data, release=current)] * 2)
+        self.assertEqual(preflight.call_args_list, [mock.call(data, release=current, timeout=60)] * 2)
         execv.assert_called_once_with(str(python), [
             str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
         self.assertTrue(stops[0].is_set())
@@ -1623,7 +1623,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         passed.assert_called_once()
-        self.assertEqual(preflight.call_args.kwargs, {"release": current})
+        self.assertEqual(preflight.call_args.kwargs, {"release": current, "timeout": 60})
         execv.assert_not_called()
 
     def test_loop_relaunches_the_installed_release_when_the_pointer_moves(self):
@@ -1642,7 +1642,7 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root), "--interval", "5"]), 0)
         self.assertEqual(passed.call_count, 1)
         sleep.assert_called_once_with(5.0)
-        preflight.assert_called_once_with(self.root / "data", release=newer)
+        preflight.assert_called_once_with(self.root / "data", release=newer, timeout=60)
         execv.assert_called_once_with(str(python), [
             str(python), str(newer / "scripts/engine.py"), "--root", str(self.root), "--interval", "5.0"])
 
@@ -1670,7 +1670,7 @@ class MainTest(unittest.TestCase):
         migrated.assert_not_called()
         serving.assert_not_called()
         passed.assert_not_called()
-        preflight.assert_called_once_with(self.root / "data", release=current)
+        preflight.assert_called_once_with(self.root / "data", release=current, timeout=60)
         execv.assert_called_once_with(str(python), [
             str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
 

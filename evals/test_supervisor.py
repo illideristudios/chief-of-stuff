@@ -146,17 +146,49 @@ class VenvTest(SupervisorTest):
         current.mkdir()
         (current / "requirements.txt").write_bytes((self.release / "requirements.txt").read_bytes())
         self.pip_fails = True
-        for failure in ("probe timeout", "missing marker"):
+        for failure, executable, prefix in (("probe timeout", str(python), sys.prefix),
+                                             ("prefix alias", "/unrelated/python", str(python.parent.parent)),
+                                             ("missing marker", str(python), sys.prefix)):
             with self.subTest(failure=failure):
                 if failure == "missing marker":
                     marker.unlink(missing_ok=True)
                 self.calls.clear()
-                with mock.patch.object(supervisor.sys, "executable", str(python)), \
+                with mock.patch.object(supervisor.sys, "executable", executable), \
+                     mock.patch.object(supervisor.sys, "prefix", prefix), \
                      mock.patch.object(supervisor, "_venv_python_runs", return_value=False), \
                      self.assertRaisesRegex(supervisor.ServiceError, "running interpreter"):
                     supervisor.ensure_venv(self.data, release=current)
                 self.assertTrue(python.is_file(), "the launchd interpreter must survive failed preflight")
                 self.assertFalse(any("pip" in call or call[1:3] == ["-m", "venv"] for call in self.calls))
+
+    def test_failed_repair_preserves_another_workspaces_interpreter_and_marker(self):
+        python = supervisor.ensure_venv(self.data)
+        marker = python.parent.parent / ".installed"
+        self.pip_fails = True
+        with mock.patch.object(supervisor, "_venv_python_runs", return_value=False), \
+             self.assertRaises(supervisor.ServiceError):
+            supervisor.ensure_venv(self.data)
+        self.assertTrue(python.is_file(), "another workspace still executes this interpreter")
+        self.assertTrue(marker.is_file(), "failed preparation must not modify the published venv")
+        self.pip_fails = False
+        self.assertEqual(supervisor.ensure_venv(self.data), python)
+
+    def test_preflight_shares_one_sixty_second_budget_across_build_steps(self):
+        elapsed = [0]
+        run = self.fake_run
+
+        def slow(argv, **kwargs):
+            self.assertLessEqual(kwargs["timeout"], 60 - elapsed[0])
+            if elapsed[0] + 25 > 60:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            elapsed[0] += 25
+            return run(argv, **kwargs)
+
+        with mock.patch.object(supervisor.time, "monotonic", side_effect=lambda: elapsed[0]), \
+             mock.patch.object(supervisor.subprocess, "run", side_effect=slow), \
+             self.assertRaises(subprocess.TimeoutExpired):
+            supervisor.ensure_venv(self.data, timeout=60)
+        self.assertLessEqual(elapsed[0], 60)
 
     def test_changed_base_python_identity_builds_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
