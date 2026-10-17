@@ -275,6 +275,8 @@ def _render_store_decisions(decisions: list) -> str:
     items: list[str] = []
     for d in decisions:
         st_name = state_of(d).status
+        if st_name == "superseded":  # its replacement carries the card
+            continue
         if st_name == "blocked":
             why = d.blocked_reason or "action blocked"
             badge = f'<span class="decision-badge blocked">BLOCKED · {_esc(why)}</span>'

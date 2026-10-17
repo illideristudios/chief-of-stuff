@@ -220,6 +220,13 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.assertRegex(html, r"(?i)blocked.*merge conflicts|merge conflicts.*blocked")
         self.assertNotRegex(html, r"(?i)>\s*closed\s*<")
 
+    def test_a_superseded_decision_has_no_card_with_live_buttons(self) -> None:
+        gone = self.db.add_decision(KEY, "design", "Replaced question?")
+        self.db.answer_decision(gone.id, "Yes", status="superseded", superseded_by=self.d_open.id)
+        html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
+        self.assertIn("Split upload parser?", html)
+        self.assertNotIn("Replaced question?", html)
+
     def test_pages_post_answer_reverse_and_reroute_only_record_in_the_store(self) -> None:
         fake_forge = mock.MagicMock()
         fake_forge.write_stage.return_value = SimpleNamespace(ok=True, done=True, error="")

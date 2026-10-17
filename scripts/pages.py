@@ -394,11 +394,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self._send_html(True) if self._is_html() else super().do_GET()
 
     def _post_store_decision(self, form: dict[str, list[str]]):
+        """Record a person's answer, reversal or re-route. A reversal or re-route is an intent on its own row, and
+        the engine alone applies it: this request never touches the forge, a card, or another intent."""
         import decision_actions
-        import forge
         import sqlite3
         import store_access
-        from dataclasses import asdict
         from settings import load_policy
         from sqlalchemy.exc import OperationalError
         from supervisor import ServiceError
@@ -417,50 +417,34 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             db = store_access.migrated_store(root)
 
             def record():
-                """Phase one: the decision, its intent and its queued comments, in one short write transaction."""
+                """The decision, its intent and its queued comments, in one short write transaction."""
                 dec = db.decision(int(dec_id))
                 if dec is None:
-                    return None, (404, "no such decision")
+                    return (404, "no such decision")
                 item = db.item(dec.issue_key)
                 data = db.resume(dec.issue_key) or {}
-                # Each re-route gets an immutable identity. Validation failures roll this allocation back.
-                row = db.add_decision(dec.issue_key, dec.topic, dec.question) if action in ("reroute", "re-route") else None
+                # An intent gets its own immutable row; a validation failure rolls this allocation back.
+                row = db.add_decision(dec.issue_key, dec.topic, dec.question) if action != "answer" else None
                 tr = decision_actions.respond(
                     dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
                     history=db.segments(dec.issue_key), policies=load_policy(), issue_type=data.get("issue_type"),
-                    answered_at=now_iso, reroute_id=row.id if row else None)
-                db.update_decision(tr.store_write)
-                if row is not None:
-                    replaced = {dec.id, data.get("pending_stage", {}).get("decision_id"),
-                                data.get("redispatch", {}).get("decision_id")}
-                    previous = [d for d in db.decisions(dec.issue_key)
-                                if d.id in replaced or decision_actions.held_reroute([d])]
-                    for update in decision_actions.supersede(previous, row.id):
-                        db.update_decision(update.store_write)
-                bodies = [a.body for a in tr.actions if isinstance(a, decision_actions.ForgeComment)]
-                stage_write = next((a for a in tr.actions if isinstance(a, decision_actions.ForgeStageWrite)), None)
-
-                def intent(data: dict) -> None:
-                    if tr.redispatch is not None:
-                        data["redispatch"] = asdict(tr.redispatch)
-                    if stage_write is not None:  # the engine retries it until it lands
-                        data["pending_stage"] = {"stage": stage_write.stage, "expected": stage_write.previous_stage,
-                                                 "decision_id": tr.decision.id}
-                    if bodies:  # the engine delivers them, so no forge call waits on this request
-                        data["decision_comments"] = [*data.get("decision_comments", []), *bodies]
-
-                db.update_resume(dec.issue_key, intent)
-                return (tr, stage_write), None
+                    answered_at=now_iso, row_id=row.id if row else 0)
+                for write in (tr.store_write, tr.source):
+                    if write is not None:
+                        db.update_decision(write)
+                bodies = [a.body for a in tr.actions]
+                if bodies:  # the engine delivers them, so no forge call waits on this request
+                    db.update_resume(dec.issue_key, lambda data: data.__setitem__(
+                        "decision_comments", [*data.get("decision_comments", []), *bodies]))
+                return None
 
             try:
                 with db.transaction():
-                    done, error = record()
+                    error = record()
             except decision_actions.BadRequest as exc:
                 return self.send_error(400, str(exc))
             except ValueError as exc:
                 return self.send_error(409, str(exc))
-            if error is None and done[1] is not None:
-                error = self._write_reroute(db, forge, root, done[0], done[1], now_iso)
             if error is not None:
                 return self.send_error(*error)
         except (ServiceError, sqlite3.OperationalError, OperationalError) as exc:
@@ -475,38 +459,6 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Location", "/")
         self.send_header("Content-Length", "0")
         self.end_headers()
-
-    @staticmethod
-    def _write_reroute(db, forge, root, tr, write, now_iso):
-        """Phase two: the forge write, outside any store transaction; its result is recorded in a short one."""
-        import decision_actions
-        from reconcile import OP_STAGE_WRITE
-
-        number = int(write.issue_key.rpartition("#")[2])
-        try:
-            fg = forge.for_workspace(root)
-            if fg is None:
-                raise RuntimeError("no forge configured")
-            result = fg.write_stage(number, write.stage, expected=write.previous_stage or None, commit=True)
-            error = "" if result.ok and result.done else result.error or "stage write was not committed"
-        except Exception as exc:
-            error = str(exc)
-        with db.transaction():
-            # The intent may be gone (the engine landed it) or replaced (a newer re-route): act only while it is still ours.
-            mine = (db.resume(write.issue_key) or {}).get("pending_stage", {}).get("decision_id") == tr.decision.id
-            if not mine:
-                return
-            if error:
-                refused = decision_actions.block(db.decisions(write.issue_key), tr.decision.id, error)
-                if refused is not None:
-                    db.update_decision(refused.store_write)
-                db.add_log(write.issue_key, f"stage write refused: {error}", now_iso, OP_STAGE_WRITE)
-                return 409, error
-            db.upsert_item(write.issue_key, stage=write.stage)
-            db.update_resume(write.issue_key, lambda data: data.pop("pending_stage", None))
-            restored = decision_actions.unblock(db.decisions(write.issue_key), tr.decision.id)
-            if restored is not None:
-                db.update_decision(restored.store_write)
 
     def do_POST(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a

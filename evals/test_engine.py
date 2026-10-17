@@ -314,7 +314,7 @@ class EngineTest(unittest.TestCase):
             with self.subTest(prior=prior):
                 forge = mock.Mock()
                 forge.write_stage.return_value = SimpleNamespace(ok=True, error="")
-                engine._write_stage(forge, mock.MagicMock(), KEY, {"stage": "implement", "expected": prior})
+                engine._write_stage(forge, mock.MagicMock(), KEY, "implement", prior)
                 self.assertIs(forge.write_stage.call_args.kwargs["initialize"], initialize)
 
     def test_stage_write_failure_is_logged_and_retried_before_planning(self):
@@ -614,6 +614,7 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("pending_stage", self.db.resume(KEY))
 
     def test_waiting_on_an_intent_marks_no_sibling_decision_blocked(self):
+        self.db.sync_from_forge(self.forge.snapshots())
         sibling = self.db.add_decision(KEY, "scope", "Ship?")
         self.db.answer_decision(sibling.id, "Yes", status="answered")
         for phase, status in (("write", "re-routed"), ("run", "blocked")):

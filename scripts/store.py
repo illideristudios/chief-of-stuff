@@ -115,8 +115,8 @@ class Decision(Base):
         return ""
 
     @property
-    def blocked_from(self) -> str:
-        return str(self.record.get("blocked_from", "")) if isinstance(self.record, dict) else ""
+    def intent(self) -> str:
+        return str(self.record.get("intent", "")) if isinstance(self.record, dict) else ""
 
     @property
     def superseded_by(self) -> int:
@@ -392,7 +392,7 @@ class Store:
 
     def answer_decision(self, decision_id: int, answer: str, *, decided_by: str = "user",
                         answered_at: str | None = None, status: str = "answered",
-                        blocked_reason: str = "", rerouted_to: str = "", blocked_from: str = "",
+                        blocked_reason: str = "", rerouted_to: str = "", intent: str = "",
                         superseded_by: int = 0) -> Decision | None:
         stamp = answered_at or self._stamp()
         with self.session() as s:
@@ -408,7 +408,7 @@ class Store:
                 rec.pop("blocked_reason", None)
             if rerouted_to:
                 rec["rerouted_to"] = rerouted_to
-            for name, value in (("blocked_from", blocked_from), ("superseded_by", superseded_by)):
+            for name, value in (("intent", intent), ("superseded_by", superseded_by)):
                 if value:
                     rec[name] = value
                 else:
@@ -429,7 +429,7 @@ class Store:
             status=str(write.status or "answered"),
             blocked_reason=str(getattr(write, "blocked_reason", "") or ""),
             rerouted_to=str(getattr(write, "rerouted_to", "") or ""),
-            blocked_from=str(getattr(write, "blocked_from", "") or ""),
+            intent=str(getattr(write, "intent", "") or ""),
             superseded_by=int(getattr(write, "superseded_by", 0) or 0),
         )
 

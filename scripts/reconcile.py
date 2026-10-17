@@ -13,6 +13,8 @@ from policy import Edge, Policies, Policy, SEVERITIES, Workflow
 # The operation a log line reports. Notification recovery keys on it, never on the line's wording.
 OP_STAGE_WRITE, OP_DECISION_COMMENT, OP_WORKER_RUN = "stage_write", "decision_comment", "worker_run"
 OP_MERGE_REFUSED, OP_MERGE = "merge_refused", "merge"
+# A pending move holds its own issue only; no sibling decision shows blocked for it.
+HOLD_STAGE_WRITE, HOLD_REROUTE = "stage write pending", "re-route pending"
 
 
 class WorkItem(Protocol):
@@ -264,7 +266,6 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
          quota_resets: Mapping[str, datetime] | None = None,
-         redispatches: Mapping[str, Mapping] | None = None,
          pending_stages: Mapping[str, Mapping] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
@@ -285,21 +286,21 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         history = segments.get(item.issue_key, ())
         item_decisions = (decisions or {}).get(item.issue_key, ())
         stage_write = (pending_stages or {}).get(item.issue_key)
-        if item.forge_state != "closed" and (stage_write or decision_actions.held_reroute(item_decisions)):
-            reason = "stage write pending" if stage_write and not stage_write.get("decision_id") else "re-route pending"
-            actions.append(Wait(item.issue_key, reason))
+        intent = decision_actions.current_intent(item_decisions)
+        if item.forge_state != "closed" and (stage_write or (intent and (intent.intent == "write" or intent.status == "blocked"))):
+            # The engine's own move, a re-route not yet written, or an intent a spent retry limit blocked: this issue waits.
+            actions.append(Wait(item.issue_key, HOLD_STAGE_WRITE if stage_write else HOLD_REROUTE))
             continue
-        pending = (redispatches or {}).get(item.issue_key)
-        if pending and item.forge_state != "closed":
+        if intent and item.forge_state != "closed":
             if any(s.started_at and not s.ended_at for s in history):
                 continue
             # A person asked for this stage again; it still obeys the hold, the retry limit, and the review launch.
             if item.human_review:
                 action = Wait(item.issue_key, "needs input")
-            elif pending["stage"] not in policies.stages:
+            elif intent.rerouted_to not in policies.stages:
                 action = Wait(item.issue_key, "stage is outside the workflow")
             else:
-                action = _work(item.issue_key, pending["stage"], policies.workflow_for(issue_types.get(item.issue_key)),
+                action = _work(item.issue_key, intent.rerouted_to, policies.workflow_for(issue_types.get(item.issue_key)),
                                history, policies, (rooms or {}).get(item.issue_key))
         else:
             action = _item(item, history, policies, issue_types.get(item.issue_key),

@@ -1,8 +1,9 @@
 """Pure decision lifecycle transitions (Use Cases).
 
 Covers open, answered, reversed, re-routed, and answered-but-blocked decisions.
-Callers in Drivers (pages, engine) pass a decision record and the issue's state
-in and execute the returned store writes, forge writes, and re-dispatch actions.
+A reversal or re-route is an intent: its own decision row, carrying the stage it runs and its phase. The page server
+only appends one; `current_intent` and `supersede` pick the issue's one current intent here, and the engine alone
+applies it. Callers in Drivers pass decision records in and execute the returned store writes.
 """
 
 from __future__ import annotations
@@ -33,8 +34,8 @@ class DecisionState:
     asked_at: str = ""
     answered_at: str | None = None
     blocked_reason: str = ""
-    rerouted_to: str = ""
-    blocked_from: str = ""
+    rerouted_to: str = ""  # the stage a re-route or reversal runs
+    intent: str = ""  # "write": its stage is not yet written; "run": its worker is not yet launched; "": done
     superseded_by: int = 0
 
 
@@ -48,7 +49,7 @@ class StoreDecisionWrite:
     answered_at: str | None
     blocked_reason: str = ""
     rerouted_to: str = ""
-    blocked_from: str = ""
+    intent: str = ""
     superseded_by: int = 0
 
 
@@ -56,23 +57,6 @@ class StoreDecisionWrite:
 class ForgeComment:
     issue_key: str
     body: str
-
-
-@dataclass(frozen=True)
-class ForgeStageWrite:
-    issue_key: str
-    stage: str
-    previous_stage: str = ""
-
-
-@dataclass(frozen=True)
-class Redispatch:
-    issue_key: str
-    stage: str
-    persona: str
-    attempt: int
-    reason: str
-    decision_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -86,8 +70,8 @@ class DecisionUpdate:
 class Transition:
     decision: DecisionState
     store_write: StoreDecisionWrite | None
-    actions: tuple[ForgeComment | ForgeStageWrite, ...] = ()
-    redispatch: Redispatch | None = None
+    actions: tuple[ForgeComment, ...] = ()
+    source: StoreDecisionWrite | None = None  # the decision an intent's own row replaced, closed as superseded
 
 
 def state_of(record: Any, *, blocked_reason: str = "", rerouted_to: str = "") -> DecisionState:
@@ -114,7 +98,7 @@ def state_of(record: Any, *, blocked_reason: str = "", rerouted_to: str = "") ->
         answered_at=getattr(record, "answered_at", None),
         blocked_reason=rec_blocked,
         rerouted_to=rec_rerouted,
-        blocked_from=str(getattr(record, "blocked_from", "") or ""),
+        intent=str(getattr(record, "intent", "") or ""),
         superseded_by=int(getattr(record, "superseded_by", 0) or 0),
     )
 
@@ -139,7 +123,7 @@ def _write_for(st: DecisionState) -> StoreDecisionWrite:
         answered_at=st.answered_at,
         blocked_reason=st.blocked_reason,
         rerouted_to=st.rerouted_to,
-        blocked_from=st.blocked_from,
+        intent=st.intent,
         superseded_by=st.superseded_by,
     )
 
@@ -153,7 +137,7 @@ def answer(
 ) -> Transition:
     prev = state_of(record)
     cleaned = answer_text.strip()
-    if prev.status not in OPEN_STATES or prev.rerouted_to or prev.blocked_from == "reversed":
+    if prev.status not in OPEN_STATES or prev.intent:
         raise ValueError("decision is already closed")
     if not cleaned:
         raise ValueError("an answer must contain text")
@@ -185,99 +169,59 @@ def from_trio(
     return Transition(decision=nxt, store_write=None, actions=())
 
 
+def _intent(prev: DecisionState, status: str, verb: str, stage: str, text: str, decided_by: str,
+            answered_at: str | None, row_id: int, phase: str) -> Transition:
+    """A reversal or re-route is its own row; the decision it replaces is closed as superseded by it."""
+    nxt = replace(prev, id=row_id, status=status, answer=text, decided_by=decided_by or "user",
+                  answered_at=answered_at if answered_at is not None else prev.answered_at,
+                  blocked_reason="", rerouted_to=stage, intent=phase, superseded_by=0)
+    comment = ForgeComment(nxt.issue_key, f"Decision #{nxt.id} ({nxt.gate}) {verb} by {nxt.decided_by}: {nxt.answer}")
+    closed = replace(prev, status="superseded", blocked_reason="", superseded_by=row_id)
+    return Transition(decision=nxt, store_write=_write_for(nxt), actions=(comment,), source=_write_for(closed))
+
+
 def reverse(
     record: Any,
     answer_text: str,
     *,
+    row_id: int,
     decided_by: str = "user",
     answered_at: str | None = None,
     stage: str = "",
-    persona: str = "",
-    attempt: int = 1,
 ) -> Transition:
     prev = state_of(record)
-    # An answered decision whose action is blocked is still answered; a refused re-route is not.
-    if prev.status not in {"answered", "blocked"} or prev.rerouted_to or prev.blocked_from == "reversed":
+    # An answered decision whose action is blocked is still answered; a decision with an intent is not.
+    if prev.status not in {"answered", "blocked"} or prev.intent:
         raise ValueError("only an answered decision can be reversed")
     if not answer_text.strip():
         raise ValueError("a reversal must contain text")
-    cleaned = answer_text.strip()
-    nxt = replace(
-        prev,
-        status="reversed",
-        answer=cleaned,
-        decided_by=decided_by or "user",
-        answered_at=answered_at if answered_at is not None else prev.answered_at,
-        blocked_reason="",
-    )
-    comment = ForgeComment(
-        nxt.issue_key,
-        f"Decision #{nxt.id} ({nxt.gate}) reversed by {nxt.decided_by}: {nxt.answer}",
-    )
-    target_stage = stage or nxt.gate
-    redisp = (
-        Redispatch(nxt.issue_key, target_stage, persona, attempt, "decision reversed", nxt.id)
-        if target_stage
-        else None
-    )
-    return Transition(decision=nxt, store_write=_write_for(nxt), actions=(comment,), redispatch=redisp)
+    target_stage = stage or prev.gate
+    return _intent(prev, "reversed", "reversed", target_stage, answer_text.strip(), decided_by, answered_at, row_id,
+                   "run" if target_stage else "")
 
 
 def reroute(
     record: Any,
     target_stage: str,
     *,
+    row_id: int,
     answer_text: str = "",
     decided_by: str = "user",
     answered_at: str | None = None,
-    current_stage: str = "",
-    persona: str = "",
-    attempt: int = 1,
-    row_id: int | None = None,
 ) -> Transition:
     prev = state_of(record)
-    allowed = OPEN_STATES | {"answered"} | ({"re-routed"} if row_id is not None else set())
-    if prev.status not in allowed:
+    if prev.status not in OPEN_STATES | {"answered"} or prev.intent:
         raise ValueError("decision is already closed")
     if not target_stage.strip():
         raise ValueError("a target stage is required")
-    cleaned_stage = target_stage.strip()
-    cleaned_answer = answer_text.strip() or f"Re-routed to {cleaned_stage}"
-    nxt = replace(
-        prev,
-        id=row_id if row_id is not None else prev.id,
-        status="re-routed",
-        answer=cleaned_answer,
-        decided_by=decided_by or "user",
-        answered_at=answered_at if answered_at is not None else prev.answered_at,
-        blocked_reason="",
-        rerouted_to=cleaned_stage,
-        blocked_from="",
-        superseded_by=0,
-    )
-    stage_write = ForgeStageWrite(nxt.issue_key, cleaned_stage, current_stage or prev.gate)
-    comment = ForgeComment(
-        nxt.issue_key,
-        f"Decision #{nxt.id} ({nxt.gate}) re-routed to {cleaned_stage} by {nxt.decided_by}: {nxt.answer}",
-    )
-    redisp = (
-        Redispatch(nxt.issue_key, cleaned_stage, persona, attempt, f"decision re-routed to {cleaned_stage}", nxt.id)
-        if cleaned_stage
-        else None
-    )
-    return Transition(
-        decision=nxt,
-        store_write=_write_for(nxt),
-        actions=(stage_write, comment),
-        redispatch=redisp,
-    )
+    stage = target_stage.strip()
+    return _intent(prev, "re-routed", f"re-routed to {stage}", stage, answer_text.strip() or f"Re-routed to {stage}",
+                   decided_by, answered_at, row_id, "write")
 
 
 def refuse(record: Any, reason: str) -> Transition:
-    """A write the decision needs was refused: it shows as blocked with the reason, keeping its re-route target."""
-    prev = state_of(record)
-    nxt = replace(prev, status="blocked", blocked_reason=reason,
-                  blocked_from=prev.blocked_from if prev.status == "blocked" else prev.status)
+    """A write the decision needs was refused: it shows as blocked with the reason, keeping its target and intent."""
+    nxt = replace(state_of(record), status="blocked", blocked_reason=reason)
     return Transition(decision=nxt, store_write=_write_for(nxt))
 
 
@@ -288,8 +232,8 @@ def _update(records: Sequence[Any], decision_id: int | None, statuses: frozenset
 
 
 def block(records: Sequence[Any], decision_id: int | None, reason: str) -> DecisionUpdate | None:
-    """The decision a refused write or a spent retry limit holds up shows as blocked with the reason; it keeps its target.
-    Its original state is kept separately, so a blocked reversal never becomes an answer."""
+    """The decision a spent retry limit holds up shows as blocked with the reason; it keeps its target and intent,
+    which hold the issue until a newer intent supersedes it."""
     found = _update(records, decision_id, frozenset({"re-routed", "reversed", "blocked"}))
     if found is None:
         return None
@@ -298,13 +242,11 @@ def block(records: Sequence[Any], decision_id: int | None, reason: str) -> Decis
 
 
 def unblock(records: Sequence[Any], decision_id: int | None) -> DecisionUpdate | None:
-    """The decision whose block has cleared is restored."""
+    """An answer a wait blocked is restored once the wait is gone; an intent is never restored this way."""
     found = _update(records, decision_id, frozenset({"blocked"}))
-    if found is None:
+    if found is None or state_of(found).intent:
         return None
-    prev = state_of(found)
-    nxt = replace(prev, status=prev.blocked_from or ("re-routed" if prev.rerouted_to else "answered"),
-                  blocked_reason="", blocked_from="")
+    nxt = replace(state_of(found), status="answered", blocked_reason="")
     return DecisionUpdate(nxt, _write_for(nxt))
 
 
@@ -318,30 +260,33 @@ def unanswered(records: Sequence[Any]) -> bool:
                for st in latest_questions(records))
 
 
-def held_reroute(records: Sequence[Any]) -> bool:
-    """A refused re-route or reversal holds every workflow transition, even after its request is dropped."""
-    return any(st.status == "blocked" and (st.rerouted_to or st.blocked_from == "reversed")
-               for st in map(state_of, records))
+def current_intent(records: Sequence[Any]) -> DecisionState | None:
+    """The issue's one current intent: its newest row that still has an intent, pending or blocked."""
+    return max((st for st in map(state_of, records) if st.intent), key=lambda st: st.id, default=None)
 
 
-def supersede(records: Sequence[Any], row_id: int) -> list[DecisionUpdate]:
-    """Accepting a new intent explicitly closes the source and every earlier intent it replaces."""
-    updates = []
-    for prev in map(state_of, records):
-        if prev.id == row_id or prev.status == "superseded":
-            continue
-        nxt = replace(prev, status="superseded", blocked_reason="", blocked_from="", superseded_by=row_id)
-        updates.append(DecisionUpdate(nxt, _write_for(nxt)))
-    return updates
+def supersede(records: Sequence[Any]) -> list[DecisionUpdate]:
+    """Every older intent, pending or blocked, is closed as superseded by the current one."""
+    current = current_intent(records)
+    updates = (replace(st, status="superseded", blocked_reason="", intent="", superseded_by=current.id)
+               for st in map(state_of, records) if current and st.intent and st.id != current.id)
+    return [DecisionUpdate(nxt, _write_for(nxt)) for nxt in updates]
+
+
+def advance(records: Sequence[Any], decision_id: int) -> DecisionUpdate | None:
+    """An intent's next phase: its stage written, it runs; its worker launched, it is done. A blocked one stays."""
+    found = next((st for st in map(state_of, records) if st.id == decision_id and st.intent and st.status != "blocked"), None)
+    if found is None:
+        return None
+    nxt = replace(found, intent="run" if found.intent == "write" else "")
+    return DecisionUpdate(nxt, _write_for(nxt))
 
 
 def restore_held(records: Sequence[Any]) -> list[DecisionUpdate]:
-    """A decision-pending hold that no open decision explains is held by answers a wait blocked: restore them.
-    A re-route (restored by its stage write) and a reversal (blocked by a spent retry limit) stay as they are."""
+    """A decision-pending hold that no open decision explains is held by answers a wait blocked: restore them."""
     if unanswered(records):
         return []
-    updates = (unblock(records, r.id) for r in map(state_of, records)
-               if not r.rerouted_to and r.blocked_from != "reversed")
+    updates = (unblock(records, st.id) for st in map(state_of, records))
     return [u for u in updates if u is not None]
 
 
@@ -357,8 +302,8 @@ def _reverse_target(dec: DecisionState, current_stage: str, history: Sequence[An
 
 def respond(record: Any, action: str, text: str, *, target_stage: str = "", current_stage: str = "",
             history: Sequence[Any] = (), policies: Policies, issue_type: str | None = None,
-            answered_at: str | None = None, reroute_id: int | None = None) -> Transition:
-    """A person's answer, reversal or re-route from the board, with the stage, persona and attempt it re-runs."""
+            answered_at: str | None = None, row_id: int) -> Transition:
+    """A person's answer, reversal or re-route from the board; the last two are intents on their own row."""
     if action == "answer":
         if not text.strip():
             raise BadRequest("an answer must contain text")
@@ -373,14 +318,11 @@ def respond(record: Any, action: str, text: str, *, target_stage: str = "", curr
         raise BadRequest("a reversal must contain text")
     if stage not in policies.stages:
         raise BadRequest("unknown target stage")
-    persona = policies.stages[stage].persona
-    if not persona:
+    if not policies.stages[stage].persona:
         raise BadRequest(f"{stage} has no worker to re-run")
-    attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     if action == "reverse":
-        return reverse(record, text, answered_at=answered_at, stage=stage, persona=persona, attempt=attempt)
-    return reroute(record, stage, answer_text=text, answered_at=answered_at, current_stage=current_stage,
-                   persona=persona, attempt=attempt, row_id=reroute_id)
+        return reverse(record, text, answered_at=answered_at, stage=stage, row_id=row_id)
+    return reroute(record, stage, answer_text=text, answered_at=answered_at, row_id=row_id)
 
 
 def _action_block_reason(action: Any) -> str:
@@ -399,13 +341,12 @@ def meet_action(
     blocked_reason: str = "",
 ) -> Transition:
     prev = state_of(record, blocked_reason=blocked_reason)
-    if prev.status not in {"answered", "blocked"} or prev.rerouted_to or prev.blocked_from == "reversed":
+    if prev.status not in {"answered", "blocked"} or prev.intent:
         return Transition(decision=prev, store_write=None, actions=())
     reason = _action_block_reason(action)
     if reason:
         return refuse(prev, reason)
-    restored = "answered" if prev.status == "blocked" else prev.status
-    nxt = replace(prev, status=restored, blocked_reason="", blocked_from="")
+    nxt = replace(prev, status="answered", blocked_reason="")
     return Transition(decision=nxt, store_write=_write_for(nxt), actions=())
 
 

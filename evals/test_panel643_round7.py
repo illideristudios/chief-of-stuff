@@ -2,18 +2,20 @@
 import http.client
 import threading
 import unittest
-from types import SimpleNamespace
 from unittest import mock
 from urllib.parse import urlencode
 
 from evals import test_engine as engines
-from evals import test_m6_store_board as fixtures
 import pages
 
 KEY = engines.KEY
 
 
-class IntentEndToEndTest(engines.EngineTest):
+class IntentEndToEndTest(unittest.TestCase):
+    setUp = engines.EngineTest.setUp
+    run_pass = engines.EngineTest.run_pass
+    launch = engines.EngineTest.launch
+
     def post(self, data):
         (self.root / "pages").mkdir(exist_ok=True)
         server = pages.make_server(self.root / "pages", 0, root=self.root, refresh=lambda *a: None, every=3600)
