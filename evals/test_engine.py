@@ -17,6 +17,7 @@ import engine
 import issue_gate
 import policy
 import reconcile
+import slots
 import store
 import supervisor
 from tree_state import TreeState
@@ -177,7 +178,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [])
         self.assertEqual(len(self.forge.merges), 1)
 
-    def test_closed_merge_keeps_exit_segment_and_cleanup_hold_until_main_ci_passes(self):
+    def test_closed_merge_ends_exit_segment_but_keeps_cleanup_hold_until_main_ci_passes(self):
         self.run_pass()
         self.publish_exit()
         self.forge.rows[0].update(forge_state="closed", merge_state="merged", human_review=True)
@@ -186,18 +187,50 @@ class EngineTest(unittest.TestCase):
         self.forge.landings = lambda pipeline, keys, **kwargs: {KEY: (True, pipeline.status == "passed")}
         with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
              mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "main-sha")):
-            for status in ("running", "failed"):
+            for status in ("running", "failed", "none"):
                 actions = self.run_pass()
                 self.assertIsInstance(actions[0], reconcile.Wait)
                 self.assertIn("merged, awaiting main CI", actions[0].reason)
-                self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+                self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
                 self.assertTrue(self.db.items()[0].human_review)
                 self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
-                self.assertFalse(any(row.message.startswith("worker implement attempt 1:") for row in self.db.log(KEY)))
+                self.assertEqual(sum(row.message.startswith("worker implement attempt 1:")
+                                     for row in self.db.log(KEY)), 1)
+                self.assertEqual(self.forge.writes, [])
             status = "passed"
             self.run_pass()
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
         self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
+    def test_merged_review_exit_releases_slot_and_scope_while_main_ci_waits(self):
+        self.forge.rows[0]["stage"] = "review"
+        self.assertEqual(self.run_pass(max_concurrency=1), [reconcile.Review(KEY, 1)])
+        self.publish_exit(stage="review")
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", human_review=True)
+        # Undeclared scopes own the whole repository, so a retained claim would block OTHER.
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        status = "none"
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status=status)
+        self.forge.landings = lambda pipeline, keys, **kwargs: {KEY: (True, pipeline.status == "passed")}
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
+             mock.patch.object(engine.engine_facts, "_changed", return_value=False):
+            for status in ("none", "running", "failed"):
+                with self.subTest(status=status):
+                    actions = self.run_pass(max_concurrency=1)
+                    self.assertIsInstance(actions[0], reconcile.Wait)
+                    self.assertIn("merged, awaiting main CI", actions[0].reason)
+                    self.assertIn((OTHER, "implement", 1, "builder"), self.launched)
+                    self.assertEqual(len(self.launched), 2)
+                    self.assertEqual(slots.running(self.db), 1)  # Only OTHER's worker is live.
+                    self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+                    self.assertTrue(next(item for item in self.db.items() if item.issue_key == KEY).human_review)
+                    self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
+                    self.assertEqual(self.forge.writes, [])
+            status = "passed"
+            self.run_pass(max_concurrency=1)
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+        self.assertEqual(sum(row.message.startswith("worker review attempt 1:") for row in self.db.log(KEY)), 1)
 
     def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
