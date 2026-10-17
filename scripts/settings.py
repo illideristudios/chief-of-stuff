@@ -103,7 +103,7 @@ class Workers:
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
     require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
-    teardown: str = ""
+    teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
 
 

@@ -74,7 +74,7 @@ class WorkerTeardownTest(unittest.TestCase):
         got = settings.load(self.root, "settings.toml").workers
         self.assertEqual((got.teardown, got.teardown_list), ("python3 cleanup.py", "python3 stacks.py"))
 
-    def test_one_shot_relies_on_assignment_cleanup_until_engine_cutover(self):
+    def test_one_shot_does_not_run_workspace_teardown(self):
         self.configure(teardown=self.cleanup_command())
         self.assertEqual(self.launch(), 0)
         self.assertFalse((self.root / "cleanup.log").exists())
