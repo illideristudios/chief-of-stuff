@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -182,6 +183,18 @@ class CaseLintTest(unittest.TestCase):
             clone = run.make_repo.build(root, {})
             url = Path(run.make_repo.git(["remote", "get-url", "origin"], clone))
             self.assertTrue(url.is_dir() and url.is_relative_to(root), url)
+
+    def test_remote_confinement_rejects_external_fetch_and_push_destinations(self) -> None:
+        for setting, url in (("url", "/outside.git"), ("pushurl", "https://example.test/repo.git"),
+                             ("pushurl", "/outside.git"), ("url", "../../outside.git")):
+            with self.subTest(setting=setting, url=url), tempfile.TemporaryDirectory() as d:
+                case = Path(d)
+                (case / "case.json").write_text("{}")
+                config = case / "fixture/repo/{{dotgit}}/config"
+                config.parent.mkdir(parents=True)
+                config.write_text('[remote "origin"]\n    url = {{dotgit}}\n' + f'    {setting} = {url}\n')
+                with patch(__name__ + ".CASES", [case]), self.assertRaises(AssertionError):
+                    CaseLintTest().test_every_fixture_remote_is_a_local_path()
 
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)
