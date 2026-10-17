@@ -64,9 +64,13 @@ class BoardPostTest(unittest.TestCase):
     def test_a_settled_intent_cannot_be_re_routed_again(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         self.assertEqual(self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, mock.Mock()), 303)
-        settled = self.db.decisions(KEY)[-1]
-        self.assertEqual(self.post({"decision_id": settled.id, "action": "reroute", "target_stage": "review"}, mock.Mock()), 409)
-        self.assertEqual(self.db.decisions(KEY)[-1].id, settled.id)
+        pending = self.db.decisions(KEY)[-1]
+        self.assertEqual(pending.intent, "write")
+        # An unapplied intent can still be replaced; once the engine has applied it, it is settled and cannot.
+        self.db.answer_decision(pending.id, pending.answer, status="re-routed", rerouted_to="implement", intent="")
+        self.assertEqual(self.post({"decision_id": pending.id, "action": "reroute", "target_stage": "review"}, mock.Mock()), 409)
+        self.assertEqual(self.post({"decision_id": pending.id, "action": "reverse", "answer": "No"}, mock.Mock()), 409)
+        self.assertEqual(self.db.decisions(KEY)[-1].id, pending.id)
 
     def test_a_target_with_no_worker_is_refused_before_anything_is_written(self):
         dec = self.db.add_decision(KEY, "design", "Choose")

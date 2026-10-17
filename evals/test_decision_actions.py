@@ -140,13 +140,19 @@ class DecisionActionsTest(unittest.TestCase):
                          ("blocked", "implement", "run"))
         self.assertEqual((refused.store_write.rerouted_to, refused.store_write.intent), ("implement", "run"))
 
-    def test_a_decision_with_an_intent_can_be_neither_answered_nor_reversed_nor_restored_by_a_wait(self):
+    def test_a_decision_with_an_intent_can_be_neither_answered_nor_restored_by_a_wait(self):
         for status in ("re-routed", "reversed", "blocked"):
             held = make_decision(status=status, answer="Back", rerouted_to="plan", intent="run")
             self.assertIsNone(da.meet_action(held, reconcile.Dispatch(KEY, "implement", "builder", 1)).store_write)
-            for call in (lambda: da.answer(held, "Again"), lambda: da.reverse(held, "No", row_id=9)):
-                with self.assertRaises(ValueError):
-                    call()
+            with self.assertRaises(ValueError):
+                da.answer(held, "Again")
+
+    def test_an_unapplied_or_blocked_intent_can_be_reversed_or_re_routed_and_is_closed_without_its_intent(self):
+        for status in ("re-routed", "reversed", "blocked"):
+            for phase in ("write", "run"):
+                held = make_decision(status=status, answer="Back", rerouted_to="plan", intent=phase)
+                for tr in (da.reverse(held, "No", row_id=9), da.reroute(held, "review", row_id=9)):
+                    self.assertEqual((tr.source.status, tr.source.intent, tr.source.superseded_by), ("superseded", "", 9))
 
     def test_an_answered_decision_whose_action_is_blocked_can_still_be_reversed(self):
         blocked = make_decision(status="blocked", answer="Ship", blocked_reason="merge conflicts")
@@ -274,6 +280,19 @@ class CurrentIntentTest(unittest.TestCase):
         self.assertIsNone(da.advance([done.decision], 1))
         self.assertIsNone(da.advance([intent(1, "run", "blocked", blocked_reason="retry limit reached")], 1))
         self.assertIsNone(da.advance([intent(1)], 2))
+
+    def test_advance_and_block_apply_only_to_the_current_intent(self):
+        older, newer = intent(1, "write"), intent(2, "run")
+        self.assertIsNone(da.advance([older, newer], 1))
+        self.assertIsNone(da.block([older, newer], 1, "retry limit reached"))
+        self.assertEqual(da.advance([older, newer], 2).store_write.intent, "")
+
+    def test_an_intent_replaces_the_engines_pending_move_only_when_it_writes_a_stage(self):
+        stage = "implement"
+        self.assertTrue(da.replaces_engine_move(intent(1, "write", stage="implement"), stage))
+        self.assertTrue(da.replaces_engine_move(intent(1, "run", stage="review"), stage))
+        self.assertFalse(da.replaces_engine_move(intent(1, "run", stage="implement"), stage))
+        self.assertFalse(da.replaces_engine_move(intent(1, "write", "blocked", stage="review"), stage))
 
 
 if __name__ == "__main__":
