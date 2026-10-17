@@ -499,6 +499,7 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_count, 1)
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
+        self.assertEqual(passed.call_args.kwargs["workers"], engine.settings.Workers())
         sleep.assert_not_called()
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):

@@ -7,7 +7,7 @@ import os
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -32,6 +32,18 @@ def reading(used=40, **kw):
 
 
 class Judgements(unittest.TestCase):
+    def test_any_limit_for_one_account_can_be_near_cap(self):
+        rows = [reading(30, limit="five_hour", read_at=NOW - timedelta(hours=1)),
+                reading(60, limit="five_hour"), reading(10, limit="seven_day"),
+                reading(None, limit="limits", cap=None, unknown="unreadable")]
+        self.assertTrue(limits.near_cap(rows, NOW, .8))
+        self.assertTrue(limits.near_cap([reading(85, limit="five_hour"),
+                                        reading(10, limit="seven_day")], NOW, .8))
+        self.assertFalse(limits.near_cap(rows + [reading(90, account="other")], NOW, .8))
+        self.assertFalse(limits.near_cap(rows + [reading(90, runtime="claude")], NOW, .8))
+        self.assertFalse(limits.near_cap([reading(10, limit="five_hour"),
+                                         reading(10, limit="seven_day")], NOW, .8))
+
     def test_burn_and_projection_use_elapsed_hours(self):
         rows = [reading(20, read_at=NOW - timedelta(hours=1)), reading(40)]
         self.assertEqual(limits.burn_rate(rows[::-1]), 20)
@@ -116,6 +128,24 @@ class Sources(unittest.TestCase):
             self.assertEqual(mapped.call_count, 1)
         self.assertEqual(third[0].used, 10)
 
+    def test_unknown_event_keeps_an_unexpired_numeric_limit(self):
+        known = {"type": "rate_limit_event", "timestamp": (NOW - timedelta(minutes=2)).isoformat(),
+                 "rate_limit_info": {"rateLimitType": "five_hour", "utilization": .85,
+                                     "resetsAt": (NOW + timedelta(hours=2)).timestamp()}}
+        unknown = dict(known, timestamp=NOW.isoformat(), rate_limit_info={"rateLimitType": "five_hour"})
+        self.write(".claude/projects/work/session.jsonl", [known, unknown])
+        for events in ([known, unknown], [unknown, known]):
+            self.write(".claude/projects/work/session.jsonl", events)
+            with patch("limits_probe._now", return_value=NOW):
+                rows = limits_probe.read("claude", "")
+            self.assertEqual(rows[0].used, 85)
+            self.assertEqual(rows[0].read_at, NOW - timedelta(minutes=2))
+            self.assertTrue(limits.near_cap(rows, NOW, .8))
+        with patch("limits_probe._now", return_value=NOW + timedelta(hours=3)):
+            rows = limits_probe.read("claude", "")
+        self.assertTrue(rows[0].unknown)
+        self.assertFalse(limits.near_cap(rows, NOW + timedelta(hours=3), .8))
+
     def test_unknown_never_invents_zero_or_reads_prompt_text(self):
         self.write(".claude/projects/work/session.jsonl", [{"type": "assistant", "timestamp": NOW.isoformat(),
                    "rate_limit_info": {"rateLimitType": "five_hour", "utilization": .4,
@@ -166,6 +196,27 @@ class Sources(unittest.TestCase):
 
 
 class History(unittest.TestCase):
+    def test_repeated_unknown_reason_is_one_observation_until_status_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = limits_history.LimitsHistory(Path(tmp) / "limits.sqlite")
+            self.addCleanup(db.engine.dispose)
+            unknown = reading(None, cap=None, resets_at=None, unknown="read in 1.1")
+            db.record([unknown])
+            db.record([replace(unknown, read_at=NOW + timedelta(minutes=1))])
+            self.assertEqual(db.readings("codex", "", NOW), [unknown])
+            changed = replace(unknown, unknown="unreadable", read_at=NOW + timedelta(minutes=2))
+            known = reading(20, read_at=NOW + timedelta(minutes=3))
+            returned = replace(unknown, read_at=NOW + timedelta(minutes=4))
+            db.record([changed, known, returned, replace(returned, read_at=NOW + timedelta(minutes=5))])
+            self.assertEqual(db.readings("codex", "", NOW), [unknown, changed, known, returned])
+            other_account = replace(unknown, account="other")
+            other_limit = replace(unknown, limit="weekly")
+            other_runtime = replace(unknown, runtime="claude")
+            db.record([other_account, other_limit, other_runtime])
+            self.assertEqual(db.readings("codex", "other", NOW), [other_account])
+            self.assertIn(other_limit, db.readings("codex", "", NOW))
+            self.assertEqual(db.readings("claude", "", NOW), [other_runtime])
+
     def test_separate_migrations_account_queries_and_source_dedup(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "state/limits.sqlite"
@@ -215,8 +266,7 @@ class Integration(unittest.TestCase):
     def test_cli_records_one_reading_for_the_workspace_account(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            from test_flow import SAMPLE_CLAUDE_MD
-            (root / "CLAUDE.md").write_text(SAMPLE_CLAUDE_MD.replace("chief-of-stuff.toml", "settings.toml"))
+            (root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `settings.toml`\n")
             (root / "settings.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
             rows = [reading(None, runtime=runtime, account="secondary" if runtime == "claude" else "",
                             cap=None, unknown="read in 1.1")
@@ -233,9 +283,14 @@ class Integration(unittest.TestCase):
     def test_engine_pass_records_one_reading_and_a_failure_does_not_stop_it(self):
         import engine
         from test_engine import FakeForge, policies
-        from test_flow import make_workspace
         with tempfile.TemporaryDirectory() as tmp:
-            root = make_workspace(Path(tmp), "## Tasks\n", '[workers]\nclaude_as_profile = "secondary"\n')
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `settings.toml`\n")
+            config_path = root / "settings.toml"
+            config_path.write_text('[workers]\nclaude_as_profile = "secondary"\n')
+            workers = settings.load(root, "settings.toml").workers
+            # Collection must use the same frozen account as worker launch, even after an edit.
+            config_path.write_text('[workers]\nclaude_as_profile = "other"\n')
             db_path = root / "store.db"
             store.migrate(db_path)
             db = store.Store(db_path)
@@ -247,7 +302,7 @@ class Integration(unittest.TestCase):
             def run():
                 with patch.object(engine.worker, "collect"), patch.object(engine.cleanup, "execute", return_value=0):
                     return engine.run_pass(forge=FakeForge(), store=db, policies=policies(), root=root,
-                                           trees=trees, launch=lambda *_args: ("model", "high"))
+                                           trees=trees, workers=workers, launch=lambda *_args: ("model", "high"))
 
             with patch("limits_probe.read_all", return_value=rows) as probe, \
                     patch("limits_history.LimitsHistory") as history:
@@ -256,8 +311,10 @@ class Integration(unittest.TestCase):
             self.assertEqual(probe.call_args.args[0].claude_as_profile, "secondary")
             history.return_value.record.assert_called_once_with(rows)
             self.assertIsInstance(actions, list)
-            with patch("limits_history.LimitsHistory", side_effect=OSError("database unavailable")):
+            errors = io.StringIO()
+            with patch("limits_history.LimitsHistory", side_effect=OSError("database unavailable")), redirect_stderr(errors):
                 self.assertIsInstance(run(), list)
+            self.assertIn("engine: limits reading failed: database unavailable", errors.getvalue())
 
 
 if __name__ == "__main__":
