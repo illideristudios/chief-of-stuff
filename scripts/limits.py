@@ -41,8 +41,16 @@ def burn_rate(readings: list[Reading]) -> float | None:
 
 
 def near_cap(readings: list[Reading], now: datetime, warn_at: float) -> bool:
-    if not readings or len({(r.runtime, r.account, r.limit) for r in readings}) != 1:
+    """Any limit can trigger the warning, but runtime and account must stay isolated."""
+    if not readings or len({(r.runtime, r.account) for r in readings}) != 1:
         return False
+    groups: dict[str, list[Reading]] = {}
+    for r in readings:
+        groups.setdefault(r.limit, []).append(r)
+    return any(_limit_near_cap(rows, now, warn_at) for rows in groups.values())
+
+
+def _limit_near_cap(readings: list[Reading], now: datetime, warn_at: float) -> bool:
     last = max(readings, key=lambda r: r.read_at)
     if (last.unknown or last.used is None or last.cap is None or last.cap <= 0
             or last.read_at > now or last.resets_at is None or last.resets_at <= now):

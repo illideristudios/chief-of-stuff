@@ -529,9 +529,10 @@ class WorkerTest(unittest.TestCase):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
         with mock.patch.object(engine.worker, "collect", side_effect=lambda *a: order.append("collect")), \
+             mock.patch.object(engine, "_record_limits"), \
              mock.patch.object(engine.cleanup, "execute", return_value=0):
             engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                            trees=self.trees, launch=self.launch, clock=lambda: NOW)
+                            trees=self.trees, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: NOW)
         self.assertEqual(order[:2], ["collect", "forge"])
 
     def test_failed_review_start_can_reuse_its_prepared_tree(self):

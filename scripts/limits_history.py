@@ -68,12 +68,22 @@ class LimitsHistory:
             return
         self._migrate()
         with Session(self.engine) as session, session.begin():
+            # Serialize the check and insert across workspace engines sharing this account history.
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
             for r in readings:
+                if r.unknown:
+                    latest = session.scalar(select(LimitReading).where(
+                        LimitReading.runtime == r.runtime, LimitReading.account == r.account,
+                        LimitReading.limit == r.limit).order_by(
+                            LimitReading.read_at.desc(), LimitReading.id.desc()).limit(1))
+                    if latest is not None and latest.unknown == r.unknown:
+                        continue
                 values = {key: getattr(r, key) for key in ("runtime", "account", "limit", "used", "cap", "unit", "unknown")}
                 values.update(read_at=_stamp(r.read_at), resets_at=_stamp(r.resets_at) if r.resets_at else None)
                 session.execute(insert(LimitReading).values(**values).on_conflict_do_nothing())
 
     def readings(self, runtime: str, account: str, since: datetime) -> list[Reading]:
+        """Read since an inclusive aware timestamp (naive raises); a missing file returns []."""
         if not self.path.exists():
             return []
         with Session(self.engine) as session:

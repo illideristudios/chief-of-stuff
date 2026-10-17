@@ -8,7 +8,7 @@ from pathlib import Path
 from limits_history import LimitsHistory
 from limits_probe import read_all
 from settings import load
-from workspace import read_config
+from workspace import settings_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -16,8 +16,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", type=Path, default=Path("."))
     args = parser.parse_args(argv)
     try:
-        cfg = read_config(args.root)
-        settings = load(args.root, cfg.settings_path)
+        claude = args.root / "CLAUDE.md"
+        settings = load(args.root, settings_path(claude.read_text() if claude.is_file() else ""))
         rows = read_all(settings.workers)
         history = LimitsHistory()
         try:

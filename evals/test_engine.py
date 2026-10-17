@@ -96,6 +96,9 @@ class EngineTest(unittest.TestCase):
         identity = mock.patch.object(engine.worker.process_status, "identity", return_value="fake-start")
         identity.start()
         self.addCleanup(identity.stop)
+        limits = mock.patch.object(engine, "_record_limits")
+        limits.start()
+        self.addCleanup(limits.stop)
 
     def launch(self, key, stage, attempt, persona):
         self.launched.append((key, stage, attempt, persona))
@@ -111,7 +114,8 @@ class EngineTest(unittest.TestCase):
 
     def run_pass(self, **kwargs):
         return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                               trees=self.trees, launch=self.launch, clock=lambda: self.now, **kwargs)
+                               trees=self.trees, launch=self.launch, workers=engine.settings.Workers(),
+                               clock=lambda: self.now, **kwargs)
 
     def finish(self, stage, attempt=1, outcome="done"):
         seg = next(s for s in self.db.segments(KEY) if s.stage == stage and s.attempt == attempt)

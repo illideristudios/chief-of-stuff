@@ -1,7 +1,7 @@
 """Read structured local limit events without starting a CLI or making a network call.
 
     Event timestamps stay on readings: rereading a transcript is not a new usage observation.
-    Token/cost counters and conversation text are never interpreted as account limits.
+    Token/cost counters and ordinary conversation text are ignored; native cap-hit errors report limits.
 """
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def _unknown(runtime: str, account: str, reason: str, limit: str = "limits") -> 
 
 
 # One engine process repeats the pass. Unchanged files are not mapped again.
-# shortcut: the cache dies with the process and keeps a deleted file's last key, drop it if retained keys grow.
+# shortcut: changed transcripts are rescanned in full; cached events and deleted-file keys live until process exit.
 _scans: dict[tuple[str, int, int], tuple[dict, ...]] = {}
 
 
@@ -109,10 +109,16 @@ def _reading(runtime, account, name, used, reset, stamp) -> Reading:
 def _latest(runtime: str, account: str, candidates: list[Reading]) -> list[Reading]:
     latest = {}
     now = _now()
+
+    def priority(row: Reading) -> tuple[bool, datetime]:
+        # A status-only event cannot erase numeric evidence inside its reset window.
+        active = not row.unknown and row.used is not None and row.resets_at is not None and row.resets_at > now
+        return active, row.read_at
+
     for r in candidates:
         if r.read_at > now:
             continue
-        if r.limit not in latest or r.read_at >= latest[r.limit].read_at:
+        if r.limit not in latest or priority(r) >= priority(latest[r.limit]):
             latest[r.limit] = r
     return [(_unknown(runtime, account, "last local limit event has expired; awaiting a new event", name)
              if r.resets_at is not None and r.resets_at <= now else r)
@@ -173,12 +179,11 @@ def claude(account: str) -> list[Reading]:
             return [_unknown("claude", account, "Claude profile is a symlink; claude-as refuses it")]
     else:
         root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
-    candidates = {}
+    candidates = []
     for event in _events(root / "projects", ('"rate_limit_info"', '"rateLimitInfo"', '"isApiErrorMessage"')):
         native = _claude_error(event, account)
         if native is not None:
-            if native.limit not in candidates or native.read_at >= candidates[native.limit].read_at:
-                candidates[native.limit] = native
+            candidates.append(native)
             continue
         if event.get("type") == "rate_limit_event":
             data = event.get("rate_limit_info", event.get("rateLimitInfo"))
@@ -200,9 +205,8 @@ def claude(account: str) -> list[Reading]:
                             _time(event.get("timestamp")), "local Claude limit event has no numeric usage/reset")
             except (ValueError, TypeError, OverflowError, OSError):
                 continue
-        if name not in candidates or r.read_at >= candidates[name].read_at:
-            candidates[name] = r
-    return _latest("claude", account, list(candidates.values()))
+        candidates.append(r)
+    return _latest("claude", account, candidates)
 
 
 def cursor(account: str) -> list[Reading]:
