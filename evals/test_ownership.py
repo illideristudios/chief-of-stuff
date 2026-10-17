@@ -20,7 +20,7 @@ class IssueScopesTest(unittest.TestCase):
                 self.assertEqual(ownership.issue_scopes(body), [(".", "write")])
 
     def test_a_malformed_line_cannot_silently_drop_a_write_scope(self):
-        for bad in ("write src/", "- write src/", "| write |", "some prose", "| write | src/ | extra |"):
+        for bad in ("write src/", "- write src/", "| write |", "some prose", "| write | src/ | extra |", "| Mode | src/ |", "- mode: src/"):
             with self.subTest(bad=bad):
                 self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n" + bad), [(".", "write")])
 
