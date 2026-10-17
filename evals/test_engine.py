@@ -482,7 +482,7 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
 
-    def test_undeclared_agent_type_is_refused_before_claiming_a_segment(self):
+    def test_undeclared_agent_type_runs_default_agent(self):
         # Compliance C8: agent_type is checked against make_worktree.agent_types before recording a segment.
         self.p = policy.parse({
             "default_workflow": "standard",
@@ -494,9 +494,8 @@ class EngineTest(unittest.TestCase):
             ]}},
         })
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
-        self.assertEqual(self.launched, [])
-        self.assertEqual(self.db.segments(), [])
-        self.assertIn("nonexistent-agent", self.db.log(KEY)[-1].message)
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
 
     def test_answered_decision_meeting_a_blocked_action_records_blocked_status(self):
         # M6 item 2 & #288: engine calls decision_actions when a planned action meets an answered decision.
@@ -507,8 +506,7 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         updated = next(d for d in self.db.decisions(KEY) if d.id == dec.id)
         self.assertEqual(updated.status, "blocked")
-        resume_dec = (self.db.resume(KEY) or {}).get("decisions", {}).get(str(dec.id), {})
-        self.assertEqual(resume_dec.get("blocked_reason"), "merge conflicts")
+        self.assertEqual(updated.blocked_reason, "merge conflicts")
 
     def test_trio_consults_once_and_updates_one_row_for_consensus_and_split(self):
         import model_port

@@ -61,7 +61,7 @@ class DecisionActionsTest(unittest.TestCase):
         self.assertEqual(tr.store_write.status, "answered")
 
     def test_from_trio_escalated_leaves_decision_open_for_user(self) -> None:
-        outcome = SimpleNamespace(status="escalated", rationale=None, escalated_reason="gate timed out")
+        outcome = SimpleNamespace(unanimous=False, recommendation=None)
         tr = da.from_trio(make_decision(), outcome, answered_at=ANSWERED_AT)
         self.assertEqual(tr.decision.status, "open")
         self.assertEqual(tr.decision.decided_by, "")

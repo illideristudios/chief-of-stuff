@@ -161,7 +161,7 @@ class StoreGanttAndBoardTest(unittest.TestCase):
         row = by_key[0]
         self.assertEqual([s.category for s in row.segments], ["implement", "review", "fix", "review"])
         self.assertEqual([s.kind for s in row.segments], ["done", "done", "done", "running"])
-        self.assertIn(f"/issues/{KEY}", row.href)
+        self.assertIn(f"/issues/{urllib.parse.quote(KEY, safe="")}", row.href)
 
     def test_board_write_renders_from_store_without_any_tracker_file(self) -> None:
         self.db.add_decision(KEY2, "design", "Keep cache warmup pool?")
@@ -178,8 +178,8 @@ class StoreGanttAndBoardTest(unittest.TestCase):
         board_path, *_ = pg.write_board(self.root, now=NOW)
         html = board_path.read_text(encoding="utf-8")
         # Full issue key routes on the board:
-        self.assertIn(f'href="/issues/{KEY}"', html)
-        self.assertIn(f'href="/issues/{KEY2}"', html)
+        self.assertIn(f'href="/issues/{urllib.parse.quote(KEY, safe="")}"', html)
+        self.assertIn(f'href="/issues/{urllib.parse.quote(KEY2, safe="")}"', html)
         # Rework issue appears once in Build and has its multi-segment Gantt bars in Flow:
         self.assertIn("Upload size limit", html)
         self.assertIn("Flow · 24 hours", html)
@@ -208,11 +208,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.d_open = self.db.add_decision(KEY, "design", "Split upload parser?")
         self.d_blocked = self.db.add_decision(KEY2, "plan", "Use Redis for cache?")
         self.db.answer_decision(self.d_blocked.id, "Yes, use Redis", decided_by="user")
-        self.db.set_resume(KEY2, {
-            "decisions": {
-                str(self.d_blocked.id): {"status": "blocked", "blocked_reason": "merge conflicts"}
-            }
-        })
+        self.db.answer_decision(self.d_blocked.id, "Yes, use Redis", status="blocked", blocked_reason="merge conflicts")
 
     def test_board_renders_open_and_blocked_decisions_and_blocked_is_never_closed(self) -> None:
         board_path, *_ = pg.write_board(self.root, now=NOW)
@@ -259,15 +255,16 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             self.assertEqual(d2.status, "reversed")
             self.assertEqual(d2.answer, "Keep single pass")
 
-            # 3. Re-route the decision to another stage:
+            # 3. Re-route another decision to another stage:
+            reroute_dec = self.db.add_decision(KEY, "plan", "Return to implementation?")
             resp = post("/", {
-                "decision_id": str(self.d_open.id),
+                "decision_id": str(reroute_dec.id),
                 "action": "reroute",
                 "target_stage": "implement",
                 "answer": "Back to implement",
             })
             self.assertEqual(resp.status, 303)
-            d3 = next(d for d in self.db.decisions(KEY) if d.id == self.d_open.id)
+            d3 = next(d for d in self.db.decisions(KEY) if d.id == reroute_dec.id)
             self.assertEqual(d3.status, "re-routed")
             self.assertEqual(self.db.item(KEY).stage, "implement")
             fake_forge.write_stage.assert_called_once_with(12, "implement", expected="review", commit=True)
@@ -394,7 +391,7 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         transition = decision_actions.meet_action(self.db.decision(dec.id), reconcile.Wait(KEY, "conflict"))
         self.db.update_decision(transition.store_write)
         row = next((status, row) for status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
-                   if row.href.endswith(KEY))
+                   if row.href.endswith(urllib.parse.quote(KEY, safe="")))
         self.assertEqual(row[0], "needs input")
         self.assertIn("hold", [s.kind for s in row[1].segments])
 

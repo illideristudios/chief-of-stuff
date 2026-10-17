@@ -56,6 +56,47 @@ class PanelTest(unittest.TestCase):
         self.assertEqual(self.db.decision(dec.id).answer, "Yes")
         self.assertEqual(fg.comment.call_count, 1)
 
+    def test_simultaneous_answers_have_one_winner_and_one_comment(self):
+        dec = self.db.add_decision(KEY, "design", "Choose")
+        fg = mock.Mock()
+        fg.comment.return_value = ""
+        server = pages.make_server(self.root / "pages", 0, root=self.root, refresh=lambda *a: None, every=3600)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        barrier = threading.Barrier(2)
+        results = []
+        def submit(text):
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+            barrier.wait()
+            conn.request("POST", "/", urlencode({"decision_id": dec.id, "answer": text}))
+            resp = conn.getresponse()
+            results.append(resp.status)
+            resp.read()
+            conn.close()
+        with mock.patch.object(pages.forge, "for_workspace", return_value=fg):
+            threads = [threading.Thread(target=submit, args=(text,)) for text in ("Yes", "No")]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(15)
+        self.assertEqual(sorted(results), [303, 409])
+        self.assertEqual(fg.comment.call_count, 1)
+
+    def test_reverse_at_merge_persists_next_work_attempt_and_persona(self):
+        self.db.upsert_item(KEY, stage="merge")
+        self.db.record_segment(KEY, "implement", 1, (NOW - timedelta(hours=2)).isoformat(),
+                               (NOW - timedelta(hours=1)).isoformat(), "done")
+        dec = self.db.add_decision(KEY, "scope", "Choose", answer="Yes", decided_by="user")
+        fg = mock.Mock()
+        fg.comment.return_value = ""
+        with mock.patch.object(pages.forge, "for_workspace", return_value=fg):
+            status, _ = self.request("POST", "/", {"decision_id": dec.id, "action": "reverse", "answer": "No"})
+        self.assertEqual(status, 303)
+        pending = self.db.resume(KEY)["redispatch"]
+        self.assertEqual((pending["stage"], pending["attempt"], pending["persona"]), ("implement", 2, "implementer"))
+        self.assertEqual(self.db.decision(dec.id).status, "reversed")
+
     def test_record_update_supersedes_old_resume_status(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         self.db.set_resume(KEY, {"decisions": {str(dec.id): {"status": "blocked", "blocked_reason": "old"}}})
@@ -116,7 +157,7 @@ class PanelTest(unittest.TestCase):
     def test_workers_accept_naive_and_malformed_timestamps(self):
         for n, stamp in enumerate(("bad", NOW.replace(tzinfo=None).isoformat()), 1):
             self.db.record_segment(KEY, "review", n, stamp, runner=f"run-{n}")
-        body = workers_page.render("", fixtures.bs.EMPTY, NOW, self.root / "trees", db=self.db)
+        body = workers_page.render("", fixtures.bs.EMPTY, NOW, self.root / "trees", 4, db=self.db)
         self.assertIn("run-1", body)
         self.assertIn("run-2", body)
 
@@ -135,12 +176,19 @@ class PanelTest(unittest.TestCase):
         self.db.add_decision(KEY, "design", "Choose")
         self.db.upsert_item(OTHER, forge_state="closed", human_review=True)
         counts = pages._navigation(self.root, self.root / "pages", task_forge.page_data(self.db))
-        self.assertEqual(counts["workers"], 1)
-        self.assertEqual(counts["dispatch"], 1)
+        self.assertEqual(counts["workers"], 0)
+        self.assertEqual(counts["dispatch"], 0)
+        self.assertEqual(counts["decisions"], 1)
         self.assertNotIn("since", counts)
+        self.db.upsert_item("github:example/repo#13", title="Ready", stage="implement")
+        self.db.upsert_item("github:example/repo#14", title="Human hold", human_review=True)
+        counts = pages._navigation(self.root, self.root / "pages", task_forge.page_data(self.db))
+        self.assertEqual((counts["workers"], counts["dispatch"], counts["decisions"]), (1, 1, 1))
 
 
-class NotificationPanelTest(notices.NotifyTest):
+
+class NotificationPanelTest(unittest.TestCase):
+    ws = notices.NotifyTest.ws
     def rows(self, w, now=notices.NOW):
         cfg, settings = notify.configuration(w.root)
         return notify.store_rows(w.root, cfg, settings, now)
