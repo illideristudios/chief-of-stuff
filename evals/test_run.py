@@ -593,7 +593,8 @@ class GitWriteTest(unittest.TestCase):
 
     def test_dynamic_command_names_and_unsupported_syntax_fail_closed(self) -> None:
         for command in ('git "$(printf push)"', 'g$(printf it) push', 'git "$verb"',
-                        "cat <<EOF\ngit push\nEOF", "env --unknown git push"):
+                        "cat <<EOF\ngit push\nEOF", "env --unknown git push",
+                        "coproc git push; wait", "coproc helper git push"):
             with self.subTest(command=command):
                 self.assertFalse(self.check(command))
 
