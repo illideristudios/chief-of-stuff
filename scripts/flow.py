@@ -31,6 +31,7 @@ import tracker
 import tracker_write
 from one_shot_report import UNREADABLE, read_report
 from settings import Settings, SettingsError, load as load_settings
+from runtimes import NAMES as RUNTIMES
 from tracker_log import ended_line, started_line
 from workspace import Config, ConfigError, read_config, worktrees_dir
 
@@ -298,6 +299,27 @@ def tick(root: Path, now: datetime | None = None, day: str | None = None) -> lis
 
     settings = load_settings(root, cfg.settings_path)
     events: list[str] = []
+
+    # Limit collection is best effort; neither a broken transcript nor history may stop reconciliation.
+    try:
+        import limits_probe
+        from limits import Reading
+        from limits_history import LimitsHistory
+        readings = []
+        for runtime in RUNTIMES:
+            account = settings.workers.claude_as_profile if runtime == "claude" else ""
+            try:
+                readings.extend(limits_probe.read(runtime, account))
+            except Exception as exc:
+                readings.append(Reading(runtime, account, "limits", None, None, "", None,
+                                        current_now, f"local limit read failed: {exc}"))
+        history = LimitsHistory()
+        try:
+            history.record(readings)
+        finally:
+            history.engine.dispose()
+    except Exception as exc:
+        events.append(f"limits: {exc}")
 
     # 1. Reconcile dead or gone worker processes
     events.extend(reconcile_dead_workers(root, tracker_path, current_day))

@@ -19,7 +19,7 @@ import notify
 from notify import configuration, sync_workspace
 from workspace import ConfigError, daily_trackers
 from settings import SettingsError
-from supervisor import ServiceError, atomic_write, label, load_agent, lock, state_dir, unload_agent
+from supervisor import ServiceError, atomic_write, data_dir, ensure_venv, label, load_agent, lock, state_dir, unload_agent
 
 POLL = 5
 RECONCILE = 60
@@ -128,8 +128,11 @@ def ensure(root: Path, jobs_dir: Path | None = None) -> str:
     require_macos()
     with instance_lock(root, "notify-management.lock"):
         directory = state_dir(root)
+        data = data_dir()
+        with lock(data / "supervisor.lock", wait=True):
+            python = ensure_venv(data)
         desired = {"Label": label("notify", root),
-                   "ProgramArguments": [str(Path(sys.executable).resolve()),
+                   "ProgramArguments": [str(python),
                                         str(RELEASE / "scripts/notify_service.py"), "--root", str(root), "serve"],
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True,
                    "ThrottleInterval": 10,

@@ -1,0 +1,224 @@
+"""Read structured local limit events without starting a CLI or making a network call.
+
+    Event timestamps stay on readings: rereading a transcript is not a new usage observation.
+    Token/cost counters and conversation text are never interpreted as account limits.
+"""
+from __future__ import annotations
+
+import json
+import math
+import mmap
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from limits import Reading
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _time(value) -> datetime:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return datetime.fromtimestamp(value, timezone.utc)
+    result = datetime.fromisoformat(value)
+    if result.tzinfo is None:
+        raise ValueError("timestamp has no timezone")
+    return result.astimezone(timezone.utc)
+
+
+def _number(value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (float, int)) or not math.isfinite(value) or value < 0:
+        raise ValueError("invalid usage number")
+    return float(value)
+
+
+def _unknown(runtime: str, account: str, reason: str, limit: str = "limits") -> Reading:
+    return Reading(runtime, account, limit, None, None, "", None, _now(), reason)
+
+
+def _events(root: Path, markers: tuple[str, ...]):
+    """Search bytes before decoding: transcripts mostly contain unrelated conversation text."""
+    needles = tuple(marker.encode() for marker in markers)
+    for path in root.rglob("*.jsonl"):
+        try:
+            with path.open("rb") as stream:
+                if not os.fstat(stream.fileno()).st_size:
+                    continue
+                with mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as data:
+                    offsets = set()
+                    for needle in needles:
+                        start = 0
+                        while (hit := data.find(needle, start)) >= 0:
+                            left = data.rfind(b"\n", 0, hit) + 1
+                            right = data.find(b"\n", hit)
+                            if right < 0:
+                                right = len(data)
+                            if left not in offsets:
+                                offsets.add(left)
+                                try:
+                                    event = json.loads(data[left:right])
+                                except (ValueError, UnicodeDecodeError):
+                                    event = None
+                                if isinstance(event, dict):
+                                    yield event
+                            start = right + 1
+        except (OSError, ValueError):
+            # A rotated/deleted transcript does not hide the other sessions' data.
+            continue
+
+
+def _reading(runtime, account, name, used, reset, stamp) -> Reading:
+    used = _number(used)
+    if used > 100:
+        raise ValueError("usage exceeds 100 percent")
+    return Reading(runtime, account, name, used, 100, "%", _time(reset), _time(stamp), "")
+
+
+def _latest(runtime: str, account: str, candidates: list[Reading]) -> list[Reading]:
+    latest = {}
+    now = _now()
+    for r in candidates:
+        if r.read_at > now:
+            continue
+        if r.limit not in latest or r.read_at >= latest[r.limit].read_at:
+            latest[r.limit] = r
+    return [(_unknown(runtime, account, "last local limit event has expired; awaiting a new event", name)
+             if r.resets_at is not None and r.resets_at <= now else r)
+            for name, r in sorted(latest.items())] or [
+                _unknown(runtime, account, "no readable structured limit events in local session transcripts")]
+
+
+def codex(account: str) -> list[Reading]:
+    if account:
+        return [_unknown("codex", account, "no local source configured for this Codex account")]
+    root = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    candidates = {}
+    for event in _events(root, ('"rate_limits"',)):
+        payload = event.get("payload")
+        if event.get("type") != "event_msg" or not isinstance(payload, dict) or payload.get("type") != "token_count":
+            continue
+        rates = payload.get("rate_limits")
+        if not isinstance(rates, dict):
+            continue
+        for window in ("primary", "secondary"):
+            data = rates.get(window)
+            if not isinstance(data, dict):
+                continue
+            name = f'{rates.get("limit_id") or "codex"}/{window}'
+            try:
+                minutes = _number(data.get("window_minutes"))
+                if not minutes:
+                    raise ValueError("empty window")
+                name = f'{rates.get("limit_id") or "codex"}/{window}/{minutes:g}m'
+                r = _reading("codex", account, name, data.get("used_percent"),
+                             data.get("resets_at"), event.get("timestamp"))
+            except (ValueError, TypeError, OverflowError, OSError):
+                # Preserve the fact that the newest event is unreadable, rather than displaying an older value.
+                try:
+                    r = Reading("codex", account, name, None, None, "", None,
+                                _time(event.get("timestamp")), "malformed local limit event")
+                except (ValueError, TypeError, OverflowError, OSError):
+                    continue
+            if name not in candidates or r.read_at >= candidates[name].read_at:
+                candidates[name] = r
+    return _latest("codex", account, list(candidates.values()))
+
+
+def _claude_error(event: dict, account: str) -> Reading | None:
+    """Native Claude transcripts retain cap-hit errors even when they omit numeric status events."""
+    if event.get("type") != "assistant" or event.get("error") != "rate_limit" or event.get("isApiErrorMessage") is not True:
+        return None
+    message = event.get("message")
+    if not isinstance(message, dict) or not isinstance(message.get("content"), list):
+        return None
+    for block in message["content"]:
+        if not isinstance(block, dict) or block.get("type") != "text":
+            continue
+        text = block.get("text", "")
+        if not isinstance(text, str):
+            continue
+        match = re.fullmatch(r"You've hit your (?:(session|weekly|Opus|Sonnet) )?limit\s*·\s*resets (.+) \(([^)]+)\)", text)
+        if not match:
+            continue
+        name = (match[1] or "subscription").lower()
+        try:
+            stamp = _time(event.get("timestamp"))
+        except (ValueError, TypeError, OverflowError, OSError):
+            return None
+        clock = re.fullmatch(r"(1[0-2]|[1-9])(?::([0-5]\d))?(am|pm)", match[2])
+        try:
+            zone = ZoneInfo(match[3])
+        except (ZoneInfoNotFoundError, ValueError):
+            zone = None
+        if clock is None or zone is None:
+            return Reading("claude", account, name, None, None, "", None, stamp,
+                           "Claude cap-hit event has no supported reset clock/timezone")
+        hour = int(clock[1]) % 12 + (12 if clock[3] == "pm" else 0)
+        local = stamp.astimezone(zone)
+        # Interpret the displayed clock relative to the error's timestamp, never the probe's day.
+        # Consider both folds so a repeated DST hour does not silently become tomorrow.
+        resets = [(local.replace(hour=hour, minute=int(clock[2] or 0), second=0, microsecond=0)
+                   + timedelta(days=day)).replace(fold=fold) for day in (0, 1) for fold in (0, 1)]
+        reset = min(r.astimezone(timezone.utc) for r in resets if r.astimezone(timezone.utc) > stamp)
+        return Reading("claude", account, name, 100, 100, "%", reset, stamp, "")
+    return None
+
+
+def claude(account: str) -> list[Reading]:
+    if account:
+        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]*", account):
+            return [_unknown("claude", account, "invalid Claude profile name")]
+        root = Path(os.environ.get("CLAUDE_AS_PROFILES_DIR") or Path.home() / ".claude-profiles") / account
+        if root.is_symlink():
+            return [_unknown("claude", account, "Claude profile is a symlink; claude-as refuses it")]
+    else:
+        root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude")
+    candidates = {}
+    for event in _events(root / "projects", ('"rate_limit_info"', '"rateLimitInfo"', '"isApiErrorMessage"')):
+        native = _claude_error(event, account)
+        if native is not None:
+            if native.limit not in candidates or native.read_at >= candidates[native.limit].read_at:
+                candidates[native.limit] = native
+            continue
+        if event.get("type") == "rate_limit_event":
+            data = event.get("rate_limit_info", event.get("rateLimitInfo"))
+        elif event.get("type") == "system" and event.get("subtype") == "rate_limit":
+            data = event.get("rateLimitInfo")
+        else:
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = data.get("rateLimitType")
+        if not isinstance(name, str) or not name:
+            continue
+        try:
+            r = _reading("claude", account, name, _number(data.get("utilization")) * 100,
+                         data.get("resetsAt"), event.get("timestamp"))
+        except (ValueError, TypeError, OverflowError, OSError):
+            try:
+                r = Reading("claude", account, name, None, None, "", None,
+                            _time(event.get("timestamp")), "local Claude limit event has no numeric usage/reset")
+            except (ValueError, TypeError, OverflowError, OSError):
+                continue
+        if name not in candidates or r.read_at >= candidates[name].read_at:
+            candidates[name] = r
+    return _latest("claude", account, list(candidates.values()))
+
+
+def cursor(account: str) -> list[Reading]:
+    return [_unknown("cursor", account, "a Codex spike is looking for a local limits source")]
+
+
+def agy(account: str) -> list[Reading]:
+    return [_unknown("agy", account, "a Codex spike is looking for a local limits source")]
+
+
+def read(runtime: str, account: str) -> list[Reading]:
+    try:
+        return {"codex": codex, "claude": claude, "cursor": cursor, "agy": agy}[runtime](account)
+    except (OSError, ValueError) as exc:
+        return [_unknown(runtime, account, f"local limit source unreadable: {exc}")]

@@ -117,6 +117,22 @@ class Sources(unittest.TestCase):
             if runtime in ("cursor", "agy"):
                 self.assertIn("spike", r.unknown.lower())
 
+    def test_claude_native_cap_hit_uses_error_timestamp_and_local_reset_clock(self):
+        stamp = NOW.replace(hour=1)
+        event = {"type": "assistant", "isApiErrorMessage": True, "error": "rate_limit",
+                 "timestamp": stamp.isoformat(), "message": {"content": [{"type": "text",
+                     "text": "You've hit your session limit · resets 9:40pm (America/Chicago)"}]}}
+        self.write(".claude/projects/work/session.jsonl", [event])
+        with patch("limits_probe._now", return_value=stamp + timedelta(minutes=1)):
+            r = limits_probe.read("claude", "")[0]
+        self.assertEqual((r.limit, r.used, r.cap), ("session", 100, 100))
+        self.assertEqual(r.read_at, stamp)
+        self.assertEqual(r.resets_at, stamp.replace(hour=2, minute=40))
+        with patch("limits_probe._now", return_value=stamp + timedelta(days=1)):
+            r = limits_probe.read("claude", "")[0]
+        self.assertIsNone(r.used)
+        self.assertTrue(r.unknown)
+
     def test_expired_and_malformed_readings_are_unknown(self):
         bad = self.codex(NOW, float("nan"))
         old = self.codex(NOW - timedelta(days=8), 60)
@@ -155,6 +171,14 @@ class History(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"XDG_STATE_HOME": tmp}):
             self.assertEqual(limits_history.history_path(), Path(tmp) / "chief-of-stuff/limits.sqlite")
 
+    def test_since_is_inclusive_and_normalizes_timezones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db = limits_history.LimitsHistory(Path(tmp) / "limits.sqlite")
+            self.addCleanup(db.engine.dispose)
+            db.record([reading(30, read_at=NOW.astimezone(timezone(timedelta(hours=-5))))])
+            self.assertEqual(db.readings("codex", "", NOW), [reading(30)])
+            self.assertEqual(db.readings("codex", "", NOW + timedelta(seconds=1)), [])
+
 
 class Integration(unittest.TestCase):
     def test_settings_default_valid_and_invalid_thresholds(self):
@@ -175,10 +199,45 @@ class Integration(unittest.TestCase):
         for text in ("RUNTIME LIMITS", "codex", "40", "100", "20", "reset", "near cap", "cursor", "unknown", "spike"):
             self.assertIn(text, html)
 
+    def test_board_warning_uses_setting_and_escapes_unknown_reason(self):
+        rows = [reading(70), reading(None, runtime="cursor", limit="limits", cap=None, unknown="<spike>")]
+        low = render_board.panels.panels([render_board.limits_panel(rows, NOW, .6)])
+        high = render_board.panels.panels([render_board.limits_panel(rows, NOW, .9)])
+        self.assertIn("near cap", low)
+        self.assertNotIn("near cap", high)
+        self.assertNotIn("<spike>", high)
+        self.assertIn("&lt;spike&gt;", high)
+
+    def test_source_failure_and_recovery_supersede_stale_board_values(self):
+        failure = reading(None, limit="limits", cap=None, unknown="unreadable source", read_at=NOW)
+        older = reading(90, read_at=NOW - timedelta(minutes=1))
+        panel = render_board.limits_panel([older, failure], NOW, .8)
+        codex = [r for r in panel.rows if "codex" in r.name]
+        self.assertEqual(len(codex), 1)
+        self.assertIn("unreadable source", codex[0].facts)
+        panel = render_board.limits_panel([failure, reading(40, read_at=NOW + timedelta(minutes=1))],
+                                         NOW + timedelta(minutes=2), .8)
+        codex = [r for r in panel.rows if "codex" in r.name]
+        self.assertEqual(len(codex), 1)
+        self.assertIn("40/100", codex[0].facts)
+
+    def test_board_write_queries_history_for_workspace_account_without_probing(self):
+        from test_flow import make_workspace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = make_workspace(Path(tmp), "## Tasks\n", '[workers]\nclaude_as_profile = "secondary"\n[limits]\nwarn_at = 0.6\n')
+            with patch("limits_history.LimitsHistory") as history, patch("limits_probe.read") as probe:
+                history.return_value.readings.return_value = []
+                path, *_ = render_board.write(root, "2026-10-08")
+            probe.assert_not_called()
+            self.assertEqual([(c.args[0], c.args[1]) for c in history.return_value.readings.call_args_list],
+                             [(r, "secondary" if r == "claude" else "") for r in ("claude", "codex", "cursor", "agy")])
+            self.assertIn("RUNTIME LIMITS", path.read_text())
+
     def test_cli_collects_every_runtime_and_records_profile(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            (root / "CLAUDE.md").write_text("## Coordinator\n- Settings: settings.toml\n")
+            from test_flow import SAMPLE_CLAUDE_MD
+            (root / "CLAUDE.md").write_text(SAMPLE_CLAUDE_MD.replace("chief-of-stuff.toml", "settings.toml"))
             (root / "settings.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
             output = io.StringIO()
             with patch("limits_cli.read", side_effect=lambda runtime, account: [

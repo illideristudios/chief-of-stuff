@@ -119,12 +119,20 @@ class Ask(WorkerRecord, Base):
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
-def _config(path: Path | str) -> Config:
+def migration_config(path: Path | str, metadata, versions: Path | None = None) -> Config:
+    """Shared Alembic environment; separate databases supply their own metadata and revisions."""
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
-    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
-    cfg.attributes["metadata"] = Base.metadata
+    cfg.set_main_option("path_separator", "os")
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}".replace("%", "%%"))
+    if versions is not None:
+        cfg.set_main_option("version_locations", str(versions))
+    cfg.attributes["metadata"] = metadata
     return cfg
+
+
+def _config(path: Path | str) -> Config:
+    return migration_config(path, Base.metadata)
 
 
 def is_current(path: Path | str) -> bool:

@@ -104,21 +104,22 @@ class FlowDesign(Board):
         marks = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', r"<h2>\s*Build\s*</h2>",
                  '<figure class="columns"', '<div class="panels">',
                  '<section class="panels-panel" id="merge"', '<section class="panels-panel" id="decisions"',
-                 '<section class="panels-panel" id="workers"', "<h2>Flow · 24 hours</h2>", "<h2>Flow · 7 days</h2>", 'class="gantt-legend"']
+                 '<section class="panels-panel" id="workers"', '<section class="panels-panel" id="limits"',
+                 "<h2>Flow · 24 hours</h2>", "<h2>Flow · 7 days</h2>", 'class="gantt-legend"']
         found = [(at(self.body, m), m) for m in marks]
         self.assertEqual([m for _, m in found], [m for _, m in sorted(found)])
 
-    def test_the_panels_are_merge_order_decisions_and_workers(self) -> None:
+    def test_the_panels_include_runtime_limits_after_workers(self) -> None:
         titles = re.findall(r'<h3 class="panels-title">(?:<a [^>]*>)?([^<]+)', self.body)
-        self.assertEqual(titles, ["MERGE ORDER", "DECISIONS", "WORKERS"])
+        self.assertEqual(titles, ["MERGE ORDER", "DECISIONS", "WORKERS", "RUNTIME LIMITS"])
 
     def test_the_headings_and_section_ids_are_exactly_the_artboards(self) -> None:
         # An allow-list: a renamed or extra section ("Due soon", `id="due_next"`, "Sessions · 1") fails, not just the old names.
-        # The tab bar has no <h2>; BUILD is `#flow`; the three panels are `h3`s with their own ids.
+        # §10 adds runtime limits after the original artboard's three panels.
         h2, ids, sections = outline(self.body)
         self.assertEqual(h2, ["Build", "Flow · 24 hours", "Flow · 7 days"])
-        self.assertEqual(ids, ["flow", "merge", "decisions", "workers"])
-        self.assertEqual(sections, 4)
+        self.assertEqual(ids, ["flow", "merge", "decisions", "workers", "limits"])
+        self.assertEqual(sections, 5)
 
     def test_no_section_the_artboard_lacks_is_drawn(self) -> None:
         for mark in REMOVED:

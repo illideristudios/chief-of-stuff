@@ -1473,8 +1473,8 @@ class SectionOrderTest(unittest.TestCase):
         # This tracker has no stage history, so the two Flow charts are not drawn (test_board_flow_design.py pins them).
         h2, ids, sections = outline(self.html)
         self.assertEqual(h2, ["Build"])
-        self.assertEqual(ids, ["flow", "merge", "decisions", "workers"])
-        self.assertEqual(sections, 4)
+        self.assertEqual(ids, ["flow", "merge", "decisions", "workers", "limits"])
+        self.assertEqual(sections, 5)
 
 
 class InlineMarksTest(unittest.TestCase):

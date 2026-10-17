@@ -10,7 +10,7 @@ Install one command from this checkout:
 python3 chief_of_stuff.py install --bin-dir /usr/local/bin
 ```
 
-This writes a stable launcher in `/usr/local/bin` and a versioned release under `~/.local/share/chief-of-stuff/`. The system directory needs write permission only when first installing or explicitly replacing a different launcher; later installs update the user-owned `current` pointer. Use `--dry-run` to preview the paths without writing. The command routes a fixed set of operations: `start`, `init`, `models`, `worktree`, `worker`, `audit`, `processes`, `result`, `board`, `inbox`, `backlog`, `kanban`, `pipeline`, `notify`, `health`, `pages`, `decision`, `log`, `merge-approved`, `merge-ready`, `review-threads`, `sources`, `tracker`, and `tick`. Use `chief-of-stuff <command> --help` for each command's options.
+This writes a stable launcher in `/usr/local/bin` and a versioned release under `~/.local/share/chief-of-stuff/`. The system directory needs write permission only when first installing or explicitly replacing a different launcher; later installs update the user-owned `current` pointer. Use `--dry-run` to preview the paths without writing. The command routes a fixed set of operations: `start`, `init`, `models`, `worktree`, `worker`, `audit`, `processes`, `result`, `board`, `inbox`, `backlog`, `kanban`, `pipeline`, `notify`, `health`, `pages`, `decision`, `log`, `merge-approved`, `merge-ready`, `review-threads`, `sources`, `tracker`, `limits`, and `tick`. Use `chief-of-stuff <command> --help` for each command's options.
 
 For a new workspace, create a minimal `## Coordinator` block and settings file, then launch a coordinator:
 
@@ -49,6 +49,14 @@ An optional `[workflow] reviewer_session = "<session-name>"` routes pull request
 
 Every reviewer reports in one shape, [`skills/review-pipeline/review-report.md`](skills/review-pipeline/review-report.md), whatever its runtime, because Triage reads each finding's axis, severity, confidence and suggestion off it. Every worker assignment points a reviewing worker at it.
 `[workflow] delivery = "pull-request"` and `merge_owner = "user"` preserve the existing delivery path by default. Set `delivery = "branch"` for branch handoff without an automatic PR step, or `merge_owner = "worker"` to let the owning worker merge a reviewed PR after the coordinator confirms required approvals. Branch delivery still needs integration into main and a suite run there before a code task is marked done.
+
+## Runtime limits
+
+`chief-of-stuff limits --root /path/to/workspace` reads and records account limits for all four runtimes without starting a model session or making a network call. Each flow tick also records a reading; collection or database errors do not stop the tick. The board reads that history and shows usage, reset times, observed daily increases, and burn per hour. It warns when current usage or projected usage at reset reaches `[limits] warn_at` (default `0.8`, valid from `0` to `1`).
+
+Codex uses `rate_limits` in local session JSONL under `$CODEX_HOME/sessions` (default `~/.codex/sessions`). Claude uses structured `rate_limit_event`/`rate_limit_info` or system `rate_limit`/`rateLimitInfo` transcript records, including model caps when present. Native assistant `rate_limit` errors also establish 100% usage when they explicitly report a cap hit and a reset clock with a timezone. Usage before that hit remains unknown unless a numeric event is available. It reads the workspace's `[workers] claude_as_profile` under `$CLAUDE_AS_PROFILES_DIR` (default `~/.claude-profiles`), or `$CLAUDE_CONFIG_DIR` (default `~/.claude`) for the default login. Transcript token counts are not account limits. Missing, malformed, or expired events show unknown with a reason. Cursor and Antigravity show unknown while a Codex spike looks for their local source.
+
+History is shared across workspaces at `$XDG_STATE_HOME/chief-of-stuff/limits.sqlite` (default `~/.local/state/chief-of-stuff/limits.sqlite`) and queries always select a runtime and account. Repeated reads of the same source event do not create fresh observations. Burn rates compare observations within one reset window; daily increases count observed deltas only and can undercount consumption between missing observations or across resets. The `LimitsHistory.readings(runtime, account, since)` API supplies the same history to dispatch-runtime queries.
 
 ## Workers
 
