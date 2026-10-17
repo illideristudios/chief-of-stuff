@@ -70,6 +70,17 @@ class LabelDeltaTest(unittest.TestCase):
         self.assertIn("!! - HUMAN REVIEW REQUIRED", kanban.drift(FLOW, labels, "implement"))
 
 
+class ExtraHoldTest(unittest.TestCase):
+    def test_preserving_the_hold_unless_released_belongs_on_keep_hold(self):
+        """#799: extra_hold only detects a hold the recorded stage did not set."""
+        labels = ("03 - BUILD", FLOW.human_review_label)
+        self.assertTrue(kanban.extra_hold(FLOW, labels, "implement"))
+        self.assertTrue(kanban.keep_hold(FLOW, labels, "implement", False))
+        self.assertFalse(kanban.keep_hold(FLOW, labels, "implement", True))
+        self.assertNotIn("released", kanban.extra_hold.__doc__ or "")
+        self.assertIn("unless explicitly released", kanban.keep_hold.__doc__ or "")
+
+
 class HumanHoldTest(unittest.TestCase):
     def test_github_adds_only_hold_and_verifies(self):
         ref = backlog.IssueRef("team/repo", 9)
