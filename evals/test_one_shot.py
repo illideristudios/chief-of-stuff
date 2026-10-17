@@ -1896,11 +1896,15 @@ class RunTest(unittest.TestCase):
 
     def test_a_tree_holding_another_task_s_dispatch_still_refuses_it(self):
         # #138: only the same task may relaunch into its own stopped tree.
+        # The dead pid stays: overwriting it would drop the adoption marker.
         self._stopped_tree(task="Export header")
+        pidfile = self.tree / one_shot.PIDFILE
+        held = pidfile.read_text()
         before = self.tracker.read_text()
-        with self.assertRaisesRegex(ValueError, "already holds a dispatch"):
+        with self.assertRaisesRegex(ValueError, "unreconciled"):
             self._run(self._fake('status: done\nreason: r\nchanges: c\n', write_partial=False))
         self.assertEqual(self.tracker.read_text(), before)
+        self.assertEqual(pidfile.read_text(), held)
 
     def test_a_restarted_coordinator_adopts_a_finished_one_shots_run(self):
         # #99: the worker runs in its own session, so a coordinator restart kills the launcher and

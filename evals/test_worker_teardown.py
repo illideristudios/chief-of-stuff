@@ -80,7 +80,7 @@ class WorkerTeardownTest(unittest.TestCase):
         self.configure(teardown=self.cleanup_command())
         original = one_shot.reconcile
         def reconcile(*args, **kwargs):
-            self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.tree.resolve()} worker01\n")
+            self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.root.resolve()} worker01\n")
             return original(*args, **kwargs)
         with mock.patch.object(one_shot, "reconcile", side_effect=reconcile):
             self.assertEqual(self.launch(), 0)
@@ -96,7 +96,7 @@ class WorkerTeardownTest(unittest.TestCase):
                 self.configure(teardown=self.cleanup_command())
                 self.launch(status, codes)
                 self.assertEqual((self.root / "cleanup.log").read_text().splitlines(),
-                                 [f"{self.tree.resolve()} worker01"] * len(codes))
+                                 [f"{self.root.resolve()} worker01"] * len(codes))
 
     def test_failed_cleanup_is_reported_and_logged_without_failing_done(self):
         self.configure(teardown=self.cleanup_command(7))
@@ -154,7 +154,7 @@ class WorkerTeardownTest(unittest.TestCase):
             return shell_setup.teardown(*args)
         reports = one_shot.adopt(self.root, day="2026-09-18", teardown=teardown)
         self.assertEqual(len(reports), 1)
-        self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.tree.resolve()} worker01\n")
+        self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.root.resolve()} worker01\n")
 
     def test_engine_workers_clean_up_and_keep_done_when_cleanup_fails(self):
         fx = engine_fixtures.WorkerTest("runTest")
@@ -175,8 +175,9 @@ class WorkerTeardownTest(unittest.TestCase):
         segment = fx.db.segments()[0]
         self.assertEqual(segment.outcome, "done")
         run.assert_called_once()
-        self.assertEqual(run.call_args.args, ("exit 7", fx.tree))
+        self.assertEqual(run.call_args.args, ("exit 7", fx.root))
         self.assertEqual(run.call_args.kwargs["worker"], fx.tree.name)
+        self.assertEqual(run.call_args.kwargs["worktree"], str(fx.tree.resolve()))
         self.assertTrue(any("teardown failed" in log.message for log in fx.db.log(engine_fixtures.KEY)))
 
     def test_engine_ownership_is_verified_and_disappears_after_collect(self):
@@ -555,17 +556,130 @@ class WorkerTeardownTest(unittest.TestCase):
             self.assertEqual(one_shot._run_worker(self.tree, external_logs, ["worker"], {}, "task", 1), 0)
         self.assertEqual(target.read_text(), "original")
 
-    def test_adoption_keeps_the_dead_worker_pid_when_the_tracker_update_fails(self):
-        self.configure(teardown="cleanup")
+    def test_a_failed_tracker_update_is_reconciled_on_the_next_adoption(self):
         one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
                                "codex", "", "10:00")
+        (self.tree / ".chief-of-stuff").mkdir(exist_ok=True)
+        (self.tree / one_shot.RESULT).write_text("status: done\nreason: checked\nchanges: none\n")
         pidfile = self.tree / one_shot.PIDFILE
         pidfile.parent.mkdir(exist_ok=True)
         pidfile.write_text("999999999 Security audit\n")
-        report = {"status": "human_review", "errors": [f"{dispatch_prompt.TRACKER_ERROR} disk full"]}
-        with mock.patch.object(one_shot, "reconcile", return_value=report):
-            self.assertEqual(one_shot.adopt(self.root, day="2026-09-18"), [report])
+        original = one_shot.tracker_write.edit
+        def fail_once(path, change):
+            fail_once.calls += 1
+            if fail_once.calls == 1:
+                raise OSError("disk full")
+            return original(path, change)
+        fail_once.calls = 0
+        with mock.patch.object(one_shot.tracker_write, "edit", side_effect=fail_once):
+            first = one_shot.adopt(self.root, day="2026-09-18")
+        self.assertEqual(len(first), 1)
+        self.assertTrue(any(error.startswith(dispatch_prompt.TRACKER_ERROR) for error in first[0]["errors"]))
+        self.assertFalse(one_shot.launcher_copy(self.root, self.tree).exists())
         self.assertEqual(pidfile.read_text(), "999999999 Security audit\n")
+        self.assertIn("| worker01 | running", self.fx.tracker.read_text())
+        second = one_shot.adopt(self.root, day="2026-09-18")
+        self.assertEqual(len(second), 1)
+        self.assertFalse(any(str(error).startswith(dispatch_prompt.TRACKER_ERROR) for error in second[0]["errors"]))
+        self.assertNotIn("| worker01 | running", self.fx.tracker.read_text())
+
+    def test_teardown_executes_the_workspace_copy_of_a_relative_command(self):
+        log = self.root / "which.txt"
+        script = "import os\nfrom pathlib import Path\nPath({log!r}).write_text(os.getcwd() + ' ' + os.environ['CHIEF_OF_STUFF_WORKTREE'] + ' ' + os.environ['CHIEF_OF_STUFF_WORKER'] + ' {word}\\n')\n"
+        for base, word in ((self.root, "trusted"), (self.tree, "untrusted")):
+            (base / "tools").mkdir(exist_ok=True)
+            (base / "tools" / "stack.py").write_text(script.format(log=str(log), word=word))
+        command = shlex.join([sys.executable, "tools/stack.py"])
+        self.assertEqual(shell_setup.teardown(self.root, self.tree, "worker01", command), [])
+        self.assertEqual(log.read_text(), f"{self.root.resolve()} {self.tree.resolve()} worker01 trusted\n")
+
+    def test_a_non_utf8_pidfile_does_not_escape_the_launch_lock(self):
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        pidfile.write_bytes(b"\xff")
+        self.assertIsNone(one_shot._pidfile_pid(pidfile))
+        with one_shot.slot(self.tree.parent, self.tree, "Security audit", None):
+            self.assertTrue(pidfile.read_text().startswith(str(os.getpid())))
+
+    def test_a_launch_refuses_a_tree_holding_another_tasks_dead_worker(self):
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        pidfile.write_text("999999999 Other task\n")
+        (self.tree / dispatch_prompt.DISPATCH_FILE).write_text("task: Other task\n")
+        with self.assertRaisesRegex(ValueError, "unreconciled"):
+            self.fx._run(self.fx._fake("status: done\nreason: r\nchanges: c\n", write_partial=False))
+        self.assertEqual(pidfile.read_text(), "999999999 Other task\n")
+
+    def test_exit_json_does_not_claim_a_different_open_launch(self):
+        fx, run = self._started_engine()
+        record = dict(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"])
+        record["session_id"] = "other-session"
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        with mock.patch.object(process_status, "identity", return_value=None):
+            claims = tree_claims.engine_claims(fx.root, process_status.identity, [(None, record)])
+        self.assertFalse(any(claim.live for rows in claims.values() for claim in rows))
+
+    def test_a_resolved_tree_path_matches_the_recorded_launch(self):
+        fx, _run = self._started_engine()
+        link = fx.root / "tree-link"
+        link.symlink_to(fx.tree)
+        record = dict(fx.db.resume(engine_fixtures.KEY)["runs"]["implement-1"])
+        record["tree"] = str(link)
+        with mock.patch.object(process_status, "identity", return_value=None):
+            claims = tree_claims.engine_claims(fx.root, process_status.identity, [(None, record)])
+        self.assertIn(fx.tree.resolve(), claims)
+
+    def test_engine_ownership_failure_keeps_registry_claims(self):
+        registry = {os.getpid(): {"worktree": str(self.tree), "name": "live-worker"}}
+        with mock.patch.object(audit_tasks, "registrations", return_value=registry), \
+             mock.patch.object(audit_tasks, "engine_ownership", side_effect=RuntimeError("ps timed out")):
+            claims, exc, kind = audit_tasks._sample_claims(self.root, "trees")
+        self.assertEqual(kind, "engine")
+        self.assertIsInstance(exc, RuntimeError)
+        self.assertIn(self.tree.resolve(), claims)
+        self.assertTrue(any(claim.live for claim in claims[self.tree.resolve()]))
+
+    def test_a_stale_store_is_not_migrated_by_the_audit(self):
+        import store
+        self.configure(teardown_list="printf '[]'")
+        (self.root / "store.db").write_bytes(b"not a database")
+        with mock.patch.object(store, "migrate", side_effect=AssertionError("audit migrated")):
+            report = audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
+        self.assertTrue(any("engine ownership unreadable" in line for line in report.lines), report.lines)
+
+    def test_an_engine_probe_failure_without_stack_discovery_is_not_a_stack_finding(self):
+        with mock.patch.object(audit_tasks, "engine_ownership", side_effect=RuntimeError("ps timed out")):
+            report = audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
+        self.assertFalse(any("engine ownership unreadable" in line for line in report.lines), report.lines)
+
+    def test_a_successful_empty_claim_sample_is_not_repeated(self):
+        self.configure(teardown_list="printf '[]'")
+        calls = []
+        def sample(root, trees):
+            calls.append(trees)
+            return {}, None, ""
+        with mock.patch.object(audit_tasks, "_sample_claims", side_effect=sample):
+            audit_tasks.audit(self.root, "2026-09-18", check_issues=False)
+        self.assertEqual(len(calls), 2)
+
+    def test_unverified_engine_start_tears_the_stack_down(self):
+        fx = engine_fixtures.WorkerTest("runTest")
+        fx.setUp()
+        self.addCleanup(fx.doCleanups)
+        def start(request, run_dir, **kwargs):
+            (run_dir / "started.json").write_text(json.dumps({"pid": 77, "session_id": request.session_id}))
+            return mock.Mock(pid=78, poll=lambda: 0)
+        calls = []
+        with mock.patch.object(worker.make_worktree, "build", return_value=type("Tree", (), {"path": fx.tree})()), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=start), \
+             mock.patch.object(worker.claude_adapter, "cancel"), \
+             mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker, "teardown", side_effect=lambda *args: calls.append(args) or []):
+            with self.assertRaisesRegex(RuntimeError, "could not verify worker start"):
+                worker.launch(engine_fixtures.KEY, "implement", 1, None, store=fx.db, root=fx.root,
+                              trees=fx.trees, policies=fx.p, forge=fx.forge, clock=lambda: engine_fixtures.NOW,
+                              teardown_command="down")
+        self.assertEqual(calls, [(fx.root, fx.tree, fx.tree.name, "down")])
 
     def test_a_launch_refuses_a_tree_that_already_names_a_live_worker(self):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])

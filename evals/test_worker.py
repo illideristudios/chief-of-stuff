@@ -963,7 +963,7 @@ class WorkerTest(unittest.TestCase):
 
     def test_collect_keeps_a_command_only_start_reserved(self):
         # Engine restart between Popen and started.json must not fail the reservation.
-        run = worker._run_dir(self.root, KEY, "implement", 1)
+        run = worker.run_dir(self.root, KEY, "implement", 1)
         run.mkdir(parents=True)
         (run / "command.json").write_text("{}")
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())

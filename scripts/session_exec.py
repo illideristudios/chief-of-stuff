@@ -73,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         if "--registry" in registration and "--name" in registration:
             register(Path(registration["--registry"]), runtime="claude", name=registration["--name"],
                      worktree=registration.get("--worktree", os.getcwd()), pid=os.getpid())
+        if registration.get("--name"):
+            os.environ["CHIEF_OF_STUFF_WORKER"] = registration["--name"]
         exec_login(rest[1:])
     if argv and argv[0] == "resume-codex":
         resume = argparse.ArgumentParser(description="Resume an approved Codex plan with write access")
@@ -86,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             resume.error("codex is unavailable on PATH")
         path = options.root / ".chief-of-stuff" / "sessions" / f"{options.name}.json"
         register(path, runtime="codex", name=options.name, worktree=str(options.worktree), pid=os.getpid())
+        os.environ["CHIEF_OF_STUFF_WORKER"] = options.name
         command = [binary, "resume", options.session_id, "-C", str(options.worktree), "-s", "workspace-write",
                    *git_trees.codex_add_dir_args(options.worktree)]
         exec_login(command)
@@ -113,6 +116,7 @@ def main(argv: list[str] | None = None) -> int:
     if not command or command[0] != "--" or len(command) < 2:
         ap.error("expected -- followed by the runtime command")
     register(args.registry, runtime=args.runtime, name=args.name, worktree=args.worktree, pid=os.getpid())
+    os.environ["CHIEF_OF_STUFF_WORKER"] = args.name
     # Keep login and terminal essentials; drop inherited host session identity and launch overrides.
     if args.login_shell:
         exec_login(command[1:])

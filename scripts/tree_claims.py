@@ -34,8 +34,13 @@ def one_shot_claims(trees: Path, running_trees) -> Claims:
 
 
 def _same_launch(record: dict, started: dict, tree: Path, started_path: Path) -> bool:
+    recorded = record.get("tree")
+    try:
+        same_tree = isinstance(recorded, str) and Path(recorded).resolve() == tree
+    except OSError:
+        same_tree = False
     return (all(record.get(field) == started[field] for field in ("session_id", "pid", "runner_pid"))
-            and record.get("tree") == str(tree) and record.get("run_dir") == str(started_path.parent.resolve()))
+            and same_tree and record.get("run_dir") == str(started_path.parent.resolve()))
 
 
 def engine_claims(root: Path, identity, segments) -> Claims:
@@ -68,8 +73,12 @@ def engine_claims(root: Path, identity, segments) -> Claims:
                 continue
             tree = Path(command["cwd"]).resolve()
             open_records = [record for ended, record in located.get(path.parent.resolve(), []) if ended is None]
-            if open_records and (any(_same_launch(record, started, tree, path) for record in open_records)
-                                 or (path.parent / "exit.json").exists()):
+            if open_records and any(_same_launch(record, started, tree, path) for record in open_records):
+                out.setdefault(tree, []).append(Claim("engine worker", True))
+                continue
+            # exit.json covers the crash window before resume saves a session, not a different launch.
+            if (open_records and (path.parent / "exit.json").exists()
+                    and all(not record.get("session_id") for record in open_records)):
                 out.setdefault(tree, []).append(Claim("engine worker", True))
                 continue
             host = identity(started["pid"], session, host=True)

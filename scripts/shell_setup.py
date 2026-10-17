@@ -76,14 +76,16 @@ def login_argv(command: list[str], *, path_prefix: str = "") -> list[str]:
 
 
 def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
-                timeout: int = 120) -> subprocess.CompletedProcess:
+                timeout: int = 120, worktree: str = "") -> subprocess.CompletedProcess:
     """Run a trusted workspace command with shell setup, bounded separately from a worker's runtime.
 
-    Teardown and stack discovery share this driver. Command text is workspace-authored shell source;
-    paths and worker identity travel through cwd and the environment, never interpolated into it.
+    Teardown and stack discovery share this driver. Command text is workspace-authored shell source.
+    The process cwd is that trusted tree; worker and worktree identity travel in the environment.
     """
     env = {**clean_env(), "CHIEF_OF_STUFF_WORKSPACE": str(workspace.resolve()),
            "CHIEF_OF_STUFF_WORKER": worker}
+    if worktree:
+        env["CHIEF_OF_STUFF_WORKTREE"] = worktree
     shell = login_shell()
     kind = Path(shell).name
     if kind not in {"zsh", "bash", "sh", "dash", "ksh", "fish"}:
@@ -127,7 +129,9 @@ def teardown(root: Path, cwd: Path, name: str, command: str) -> list[str]:
         return " ".join(re.sub(r"[\x00-\x1f\x7f]", " ", text).split())[:1000]
 
     try:
-        result = run_command(command, cwd if cwd.is_dir() else root, workspace=root, worker=name)
+        # Always the trusted workspace. A review worktree is contributor code; a relative
+        # teardown script must not run from there. The worktree path is only an environment value.
+        result = run_command(command, root, workspace=root, worker=name, worktree=str(cwd.resolve()))
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         return [f"teardown: {brief(str(exc))}"]
     if result.returncode:

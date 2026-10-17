@@ -476,13 +476,23 @@ def trees_lock(trees: Path):
         os.close(lock)
 
 
+def _pidfile_line(pidfile: Path) -> str | None:
+    """The first line of a regular pid file, or None when it is missing, a symlink, or unreadable."""
+    try:
+        if pidfile.parent.is_symlink():
+            return None
+        data = git_view.read_regular(pidfile, PIDFILE_MAX, nofollow=True)
+    except OSError:
+        return None
+    if not data:
+        return None
+    return (data.decode(errors="replace").splitlines() or [""])[0]
+
+
 def _pidfile_pid(pidfile: Path) -> int | None:
     """The pid in a regular pid file, or None when it is missing, a symlink, or unreadable."""
-    try:
-        if pidfile.parent.is_symlink() or pidfile.is_symlink() or not pidfile.is_file():
-            return None
-        line = (pidfile.read_text().splitlines() or [""])[0]
-    except OSError:
+    line = _pidfile_line(pidfile)
+    if line is None:
         return None
     pid, _, _ = line.partition(" ")
     if pid.isascii() and pid.isdecimal() and (value := int(pid)) > 0:
@@ -524,10 +534,15 @@ def slot(trees: Path, cwd: Path, task: str, cap: int | None):
             raise ValueError(f"{len(busy)} one-shot workers running; [workers] max_concurrency is {cap} "
                              "(list them: chief-of-stuff processes --root <workspace>)")
         pidfile = cwd / PIDFILE
+        line = _pidfile_line(pidfile)
         held = _pidfile_pid(pidfile)
         # A live detached worker's pid is the adoption marker; do not replace it.
-        if held is not None and held != os.getpid() and process_exists(held):
-            raise ValueError(f"{cwd.name} already has a live one-shot worker (pid {held})")
+        # A dead pid for another task is the same marker, waiting for adopt().
+        if line is not None and held is not None and held != os.getpid():
+            if process_exists(held):
+                raise ValueError(f"{cwd.name} already has a live one-shot worker (pid {held})")
+            if line.partition(" ")[2].strip() != task.strip():
+                raise ValueError(f"{cwd.name} still holds an unreconciled one-shot run")
         if pidfile.parent.is_symlink() or pidfile.is_symlink():
             raise ValueError(f"{cwd.name} pid file is a symlink")
         pidfile.parent.mkdir(exist_ok=True)
@@ -781,6 +796,8 @@ def adopt(root: Path, day: str | None = None, *,
                           or any(str(error).startswith((dispatch_prompt.TRACKER_ERROR, "report copy:"))
                                  for error in errors))
             if unfinished:
+                with suppress(OSError):
+                    launcher_copy(root, cwd).unlink(missing_ok=True)
                 with suppress(OSError):
                     _write_pidfile(trees, cwd, f"{pid} {task}\n", {os.getpid(), pid})
             else:

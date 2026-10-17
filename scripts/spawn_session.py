@@ -176,6 +176,7 @@ def runtime_tokens(*, cwd: str, workspace: str = ".", **worker) -> list[str]:
     """Exact worker argv shared by terminal launchers: cwd and PATH pinned inline by `env`."""
     return [ENV_BIN, "-C", _paths(cwd)[0], f"PATH={os.environ.get('PATH', '')}",
             f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(workspace)}",
+            f"CHIEF_OF_STUFF_WORKER={worker.get('title') or ''}",
             *worker_tokens(cwd=cwd, workspace=workspace, **worker)]
 
 
@@ -210,7 +211,8 @@ def herdr_commands(*, herdr: Path | None, session: str, **worker) -> tuple[list[
                            "the pane shell cannot take a line that long")
     return ([*prefix, "tab", "create", "--cwd", os.path.abspath(worker["cwd"]),
              "--label", title, "--no-focus",
-             "--env", f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(worker.get('workspace', '.'))}"],
+             "--env", f"CHIEF_OF_STUFF_WORKSPACE={os.path.abspath(worker.get('workspace', '.'))}",
+             "--env", f"CHIEF_OF_STUFF_WORKER={title or ''}"],
             [*prefix, "pane", "run", "<root-pane>", *line])
 
 
