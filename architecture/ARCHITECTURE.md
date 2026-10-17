@@ -60,6 +60,12 @@ Deciding which types a change has takes one model call through the port. The eng
 
 Each reviewer reviews only within its lens and does not fix. Findings come back in one review report shape (issue #563) and are kept as store records.
 
+The architect and the architecture reviewers are different roles, and nothing treats one as the other.
+- **The architect is the `frank-lloyd-aight` agent.** It owns the canonical architecture document and the compliance record. It is consulted when the policy says so, after the panel. It disposes of findings as fix, file, keep or discard, gives or withholds the architecture approval a merge needs, and can sit in the decision trio. It never runs as a panel reviewer, and it reports no review findings of its own.
+- **The architecture reviewers are panel personas:** Senior Architect (1) and the architectural-choice expert (11, "Uncle Bob" here). They review a change within their lens and report findings like any other reviewer. They cannot dispose of findings, approve a merge, or change the architecture documents.
+
+In policy, the name `architect` is reserved for the agent: `[personas.architect]`, with `agent = "frank-lloyd-aight"`, is what the consult and dispositions point at. Reviewer personas never use that name; they are `senior-architect` and `uncle-bob`. A finding from an architecture reviewer goes to the architect for disposition like any other finding.
+
 Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
 
 ## 7. Assignments
