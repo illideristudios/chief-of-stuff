@@ -80,6 +80,16 @@ class ExtraHoldTest(unittest.TestCase):
         self.assertNotIn("released", kanban.extra_hold.__doc__ or "")
         self.assertIn("unless explicitly released", kanban.keep_hold.__doc__ or "")
 
+    def test_a_stage_that_requires_the_hold_is_not_an_extra_hold(self):
+        held = ("01 - PLAN REVIEW", FLOW.human_review_label)
+        self.assertFalse(kanban.extra_hold(FLOW, held, "plan review"))
+        self.assertFalse(kanban.keep_hold(FLOW, held, "plan review", False))
+
+    def test_no_hold_label_is_no_extra_hold(self):
+        for stage in ("implement", "plan review", None):
+            self.assertFalse(kanban.extra_hold(FLOW, ("03 - BUILD",), stage))
+            self.assertFalse(kanban.keep_hold(FLOW, ("03 - BUILD",), stage, False))
+
 
 class HumanHoldTest(unittest.TestCase):
     def test_github_adds_only_hold_and_verifies(self):
