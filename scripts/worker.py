@@ -165,6 +165,39 @@ def _ask_conflict(store: Any, key: str, stage: str, attempt: int, reason: str, c
     raise RuntimeError(reason)
 
 
+def _candidate_paths(issue_key: str, number: int, data: dict, store: Any, trees: Path) -> tuple[list[Path], set[Path]]:
+    review_paths = {Path(v["tree"]).resolve() for v in data.get("review_trees", {}).values()
+                    if isinstance(v, dict) and v.get("tree")}
+    candidates: list[Path] = []
+    if data.get("worktree"):
+        candidates.append(Path(data["worktree"]))
+    candidates.extend(Path(row.path) for row in store.ownership(issue_key))
+    candidates.extend(p for p in sorted(trees.glob(f"issue-{number}-*"))
+                      if not p.name.startswith(f"issue-{number}-review-"))
+    return candidates, review_paths
+
+
+def recovery_held(store: Any, key: str, stage: str, *, trees: Path, repo: Path) -> bool:
+    """True when this stage's conflict is answered `hold` and the trees still conflict. The planner waits."""
+    decisions = store.decisions(key)
+    if not any(d.topic == "conflict" and d.answer == "hold" for d in decisions):
+        return False
+    number = int(key.rpartition("#")[2])
+    data = _resume(store, key)
+    candidates, review_paths = _candidate_paths(key, number, data, store, trees)
+    common = _common(repo)
+    if common is None:
+        return False
+    with make_worktree.clone_lock(repo):
+        found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
+    chosen = completion.recovery(found, preferred=str(Path(data["worktree"])) if data.get("worktree") else None)
+    if not isinstance(chosen, completion.Conflict):
+        return False
+    question = _conflict_question(stage, chosen.reason)
+    rows = [d for d in decisions if (d.topic, d.question) == ("conflict", question)]
+    return bool(rows and rows[-1].answer == "hold")
+
+
 def _conflict_choice(store: Any, key: str, stage: str, attempt: int, reason: str, clock: engine_clock.Clock) -> str:
     """The offered option, matched exactly. Anything else asks again."""
     question = _conflict_question(stage, reason)
@@ -297,19 +330,35 @@ def _legacy_worktree(issue_key: str, number: int, stage: str, attempt: int, tree
     return made.path, branch, False
 
 
+def _retire_orphans(repo: Path, trees: Path, found: list[completion.OrphanTree]) -> None:
+    """Abort starts fresh. The conflicting checkouts must be gone, or the next launch aborts again."""
+    root = trees.resolve()
+    for c in found:
+        if not c.path:
+            continue
+        path = Path(c.path)
+        try:
+            inside = path.resolve().is_relative_to(root)
+        except OSError:
+            continue
+        if not inside:
+            continue
+        code, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
+        if code != 0 and path.exists():
+            raise RuntimeError(f"could not retire orphaned worktree: {detail}")
+    for c in found:
+        if not c.branch.startswith("work/"):
+            continue
+        make_worktree.git_trusted(["branch", "-D", c.branch], repo)
+        make_worktree.git_trusted(["update-ref", "-d", f"refs/remotes/origin/{c.branch}"], repo)
+
+
 def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tree_name: str, branch: str,
                       agent: str, data: dict, store: Any, root: Path, trees: Path, repo: Path,
                       clock: engine_clock.Clock) -> tuple[Path, str, bool]:
     """Reuse or recover an orphaned worktree/branch without asking; ask only on a genuine conflict (#725).
     Gathers the git facts and executes; `completion.recovery` decides (architecture §4)."""
-    review_paths = {Path(v["tree"]).resolve() for v in data.get("review_trees", {}).values()
-                    if isinstance(v, dict) and v.get("tree")}
-    candidates: list[Path] = []
-    if data.get("worktree"):
-        candidates.append(Path(data["worktree"]))
-    candidates.extend(Path(row.path) for row in store.ownership(issue_key))
-    candidates.extend(p for p in sorted(trees.glob(f"issue-{number}-*"))
-                      if not p.name.startswith(f"issue-{number}-review-"))
+    candidates, review_paths = _candidate_paths(issue_key, number, data, store, trees)
     common = _common(repo)
     if common is None:
         return _legacy_worktree(issue_key, number, stage, attempt, tree_name, branch, agent, data, store, root, trees, repo)
@@ -353,6 +402,8 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
                 ["worktree", "add", "--no-track", "-B", chosen.branch, "--", str(tree), chosen.head], repo)
             if code != 0:
                 raise RuntimeError(f"git worktree add failed: {detail}")
+        if abort:
+            _retire_orphans(repo, trees, found)
     if abort:
         # A fresh tree from main. Its name cannot be one the conflicting checkouts already hold.
         fresh = f"{tree_name}-{uuid.uuid4()}"
@@ -489,6 +540,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
     except BaseException:  # an interrupt too: a start that was never verified must not leave a runner behind
+        if run_dir.is_dir():
+            (run_dir / "canceled").write_text("canceled\n")
         claude_adapter.cancel(runner)
         if not (run_dir / "started.json").exists():
             # cancel waits on the runner process: this command can no longer produce a start.
@@ -513,6 +566,17 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             if not isinstance(runs, dict):
                 raise ValueError("unreadable run records")
             record = runs.get(f"{segment.stage}-{segment.attempt}")
+            run_dir = _run_dir(root, key, segment.stage, segment.attempt)
+            if (run_dir / "canceled").is_file():
+                # Only a start the cancel path marked. A dead host with no mark is a failed attempt.
+                run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
+                store.drop_segment(key, segment.stage, segment.attempt)
+                if (data.get("pending_stage") or {}).get("stage") == segment.stage:
+                    data.pop("pending_stage")
+                    store.set_resume(key, data)
+                store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: dropped, nothing had started",
+                              now.isoformat())
+                continue
             if record is None and trees is not None:
                 # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.
                 run_dir = _run_dir(root, key, segment.stage, segment.attempt)
@@ -526,12 +590,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     _save_run(store, key, segment.stage, segment.attempt, record)
                     data = _resume(store, key)
                     record = data["runs"][f"{segment.stage}-{segment.attempt}"]
-                elif not (run_dir / "exit.json").exists() and (
-                        not any((run_dir / name).exists() for name in ("started.json", "command.json", "exit.json"))
-                        or (run_dir / "started.json").is_file()):
-                    # Nothing verified ran. An interrupt after started.json leaves the rename for this pass.
-                    if (run_dir / "started.json").is_file():
-                        run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
+                elif not any((run_dir / name).exists() for name in ("started.json", "command.json", "exit.json")):
                     store.drop_segment(key, segment.stage, segment.attempt)
                     if (data.get("pending_stage") or {}).get("stage") == segment.stage:
                         data.pop("pending_stage")

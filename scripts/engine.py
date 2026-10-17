@@ -85,7 +85,7 @@ def _record_limits(workers: settings.Workers) -> None:
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, clone: Path | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -130,9 +130,13 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     store.add_log(item.issue_key, message, at)
 
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
+    held = None
+    if clone is not None:
+        def held(key, stage, repo=clone):
+            return worker.recovery_held(store, key, stage, trees=trees, repo=repo)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             **_planning_inputs(store, items))
+                             recovery_held=held, **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:
@@ -225,15 +229,17 @@ def main(argv: list[str] | None = None) -> int:
                 selected = next(iter(config.repos.values()))
             if not selected and config.repos:
                 raise ValueError("no [repos] clone matches the workspace backlog")
+            clone = root / selected if selected else root
             launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                             clone=root / selected if selected else root,
+                             clone=clone,
                              claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules)
             try:
                 while True:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
+                                 clone=clone)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

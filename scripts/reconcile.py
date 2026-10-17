@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 
 from model_port import RETRYABLE
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
@@ -257,7 +257,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
-         quota_resets: Mapping[str, datetime] | None = None) -> list[Action]:
+         quota_resets: Mapping[str, datetime] | None = None,
+         recovery_held: Callable[[str, str], bool] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
@@ -277,6 +278,9 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
                        (decisions or {}).get(item.issue_key, ()))
+        if (recovery_held is not None and isinstance(action, Dispatch)
+                and recovery_held(action.issue_key, action.stage)):
+            action = Wait(action.issue_key, "orphan recovery held")
         if isinstance(action, (Dispatch, Review)):
             if free_slots:
                 free_slots -= 1

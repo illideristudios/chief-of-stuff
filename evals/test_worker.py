@@ -815,21 +815,18 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments()[0].outcome, "quota")
 
     def test_actor_metadata_survives_a_kill_before_save_run(self):
-        self.p.personas["builder"] = SimpleNamespace(role="build", rules=(), agent="", model="original", effort="high")
-        def killed_save(*args, **kwargs):
-            raise KeyboardInterrupt
-        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
-             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
-             mock.patch.object(worker.process_status, "identity", return_value="process-start"), \
-             mock.patch.object(worker, "_save_run", side_effect=killed_save), \
-             mock.patch.object(worker.claude_adapter, "cancel"):
-            with self.assertRaises(KeyboardInterrupt):
-                slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
-                            max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        # A crash that never entered cancel leaves no mark. The live host is adopted, including who was launched.
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        run.mkdir(parents=True)
+        (run / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": "s"}))
+        (run / "actor.json").write_text(json.dumps({"model": "original", "effort": "high"}))
+        self.db.set_resume(KEY, {"worktree": str(self.tree), "work_branch": "work/issue-1-implement-1"})
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
             worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
         segment = self.db.segments()[0]
         self.assertEqual((segment.model, segment.effort), ("original", "high"))
+        self.assertIsNone(segment.ended_at)
 
     def test_canceled_unstarted_launch_releases_its_slot_on_restart(self):
         def unstarted(request, run_dir, **kwargs):
@@ -923,16 +920,16 @@ class WorkerTest(unittest.TestCase):
             {"name": "issue-1-implement-2", "branch": "work/issue-1-implement-2", "merged": False}])
 
     def test_abort_starts_fresh_from_main_and_does_not_ask_again(self):
-        from evals import git_taint as taint, make_repo
+        from evals import git_taint as taint
         with taint.private_git_views(self.root / "private-views"):
             clone = self.diverged()
             with self.assertRaisesRegex(RuntimeError, "diverged"):
                 self.launch_in(clone, attempt=3)
-            kept = make_repo.git(["rev-parse", "HEAD"], self.trees / "issue-1-implement-1")
             self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="abort")
             request = self.launch_in(clone, attempt=3)
             self.assertNotIn(Path(request.cwd).name, ("issue-1-implement-1", "issue-1-implement-2"))
-            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.trees / "issue-1-implement-1"), kept)
+            self.assertFalse((self.trees / "issue-1-implement-1").exists())
+            self.assertFalse((self.trees / "issue-1-implement-2").exists())
             self.assertEqual(len(self.db.asks(KEY)), 1)
             self.assertNotIn(worker.dispatch_prompt.RECOVERY, request.prompt)
 
@@ -1038,7 +1035,8 @@ class WorkerTest(unittest.TestCase):
             shutil.rmtree(self.trees / "issue-1-implement-2")
             make_repo.git(["worktree", "prune"], clone)
             make_repo.git(["branch", "-D", "work/issue-1-implement-2"], clone)
-            self.db.end_segment(OTHER, "implement", 1, NOW.isoformat(), "done")
+            forge.rows.pop()
+            self.db.drop_segment(OTHER, "implement", 1)
             seen.clear()
             with mock.patch.object(engine, "_record_limits"), \
                  mock.patch.object(engine.cleanup, "execute", return_value=0), \
