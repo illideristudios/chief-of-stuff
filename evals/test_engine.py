@@ -650,6 +650,28 @@ class EngineTest(unittest.TestCase):
         self.run_pass(model=self._votes([("adopt", "Keep")] * 3))
         self.assertEqual(self.db.asks(KEY)[0].answer, "Keep")
 
+    def test_an_old_ask_answer_does_not_settle_its_split_replacement(self):
+        import decision_actions
+        self._trio()
+        self.db.clock = lambda: self.now
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "original")
+        self.run_pass(model=self._votes([("adopt", "Split")] * 3))
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        self.run_pass()
+        self.finish("implement", 2)
+        split = self._votes([("concern", "Keep")] * 3)
+        self.run_pass(model=split)
+        self.assertIsNone(self.db.decisions(KEY)[-1].answer)
+        self.run_pass(model=split)
+        self.assertIsNone(self.db.decisions(KEY)[-1].answer)
+        self.assertEqual(split.n, 3)
+
     def test_short_asks_keep_the_question_in_the_interrupt(self):
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
@@ -811,6 +833,7 @@ class EngineTest(unittest.TestCase):
         self._merge_gate()
         failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
         self.assertIsInstance(self.run_pass(model=failed)[0], reconcile.Ask)
+        self.now += timedelta(seconds=60)
         model = self._votes([("adopt", "approve")] * 3)
         self.assertIsInstance(self.run_pass(model=model)[0], reconcile.Ask)
         self.assertEqual(model.n, 3)
@@ -874,7 +897,8 @@ class EngineTest(unittest.TestCase):
         self.db.set_resume(KEY, {**self.db.resume(KEY), "quota_percent": 85})
         self.run_pass(model=model)
         self.assertEqual(model.n, 0)
-        self.assertEqual(self.db.resume(KEY)["interrupt"], {"kind": "limit", "reason": "reached quota limit"})
+        self.assertEqual(self.db.resume(KEY)["interrupt"],
+                         {"kind": "limit", "reason": "reached quota limit", "stage": "implement"})
 
     def test_repeated_quota_occurrences_each_log_once(self):
         self._trio(quota_percent=80)
