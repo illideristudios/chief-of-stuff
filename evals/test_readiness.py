@@ -30,6 +30,10 @@ class ReadinessTest(unittest.TestCase):
         claims = (readiness.Claim(KEY, "src/a.py"),)
         self.assertIsNone(self.why(claims=claims, running=(KEY,)))
 
+    def test_repository_relative_paths_do_not_conflict_across_repositories(self):
+        foreign = "github:other/project#2"
+        self.assertIsNone(self.why(claims=(readiness.Claim(KEY, "."), readiness.Claim(foreign, ".")), running=(foreign,)))
+
     def test_an_open_blocker_and_an_unknown_read_are_not_ready(self):
         self.assertEqual(self.why(blockers=(OTHER,)), f"blocked by {OTHER}")
         self.assertEqual(self.why(blockers=None), "dependency blockers unknown")

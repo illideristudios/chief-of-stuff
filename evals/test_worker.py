@@ -813,7 +813,7 @@ class WorkerTest(unittest.TestCase):
                                  NOW + timedelta(hours=3), {}, quota_resets={KEY: NOW + timedelta(hours=2)})
         self.assertEqual(planned, [reconcile.Dispatch(KEY, "implement", "builder", 6)])
 
-    def test_engine_collects_before_reading_forge(self):
+    def test_engine_syncs_forge_before_collecting_so_completion_uses_declared_ownership(self):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
         with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect")), \
@@ -821,7 +821,7 @@ class WorkerTest(unittest.TestCase):
              mock.patch.object(engine.cleanup, "execute", return_value=0):
             engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
                             trees=self.trees, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: NOW)
-        self.assertEqual(order[:2], ["collect", "forge"])
+        self.assertEqual(order[:2], ["forge", "collect"])
 
     def test_failed_review_start_can_reuse_its_prepared_tree(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \

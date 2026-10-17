@@ -15,6 +15,7 @@ import forge
 import readiness
 import store
 import backlog
+from tree_state import TreeState
 
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
@@ -67,6 +68,9 @@ class GatherTest(unittest.TestCase):
         self.assertNotIn(OTHER, facts.read_only)
 
     def test_reports_follow_the_order_they_were_written(self):
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        self.db.record_segment(KEY, "implement", 2, started_at=NOW.isoformat(), ended_at=NOW.isoformat(), outcome="done")
+        self.db.record_segment(KEY, "review", 1, started_at=NOW.isoformat())
         self.db.add_report(KEY, "implement", 2, "sess", "done", "ok", [])
         self.db.add_report(KEY, "review", 1, "sess", "blocked", "stuck", [])
         self.assertEqual([(r.stage, r.attempt) for r in self.gather().reports][-1], ("review", 1))
@@ -130,6 +134,28 @@ class GatherTest(unittest.TestCase):
 
     def test_a_forge_that_cannot_read_blockers_is_unknown(self):
         self.assertIsNone(self.gather(SimpleNamespace()).blockers)
+
+    def test_suite_on_main_requires_passing_ci_and_the_worker_head_in_that_main_head(self):
+        tree = self.trees / "issue-1"
+        tree.mkdir()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["tree"] = str(tree)
+        self.db.set_resume(KEY, data)
+        for status, code, expected in (("passed", 0, True), ("failed", 0, False), ("none", 0, False),
+                                        ("passed", 1, None), ("passed", 128, None)):
+            with self.subTest(status=status, code=code), \
+                 mock.patch.object(engine_facts.git_trees, "discover", return_value=[tree]), \
+                 mock.patch.object(engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
+                 mock.patch.object(engine_facts.git_trees, "git", return_value=(code, "")) as git:
+                source = SimpleNamespace(blocked_by=lambda: {}, branch_head=lambda ref: forge.Pipeline(1, ref, "main-sha", status, ""))
+                self.assertEqual(dict(self.gather(source).suite_on_main)[KEY], expected)
+                git.assert_called_once_with(["merge-base", "--is-ancestor", "HEAD", "main-sha"], tree)
+
+    def test_finished_run_tree_evidence_remains_available_for_read_only_enforcement(self):
+        self.db.replace_file_ownership(KEY, [(".", "read")])
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        self.assertIn(KEY, self.gather().read_only)
+        self.assertEqual(self.gather().changed, ((KEY, None),))
 
     def test_a_failed_relationship_read_says_why(self):
         failing = mock.Mock(**{"blocked_by.side_effect": engine_facts.ForgeError("auth required")})

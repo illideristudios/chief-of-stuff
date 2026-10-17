@@ -192,6 +192,7 @@ class WorkMainTest(unittest.TestCase):
         key = "github:example/app#3"
         db.upsert_item(key)
         ask = db.add_ask(key, "implement", 1, "session", "Continue?", ["yes"], "")
+        db.add_report(key, "implement", 1, "session", "blocked", "waiting", [])
         self.assertEqual(self.run_work("--issue", "3", "--answer-ask", str(ask), "--answer", "yes")[0], 0)
         self.assertIsNone(db.asks(key)[0].answer, "preview writes nothing")
         self.assertEqual(self.run_work("--issue", "4", "--answer-ask", str(ask), "--answer", "yes", "--commit")[0], 1)
@@ -199,6 +200,14 @@ class WorkMainTest(unittest.TestCase):
         code, _, err = self.run_work("--issue", "3", "--answer-ask", str(ask), "--answer", "yes", "--commit")
         self.assertEqual(code, 0, err)
         self.assertEqual(db.asks(key)[0].answer, "yes")
+        import engine_facts
+        import readiness
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        facts = engine_facts.gather(forge=SimpleNamespace(blocked_by=lambda: {}), store=db,
+                                    root=self.root, trees=self.root / "trees", now=datetime.now(timezone.utc))
+        self.assertIsNone(readiness.why_not(key, claims=facts.claims, running=(), blockers=(),
+                                          asks=facts.asks, reports=facts.reports))
 
     def test_existing_issue_preview_does_not_open_the_store(self):
         self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])

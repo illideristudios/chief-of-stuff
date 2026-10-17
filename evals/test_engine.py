@@ -117,6 +117,7 @@ class EngineTest(unittest.TestCase):
         data = self.db.resume(key) or {}
         data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": {
             "pid": 123, "session_id": "fake-session", "identity": "fake-start",
+            "runner_pid": 124, "runner_identity": "fake-start",
             "run_dir": str(supervisor.state_dir(self.root) / "runs" / f"{key.rpartition('#')[2]}-{stage}-{attempt}"),
             "tree": str(self.trees / "fake"),
         }}
@@ -283,6 +284,39 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertTrue(self.db.items()[0].human_review)
         self.assertEqual(len(self.launched), 1)
+
+    def test_a_failed_adapter_exit_with_unlanded_changes_requires_a_hold(self):
+        self.run_pass()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        run.mkdir(parents=True)
+        (run / "stdout").write_text(json.dumps({"is_error": True, "result": "failed"}))
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 1}')
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)), \
+             mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
+            self.run_pass()
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(len(self.launched), 1)
+
+    def test_failed_completion_hold_write_keeps_the_segment_open(self):
+        self.run_pass()
+        self.db.set_resume(KEY, {"runs": []})
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
+        self.forge.add_human_hold = lambda number: "forge offline"
+        with self.assertRaisesRegex(ForgeError, "forge offline"):
+            self.run_pass()
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertFalse(self.db.items()[0].human_review)
+
+    def test_a_failed_ownership_read_keeps_existing_scopes_and_items(self):
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `src/`"
+        self.run_pass()
+        self.forge.rows[0]["stage"] = "review"
+        with mock.patch.object(self.forge, "issue", return_value=SimpleNamespace(ok=False, issue=None, error="offline")):
+            with self.assertRaisesRegex(ForgeError, "ownership.*offline"):
+                self.run_pass()
+        self.assertEqual(self.db.items()[0].stage, "implement")
+        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [("src", "read")])
 
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
