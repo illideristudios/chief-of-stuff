@@ -860,7 +860,7 @@ class ClaudeAdapterRunTest(unittest.TestCase):
     def test_wait_turn_receives_delayed_notification_or_reports_unreached(self):
         import time
         import sys
-        for mode, wait in (("delayed", 1), ("inline", 1), ("absent", 0.2)):
+        for mode, wait in (("delayed", 1), ("inline", 4), ("absent", 0.4)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
                 base = Path(d); work = base / "work"; work.mkdir(); out = base / "out"; out.mkdir()
                 cli = base / "claude"
@@ -868,30 +868,66 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                 result = {"type": "result", "is_error": False, "result": "done"}
                 assistant = {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
                 cli.write_text(f"#!{sys.executable}\n" +
-                    "import json,sys,time\n" +
+                    "import json,sys,time\nfrom pathlib import Path\n" +
                     "message=json.loads(sys.stdin.readline())\n" +
                     "assert message['message']['content']=='go'\n" +
+                    f"Path({str(base / 'emitted')!r}).write_text(str(time.monotonic()))\n" +
                     f"print(json.dumps({init!r}),flush=True)\n" +
                     ("print(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" if mode == "inline" else "") +
                     f"print(json.dumps({assistant!r}),flush=True)\nprint(json.dumps({result!r}),flush=True)\n" +
                     ("time.sleep(0.1)\nprint(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" +
                      f"print(json.dumps({assistant!r}),flush=True)\nprint(json.dumps({result!r}),flush=True)\n" if mode == "delayed" else "") +
-                    "assert not sys.stdin.read(), 'wait must not send a prompt'\n")
+                    f"Path({str(base / 'stdin')!r}).write_text(sys.stdin.read())\n")
                 cli.chmod(0o755)
-                spec = {"timeout_seconds": 3, "turns": [{"prompt": "go", "graders": []},
+                spec = {"timeout_seconds": 6, "turns": [{"prompt": "go", "graders": []},
                         {"wait_seconds": wait, "graders": [{"type": "regex", "pattern": "done"}]}]}
-                started = time.monotonic()
                 with unittest.mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}), \
                      unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
                     results, error, meta = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None,
                                                          base / "calls", "America/Chicago")
                 self.assertIsNone(error)
+                self.assertEqual((base / "stdin").read_text(), "", "wait must not send a prompt")
+                elapsed = time.monotonic() - float((base / "emitted").read_text())
                 self.assertEqual(results[0][1], None if mode == "absent" else True, results)
                 if mode == "absent":
-                    self.assertGreaterEqual(time.monotonic() - started, wait)
+                    self.assertGreaterEqual(elapsed, wait)
                     verdict = run.write_verdict(out, "wait", "agent", "sonnet", 1, results, error, meta)
                     self.assertIsNone(json.loads(verdict.read_text())["passed"])
-                self.assertLess(time.monotonic() - started, 2)
+                self.assertLess(elapsed, 2)
+
+    def test_stream_driver_rejects_empty_prompted_turn_and_natural_exit_failure(self):
+        for mode, expected in (("empty", "unknown"), ("exit", "unknown"), ("quota", "quota"),
+                               ("success", None), ("cleanup", None)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
+                base = Path(d); cli = base / "claude"
+                result = {"type": "result", "is_error": False, "result": "done"}
+                cli.write_text(f"#!{sys.executable}\nimport json,sys,time\n" +
+                    "sys.stdin.readline()\n" +
+                    f"print(json.dumps({result!r}),flush=True)\n" +
+                    ("sys.stdin.readline()\nsys.exit(0)\n" if mode == "empty" else
+                     "sys.stdin.read()\n" +
+                     ("print('API Error: 429 RESOURCE_EXHAUSTED, resets at 5pm.',file=sys.stderr)\nsys.exit(1)\n"
+                      if mode == "quota" else "sys.exit(1)\n" if mode == "exit" else
+                      "time.sleep(30)\n" if mode == "cleanup" else "sys.exit(0)\n")))
+                cli.chmod(0o755)
+                with unittest.mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}), \
+                     unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
+                    got = run.claude_adapter.drive_turns(
+                        run.Request(prompt="", cwd=d, keep_events=True, timeout_s=3),
+                        ["one", "two"] if mode == "empty" else ["one"], [0, 0],
+                        env={}, artifacts=base / "out", snapshot=lambda n: True, before_turn=lambda n: None)
+                if expected:
+                    self.assertIsInstance(got, run.Failure)
+                    self.assertEqual(got.kind, expected)
+                    if mode == "empty":
+                        self.assertIn("exit 0 with no answer", got.message)
+                    if mode == "quota":
+                        self.assertEqual(got.message, "resets at 5pm.")
+                else:
+                    self.assertIsInstance(got, list)
+                    self.assertEqual(len(got), 1)
+                code = json.loads((base / "out/exit.json").read_text())["exit_code"]
+                self.assertEqual(code, 0 if mode in ("empty", "success") else -9 if mode == "cleanup" else 1)
 
     def test_unreached_prompted_turns_do_not_crash_the_grader(self):
         spec = {"turns": [{"prompt": "one", "graders": []},
@@ -1355,6 +1391,18 @@ class UnmeasuredVerdictTest(unittest.TestCase):
         self.assertNotIn("FAIL", out)
         self.assertEqual(code, 2)
 
+    def test_failed_grader_wins_over_an_unreached_turn(self):
+        results = [("T1", False, "launch failed"), ("T2", None, "turn not reached")]
+        out, code = self.run_main(results, None)
+        self.assertIn("=> stale-clock: RED", out)
+        self.assertRegex(out, r"(?m)^\d+ case\(s\): 0 green, 1 red, 0 unmeasured")
+        self.assertEqual(code, 1)
+
+    def test_passed_grader_and_unreached_turn_remain_unmeasured(self):
+        out, code = self.run_main([("T1", True, "done"), ("T2", None, "turn not reached")], None)
+        self.assertIn("=> stale-clock: UNMEASURED", out)
+        self.assertEqual(code, 2)
+
     def test_a_graded_failure_still_reads_red(self) -> None:
         out, code = self.run_main([("a grader", False, "because")], None)
         self.assertIn("=> stale-clock: RED", out)
@@ -1392,6 +1440,12 @@ class VerdictOnDiskTest(unittest.TestCase):
         self.assertFalse(data["passed"])
         self.assertEqual([g["name"] for g in data["graders"]], ["g1", "g2"])
         self.assertEqual(data["graders"][1]["why"], "no such line")
+
+    def test_failed_grader_is_preserved_beside_an_unreached_turn(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = run.write_verdict(Path(d), "c", "agent", "sonnet", 1,
+                [("T1", False, "launch failed"), ("T2", None, "turn not reached")], None, {})
+            self.assertIs(json.loads(path.read_text())["passed"], False)
 
     def test_a_harness_error_is_recorded_as_unmeasured_not_as_red(self) -> None:
         """The 0.9.0 lesson, now durable: a case that never ran is not a case that failed."""
