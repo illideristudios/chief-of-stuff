@@ -235,6 +235,17 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     _record_limits(workers)
 
     snapshots = list(forge.snapshots())
+    board = getattr(forge, "kanban", None)
+    if board is not None:
+        stored_stages = {item.issue_key: item.stage for item in store.items()}
+        for row in snapshots:
+            observed = row.get("stage")
+            stored = stored_stages.get(row["issue_key"])
+            # Shared labels cannot identify a precise workflow stage; a different label still wins.
+            if (observed in board.stage_map and stored in board.stage_map
+                    and board.stage_map[observed] == board.stage_map[stored]):
+                row["stage"] = stored
+    store.sync_from_forge(snapshots)
     scopes = {}
     for row in snapshots:
         key = row["issue_key"]
@@ -252,17 +263,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     scopes[key] = [(".", "write")]
                 continue
         scopes[key] = ownership.issue_scopes(body)
-    board = getattr(forge, "kanban", None)
-    if board is not None:
-        stored_stages = {item.issue_key: item.stage for item in store.items()}
-        for row in snapshots:
-            observed = row.get("stage")
-            stored = stored_stages.get(row["issue_key"])
-            # Shared labels cannot identify a precise workflow stage; a different label still wins.
-            if (observed in board.stage_map and stored in board.stage_map
-                    and board.stage_map[observed] == board.stage_map[stored]):
-                row["stage"] = stored
-    store.sync_from_forge(snapshots)
     for key, declared in scopes.items():
         store.replace_file_ownership(key, declared)
     present = {row["issue_key"] for row in snapshots}
