@@ -130,6 +130,7 @@ class LogEntry(Base):
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"))
     at: Mapped[str] = mapped_column(String)
     message: Mapped[str] = mapped_column(String)
+    kind: Mapped[str] = mapped_column(String, default="", server_default="")
 
 
 class Resume(Base):
@@ -422,12 +423,12 @@ class Store:
             stmt = stmt.where(Decision.issue_key == issue_key)
         return self._all(stmt)
 
-    def add_log(self, issue_key: str, message: str, at: str) -> None:
+    def add_log(self, issue_key: str, message: str, at: str, kind: str = "") -> None:
         with self.session() as s:
-            s.add(LogEntry(issue_key=issue_key, at=at, message=message))
+            s.add(LogEntry(issue_key=issue_key, at=at, message=message, kind=kind))
 
-    def log_event(self, issue_key: str, message: str, at: str | None = None) -> None:
-        self.add_log(issue_key, message, at or self._stamp())
+    def log_event(self, issue_key: str, message: str, at: str | None = None, kind: str = "") -> None:
+        self.add_log(issue_key, message, at or self._stamp(), kind)
 
     def log(self, issue_key: str | None = None) -> list[LogEntry]:
         stmt = select(LogEntry).order_by(LogEntry.id)

@@ -12,7 +12,7 @@ from evals import test_m6_store_board as fixtures
 from evals import test_notify as notices
 import notify
 import pages
-import store
+import reconcile
 
 KEY, NOW = fixtures.KEY, fixtures.NOW
 
@@ -121,7 +121,7 @@ class NotificationRecoveryTest(unittest.TestCase):
         w = self.ws()
         w.db.upsert_item(notices.KEY)
         w.db.set_resume(notices.KEY, {"decision_comments": ["Decision #1 answered"]})
-        w.db.add_log(notices.KEY, "decision comment failed: offline", notices.NOW.isoformat(), kind=store.OP_DECISION_COMMENT)
+        w.db.add_log(notices.KEY, "decision comment failed: offline", notices.NOW.isoformat(), kind=reconcile.OP_DECISION_COMMENT)
         later = notices.NOW + timedelta(minutes=5)
         self.recovered(w, later)
         self.assertEqual(len(self.rows(w, later)), 1)
@@ -132,7 +132,7 @@ class NotificationRecoveryTest(unittest.TestCase):
         w = self.ws()
         w.db.upsert_item(notices.KEY)
         w.db.set_resume(notices.KEY, {"pending_stage": {"stage": "fix", "expected": "review"}})
-        w.db.add_log(notices.KEY, "stage write refused: write refused", notices.NOW.isoformat(), kind=store.OP_STAGE_WRITE)
+        w.db.add_log(notices.KEY, "stage write refused: write refused", notices.NOW.isoformat(), kind=reconcile.OP_STAGE_WRITE)
         later = notices.NOW + timedelta(minutes=5)
         self.recovered(w, later)
         self.assertEqual(len(self.rows(w, later)), 1)
@@ -148,19 +148,19 @@ class NotificationRecoveryTest(unittest.TestCase):
         return len(self.rows(w, later))
 
     def test_a_refused_merge_is_not_cleared_by_an_unrelated_later_run(self):
-        self.assertEqual(self.failure("merge refused: not ready", store.OP_MERGE_REFUSED), 1)
+        self.assertEqual(self.failure("merge refused: not ready", reconcile.OP_MERGE_REFUSED), 1)
 
     def test_a_worker_run_failure_is_cleared_by_a_later_success(self):
-        self.assertEqual(self.failure("worker fix attempt 1: failed", store.OP_WORKER_RUN), 0)
+        self.assertEqual(self.failure("worker fix attempt 1: failed", reconcile.OP_WORKER_RUN), 0)
 
     def test_a_failure_with_no_recorded_operation_stays_unrecovered(self):
         self.assertEqual(self.failure("dispatch failed: no slot"), 1)
 
     def test_recovery_follows_the_recorded_operation_not_the_wording(self):
         # Worded like a stage write, recorded as a worker run: a later success recovers it.
-        self.assertEqual(self.failure("stage write failed: label offline", store.OP_WORKER_RUN), 0)
+        self.assertEqual(self.failure("stage write failed: label offline", reconcile.OP_WORKER_RUN), 0)
         # Worded like a worker run, recorded as a stage write with none pending: it recovered.
-        self.assertEqual(self.failure("worker fix attempt 1: failed", store.OP_STAGE_WRITE), 0)
+        self.assertEqual(self.failure("worker fix attempt 1: failed", reconcile.OP_STAGE_WRITE), 0)
 
 
 if __name__ == "__main__":

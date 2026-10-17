@@ -68,6 +68,14 @@ class Redispatch:
     persona: str
     attempt: int
     reason: str
+    decision_id: int = 0
+
+
+@dataclass(frozen=True)
+class DecisionUpdate:
+    """One decision's store write, keyed by its id."""
+    decision: DecisionState
+    store_write: StoreDecisionWrite
 
 
 @dataclass(frozen=True)
@@ -206,7 +214,7 @@ def reverse(
     )
     target_stage = stage or nxt.gate
     redisp = (
-        Redispatch(nxt.issue_key, target_stage, persona, attempt, "decision reversed")
+        Redispatch(nxt.issue_key, target_stage, persona, attempt, "decision reversed", nxt.id)
         if target_stage
         else None
     )
@@ -246,7 +254,7 @@ def reroute(
         f"Decision #{nxt.id} ({nxt.gate}) re-routed to {cleaned_stage} by {nxt.decided_by}: {nxt.answer}",
     )
     redisp = (
-        Redispatch(nxt.issue_key, cleaned_stage, persona, attempt, f"decision re-routed to {cleaned_stage}")
+        Redispatch(nxt.issue_key, cleaned_stage, persona, attempt, f"decision re-routed to {cleaned_stage}", nxt.id)
         if cleaned_stage
         else None
     )
@@ -262,6 +270,31 @@ def refuse(record: Any, reason: str) -> Transition:
     """A write the decision needs was refused: it shows as blocked with the reason, keeping its re-route target."""
     nxt = replace(state_of(record), status="blocked", blocked_reason=reason)
     return Transition(decision=nxt, store_write=_write_for(nxt))
+
+
+def _update(records: Sequence[Any], decision_id: int | None, statuses: frozenset[str]) -> DecisionState | None:
+    """The one decision with this id, if it is in a state the update applies to; an absent id matches nothing."""
+    found = next((r for r in records if decision_id and getattr(r, "id", None) == decision_id), None)
+    prev = state_of(found) if found is not None else None
+    return prev if prev is not None and prev.status in statuses else None
+
+
+def block(records: Sequence[Any], decision_id: int | None, reason: str) -> DecisionUpdate | None:
+    """The decision a refused write or a spent retry limit holds up shows as blocked with the reason; it keeps its target."""
+    prev = _update(records, decision_id, frozenset({"re-routed", "reversed", "blocked"}))
+    if prev is None:
+        return None
+    nxt = refuse(prev, reason).decision
+    return DecisionUpdate(nxt, _write_for(nxt))
+
+
+def unblock(records: Sequence[Any], decision_id: int | None) -> DecisionUpdate | None:
+    """The decision whose block has cleared is restored."""
+    prev = _update(records, decision_id, frozenset({"blocked"}))
+    if prev is None:
+        return None
+    tr = meet_action(prev, None)
+    return DecisionUpdate(tr.decision, tr.store_write)
 
 
 def _reverse_target(dec: DecisionState, current_stage: str, history: Sequence[Any], policies: Policies,

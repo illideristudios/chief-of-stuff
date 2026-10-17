@@ -35,6 +35,7 @@ try:
     import store_access  # noqa: E402
 except ModuleNotFoundError:
     store_access = None  # type: ignore[assignment]
+from reconcile import OP_DECISION_COMMENT, OP_MERGE, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN  # noqa: E402
 from settings import Settings, SettingsError, load  # noqa: E402
 from workspace import ConfigError, read_config  # noqa: E402
 
@@ -136,17 +137,20 @@ def _parse_stamp(raw: str | None, zone, fallback: datetime) -> datetime:
     return fallback
 
 
-def _recovered(message: str, issue_key: str, stamp: datetime, db, segments: list, zone, now: datetime) -> bool:
-    """Whether the thing a log line reports has since come right. Only the failed operation's own state says so."""
-    state = db.resume(issue_key)
+def _recovered(entry, stamp: datetime, db, segments: list, zone, now: datetime) -> bool:
+    """Whether the operation a log line recorded has since come right. Only that operation's own state says so;
+    an operation nobody recorded is never taken for recovered."""
+    state = db.resume(entry.issue_key)
     state = state if isinstance(state, dict) else {}
-    lowered = message.casefold()
-    if lowered.startswith("stage write"):
+    if entry.kind == OP_STAGE_WRITE:
         return not state.get("pending_stage")
-    if "comment failed" in lowered:
+    if entry.kind == OP_DECISION_COMMENT:
         return not state.get("decision_comments")
-    # Anything else stopped a worker run, which a later successful run of the issue recovers.
-    return any(s.outcome == "done" and _parse_stamp(s.ended_at or s.started_at, zone, now) > stamp for s in segments)
+    if entry.kind == OP_WORKER_RUN:
+        return any(s.outcome == "done" and _parse_stamp(s.ended_at or s.started_at, zone, now) > stamp for s in segments)
+    if entry.kind == OP_MERGE_REFUSED:
+        return any(e.kind == OP_MERGE and e.id > entry.id for e in db.log(entry.issue_key))
+    return False
 
 
 def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
@@ -233,7 +237,7 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
             if entry.issue_key not in opened or not any(word in lowered for word in ("failed", "refused", "escalate: retry limit")):
                 continue
             stamp = _parse_stamp(entry.at, cfg.zone, now)
-            if _recovered(entry.message, entry.issue_key, stamp, db, segs_by_key.get(entry.issue_key, []), cfg.zone, now):
+            if _recovered(entry, stamp, db, segs_by_key.get(entry.issue_key, []), cfg.zone, now):
                 continue
             short = _short_key(entry.issue_key)
             what = f"{short} {entry.message}"

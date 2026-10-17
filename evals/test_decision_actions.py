@@ -86,7 +86,7 @@ class DecisionActionsTest(unittest.TestCase):
         self.assertEqual(tr.store_write.status, "reversed")
         self.assertEqual(tr.store_write.answer, "No, keep one pass")
         self.assertTrue(any(isinstance(a, da.ForgeComment) and "reversed" in a.body.casefold() for a in tr.actions))
-        self.assertEqual(tr.redispatch, da.Redispatch(KEY, "implement", "builder", 2, "decision reversed"))
+        self.assertEqual(tr.redispatch, da.Redispatch(KEY, "implement", "builder", 2, "decision reversed", 7))
 
     def test_reroute_transitions_to_rerouted_writes_stage_and_requests_redispatch(self) -> None:
         answered = make_decision(status="answered", answer="Yes", decided_by="user", answered_at=ANSWERED_AT)
@@ -106,7 +106,7 @@ class DecisionActionsTest(unittest.TestCase):
         self.assertEqual(tr.store_write.rerouted_to, "plan")
         self.assertIn(da.ForgeStageWrite(KEY, "plan", "review"), tr.actions)
         self.assertTrue(any(isinstance(a, da.ForgeComment) and "plan" in a.body for a in tr.actions))
-        self.assertEqual(tr.redispatch, da.Redispatch(KEY, "plan", "architect", 1, "decision re-routed to plan"))
+        self.assertEqual(tr.redispatch, da.Redispatch(KEY, "plan", "architect", 1, "decision re-routed to plan", 7))
 
     def test_answered_decision_meeting_blocked_action_becomes_blocked_and_never_closed(self) -> None:
         # #288: an answered decision whose issue is blocked carries the reason the action cannot run,
@@ -185,7 +185,7 @@ class RespondTest(unittest.TestCase):
 
     def test_reroute_picks_the_persona_and_next_attempt_of_the_target_stage(self):
         tr = self.respond("reroute", target="implement", history=[SEGMENT("implement", 1), SEGMENT("implement", 2)])
-        self.assertEqual(tr.redispatch, da.Redispatch(KEY, "implement", "implementer", 3, "decision re-routed to implement"))
+        self.assertEqual(tr.redispatch, da.Redispatch(KEY, "implement", "implementer", 3, "decision re-routed to implement", 7))
         self.assertIn(da.ForgeStageWrite(KEY, "implement", "review"), tr.actions)
 
     def test_reroute_refuses_unknown_stages_and_stages_with_no_worker(self):

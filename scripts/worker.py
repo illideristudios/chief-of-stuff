@@ -20,6 +20,7 @@ from settings import load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import Failure, Request, retry_at
+from reconcile import OP_WORKER_RUN
 
 _runners: dict[str, Any] = {}
 
@@ -315,4 +316,4 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             reason = f"unreadable worker run: {exc}"
         store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),
-                      now.isoformat())
+                      now.isoformat(), OP_WORKER_RUN)

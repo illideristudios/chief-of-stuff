@@ -313,7 +313,7 @@ class EngineTest(unittest.TestCase):
             with self.subTest(prior=prior):
                 forge = mock.Mock()
                 forge.write_stage.return_value = SimpleNamespace(ok=True, error="")
-                engine._write_stage(forge, mock.MagicMock(), KEY, "implement", prior)
+                engine._write_stage(forge, mock.MagicMock(), KEY, {"stage": "implement", "expected": prior})
                 self.assertIs(forge.write_stage.call_args.kwargs["initialize"], initialize)
 
     def test_stage_write_failure_is_logged_and_retried_before_planning(self):
@@ -597,7 +597,8 @@ class EngineTest(unittest.TestCase):
         dec = self.blocked_reroute()
         other = self.db.add_decision(KEY, "scope", "Conflicts?")
         self.db.answer_decision(other.id, "Yes", status="blocked", blocked_reason="merge conflicts", rerouted_to="review")
-        self.run_pass()
+        with mock.patch.object(engine.reconcile, "plan", return_value=[]):
+            self.run_pass()
         self.assertEqual(self.db.decision(dec.id).status, "re-routed")
         self.assertEqual((self.db.decision(other.id).status, self.db.decision(other.id).blocked_reason),
                          ("blocked", "merge conflicts"))
@@ -610,7 +611,8 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         self.assertEqual((self.db.decision(old.id).status, self.db.decision(dec.id).blocked_reason),
                          ("re-routed", "write refused"))
-        self.run_pass()
+        with mock.patch.object(engine.reconcile, "plan", return_value=[]):
+            self.run_pass()
         self.assertEqual(self.db.decision(dec.id).status, "blocked")
         self.assertNotIn("pending_stage", self.db.resume(KEY))
 

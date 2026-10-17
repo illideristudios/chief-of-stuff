@@ -224,7 +224,7 @@ class NotificationPanelTest(unittest.TestCase):
     def test_retry_stop_is_notified_and_a_recovered_failure_is_not(self):
         w = self.ws()
         w.db.upsert_item(notices.KEY)
-        w.db.add_log(notices.KEY, "escalate: retry limit reached for fix", notices.NOW.isoformat())
+        w.db.add_log(notices.KEY, "escalate: retry limit reached for fix", notices.NOW.isoformat(), kind=reconcile.OP_WORKER_RUN)
         self.assertEqual(len(self.rows(w)), 1)
         w.db.record_segment(notices.KEY, "fix", 1, notices.NOW.isoformat(), notices.NOW.isoformat(), "failed")
         later = notices.NOW + timedelta(minutes=5)

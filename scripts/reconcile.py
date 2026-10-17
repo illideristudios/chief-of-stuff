@@ -10,6 +10,10 @@ import decision_actions
 from model_port import RETRYABLE
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
 
+# The operation a log line reports. Notification recovery keys on it, never on the line's wording.
+OP_STAGE_WRITE, OP_DECISION_COMMENT, OP_WORKER_RUN = "stage_write", "decision_comment", "worker_run"
+OP_MERGE_REFUSED, OP_MERGE = "merge_refused", "merge"
+
 
 class WorkItem(Protocol):
     issue_key: str

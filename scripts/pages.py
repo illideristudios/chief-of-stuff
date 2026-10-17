@@ -440,7 +440,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if tr.redispatch is not None:
                         data["redispatch"] = asdict(tr.redispatch)
                     if stage_write is not None:  # the engine retries it until it lands
-                        data["pending_stage"] = {"stage": stage_write.stage, "expected": stage_write.previous_stage}
+                        data["pending_stage"] = {"stage": stage_write.stage, "expected": stage_write.previous_stage,
+                                                 "decision_id": tr.decision.id}
                     if bodies:  # the engine delivers them, so no forge call waits on this request
                         data["decision_comments"] = [*data.get("decision_comments", []), *bodies]
 
@@ -470,6 +471,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _write_reroute(db, forge, root, tr, write, now_iso):
         """Phase two: the forge write, outside any store transaction; its result is recorded in a short one."""
         import decision_actions
+        from reconcile import OP_STAGE_WRITE
 
         number = int(write.issue_key.rpartition("#")[2])
         try:
@@ -482,9 +484,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             error = str(exc)
         with db.transaction():
             if error:
-                refused = decision_actions.refuse(tr.decision, error)
-                db.update_decision(refused.store_write)
-                db.add_log(write.issue_key, f"stage write refused: {error}", now_iso)
+                refused = decision_actions.block(db.decisions(write.issue_key), tr.decision.id, error)
+                if refused is not None:
+                    db.update_decision(refused.store_write)
+                db.add_log(write.issue_key, f"stage write refused: {error}", now_iso, OP_STAGE_WRITE)
                 return 409, error
             db.upsert_item(write.issue_key, stage=write.stage)
             db.update_resume(write.issue_key, lambda data: data.pop("pending_stage", None))
