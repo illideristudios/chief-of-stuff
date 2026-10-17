@@ -1499,3 +1499,14 @@ class ForgeRetryabilityTest(unittest.TestCase):
         with self.assertRaises(forge.ForgeError) as raised:
             source.closing_request("github:example/project#1", [])
         self.assertFalse(raised.exception.retryable)
+
+    def test_engine_login_comes_from_the_authenticated_forge_user(self):
+        from unittest import mock
+        gh = mock.Mock(return_value=(0, '{"login":"engine"}', ""))
+        source = forge.Forge(backlog.GitHubBacklog("example/project"), approver="human", gh=gh)
+        self.assertEqual(source.login(), "engine")
+        gh.assert_called_once_with(["api", "user"])
+        home = backlog.Backlog("https://gitlab.example", "group/project")
+        with mock.patch.object(backlog, "_call", return_value=({"username": "engine"}, {}, "")) as call:
+            self.assertEqual(forge.Forge(home, token="test-token").login(), "engine")
+        self.assertEqual(call.call_args.args[:2], ("GET", "https://gitlab.example/api/v4/user"))

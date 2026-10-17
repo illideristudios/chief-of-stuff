@@ -208,8 +208,16 @@ class ReviewPanelTest(unittest.TestCase):
         self.review(1, "critic", [finding(title) for title, _ in dispositions])
         self.review(2, "security")
         keys = [f["finding_key"] for f in reconcile.review_findings(self.db.reports(KEY), self.db.segments(KEY))]
+        asked = self.keys()
+        token = reconcile.request_token("head", asked)
+        self.requests = {KEY: {token: asked}}
         self.replies = {KEY: reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(),
-                        dict(zip(keys, [d for _, d in dispositions])))}
+                        dict(zip(keys, [d for _, d in dispositions])), token)}
+
+    def test_request_tokens_name_sets_not_order_or_duplicate_reports(self):
+        one, two = {"finding_key": "1/1/a"}, {"finding_key": "1/2/b"}
+        self.assertEqual(reconcile.request_token("head", [one, two]),
+                         reconcile.request_token("head", [two, one, one]))
 
     def test_the_architect_decides_which_findings_get_a_fix(self):
         self.consulted(("Keep me", "keep"), ("Fix me", "fix"), ("Not real", "discard"), ("Later", "file"))
@@ -272,7 +280,7 @@ class ReviewPanelTest(unittest.TestCase):
         action = self.plan()[0]
         self.assertIsInstance(action, reconcile.Consult)
         self.assertEqual((action.head, [f["title"] for f in action.findings]), ("head", ["Two"]))
-        self.requests = {KEY: [asked, reconcile.request_token("head", self.keys())]}
+        self.requests = {KEY: {asked: [], reconcile.request_token("head", self.keys()): self.keys()}}
         self.assertIsInstance(self.plan()[0], reconcile.Wait)
 
     def test_a_rework_stage_whose_head_moved_keeps_its_dispatch(self):
@@ -346,14 +354,15 @@ class ReviewPanelTest(unittest.TestCase):
         action, = self.plan()
         self.assertEqual(action.finding["title"], "Fix me")
         self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="produced")
-        self.requests = {KEY: [reconcile.request_token("head", [])]}
-        nxt = self.plan(head="produced")[0]
-        self.assertIsInstance(nxt, reconcile.Consult)
-        self.assertEqual((nxt.head, list(nxt.findings)), ("produced", []))
-        self.replies[KEY] = reconcile.ArchitectReply("produced", "CHANGES", NOW.isoformat(), self.replies[KEY].dispositions)
-        self.requests = {KEY: [reconcile.request_token("head", []), reconcile.request_token("produced", [])]}
-        nxt = self.plan(head="produced")[0]
+        nxt, = self.plan(head="produced")
         self.assertEqual((nxt.stage, nxt.finding["title"]), ("fix", "Also"))
+        self.segment("fix", 2, finding_key=nxt.finding_key, reviewed_head="produced")
+        self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan(head="produced")))
+        self.review(3, "critic", head="produced", round=2)
+        self.review(4, "security", head="produced", round=2)
+        for attempt in (3, 4):
+            self.db.record_segment(KEY, "review", attempt, NOW.isoformat())
+        self.assertEqual(self.plan(head="produced"), [reconcile.Consult(KEY, "produced", [])])
 
     def test_approval_of_an_older_head_requests_only_the_new_head(self):
         self.consulted(("Keep me", "keep"))

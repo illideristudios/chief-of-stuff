@@ -75,11 +75,14 @@ class FakeForge:
     def closing_request(self, issue_key, requests=None):
         return SimpleNamespace(number=10, verdict="ready", approval="", head=tf.tma.HEAD)
 
+    def login(self):
+        return "engine"
+
     def change_comments(self, number):
         return list(self.comments)
 
     def comment_change(self, number, body):
-        self.comments.append(SimpleNamespace(body=body, time=NOW.isoformat()))
+        self.comments.append(SimpleNamespace(author="engine", body=body, time=NOW.isoformat()))
 
     def issue(self, number):
         row = next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))
@@ -132,7 +135,7 @@ class PlanningInputsTest(unittest.TestCase):
             self.assertEqual(inputs["heads"], {KEY: "h"})
             forge.change_comments.assert_called_once()
             self.assertEqual(inputs["architect_replies"], {})
-            self.assertEqual(db.log(KEY), [])
+            self.assertEqual([r.message for r in db.log(KEY)], ["architect comments unreadable: rate limit"])
 
 
 class EngineTest(unittest.TestCase):
@@ -917,10 +920,11 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.finish("review")
         self.findings()
+        self.assertIsInstance(self.run_pass()[0], reconcile.Consult)
         self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=self.now.isoformat()))
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
 
-    def test_latest_equal_time_reply_wins_and_request_survives_lost_resume(self):
+    def test_unstored_comments_cannot_suppress_a_real_request(self):
         self.forge.rows[0]["stage"] = "review"
         self.db.sync_from_forge(self.forge.rows)
         self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(),
@@ -930,8 +934,9 @@ class EngineTest(unittest.TestCase):
         self.forge.comments = [SimpleNamespace(body="Architect review requested: " + tf.tma.HEAD, time=NOW.isoformat()),
                                SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=NOW.isoformat()),
                                SimpleNamespace(body="Architect: CHANGES " + tf.tma.HEAD, time=NOW.isoformat())]
-        self.assertEqual(self.run_pass()[0], reconcile.Wait(KEY, "architect requested changes"))
-        self.assertEqual(len(self.forge.comments), 3)
+        self.assertIsInstance(self.run_pass()[0], reconcile.Consult)
+        self.assertEqual(len(self.forge.comments), 4)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "waiting for the architect")])
         self.assertEqual(self.forge.merges, [])
 
 
