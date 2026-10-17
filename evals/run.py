@@ -1068,15 +1068,17 @@ def write_verdict(out: Path, case: str, arm: str, model: str, run_no: int,
     Grading is a pure function of this directory and the verdicts could be rebuilt from it, which is
     a recovery route and not a reason to leave them unwritten.
 
-    `passed` is None when a harness error stopped the run, never False: a case that never ran is not
-    a case that failed, which is the 0.9.0 lesson that cost fourteen false regressions.
+    A failed grader wins over unreached turns. Otherwise `passed` is None when execution was
+    incomplete: a case that never ran is not a case that failed.
     """
     out.mkdir(parents=True, exist_ok=True)
     path = out / "verdict.json"
+    passed = False if any(p is False for _, p, _ in results) else (
+        None if error or any(p is None for _, p, _ in results) else True)
     path.write_text(json.dumps({
         "case": case, "arm": arm, "model": model, "runtime": runtime, "run": run_no, "meta": meta,
         "error": error,
-        "passed": None if error or any(p is None for _, p, _ in results) else all(p for _, p, _ in results),
+        "passed": passed,
         "graders": [{"name": n, "passed": p, "why": w} for n, p, w in results],
     }, indent=2) + "\n")
     return path
@@ -1782,20 +1784,24 @@ def main(argv: list[str]) -> int:
         # A case that never ran is not a case that failed. One network outage killed fourteen of the
         # fifty-four in the 0.9.0 sweep — no grader ran in any of them — and the log said RED for all
         # fourteen, which reads as fourteen regressions to look for.
-        if unmeasured:
+        if not case_pass:
+            verdict, key = "RED", "red"
+            any_fail |= args.arm == "agent"
+        elif unmeasured:
             verdict, key = "UNMEASURED (turn or grader not reached)", "unmeasured"
         elif args.arm == "baseline":
-            verdict, key = ("NON-DISCRIMINATING (baseline passes)", "green") if case_pass else ("RED", "red")
+            verdict, key = "NON-DISCRIMINATING (baseline passes)", "green"
         else:
-            verdict, key = ("GREEN", "green") if case_pass else ("RED", "red")
-            any_fail |= not case_pass
+            verdict, key = "GREEN", "green"
         tally[key] += 1
         print(f"=> {case.name}: {verdict}")
     print(f"\n{len(cases)} case(s): {tally['green']} green, {tally['red']} red, {tally['unmeasured']} unmeasured")
     print(f"results: {EVALS / 'results' / stamp}")
+    if any_fail:
+        return 1
     if harness_error:
         return 2
-    return 1 if any_fail else 0
+    return 0
 
 
 if __name__ == "__main__":

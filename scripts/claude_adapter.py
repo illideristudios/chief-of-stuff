@@ -255,13 +255,13 @@ def drive_turns(request: Request, prompts: list[str | None], waits: list[float],
                     wait_deadline = min(deadline, time.monotonic() + wait) if prompt is None else deadline
                     events = []
                     while True:
-                        while b"\n" not in pending:
+                        if b"\n" not in pending:
                             remaining = (deadline if events else wait_deadline) - time.monotonic()
                             if remaining <= 0 or not selector.select(max(0, remaining)):
                                 if time.monotonic() >= deadline:
                                     timed_out = True
                                     return Failure("unknown", f"no answer within {request.timeout_s}s")
-                                return turns  # idle wait expired: no turn to grade
+                                break  # idle wait expired: no turn to grade
                             chunk = os.read(process.stdout.fileno(), 65536)
                             if not chunk:
                                 process.wait(timeout=max(0.01, deadline - time.monotonic()))
@@ -271,9 +271,12 @@ def drive_turns(request: Request, prompts: list[str | None], waits: list[float],
                                 if process.returncode or events:
                                     return classify(process.returncode, json.dumps(events[-1]) if events else "",
                                                     diagnostic, keep_events=True)
-                                return turns
+                                if prompt is not None:
+                                    return Failure("unknown", "exit 0 with no answer")
+                                break
                             raw.extend(chunk)
                             pending.extend(chunk)
+                            continue
                         line, _, rest = pending.partition(b"\n")
                         pending[:] = rest
                         try:
@@ -291,6 +294,8 @@ def drive_turns(request: Request, prompts: list[str | None], waits: list[float],
                             if snapshot(len(turns)) is False:
                                 return Failure("unknown", "fixture snapshot failed; see snapshot-errors.jsonl")
                             break
+                    if not events or events[-1].get("type") != "result":
+                        break
             except (BrokenPipeError, subprocess.TimeoutExpired) as exc:
                 return Failure("unknown", str(exc))
             finally:
@@ -300,19 +305,29 @@ def drive_turns(request: Request, prompts: list[str | None], waits: list[float],
                 except BrokenPipeError:
                     pass
                 process.stdin = None
+                natural_exit = True
                 try:
                     tail, _ = process.communicate(timeout=0.2)
                 except subprocess.TimeoutExpired:
+                    natural_exit = False
                     tail, _ = _kill_and_drain(process)
                 except BaseException:
                     _kill_and_drain(process)
                     raise
                 raw.extend(tail.encode() if isinstance(tail, str) else tail)
+                errors.flush()
+                errors.seek(0)
+                diagnostic = errors.read().decode(errors="replace")
     finally:
         (artifacts / "stdout").write_bytes(raw)
         if process is not None:
             (artifacts / "exit.json").write_text(json.dumps({"exit_code": process.returncode,
                                                             "timed_out": timed_out}))
+    if natural_exit and turns:
+        final = classify(process.returncode, "\n".join(json.dumps(e) for e in turns[-1][0]),
+                         diagnostic, keep_events=True)
+        if isinstance(final, Failure):
+            return final
     return turns
 
 

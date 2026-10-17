@@ -896,7 +896,7 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                 self.assertLess(elapsed, 2)
 
     def test_stream_driver_rejects_empty_prompted_turn_and_natural_exit_failure(self):
-        for mode, expected in (("empty", "unknown"), ("exit", "unknown"), ("quota", "quota"),
+        for mode, expected in (("empty", "unknown"), ("exit", "error"), ("quota", "quota"),
                                ("success", None), ("cleanup", None)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
                 base = Path(d); cli = base / "claude"
