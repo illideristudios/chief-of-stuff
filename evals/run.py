@@ -1047,8 +1047,19 @@ def snapshot_plugin(dest: Path) -> Path:
     return dest
 
 
+def snapshot_fixture(work: Path, target: Path, out: Path) -> bool:
+    """A diagnostic snapshot must never replace the outcome or abort the remaining sweep."""
+    try:
+        shutil.copytree(work, target, dirs_exist_ok=True)
+    except OSError as exc:
+        with (out / "snapshot-errors.jsonl").open("a") as log:
+            log.write(json.dumps({"target": target.name, "error": str(exc)}) + "\n")
+        return False
+    return True
+
+
 def write_verdict(out: Path, case: str, arm: str, model: str, run_no: int,
-                  results: list[tuple[str, bool, str]], error: str | None, meta: str,
+                  results: list[tuple[str, bool | None, str]], error: str | None, meta: str,
                   runtime: str = "claude") -> Path:
     """What the run decided, beside the inputs it decided from. Finding 114b.
 
@@ -1065,7 +1076,7 @@ def write_verdict(out: Path, case: str, arm: str, model: str, run_no: int,
     path.write_text(json.dumps({
         "case": case, "arm": arm, "model": model, "runtime": runtime, "run": run_no, "meta": meta,
         "error": error,
-        "passed": None if error else all(p for _, p, _ in results),
+        "passed": None if error or any(p is None for _, p, _ in results) else all(p for _, p, _ in results),
         "graders": [{"name": n, "passed": p, "why": w} for n, p, w in results],
     }, indent=2) + "\n")
     return path
@@ -1268,7 +1279,7 @@ def has_notification(events: list[dict[str, Any]]) -> bool:
     return any(e.get("type") == "system" and e.get("subtype") == "task_notification" for e in events)
 
 
-def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, calls: list[dict[str, Any]]) -> list[tuple[str, bool, str]]:
+def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, calls: list[dict[str, Any]]) -> list[tuple[str, bool | None, str]]:
     """Grade each turn spec against the turn it belongs to.
 
     A prompt spec takes the next turn. A wait spec (no prompt) takes the turn that carried the
@@ -1281,7 +1292,7 @@ def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, cal
         if "prompt" in turn_spec:
             ti += 1
             turn_index = ti if ti < len(turns) else None
-        elif ti >= 0 and has_notification(turns[ti].events):
+        elif 0 <= ti < len(turns) and has_notification(turns[ti].events):
             turn_index = ti
         elif ti + 1 < len(turns):
             ti += 1
@@ -1289,7 +1300,7 @@ def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, cal
         else:
             turn_index = None
         if turn_index is None:
-            results.append((f"T{n}: ran", False, "turn not reached"))
+            results.append((f"T{n}: ran", None, "turn not reached"))
             continue
         turn = turns[turn_index]
         snap = turn_index + 1
@@ -1471,7 +1482,7 @@ def eval_environment(out: Path, calls_log: Path, tz: str, root: Path | None = No
 
 
 def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = None,
-            runtime: str = "claude", effort: str | None = None) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
+            runtime: str = "claude", effort: str | None = None) -> tuple[list[tuple[str, bool | None, str]], str | None, dict[str, Any]]:
     tz = case.spec.get("tz", "America/Chicago")
     ctx = context(tz, datetime.now(ZoneInfo(tz)))
     out.mkdir(parents=True, exist_ok=True)
@@ -1551,13 +1562,15 @@ def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = Non
         t_end = datetime.now(ZoneInfo(tz))
     finally:
         try:
-            shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
+            snapshot_ok = snapshot_fixture(work, out / "fixture", out)
         finally:
             stop_pages(work, int(ctx["pages_port"]))
             shutil.rmtree(work, ignore_errors=True)
             stop_server(health)
             stop_server(taken)  # a daemon thread would otherwise outlive this case and serve the next one
 
+    if not snapshot_ok:
+        return [], "fixture snapshot failed; see snapshot-errors.jsonl", {"runtime": runtime}
     stream = (load_stream(out / "stream.jsonl") if runtime == "claude" else
               parse_host_stream((out / "stream.jsonl").read_text(), runtime, model))
     meta = {
@@ -1589,7 +1602,7 @@ def run_host_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: 
                    env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str,
                    *, runtime: str, root: Path, effort: str | None = None,
                    case_root: Path = Path("."), ctx: dict[str, str] | None = None
-                   ) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
+                   ) -> tuple[list[tuple[str, bool | None, str]], str | None, dict[str, Any]]:
     """Drive prompted turns through the host's explicit conversation ID."""
     completed: list[tuple[Stream, datetime, datetime]] = []
     session_id = None
@@ -1644,8 +1657,8 @@ def run_host_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: 
                             "denials": sum(len(s.denied_ids) for s, _, _ in completed)}
 
 
-def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path, env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str, case_root: Path = Path("."), ctx: dict[str, str] | None = None, root: Path | None = None, effort: str | None = None) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
-    """Prompted turns are completed adapter calls, resumed by explicit session ID."""
+def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path, env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str, case_root: Path = Path("."), ctx: dict[str, str] | None = None, root: Path | None = None, effort: str | None = None) -> tuple[list[tuple[str, bool | None, str]], str | None, dict[str, Any]]:
+    """Completed calls resume prompted conversations; wait cases keep one adapter stream alive."""
     owned_sessions: set[str] = set()
     try:
         turns: list[Turn] = []
@@ -1653,28 +1666,43 @@ def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path,
         request = replace(request, session_id=str(uuid.uuid4()))
         options = claude_options(spec, mcp_config, root)
         deadline = time.monotonic() + request.timeout_s
-        for n, turn_spec in enumerate(spec["turns"], 1):
-            if "prompt" not in turn_spec:
-                # Completed calls already contain inline background notifications. Missing notifications
-                # are graded as "turn not reached", never as an unmeasured harness error.
-                continue
-            if "peers" in turn_spec:
-                (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return [], f"timeout before claude turn {n}", {"turns_reached": len(turns)}
-            request = replace(request, prompt=turn_spec["prompt"], timeout_s=remaining)
-            started = datetime.now(ZoneInfo(tz))
+        if any("prompt" not in t for t in spec["turns"]):
+            def before_turn(n):
+                turn_spec = spec["turns"][n - 1]
+                if "peers" in turn_spec:
+                    (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
             owned_sessions.add(request.session_id)
-            got = call_claude(request, options, env, out, suffix=f"-turn{n}")
-            if isinstance(got, Failure):
-                return [], f"claude turn {n} {got.kind}: {got.message}", {"turns_reached": len(turns)}
-            turns.append(Turn(got.events or [], started, datetime.now(ZoneInfo(tz))))
-            shutil.copytree(work, out / f"fixture-turn{len(turns)}", dirs_exist_ok=True)
-            if n < len(spec["turns"]):
-                if not got.session_id:
-                    return [], f"claude returned no conversation ID after turn {n}", {"turns_reached": len(turns)}
-                request = replace(request, session_id=got.session_id, resume=True)
+            completed = claude_adapter.drive_turns(request,
+                [t.get("prompt") for t in spec["turns"]],
+                [t.get("wait_seconds", spec.get("wait_seconds", 180)) for t in spec["turns"]],
+                extra_args=options, env=env, artifacts=out / "claude",
+                snapshot=lambda n: snapshot_fixture(work, out / f"fixture-turn{n}", out), before_turn=before_turn)
+            command = out / "claude/command.json"
+            if command.exists():
+                shutil.copyfile(command, out / "command.json")
+            if isinstance(completed, Failure):
+                return [], f"claude {completed.kind}: {completed.message}", {"runtime": "claude"}
+            turns = [Turn(*turn) for turn in completed]
+        else:
+            for n, turn_spec in enumerate(spec["turns"], 1):
+                if "peers" in turn_spec:
+                    (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return [], f"timeout before claude turn {n}", {"turns_reached": len(turns)}
+                request = replace(request, prompt=turn_spec["prompt"], timeout_s=remaining)
+                started = datetime.now(ZoneInfo(tz))
+                owned_sessions.add(request.session_id)
+                got = call_claude(request, options, env, out, suffix=f"-turn{n}")
+                if isinstance(got, Failure):
+                    return [], f"claude turn {n} {got.kind}: {got.message}", {"turns_reached": len(turns)}
+                turns.append(Turn(got.events or [], started, datetime.now(ZoneInfo(tz))))
+                if not snapshot_fixture(work, out / f"fixture-turn{len(turns)}", out):
+                    return [], "fixture snapshot failed; see snapshot-errors.jsonl", {"turns_reached": len(turns)}
+                if n < len(spec["turns"]):
+                    if not got.session_id:
+                        return [], f"claude returned no conversation ID after turn {n}", {"turns_reached": len(turns)}
+                    request = replace(request, session_id=got.session_id, resume=True)
         (out / "stream.jsonl").write_text("".join(json.dumps(e) + "\n" for t in turns for e in t.events))
         streams = [parse_stream(t.events) for t in turns]
         meta = {
@@ -1686,7 +1714,7 @@ def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path,
             return [], "claude produced no result for turn 1", meta
         ok, detail = check_arm(streams[0].init, arm, needs_calendar="calendar" in spec, model=model,
                                needs_peers="peers" in spec,
-                               agent_flag_used=any(claude_agent_flag(out, f"-turn{n}")
+                               agent_flag_used=claude_agent_flag(out) or any(claude_agent_flag(out, f"-turn{n}")
                                                    for n in range(1, len(spec["turns"]) + 1)))
         if not ok:
             return [], f"arm check: {detail}", meta
@@ -1694,7 +1722,7 @@ def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path,
         return grade_turns(spec, turns, tz, out, calls), None, meta
     finally:
         try:
-            shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
+            snapshot_fixture(work, out / "fixture", out)
         finally:
             for session_id in owned_sessions:
                 claude_adapter.forget_session(session_id, env)
@@ -1746,13 +1774,16 @@ def main(argv: list[str]) -> int:
                 print(f"  HARNESS ERROR  {error}")
                 continue
             for name, passed, why in results:
-                print(f"  {'PASS' if passed else 'FAIL'}  {name}  — {why}")
-                case_pass &= passed
+                print(f"  {'UNREACHED' if passed is None else 'PASS' if passed else 'FAIL'}  {name}  — {why}")
+                if passed is None:
+                    unmeasured = harness_error = True
+                else:
+                    case_pass &= passed
         # A case that never ran is not a case that failed. One network outage killed fourteen of the
         # fifty-four in the 0.9.0 sweep — no grader ran in any of them — and the log said RED for all
         # fourteen, which reads as fourteen regressions to look for.
         if unmeasured:
-            verdict, key = "UNMEASURED (no grader ran)", "unmeasured"
+            verdict, key = "UNMEASURED (turn or grader not reached)", "unmeasured"
         elif args.arm == "baseline":
             verdict, key = ("NON-DISCRIMINATING (baseline passes)", "green") if case_pass else ("RED", "red")
         else:

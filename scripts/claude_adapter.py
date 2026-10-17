@@ -10,11 +10,14 @@ from __future__ import annotations
 
 import json
 import os
+import selectors
 import signal
 import shutil
 import subprocess
 import sys
+import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 
 import runtimes
@@ -56,7 +59,7 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
         with (run_dir / "runner.stderr").open("w") as errors:
             return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
                                      request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                    stderr=errors, env=clean_env(), start_new_session=True)
+                                    stderr=errors, env=model_env(), start_new_session=True)
     except Exception:
         # No runner exists to produce started/exit evidence; allow this attempt to be retried.
         (run_dir / "command.json").unlink(missing_ok=True)
@@ -90,7 +93,7 @@ def _worker(run_dir: Path) -> None:
     prepared = json.loads((run_dir / "command.json").read_text())
     with (run_dir / "stdout").open("w") as stdout, (run_dir / "stderr").open("w") as stderr:
         try:
-            process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env={**clean_env(), **prepared.get("env", {})},
+            process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env=model_env({**os.environ, **prepared.get("env", {})}),
                                        stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
             _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
                                              "session_id": prepared["session_id"]})
@@ -101,23 +104,50 @@ def _worker(run_dir: Path) -> None:
     _write(run_dir, "exit.json", {"exit_code": code})
 
 
-# Only the model adapter receives provider credentials; shell setup and worker launch keep their
-# narrower environment. An unrelated secret must not become visible to a model subprocess.
+# Only the model adapter receives provider credentials; shell setup keeps its narrower
+# environment. An unrelated secret must not become visible to a model subprocess.
 MODEL_ENV = {
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
-    "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
+    "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
     "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_CONFIG_FILE", "AWS_SHARED_CREDENTIALS_FILE",
     "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_ROLE_ARN", "AWS_ROLE_SESSION_NAME",
     "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
     "AWS_CONTAINER_AUTHORIZATION_TOKEN", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
-    "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS",
+    "ANTHROPIC_VERTEX_BASE_URL", "ANTHROPIC_VERTEX_PROJECT_ID", "CLOUD_ML_REGION", "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_QUOTA_PROJECT", "CLOUDSDK_CONFIG",
+    "ANTHROPIC_FOUNDRY_AUTH_TOKEN", "AZURE_CLIENT_ID", "AZURE_CLIENT_SECRET", "AZURE_TENANT_ID",
+    "AZURE_FEDERATED_TOKEN_FILE", "AZURE_AUTHORITY_HOST",
     "ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_FOUNDRY_BASE_URL", "ANTHROPIC_FOUNDRY_RESOURCE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "all_proxy", "no_proxy",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "REQUESTS_CA_BUNDLE", "NODE_EXTRA_CA_CERTS", "NODE_USE_SYSTEM_CA",
 }
+
+
+def model_env(source: dict[str, str] | None = None) -> dict[str, str]:
+    source = os.environ if source is None else source
+    return {**clean_env(source), **{k: v for k, v in source.items() if k in MODEL_ENV}}
+
+
+def _kill_and_drain(process: subprocess.Popen) -> tuple[str, str]:
+    """Reap the leader and bound pipe draining even if a descendant escaped its group."""
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    try:
+        return process.communicate(timeout=1)
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired carries all bytes collected so far, including the first communicate.
+        for pipe in (process.stdout, process.stderr):
+            if pipe is not None:
+                pipe.close()
+        process.wait(timeout=1)
+        def text(value):
+            return value.decode(errors="replace") if isinstance(value, bytes) else value or ""
+        return text(exc.output), text(exc.stderr)
 
 
 def forget_session(session_id: str, env: dict[str, str]) -> None:
@@ -147,7 +177,7 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
     if request.session_id and not request.resume and not _is_uuid(request.session_id):
         return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
     source = os.environ if env is None else env
-    environment = {**clean_env(source), **{k: v for k, v in source.items() if k in MODEL_ENV}}
+    environment = model_env(source)
     try:
         prepared = command(request, claude_as_profile, extra_args=extra_args,
                            path_prefix=source.get("CHIEF_OF_STUFF_PATH_PREFIX", ""))
@@ -161,7 +191,7 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
     # even when its leader already exited and a descendant is keeping a pipe open.
     try:
         process = subprocess.Popen(prepared, env=environment, cwd=request.cwd, stdin=subprocess.DEVNULL,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, errors="replace", start_new_session=True)
     except OSError as exc:
         return Failure("unknown", f"could not launch: {exc}")
     timed_out = False
@@ -169,11 +199,10 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
         stdout, stderr = process.communicate(timeout=request.timeout_s)
     except subprocess.TimeoutExpired:
         timed_out = True
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        stdout, stderr = process.communicate()
+        stdout, stderr = _kill_and_drain(process)
+    except BaseException:
+        _kill_and_drain(process)
+        raise
     if artifacts is not None:
         (artifacts / "stdout").write_text(stdout)
         (artifacts / "stderr").write_text(stderr)
@@ -181,6 +210,110 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
     if timed_out:
         return Failure("unknown", f"no answer within {request.timeout_s}s")
     return classify(process.returncode, stdout, stderr, keep_events=request.keep_events)
+
+
+def drive_turns(request: Request, prompts: list[str | None], waits: list[float], *,
+                extra_args: tuple[str, ...] = (), env: dict[str, str], artifacts: Path,
+                snapshot, before_turn) -> list[tuple[list[dict], datetime, datetime]] | Failure:
+    """Eval stream input: wait turns send nothing and keep the same CLI alive for notifications."""
+    deadline = time.monotonic() + request.timeout_s
+    try:
+        prepared = command(request, extra_args=(*extra_args, "--input-format", "stream-json"),
+                           path_prefix=env.get("CHIEF_OF_STUFF_PATH_PREFIX", ""))
+    except ShellError as exc:
+        return Failure("missing_program", str(exc))
+    # Stream input has no positional prompt; command's final empty prompt is deliberately omitted.
+    prepared.pop()
+    environment = model_env(env)
+    artifacts.mkdir(parents=True, exist_ok=True)
+    (artifacts / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
+                                                       "env_keys": sorted(environment)}, indent=1))
+    turns = []
+    timed_out = False
+    raw = bytearray()
+    pending = bytearray()
+    process = None
+    try:
+        with (artifacts / "stderr").open("w+b") as errors, selectors.DefaultSelector() as selector:
+            try:
+                process = subprocess.Popen(prepared, cwd=request.cwd, env=environment, stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
+            except OSError as exc:
+                return Failure("unknown", f"could not launch: {exc}")
+            selector.register(process.stdout, selectors.EVENT_READ)
+            try:
+                for n, (prompt, wait) in enumerate(zip(prompts, waits), 1):
+                    if prompt is None and turns and any(e.get("type") == "system" and
+                            e.get("subtype") == "task_notification" for e in turns[-1][0]):
+                        continue
+                    before_turn(n)
+                    started = datetime.now().astimezone()
+                    if prompt is not None:
+                        process.stdin.write((json.dumps({"type": "user", "message": {
+                            "role": "user", "content": prompt}}) + "\n").encode())
+                        process.stdin.flush()
+                    wait_deadline = min(deadline, time.monotonic() + wait) if prompt is None else deadline
+                    events = []
+                    while True:
+                        while b"\n" not in pending:
+                            remaining = (deadline if events else wait_deadline) - time.monotonic()
+                            if remaining <= 0 or not selector.select(max(0, remaining)):
+                                if time.monotonic() >= deadline:
+                                    timed_out = True
+                                    return Failure("unknown", f"no answer within {request.timeout_s}s")
+                                return turns  # idle wait expired: no turn to grade
+                            chunk = os.read(process.stdout.fileno(), 65536)
+                            if not chunk:
+                                process.wait(timeout=max(0.01, deadline - time.monotonic()))
+                                errors.flush()
+                                errors.seek(0)
+                                diagnostic = errors.read().decode(errors="replace")
+                                if process.returncode or events:
+                                    return classify(process.returncode, json.dumps(events[-1]) if events else "",
+                                                    diagnostic, keep_events=True)
+                                return turns
+                            raw.extend(chunk)
+                            pending.extend(chunk)
+                        line, _, rest = pending.partition(b"\n")
+                        pending[:] = rest
+                        try:
+                            event = json.loads(line.decode(errors="replace"))
+                        except ValueError:
+                            continue
+                        if not isinstance(event, dict):
+                            continue
+                        events.append(event)
+                        if event.get("type") == "result":
+                            got = classify(0, "\n".join(json.dumps(e) for e in events), "", keep_events=True)
+                            if isinstance(got, Failure):
+                                return got
+                            turns.append((events, started, datetime.now().astimezone()))
+                            if snapshot(len(turns)) is False:
+                                return Failure("unknown", "fixture snapshot failed; see snapshot-errors.jsonl")
+                            break
+            except (BrokenPipeError, subprocess.TimeoutExpired) as exc:
+                return Failure("unknown", str(exc))
+            finally:
+                # Closing stdin permits an ordinary exit. Drain/cleanup is always bounded.
+                try:
+                    process.stdin.close()
+                except BrokenPipeError:
+                    pass
+                process.stdin = None
+                try:
+                    tail, _ = process.communicate(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    tail, _ = _kill_and_drain(process)
+                except BaseException:
+                    _kill_and_drain(process)
+                    raise
+                raw.extend(tail.encode() if isinstance(tail, str) else tail)
+    finally:
+        (artifacts / "stdout").write_bytes(raw)
+        if process is not None:
+            (artifacts / "exit.json").write_text(json.dumps({"exit_code": process.returncode,
+                                                            "timed_out": timed_out}))
+    return turns
 
 
 def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
