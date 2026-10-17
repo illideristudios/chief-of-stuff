@@ -176,6 +176,9 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
                          [reconcile.Wait(KEY, "quota reset pending")])
         self.assertEqual(self.plan(quota_resets={KEY: later}), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.plan(replace(Item(), stage="review", review_state="approved", merge_state="ready"),
+                                   [Segment("review")], {}, quota_resets={KEY: later}),
+                         [reconcile.Merge(KEY)])
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
         self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
                          [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])

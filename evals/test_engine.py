@@ -1497,7 +1497,7 @@ class MainTest(unittest.TestCase):
         newer = Path("/installs/versions/2.0.0-abc")
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
-             mock.patch.object(engine.supervisor, "current_release", return_value=newer), \
+             mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
              mock.patch.object(engine.os, "execv") as execv, \
              mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("update ignored")]) as sleep:
             self.assertEqual(engine.main(["--root", str(self.root), "--interval", "5"]), 0)
@@ -1505,6 +1505,28 @@ class MainTest(unittest.TestCase):
         sleep.assert_called_once_with(5.0)
         execv.assert_called_once_with(sys.executable, [
             sys.executable, str(newer / "chief_of_stuff.py"), "engine", "--root", str(self.root), "--interval", "5.0"])
+
+    def test_stale_launch_hands_off_before_opening_the_workspace_or_migrating(self):
+        import pages
+        install = self.root / "install"
+        old, current = install / "versions/old", install / "versions/current"
+        old.mkdir(parents=True)
+        current.mkdir()
+        (current / "chief_of_stuff.py").touch()
+        (install / "current").symlink_to(current)
+        with mock.patch.object(supervisor, "RELEASE", old), \
+             mock.patch.object(engine.startup, "workspace_forge") as workspace, \
+             mock.patch.object(engine.store_access, "migrated_store", side_effect=RuntimeError("unknown revision")) as migrated, \
+             mock.patch.object(pages, "supervise") as serving, \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.os, "execv") as execv:
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        workspace.assert_not_called()
+        migrated.assert_not_called()
+        serving.assert_not_called()
+        passed.assert_not_called()
+        execv.assert_called_once_with(sys.executable, [
+            sys.executable, str(current / "chief_of_stuff.py"), "engine", "--root", str(self.root), "--interval", "60"])
 
     def test_loop_keeps_running_while_the_installed_release_is_its_own(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

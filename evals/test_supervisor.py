@@ -83,6 +83,8 @@ class CurrentReleaseTest(SupervisorTest):
         install = self.release.parent / "install"
         old, new = install / "versions/1.0.0-aaa", install / "versions/1.0.1-bbb"
         old.mkdir(parents=True), new.mkdir(parents=True)
+        (old / "chief_of_stuff.py").touch()
+        (new / "chief_of_stuff.py").touch()
         (install / "current").symlink_to(old.relative_to(install))
         with mock.patch.object(supervisor, "RELEASE", old.resolve()):
             self.assertEqual(supervisor.current_release(), old.resolve())
@@ -92,6 +94,24 @@ class CurrentReleaseTest(SupervisorTest):
 
     def test_a_release_run_from_a_checkout_is_its_own_current(self):
         self.assertEqual(supervisor.current_release(), supervisor.RELEASE)
+
+    def test_invalid_install_pointers_keep_the_working_release_and_report_the_problem(self):
+        install = self.release.parent / "install"
+        old = install / "versions/old"
+        old.mkdir(parents=True)
+        pointer = install / "current"
+        for target in (install / "missing", install / "incomplete", pointer):
+            with self.subTest(target=target):
+                if target.name == "incomplete":
+                    target.mkdir()
+                pointer.symlink_to(target)
+                self.addCleanup(pointer.unlink, missing_ok=True)
+                errors = io.StringIO()
+                with mock.patch.object(supervisor, "RELEASE", old), contextlib.redirect_stderr(errors):
+                    actual = supervisor.current_release()
+                pointer.unlink()
+                self.assertEqual(actual, old)
+                self.assertIn("current", errors.getvalue())
 
 
 class VenvTest(SupervisorTest):

@@ -427,6 +427,48 @@ class EnsureTest(unittest.TestCase):
         with self.assertRaisesRegex(pg.PagesError, f"{self.port}.*not the pages server"):
             pg.ensure(self.dir, self.port, self.log)
 
+    def test_cancelled_start_reaps_its_detached_child_before_returning(self):
+        stop = threading.Event()
+        real_popen = subprocess.Popen
+        children = []
+
+        def start(*_a, **_k):
+            proc = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            children.append(proc)
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            stop.set()  # shutdown arrived while Popen was starting the child
+            return proc
+
+        with mock.patch.object(pg.subprocess, "Popen", side_effect=start), \
+             mock.patch.object(pg, "_who", return_value=None):
+            self.assertEqual(pg.ensure(self.dir, self.port, self.log, stop=stop), "pages: stopped")
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode, "cancelled startup must reap its child before returning")
+        self.assertFalse((self.dir / ".pid").exists())
+
+    def test_cancellation_interrupts_waiting_for_the_ensure_lock(self):
+        stop = threading.Event()
+        finished = threading.Event()
+        errors = []
+
+        def ensure():
+            try:
+                pg.ensure(self.dir, self.port, self.log, stop=stop)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        with pg.supervisor.lock(self.dir / ".ensure.lock"), \
+             mock.patch.object(pg.subprocess, "Popen") as popen:
+            thread = threading.Thread(target=ensure, daemon=True)
+            thread.start()
+            stop.set()
+            self.assertTrue(finished.wait(2), "shutdown stayed blocked on the ensure lock")
+            thread.join(timeout=2)
+        self.assertEqual(errors, [])
+        popen.assert_not_called()
+
     def test_an_older_server_is_restarted(self):
         # A server started before `--root` existed never renders; `--ensure` replaces it, by its pid file.
         self.addCleanup(self.stop)
