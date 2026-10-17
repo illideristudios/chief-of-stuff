@@ -511,6 +511,42 @@ class WorkerTeardownTest(unittest.TestCase):
                 self.fx._run(fake)
         self.assertTrue((self.tree / one_shot.PIDFILE).exists())
 
+    def test_invalid_utf8_tracker_preserves_the_interrupt_and_recovery_marker(self):
+        def teardown(*args):
+            self.fx.tracker.write_bytes(b"\xff")
+            raise KeyboardInterrupt
+        with mock.patch.object(one_shot, "_run_worker", return_value=127), \
+             mock.patch.object(shell_setup, "teardown", side_effect=teardown):
+            with self.assertRaises(KeyboardInterrupt):
+                self.fx._run(self.fx._fake(None, write_partial=False))
+        self.assertEqual((self.tree / one_shot.PIDFILE).read_text(), f"{os.getpid()} Security audit\n")
+
+    def test_unreadable_adoption_tracker_keeps_evidence_and_retries_after_recovery(self):
+        one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
+                               "codex", "", "10:00")
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        marker = "999999999 Security audit\n"
+        original = Path.read_text
+        for failure in (PermissionError("tracker unavailable"), OSError("I/O error"),
+                        UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid byte")):
+            with self.subTest(failure=failure):
+                pidfile.write_text(marker)
+                def read(path, *args, **kwargs):
+                    if path == self.fx.tracker:
+                        raise failure
+                    return original(path, *args, **kwargs)
+                with mock.patch.object(Path, "read_text", read), \
+                     mock.patch.object(one_shot, "reconcile") as reconcile, \
+                     self.assertRaises(type(failure)):
+                    one_shot.adopt(self.root, day="2026-09-18")
+                reconcile.assert_not_called()
+                self.assertEqual(pidfile.read_text(), marker)
+        self.assertIn("| worker01 | running", self.fx.tracker.read_text())
+        self.assertEqual(len(one_shot.adopt(self.root, day="2026-09-18")), 1)
+        self.assertFalse(pidfile.exists())
+        self.assertNotIn("| worker01 | running", self.fx.tracker.read_text())
+
     def test_nested_cwd_uses_the_configured_worktrees_lock_for_pid_updates(self):
         nested = self.tree / "nested"
         nested.mkdir()
