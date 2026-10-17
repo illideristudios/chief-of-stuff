@@ -1240,6 +1240,7 @@ class EngineTest(unittest.TestCase):
             "zach_gates": ("plan",), "approvals": (policy.Approval("plan", NOW + timedelta(days=1)),)})
         self.now += timedelta(minutes=1)
         self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.finish("review")
         self.findings()
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])

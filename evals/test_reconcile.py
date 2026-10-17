@@ -299,6 +299,20 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(replace(Item(), human_review=True), usage=usage),
                          [reconcile.Wait(KEY, "human review")])
 
+    def test_a_restart_supersedes_an_older_unanswered_review_decision_at_merge(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        history = [Segment("implement", 1, NOW - timedelta(hours=4), NOW - timedelta(hours=3)),
+                   Segment("review", 1, NOW - timedelta(hours=3), NOW - timedelta(hours=2)),
+                   Segment("implement", 2, NOW - timedelta(hours=1), NOW - timedelta(minutes=30)),
+                   Segment("review", 2, NOW - timedelta(minutes=20), NOW - timedelta(minutes=10))]
+        decisions = [Decision(None, "design", "Split?", {"decision": {"stage": "review", "attempt": 1}}),
+                     Decision(None, record={"reversed": True}),
+                     Decision(None, record={"restarted": "implement", "restart_attempt": 2})]
+        self.assertEqual(self.plan(item, history, {}, decisions={KEY: decisions}),
+                         [reconcile.Wait(KEY, "decision pending")])
+        decisions.append(Decision("replacement"))
+        self.assertEqual(self.plan(item, history, {}, decisions={KEY: decisions}), [reconcile.Merge(KEY)])
+
     def test_a_reversed_decision_routes_back_to_the_workflow_start(self):
         item = replace(Item(), stage="merge", merge_state="ready")
         reversed_decisions = {KEY: [Decision(None, record={"reversed": True})]}
