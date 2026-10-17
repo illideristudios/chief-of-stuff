@@ -192,6 +192,12 @@ class SettingsTest(unittest.TestCase):
                 with self.subTest(escape=escape, suffix=suffix), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
                     st.load(self.root, self.write('[workers]\nrules = ["Keep tests.' + escape + suffix + '"]\n'))
 
+    def test_worker_rules_reject_bidirectional_formatting_controls(self):
+        for escape in (r"\u061c", r"\u200e", r"\u200f", r"\u202a", r"\u202b", r"\u202c", r"\u202d", r"\u202e",
+                       r"\u2066", r"\u2067", r"\u2068", r"\u2069"):
+            with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                st.load(self.root, self.write('[workers]\nrules = ["approve abc' + escape + 'txt"]\n'))
+
     def test_worker_rules_reject_peer_markers_and_excessive_length_at_load(self):
         for prefix in ("", '[notify]\nadapter = "off"\n'):
             for rule in ("Keep tests. (via peer)", "x" * 2401):
