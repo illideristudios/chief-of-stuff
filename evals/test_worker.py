@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -843,7 +844,7 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(), [])
         self.assertEqual(slots.running(self.db), 0)
 
-    def test_an_interrupt_after_started_json_is_renamed_on_the_next_pass(self):
+    def test_an_interrupt_after_started_json_is_archived_at_once_and_its_slot_released_on_the_next_pass(self):
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
         self.addCleanup(lambda: proc.poll() is not None or proc.kill())
 
@@ -867,12 +868,76 @@ class WorkerTest(unittest.TestCase):
                 slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
                             max_concurrency=1, clock=lambda: NOW, launch=self.launch)
         run = worker._run_dir(self.root, KEY, "implement", 1)
-        self.assertTrue((run / "started.json").is_file())
+        # cancel returned, so the start is archived with its evidence now, not left for a pass that may never see it.
+        self.assertFalse(run.exists())
+        (archive,) = run.parent.glob(f"{run.name}-canceled-*")
+        self.assertTrue((archive / "started.json").is_file())
+        self.assertNotIn("implement-1", self.db.resume(KEY).get("runs", {}))
         self.assertEqual(len(self.db.segments()), 1)
         worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
         self.assertEqual(self.db.segments(), [])
-        self.assertEqual(len(list(run.parent.glob(f"{run.name}-canceled-*"))), 1)
+
+    @contextmanager
+    def interrupted(self, start, cancel=None, identity="process-start"):
+        """A launch whose runner start is `start` and whose verification is interrupted."""
+        runner = SimpleNamespace(pid=78, poll=mock.Mock(side_effect=KeyboardInterrupt))
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=lambda r, d, **k: (start(r, d), runner)[1]), \
+             mock.patch.object(worker.claude_adapter, "cancel", **({"side_effect": cancel} if cancel else {})) as stop, \
+             mock.patch.object(worker.process_status, "identity", return_value=identity):
+            yield stop
+
+    def test_a_failed_cancel_leaves_no_mark_for_collect_to_trust(self):
+        with self.interrupted(self.start, cancel=RuntimeError("runner survived SIGKILL")) as cancel:
+            with self.assertRaisesRegex(RuntimeError, "survived"):
+                self.launch()
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        self.assertTrue((run / "started.json").is_file())
+        self.assertFalse((run / "canceled").exists())
+
+    def test_a_marker_write_failure_does_not_skip_the_cancel(self):
+
+        def blocked(request, run_dir):
+            self.start(request, run_dir)
+            (run_dir / "canceled").mkdir()  # the mark cannot be written over a directory
+
+        with self.interrupted(blocked) as cancel:
+            with self.assertRaises(KeyboardInterrupt):
+                self.launch()
+        cancel.assert_called_once()
+
+    def test_a_launch_exception_after_started_json_archives_the_canceled_start(self):
+        with self.interrupted(self.start) as cancel, \
+             mock.patch.object(worker.process_status, "identity", side_effect=RuntimeError("ps unavailable")):
+            with self.assertRaises(RuntimeError):
+                slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                            max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        cancel.assert_called_once()
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        self.assertEqual(self.db.segments(), [])  # slots.claim dropped it: nobody will collect the marker
         self.assertFalse(run.exists())
+        (archive,) = run.parent.glob(f"{run.name}-canceled-*")
+        self.assertTrue((archive / "started.json").is_file())
+        self.assertNotIn("implement-1", self.db.resume(KEY).get("runs", {}))
+
+    def test_adoption_honors_a_cancel_mark(self):
+        run = self.launched()
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        data = self.db.resume(KEY)
+        adopt = lambda: worker._existing_run(data, run, "implement", 1, self.trees, lambda: NOW)  # noqa: E731
+        self.assertIsNotNone(adopt())
+        (run / "canceled").write_text("canceled\n")
+        self.assertIsNone(adopt())
+
+    def test_collect_keeps_the_reservation_until_a_canceled_start_is_verified_stopped(self):
+        run = self.launched()
+        (run / "canceled").write_text("canceled\n")
+        for identity, kept in (("live", True), (None, False)):
+            with self.subTest(identity=identity), mock.patch.object(worker.process_status, "identity", return_value=identity):
+                worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+                self.assertEqual(bool(self.db.segments()), kept)
+                self.assertEqual(run.exists(), kept)
 
     def test_a_dead_start_without_a_cancel_mark_counts_as_a_failed_attempt(self):
         run = worker._run_dir(self.root, KEY, "implement", 1)
