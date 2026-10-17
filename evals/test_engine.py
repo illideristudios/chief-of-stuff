@@ -31,6 +31,7 @@ from settings import Kanban
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
 OTHER = "github:example/project#2"
+SCOPE = "## File ownership\n- write: `.`"
 
 
 def policies():
@@ -61,7 +62,7 @@ class FakeForge:
 
     def snapshot(self, issue_key, *, issue=None, request=None):
         row = next(r for r in self.rows if r["issue_key"] == issue_key)
-        return {"body": "", **dict(row), "stage_mark": None}
+        return {"body": SCOPE, **dict(row), "stage_mark": None}
 
     def mark(self, number):
         return f"#{number}"
@@ -84,7 +85,7 @@ class FakeForge:
     def issue(self, number):
         row = next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))
         return SimpleNamespace(ok=True, issue=SimpleNamespace(is_open=row["forge_state"] == "open", labels=[],
-                               body=row.get("body", "")))
+                               body=row.get("body", SCOPE)))
 
     def merge(self, number, commit=False, issue_key=None, approval=None, head=None, stage_mark=None):
         self.merges.append((number, commit, issue_key))
@@ -341,10 +342,25 @@ class EngineTest(unittest.TestCase):
                                           trees=self.trees, now=self.now)
         self.assertEqual(set(facts.read_only), {KEY, OTHER})
 
-    def test_undeclared_fresh_issues_conflict_in_the_same_pass(self):
+    def test_undeclared_issues_wait_without_owning_files_or_taking_slots(self):
+        for body in ("", "## File ownership\n- typo: `src/`"):
+            with self.subTest(body=body):
+                self.forge.rows[0]["body"] = body
+                self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
+                self.assertEqual(self.db.ownership(KEY), [])
+                self.assertEqual(self.db.segments(KEY), [])
+        self.assertEqual(self.launched, [])
+        self.assertIn("wait: needs file ownership", [row.message for row in self.db.log(KEY)])
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
-                                          reconcile.Wait(OTHER, f"file ownership conflict with {KEY}")])
+        self.assertEqual(self.run_pass(max_concurrency=1), [reconcile.Wait(KEY, "needs file ownership"),
+                                                          reconcile.Dispatch(OTHER, "implement", "builder", 1)])
+        self.assertEqual([row[0] for row in self.launched], [OTHER])
+
+    def test_adding_a_valid_scope_releases_the_wait_on_the_next_pass(self):
+        self.forge.rows[0]["body"] = ""
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
+        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 
     def test_scope_edits_replace_old_claims_and_keep_worktree_registrations(self):
         self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
@@ -356,7 +372,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("docs", "read")})
         self.forge.rows[0]["body"] = "scope removed"
         self.run_pass()
-        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), (".", "write")})
+        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree")})
 
     def test_root_layout_keeps_declared_file_scopes(self):
         self.trees = self.root
@@ -626,11 +642,12 @@ class EngineTest(unittest.TestCase):
         self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
         self.cleanup.assert_called()
 
-    def test_a_new_issue_with_an_unreadable_body_defaults_to_repository_ownership(self):
+    def test_a_new_issue_with_an_unreadable_body_waits_without_inventing_scope(self):
         self.forge.rows[0]["body"] = None
         with mock.patch.object(self.forge, "issue", side_effect=ForgeError("offline")):
-            self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
-        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [(".", "write")])
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
+        self.assertEqual(self.db.ownership(KEY), [])
+        self.assertEqual(self.launched, [])
         self.assertIn("ownership read failed: offline", self.db.log(KEY)[0].message)
 
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):

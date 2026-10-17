@@ -724,7 +724,7 @@ class ReconcileTest(unittest.TestCase):
         import readiness
         keys = [f"github:example/project#{n}" for n in (1, 2, 3)]
         items = [replace(Item(), issue_key=key) for key in keys]
-        claims = (readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
+        claims = (readiness.Claim(keys[0], "docs/"), readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
         got = reconcile.plan(items, {}, self.p, {}, 1, NOW, {}, facts=reconcile.Facts(claims=claims, blockers=()))
         self.assertEqual([type(a).__name__ for a in got], ["Dispatch", "Wait", "Wait"])
         self.assertEqual([a.reason for a in got[1:]], ["no free worker slots"] * 2)

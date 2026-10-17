@@ -13,30 +13,38 @@ class IssueScopesTest(unittest.TestCase):
         body = "## File ownership\n| Mode | Paths |\n| --- | --- |\n| write | `src/`, `tests/` |\n- read-only: `docs/`\n## Other\n- write: `secrets/`"
         self.assertEqual(ownership.issue_scopes(body), [("src", "write"), ("tests", "write"), ("docs", "read")])
 
-    def test_absent_empty_or_invalid_scope_defaults_to_whole_repository_write(self):
+    def test_absent_empty_or_invalid_scope_has_no_scope(self):
         for body in ("", "## File ownership\n", "## File ownership\n- typo: `src/`",
                      "## File ownership\n- write: `../outside`", "## File ownership\n- write: `/absolute`"):
             with self.subTest(body=body):
-                self.assertEqual(ownership.issue_scopes(body), [(".", "write")])
+                self.assertIsNone(ownership.issue_scopes(body))
 
     def test_a_malformed_line_cannot_silently_drop_a_write_scope(self):
         for bad in ("write src/", "- write src/", "| write |", "some prose", "| write | src/ | extra |", "| Mode | src/ |", "- mode: src/"):
             with self.subTest(bad=bad):
-                self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n" + bad), [(".", "write")])
+                self.assertIsNone(ownership.issue_scopes("## File ownership\n- read-only: docs/\n" + bad))
 
     def test_noncanonical_path_segments_cannot_bypass_overlap(self):
         for path in ("src//a.py", "src/./a.py", "src/../a.py"):
             with self.subTest(path=path):
-                self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + path), [(".", "write")])
+                self.assertIsNone(ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + path))
 
-    def test_cells_that_cannot_round_trip_through_overlap_default_to_repository_write(self):
+    def test_cells_that_cannot_round_trip_through_overlap_have_no_scope(self):
         for paths in ("`none`", "`none, src`", "`src,a.py`", "`src/a; worktree hidden`",
                       "`src/a` src/b", "src/a, `src/b`", "`src/a` and `src/b`", "`src/a` `src/b`",
                       "`src/a", "`src/a` trailing", "` src/a `"):
             with self.subTest(paths=paths):
                 scopes = ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + paths)
-                self.assertEqual(scopes, [(".", "write")])
-                self.assertTrue(ownership.overlaps(scopes[0][0], "src/anything"))
+                self.assertIsNone(scopes)
+
+    def test_whole_repository_scope_is_explicit_and_read_only_stays_distinct(self):
+        for mode, expected in (("write", "write"), ("read-only", "read")):
+            with self.subTest(mode=mode):
+                self.assertEqual(ownership.issue_scopes(f"## File ownership\n- {mode}: `.`"), [(".", expected)])
+
+    def test_issue_form_body_keeps_the_canonical_section(self):
+        body = "### Outcome\n\nFix the parser\n\n### File ownership\n\n## File ownership\n- write: `src/`"
+        self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
 
 
 class ReadOnlyTest(unittest.TestCase):

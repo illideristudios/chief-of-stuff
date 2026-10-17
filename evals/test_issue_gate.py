@@ -23,6 +23,8 @@ import store  # noqa: E402
 import supervisor  # noqa: E402
 import test_forge as tf  # noqa: E402  (module-qualified: don't re-collect its TestCases)
 
+SCOPE = "## File ownership\n- write: `src/`"
+
 BLOCK = "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Timezone: UTC\n{backlog}\n## After\n"
 
 
@@ -42,7 +44,7 @@ class GateTest(unittest.TestCase):
     def test_work_without_an_issue_files_the_issue_first_then_writes_exactly_one_row(self):
         gh = tf.FakeGh()
         f = forge.for_workspace(self.workspace("- Backlog: GitHub issues; repo example/app"), gh=gh)
-        got = issue_gate.start(f, self.store, "Add a flag", body="why", commit=True)
+        got = issue_gate.start(f, self.store, "Add a flag", body=SCOPE, commit=True)
         self.assertEqual(got, issue_gate.Started(issue_key="github:example/app#101"))
         self.assertEqual([c[:2] for c in gh.all_calls], [["issue", "create"]])
         self.assertEqual([(i.issue_key, i.title) for i in self.store.items()], [("github:example/app#101", "Add a flag")])
@@ -65,9 +67,22 @@ class GateTest(unittest.TestCase):
                 got = issue_gate.start(f, self.store, "Parser", body=body if number is None else "ignored", issue=number, commit=True)
                 self.assertEqual([(r.path, r.mode) for r in self.store.ownership(got.issue_key)], [("src", "read")])
 
-    def test_intake_without_a_scope_owns_the_repository(self):
-        got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Parser", commit=True)
-        self.assertEqual([(r.path, r.mode) for r in self.store.ownership(got.issue_key)], [(".", "write")])
+    def test_new_issue_without_valid_scope_is_refused_before_any_forge_or_store_write(self):
+        for body in ("", "## File ownership\n", "## File ownership\n- typo: `src/`"):
+            for commit in (False, True):
+                with self.subTest(body=body, commit=commit):
+                    gh = tf.FakeGh()
+                    got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "Parser", body=body, commit=commit)
+                    self.assertIn("needs file ownership", got.refused)
+                    self.assertEqual(gh.all_calls, [])
+                    self.assertEqual(self.store.items(), [])
+
+    def test_an_existing_undeclared_issue_is_cached_without_inventing_scope(self):
+        f = forge.Forge(tf.GH, gh=tf.FakeGh(issues=[tf.gh_issue(3, "Parser")]))
+        self.store.upsert_item("github:example/app#3")
+        self.store.replace_file_ownership("github:example/app#3", [(".", "write")])
+        got = issue_gate.start(f, self.store, "Parser", issue=3, commit=True)
+        self.assertEqual(self.store.ownership(got.issue_key), [])
 
     def test_a_supplied_issue_the_forge_does_not_confirm_is_refused_and_writes_no_row(self):
         got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Add a flag", issue=999999, commit=True)
@@ -95,33 +110,33 @@ class GateTest(unittest.TestCase):
         f = forge.for_workspace(self.workspace(
             "- Backlog: GitLab; host https://gitlab.example.test; project team/app; token env SOME_TOKEN"), token="t")
         with mock.patch.object(backlog, "_call", call):
-            got = issue_gate.start(f, self.store, "Add a flag", commit=True)
+            got = issue_gate.start(f, self.store, "Add a flag", body=SCOPE, commit=True)
         self.assertEqual(got.issue_key, "gitlab:gitlab.example.test/team/app#7")
         self.assertEqual([i.issue_key for i in self.store.items()], ["gitlab:gitlab.example.test/team/app#7"])
 
     def test_a_create_that_fails_writes_no_row(self):
         gh = tf.FakeGh(fail={("issue", "create")})
-        got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "Add a flag", commit=True)
+        got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "Add a flag", body=SCOPE, commit=True)
         self.assertIn("rate limited", got.refused)
         self.assertEqual(self.store.items(), [])
 
     def test_a_create_that_names_no_number_writes_no_row(self):
         f = forge.Forge(backlog.Backlog("https://gitlab.example.test", "team/app"), token="t")
         with mock.patch.object(backlog, "_call", lambda *a, **k: ({}, {}, "")):
-            got = issue_gate.start(f, self.store, "Add a flag", commit=True)
+            got = issue_gate.start(f, self.store, "Add a flag", body=SCOPE, commit=True)
         self.assertIn("no issue number", got.refused)
         self.assertEqual(self.store.items(), [])
 
     def test_a_preview_files_nothing_and_writes_no_row(self):
         gh = tf.FakeGh()
-        got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "Add a flag")
+        got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "Add a flag", body=SCOPE)
         self.assertEqual(got.preview, "would create: Add a flag")
         self.assertEqual((gh.all_calls, self.store.items()), ([], []))
 
     def test_no_backlog_is_refused_and_setup_is_offered(self):
         for root in (self.workspace(""), self.root / "no-workspace-here"):
             with self.subTest(root=root):
-                got = issue_gate.start(forge.for_workspace(root), self.store, "Add a flag", commit=True)
+                got = issue_gate.start(forge.for_workspace(root), self.store, "Add a flag", body=SCOPE, commit=True)
                 self.assertIn("no `Backlog:` line", got.refused)
                 self.assertIn("- Backlog: GitHub issues; repo OWNER/NAME", got.setup)
                 self.assertIn("chief-of-stuff init", got.setup)
@@ -146,7 +161,7 @@ class WorkMainTest(unittest.TestCase):
         with mock.patch.object(forge, "for_workspace", side_effect=lambda root, **opts:
                                real_factory(root, gh=self.gh, **opts)), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-            code = work.main(["--root", str(self.root), "Add a flag", *args])
+            code = work.main(["--root", str(self.root), "Add a flag", "--body", SCOPE, *args])
         return code, out.getvalue(), err.getvalue()
 
     def items(self):
@@ -163,10 +178,10 @@ class WorkMainTest(unittest.TestCase):
         def gh(args, input_text=None):
             if args[:2] == ["issue", "create"]:
                 self.assertEqual(self.items(), [], "the store row must follow issue creation")
-                self.assertEqual(input_text, "why")
+                self.assertEqual(input_text, SCOPE)
             return create(args, input_text)
         self.gh = gh
-        code, out, err = self.run_work("--body", "why", "--commit")
+        code, out, err = self.run_work("--body", SCOPE, "--commit")
         self.assertEqual(code, 0, err)
         self.assertIn("github:example/app#101", out)
         self.assertEqual(self.items(), [("github:example/app#101", "Add a flag")])
@@ -176,7 +191,7 @@ class WorkMainTest(unittest.TestCase):
         self.assertEqual([c[:2] for c in create.all_calls], [["issue", "create"], ["issue", "view"]])
 
     def test_default_preview_files_nothing_and_writes_no_row(self):
-        code, out, err = self.run_work("--body", "why")
+        code, out, err = self.run_work("--body", SCOPE)
         self.assertEqual(code, 0, err)
         self.assertIn("would create: Add a flag", out)
         self.assertEqual((self.gh.all_calls, self.items()), ([], []))
@@ -185,7 +200,7 @@ class WorkMainTest(unittest.TestCase):
                          "a preview must not create, migrate or lock the store")
 
     def test_work_records_an_answer_for_the_named_issues_ask(self):
-        self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Parser"), tf.gh_issue(4, "Other")])
+        self.gh = tf.FakeGh(issues=[{**tf.gh_issue(3, "Parser"), "body": SCOPE}, tf.gh_issue(4, "Other")])
         store.migrate(self.root / "store.db")
         db = store.Store(self.root / "store.db")
         self.addCleanup(db.engine.dispose)
