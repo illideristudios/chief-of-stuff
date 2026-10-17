@@ -598,7 +598,9 @@ class WorkerTest(unittest.TestCase):
     def test_a_non_done_report_is_not_suite_gated(self):
         forge = self.suite_run(outcome="blocked")
         forge.add_human_hold = mock.Mock(return_value="")
-        self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        with mock.patch.object(engine.engine_facts, "_tree_facts",
+                               return_value=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
         self.assertEqual(self.db.segments(KEY)[0].outcome, "blocked")
         self.assertFalse(self.db.items()[0].human_review)
         self.assertNotIn("suite_hold", self.db.resume(KEY))

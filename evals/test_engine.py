@@ -418,7 +418,7 @@ class EngineTest(unittest.TestCase):
 
     def test_releasing_a_read_only_completion_hold_allows_the_next_stage(self):
         self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
-        self.forge.kanban = SimpleNamespace(stage_map={}, holds=lambda stage: False)
+        self.forge.kanban = SimpleNamespace(stage_map={}, holds=lambda stage: False, hold_stages=())
         self.forge.add_human_hold = lambda number: self.forge.rows[0].update(human_review=True)
         self.run_pass()
         self.publish_exit()
@@ -526,7 +526,7 @@ class EngineTest(unittest.TestCase):
     def test_failed_completion_hold_write_keeps_the_segment_open(self):
         self.run_pass()
         self.db.set_resume(KEY, {"runs": []})
-        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
         self.forge.add_human_hold = lambda number: "forge offline"
         with self.assertRaisesRegex(ForgeError, "forge offline"):
             self.run_pass()
@@ -564,7 +564,7 @@ class EngineTest(unittest.TestCase):
         self.assertIn("ownership read failed: offline", self.db.log(KEY)[0].message)
 
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
-        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
         self.forge.holds = []
         self.forge.add_human_hold = lambda number: self.forge.holds.append(number) or ""
         self.db.upsert_item(KEY, stage="implement")
@@ -577,7 +577,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
 
     def test_a_close_whose_hold_write_fails_leaves_the_segment_open(self):
-        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
         self.forge.add_human_hold = lambda number: "forge offline"
         self.db.upsert_item(KEY, stage="implement")
         self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
