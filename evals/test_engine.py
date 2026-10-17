@@ -532,6 +532,14 @@ class EngineTest(unittest.TestCase):
                 self.assertEqual(decs[0].status, "answered" if unanimous else "open")
                 self.assertEqual(len(decs[0].record["verdicts"]), 3)
 
+    def test_an_ask_without_a_configured_trio_stays_open_and_unconsulted(self):
+        model = mock.Mock()
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split module?")]):
+            self.run_pass(trio_port=model)
+        model.assert_not_called()
+        self.assertEqual([d.status for d in self.db.decisions(KEY)], ["open"])
+        self.assertFalse([e for e in self.db.log(KEY) if "failed" in e.message])
+
     def test_default_agent_has_no_declared_type(self):
         self.run_pass()
         self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
@@ -578,6 +586,15 @@ class MainTest(unittest.TestCase):
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         sleep.assert_not_called()
+
+    def test_the_production_pass_consults_the_trio_through_the_claude_adapter(self):
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.claude_adapter, "call") as call:
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+            request = object()
+            passed.call_args.kwargs["trio_port"](request)
+        self.assertEqual(call.call_args.args, (request,))
 
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()
