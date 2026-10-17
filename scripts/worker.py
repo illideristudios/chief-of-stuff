@@ -21,6 +21,7 @@ from settings import load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import Failure, Request, retry_at
+from shell_setup import teardown
 
 _runners: dict[str, Any] = {}
 
@@ -109,7 +110,7 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
+           claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
            clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
@@ -196,6 +197,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         raise RuntimeError("worker launch requires the guard/ plugin beside scripts/")
     plugin_dirs = (str(plugin),)
     env = {"CHIEF_OF_STUFF_WORKSPACE": str(root.resolve()),
+           "CHIEF_OF_STUFF_WORKER": tree.name,
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
     request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
@@ -225,13 +227,19 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         _save_run(store, issue_key, stage, attempt, record)
     except Exception:
         claude_adapter.cancel(runner)
+        # The process is already up. collect() never sees a segment slots.claim drops on this failure.
+        for error in teardown(root, tree, tree.name, teardown_command):
+            try:
+                store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+            except Exception:
+                pass
         raise
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None, *, require_green: bool = False) -> None:
+            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False) -> None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     for segment in store.segments():
         if segment.ended_at is not None:
@@ -282,6 +290,9 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
+            for error in teardown(root, Path(record["tree"]), Path(record["tree"]).name, teardown_command):
+                store.add_log(key, f"worker teardown failed: {error}", now.isoformat())
+            if not (run_dir / "exit.json").exists():
                 raise ValueError("missing adapter exit record")
             code = _exit_code(run_dir)
             reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())

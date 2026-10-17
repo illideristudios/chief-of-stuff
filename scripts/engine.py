@@ -190,14 +190,14 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None, require_green: bool = False) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "") -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     _record_limits(workers)
-    worker.collect(store, root, clock, trees, require_green=require_green)
+    worker.collect(store, root, clock, trees, require_green=require_green, teardown_command=teardown_command)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -408,14 +408,14 @@ def main(argv: list[str] | None = None) -> int:
             launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
                              clone=root / selected if selected else root,
                              claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
-                             require_green=config.workers.require_green_tests)
+                             require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
             try:
                 while True:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
                                  launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
-                                 require_green=config.workers.require_green_tests)
+                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

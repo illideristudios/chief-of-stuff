@@ -250,6 +250,22 @@ class Store:
             s.execute(delete(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
                                             Segment.attempt == attempt))
 
+    def segment_runs(self) -> list[tuple[str, str, int, str | None, Any]]:
+        """Each segment's issue, stage, attempt, end time, and resume run entry (or None)."""
+        with self.session() as s:
+            rows = s.execute(select(Segment.issue_key, Segment.stage, Segment.attempt, Segment.ended_at, Resume.data)
+                             .outerjoin(Resume, Resume.issue_key == Segment.issue_key)
+                             .order_by(Segment.id)).all()
+        out = []
+        for key, stage, attempt, ended, data in rows:
+            entry = None
+            if isinstance(data, dict):
+                runs = data.get("runs")
+                if isinstance(runs, dict):
+                    entry = runs.get(f"{stage}-{attempt}")
+            out.append((key, stage, attempt, ended, entry))
+        return out
+
     def segments(self, issue_key: str | None = None) -> list[Segment]:
         stmt = select(Segment).order_by(Segment.id)
         if issue_key is not None:

@@ -821,6 +821,8 @@ class MainTest(unittest.TestCase):
         self.assertIn("held", errors.getvalue())
 
     def test_once_opens_workspace_store_and_runs_one_pass_without_sleep(self):
+        settings_path = self.root / "settings.toml"
+        settings_path.write_text(settings_path.read_text() + 'teardown = "exit 7"\n')
         fake = FakeForge()
         with mock.patch.object(engine.forge, "for_workspace", return_value=fake), \
              mock.patch.object(engine, "run_pass") as passed, mock.patch.object(engine.time, "sleep") as sleep:
@@ -830,6 +832,8 @@ class MainTest(unittest.TestCase):
         self.assertIs(passed.call_args.kwargs["forge"], fake)
         self.assertEqual(passed.call_args.kwargs["trees"], self.root / "trees")
         self.assertEqual(passed.call_args.kwargs["workers"].claude_as_profile, "secondary")
+        self.assertEqual(passed.call_args.kwargs["teardown_command"], "exit 7")
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["teardown_command"], "exit 7")
         sleep.assert_not_called()
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
