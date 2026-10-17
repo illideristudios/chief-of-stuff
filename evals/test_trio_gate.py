@@ -280,6 +280,15 @@ class GateTest(unittest.TestCase):
         self.assertEqual([r.record["decision"]["context"] for r in self.store.decisions(KEY)],
                          ["implement-1", "implement-2"])
 
+    def test_the_same_decision_id_in_a_new_stage_attempt_is_consulted_again(self):
+        first = replace(self.decision, stage="implement", attempt=1)
+        self.consult([reply()] * 3, decision=first)
+        model = FakeModel([reply(choice=OPTIONS[1])] * 3)
+        second = replace(first, attempt=2)
+        got = trio_gate.decide(second, self.store.decisions(KEY), self.policy, PERSONAS, model, self.store)
+        self.assertEqual((got.recommendation, len(model.requests)), (OPTIONS[1], 3))
+        self.assertEqual([r.record["decision"]["attempt"] for r in self.store.decisions(KEY)], [1, 2])
+
     def test_a_gate_hold_is_recorded_as_unanswered_for_zach(self):
         decision = replace(self.decision, options=("approve", "hold"), stage="implement", attempt=1)
         self.consult([reply(choice="hold")] * 3, decision=decision)

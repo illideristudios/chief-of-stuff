@@ -249,14 +249,15 @@ class EngineTest(unittest.TestCase):
         self.db.sync_from_forge(self.forge.snapshots())
         for action in (reconcile.Ask(KEY, "plan", "approval needed"), reconcile.Escalate(KEY, "retry limit")):
             with self.subTest(action=action):
-                self.db.set_resume(KEY, {"session": "keep"})
+                self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}), "session": "keep"})
                 before = len(self.db.log(KEY))
                 with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
                     self.run_pass()
                     self.run_pass()
                 self.assertEqual(len(self.db.log(KEY)), before + 1)
                 self.assertEqual(self.db.resume(KEY)["session"], "keep")
-                self.assertIn("interrupt", self.db.resume(KEY))
+                field = "decision_interrupts" if isinstance(action, reconcile.Ask) else "interrupt"
+                self.assertIn(field, self.db.resume(KEY))
 
     def test_free_slots_cap_dispatches_including_existing_workers(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
@@ -508,7 +509,7 @@ class EngineTest(unittest.TestCase):
         row = self.db.decisions(KEY)[0]
         self.assertEqual((row.answer, row.decided_by, row.record["unanimous"]), ("Split the parser", "trio", True))
         self.assertEqual([v["vote"] for v in row.record["verdicts"]], ["adopt", "adopt", "adopt"])
-        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.assertAlmostEqual(self.db.resume(KEY)["spend_usd"], 0.3)
         self.assertEqual(model.n, 3)
 
@@ -531,7 +532,7 @@ class EngineTest(unittest.TestCase):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
         model = self._votes([("adopt", "approve")] * 6)
         self.assertEqual(self.run_pass(model=model), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
-        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
         self.assertEqual(self.db.decisions(KEY)[0].answer, "approve")
         self.run_pass(model=model)
@@ -767,6 +768,21 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.assertEqual(self.db.resume(KEY)["interrupt"], other)
 
+    def test_unscoped_replacement_interrupt_survives_with_or_without_a_model(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        self.db.add_decision(KEY, "design", "Missing payload?", record={
+            "restarted": "implement", "restart_attempt": 1})
+        for model in (None, mock.Mock()):
+            with self.subTest(model=model), mock.patch.object(engine.reconcile, "plan", return_value=[]):
+                self.run_pass(model=model)
+                self.run_pass(model=model)
+                self.assertEqual(self.db.resume(KEY)["interrupt"], {
+                    "kind": "ambiguity", "reason": "Missing payload?", "stage": "implement"})
+                self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), 1)
+                self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
     def test_the_cap_counts_failures_a_killed_pass_did_not_absorb(self):
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
@@ -819,7 +835,7 @@ class EngineTest(unittest.TestCase):
         interrupt = self.db.resume(KEY)["decision_interrupts"][0]
         self.assertEqual(interrupt, {"kind": "ambiguity",
             "reason": "trio unavailable after 8 attempts: Which parser?",
-            "decision": {"id": ["design", "Which parser?", "parser"], "stage": "implement", "attempt": 2}})
+            "decision": {"id": ["design", "Which parser?", "parser"], "stage": "implement", "attempt": 1}})
         self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), 1)
         self.finish("review")
         self.findings()
@@ -960,7 +976,7 @@ class EngineTest(unittest.TestCase):
         self.run_pass(model=split)
         self.assertEqual(split.n, 3)
         self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
-        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.finish("review", 2)
         self.findings(2)
         self.assertEqual(self.run_pass(model=split), [reconcile.Merge(KEY)])
@@ -1152,7 +1168,7 @@ class EngineTest(unittest.TestCase):
         model = self._votes([("adopt", "approve")] * 3)
         self.assertIsInstance(self.run_pass(model=model)[0], reconcile.Ask)
         self.assertEqual(model.n, 3)
-        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
         self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
 
     def test_gate_context_excludes_out_of_band_architect_and_is_not_a_wildcard(self):
