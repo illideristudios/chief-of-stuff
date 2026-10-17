@@ -722,6 +722,8 @@ class EngineTest(unittest.TestCase):
             "decision": {"topic": "design", "question": "Which parser?", "instance": "parser",
                          "context": ask.context}})
         self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), 1)
+        self.finish("review")
+        self.findings()
         self.db.engine.dispose()
         self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
         self.addCleanup(self.db.engine.dispose)

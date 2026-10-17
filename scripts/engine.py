@@ -36,7 +36,6 @@ from forge_port import ForgeError
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
-MAX_TRIO_RETRIES = 8  # Stop automatic consultations after repeated outages in the same decision context.
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -129,8 +128,14 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     retry_key = json.dumps([topic, question, instance, context, options])
     retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
     prior = decision_actions.latest(earlier).get((topic, question, instance))
-    if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
-            and (retry["failures"] >= MAX_TRIO_RETRIES or datetime.fromisoformat(retry["retry_at"]) > clock())):
+    # Recover an exhaustion write interrupted after persisting the final failure/backoff.
+    exhausted = decision_actions.exhaust_retry(prior, retry.get("failures", 0))
+    if exhausted is not None:
+        store.add_decision(key, exhausted.topic, exhausted.question, exhausted.answer,
+                           exhausted.decided_by, exhausted.record)
+        earlier = store.decisions(key)
+    elif (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
+            and datetime.fromisoformat(retry["retry_at"]) > clock()):
         return None
     outcome = trio_gate.decide(decision, earlier, resolved, personas,
                                _metered(store, key, model) if model is not None else None, store)
@@ -139,13 +144,18 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     retries = data.get("trio_retries") or {}
     if len(rows) > len(earlier) and decision_actions.retryable_failure(rows[-1].record):
         failures = retry.get("failures", 0) + 1
-        delay = min(3600, 60 * 2 ** min(failures - 1, 6))
-        retries[retry_key] = {"failures": failures,
-                              "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
-        data["trio_retries"] = retries
-        store.set_resume(key, data)
-        return None
-    elif retry_key in retries:
+        exhausted = decision_actions.exhaust_retry(rows[-1], failures)
+        if exhausted is None:
+            delay = min(3600, 60 * 2 ** min(failures - 1, 6))
+            retries[retry_key] = {"failures": failures,
+                                  "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
+            data["trio_retries"] = retries
+            store.set_resume(key, data)
+            return None
+        store.add_decision(key, exhausted.topic, exhausted.question, exhausted.answer,
+                           exhausted.decided_by, exhausted.record)
+        outcome = trio_gate.Outcome(None, False, exhausted.record["error"])
+    if retry_key in retries:
         retries.pop(retry_key)
         if not retries:
             data.pop("trio_retries", None)
@@ -399,7 +409,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     data = _resume(store, key)
                     data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
                     store.set_resume(key, data)
-                else:
+                elif choice == "hold":
                     _interrupt(store, key, "ambiguity", action.reason, at, scope={"decision": {
                         "topic": action.gate, "question": action.reason, "instance": "", "context": action.context}})
             elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):

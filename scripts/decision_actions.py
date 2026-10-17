@@ -9,9 +9,13 @@ from typing import Any, Sequence
 
 from model_port import RETRYABLE
 
+MAX_TRIO_RETRIES = 8
+
 
 def retryable_failure(record: Any) -> bool:
     """A model outage or exhausted quota is not a settled disagreement."""
+    if isinstance(record, dict) and record.get("retry_exhausted"):
+        return False
     verdicts = record.get("verdicts", ()) if isinstance(record, dict) else ()
     return isinstance(verdicts, (list, tuple)) and any(
         isinstance(v, dict) and v.get("choice") is None
@@ -26,6 +30,15 @@ class DecisionUpdate:
     answer: str | None
     decided_by: str
     record: dict[str, Any]
+
+
+def exhaust_retry(row: Any, failures: int) -> DecisionUpdate | None:
+    """A capped model outage becomes an answerable human decision, keeping the votes as evidence."""
+    if row is None or row.answer or failures < MAX_TRIO_RETRIES or not retryable_failure(row.record):
+        return None
+    reason = f"trio unavailable after {failures} attempts: {row.question}"
+    return DecisionUpdate(row.topic, row.question, None, "zach",
+                          {**row.record, "retry_exhausted": failures, "error": reason})
 
 
 def _time(value: datetime | str) -> datetime:
