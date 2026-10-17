@@ -1,5 +1,5 @@
 """The tracker's `## Log` lines that scripts write and the pages read back: a task's stage move, a one-shot's
-start, end and relaunch, a run relaunching after its wait ran out, a hold the launcher could not apply, and a
+start, end and relaunch, a run relaunching after its wait ran out, cleanup warnings, a hold the launcher could not apply, and a
 closure the user approved.
 
 `chief-of-stuff log --stage` and the one-shot launcher write them with the formatters here; the Flow charts, the
@@ -79,6 +79,11 @@ def hold_failed_line(at: str, name: str, task: str, error: str) -> str:
     """The launcher's line when worker `name`'s review hold could not be applied to `task`'s issue (#566); the
     audit reads it back with HOLD_FAILED and keeps reporting the hold until it lands."""
     return f"- {at} one-shot {name}: review hold failed: {error}, task {task}"
+
+
+def teardown_failed_line(at: str, name: str, task: str, error: str) -> str:
+    """The launcher's cleanup warning; `error` comes already on one line."""
+    return f"- {at} one-shot {name}: teardown failed: {error}, task {task}"
 
 
 def approved_close_line(at: str, task: str, why: str) -> str:

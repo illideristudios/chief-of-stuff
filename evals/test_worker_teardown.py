@@ -15,6 +15,7 @@ from unittest import mock
 from evals import git_taint, test_one_shot as fixtures, test_worker as engine_fixtures
 
 import dispatch_prompt
+import adopt_one_shots
 import one_shot
 import settings
 import shell_setup
@@ -544,6 +545,33 @@ class WorkerTeardownTest(unittest.TestCase):
                 self.assertEqual(pidfile.read_text(), marker)
         self.assertIn("| worker01 | running", self.fx.tracker.read_text())
         self.assertEqual(len(one_shot.adopt(self.root, day="2026-09-18")), 1)
+        self.assertFalse(pidfile.exists())
+        self.assertNotIn("| worker01 | running", self.fx.tracker.read_text())
+
+    def test_adoption_cli_reports_unreadable_history_and_preserves_the_marker(self):
+        one_shot.record_launch(self.fx.tracker, "Security audit", "worker01", "worktree `worker` (main)",
+                               "codex", "", "10:00")
+        pidfile = self.tree / one_shot.PIDFILE
+        pidfile.parent.mkdir(exist_ok=True)
+        marker = "999999999 Security audit\n"
+        pidfile.write_text(marker)
+        original = Path.read_text
+        def read(path, *args, **kwargs):
+            if path == self.fx.tracker:
+                raise PermissionError("tracker unavailable")
+            return original(path, *args, **kwargs)
+        now = one_shot.datetime.fromisoformat("2026-09-19T12:00:00+00:00")
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(one_shot, "datetime", wraps=one_shot.datetime) as clock:
+            clock.now.return_value = now
+            with mock.patch.object(Path, "read_text", read), \
+                 contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                self.assertEqual(adopt_one_shots.main(["--root", str(self.root)]), 1)
+            self.assertEqual(pidfile.read_text(), marker)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn("tracker unavailable", err.getvalue())
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(adopt_one_shots.main(["--root", str(self.root)]), 0)
         self.assertFalse(pidfile.exists())
         self.assertNotIn("| worker01 | running", self.fx.tracker.read_text())
 

@@ -13,7 +13,7 @@ import subprocess
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
+from typing import Callable, NamedTuple
 
 import backlog
 import dispatch_prompt
@@ -31,8 +31,9 @@ from model_port import quota_reset
 from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
-from tracker import parse_tracker
-from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
+from tracker import Task, parse_tracker
+from tracker_log import (RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line,
+                         started_line, teardown_failed_line, timed_out_line)
 from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
@@ -342,35 +343,52 @@ def write_report(root: Path, cwd: Path, report: dict) -> dict:
     return report
 
 
+class _TaskLookup(NamedTuple):
+    text: str = ""
+    rows: tuple[Task, ...] = ()
+    error: OSError | ValueError | None = None
+
+    @property
+    def row(self) -> Task | None:
+        return self.rows[0] if len(self.rows) == 1 else None
+
+
+def _lookup_task(path: Path, task: str) -> _TaskLookup:
+    """Read one tracker's task, keeping unreadable evidence separate from clean absence."""
+    try:
+        text = path.read_text()
+    except FileNotFoundError:
+        return _TaskLookup()
+    except (OSError, ValueError) as exc:
+        return _TaskLookup(error=exc)
+    return _TaskLookup(text, tuple(row for row in parse_tracker(text).tasks if row.item.strip() == task))
+
+
 def _launch_row_running(launch: Path, task: str, name: str) -> bool:
     """The launch-day row the midnight rollover carried over is still running under this worker (#576)."""
-    try:
-        rows = [row for row in parse_tracker(launch.read_text()).tasks if row.item.strip() == task]
-    except OSError:
-        return False
-    return len(rows) == 1 and rows[0].kind == "running" and rows[0].owner.strip().lower() == name.lower()
+    row = _lookup_task(launch, task).row
+    return row is not None and row.kind == "running" and row.owner.strip().lower() == name.lower()
 
 
 def _pending_run(root: Path, cfg, day: str, task: str, name: str) -> bool:
     """Whether reconciliation still owns a running row, including its midnight rollover twin."""
     launch = root / cfg.tracker_path(day)
     end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
-    try:
-        rows = [row for row in parse_tracker(end.read_text()).tasks if row.item.strip() == task] if end.exists() else []
-        if rows:
-            row = rows[0]
-            if len(rows) != 1 or row.owner.strip().lower() != name.lower():
-                return False
-            if row.kind == "running":
-                return True
-            if end == launch or row.kind != "open":
-                return False
-        # Read directly: _launch_row_running treats unreadable files as not running,
-        # which is suitable for rollover proof but cannot authorize releasing a marker.
-        rows = [row for row in parse_tracker(launch.read_text()).tasks if row.item.strip() == task]
-        return len(rows) == 1 and rows[0].kind == "running" and rows[0].owner.strip().lower() == name.lower()
-    except OSError:
+    found = _lookup_task(end, task)
+    if found.error is not None:
         return True  # an unreadable tracker cannot authorize discarding recovery evidence
+    if found.rows:
+        row = found.row
+        if row is None or row.owner.strip().lower() != name.lower():
+            return False
+        if row.kind == "running":
+            return True
+        if end == launch or row.kind != "open":
+            return False
+    found = _lookup_task(launch, task)
+    row = found.row
+    return found.error is not None or (row is not None and row.kind == "running"
+                                      and row.owner.strip().lower() == name.lower())
 
 
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
@@ -394,7 +412,10 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     launch = path
     end = root / cfg.tracker_path(datetime.now(cfg.zone).date().isoformat())
     carried = False
-    if end.exists() and any(row.item.strip() == task for row in parse_tracker(end.read_text()).tasks):
+    found = _lookup_task(end, task)
+    if found.error is not None:
+        raise found.error
+    if found.rows:
         # The midnight rollover carries a still-running launch-day row over as the end day's open twin (#576):
         # the same row, so the run lands on it. The launch day's row tells the twin from a changed row.
         carried = launch != end and _launch_row_running(launch, task, name)
@@ -437,8 +458,10 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     # The tracker keeps only 500 characters: its git excerpts must leave room for both facts.
     log_summary = (f"{suite}; Commits from this run: {_brief(commits)[:100]}; " +
                    (f"Working tree: {_brief(actual)[:100]}" if actual else "Working tree clean") + f"; {changes}")
-    rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
-    row = rows[0] if len(rows) == 1 else None
+    found = _lookup_task(path, task)
+    if found.error is not None:
+        raise found.error
+    row = found.row
     if row is None or row.owner.strip().lower() != name.lower() or (
             # The rollover twin is the same row, open (#576); any other drift from running is a changed row.
             row.kind != "running" and not (carried and row.kind == "open")):
@@ -474,8 +497,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     for error in (teardown_errors or []):
         try:
             tracker_write.edit(path, lambda text: tracker_write.append_log(
-                text, f"- {tracker_write.stamp(cfg.zone)} one-shot {name}: teardown failed: "
-                f"{_brief(error.removeprefix('teardown: '))}, task {task}", create=True))
+                text, teardown_failed_line(tracker_write.stamp(cfg.zone), name, task,
+                                           _brief(error.removeprefix('teardown: '))), create=True))
         except (OSError, ValueError) as exc:
             errors.append(f"teardown: could not log cleanup failure: {exc}")
     if status == "human_review" and ref:
@@ -770,20 +793,20 @@ ADOPT_LOOKBACK = 7  # days of trackers one adoption sweep scans for a dead run's
 
 def _running_row(root: Path, cfg, task: str, cwd: Path, days: list[str]) -> tuple[str, str] | None:
     """The day and worker name of `task`'s running row in the latest of `days` whose tracker holds one
-    and whose File ownership names this tree; None when no recent tracker says running here (#99)."""
+    and whose File ownership names this tree; None when every tracker was readable or absent
+    and none says running here. An unreadable tracker raises, preserving recovery evidence (#99)."""
     tree = f"worktree `{cwd.resolve().name}`"
     for day in days:  # latest first
-        try:
-            text = (root / cfg.tracker_path(day)).read_text()
-        except OSError:
+        found = _lookup_task(root / cfg.tracker_path(day), task)
+        if found.error is not None:
+            raise found.error
+        row = found.row
+        if row is None or row.kind != "running" or not row.owner.strip():
             continue
-        rows = [row for row in parse_tracker(text).tasks if row.item.strip() == task]
-        if len(rows) != 1 or rows[0].kind != "running" or not rows[0].owner.strip():
-            continue
-        owned = ownership.cell(text, dispatch_prompt.task_keys(task, dispatch_prompt.task_name(text, task)))
+        owned = ownership.cell(found.text, dispatch_prompt.task_keys(task, dispatch_prompt.task_name(found.text, task)))
         if owned is None or tree not in owned:
             continue  # the row's running work lives in some other tree
-        return day, rows[0].owner.strip()
+        return day, row.owner.strip()
     return None
 
 
