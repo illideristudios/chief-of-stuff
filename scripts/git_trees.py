@@ -215,7 +215,9 @@ def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
             )
             if out.returncode == 0 or "cannot lock ref" not in out.stderr:
                 break
-    except (OSError, subprocess.SubprocessError) as exc:  # not `exc`'s text: a timeout's repeats the tree's path
+    except subprocess.TimeoutExpired:
+        return f"git fetch timed out after {timeout}s; fetch origin manually, then retry"
+    except (OSError, subprocess.SubprocessError) as exc:  # not `exc`'s text: it can repeat the tree's path
         return f"git fetch did not run ({type(exc).__name__})"
     if out.returncode == 0:
         return ""
