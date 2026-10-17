@@ -789,8 +789,12 @@ class EngineTest(unittest.TestCase):
 
         self.launch = board_post_during_launch
         self.run_pass()
-        self.assertEqual(self.db.decision(carried.id).intent, "")
+        # The newer intent is current, so the launch does not end the carried one or clear the newer: the next pass supersedes it.
+        self.assertEqual((self.db.decision(carried.id).status, self.db.decision(carried.id).intent), ("reversed", "run"))
         self.assertEqual((self.db.decision(self.newer.id).status, self.db.decision(self.newer.id).intent), ("re-routed", "write"))
+        self.run_pass()
+        self.assertEqual((self.db.decision(carried.id).status, self.db.decision(carried.id).superseded_by),
+                         ("superseded", self.newer.id))
 
     def test_a_worker_is_not_launched_for_an_intent_a_newer_one_has_replaced_since_planning(self):
         old = self.add_intent("implement", "run", status="reversed", question="A?")
@@ -806,7 +810,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.launched, [])
         self.assertEqual(self.db.decision(old.id).intent, "run")
 
-    def test_a_retry_limit_blocks_the_intent_planning_saw_not_a_newer_one(self):
+    def test_a_retry_limit_blocks_only_the_current_intent_not_a_newer_one_that_replaced_it(self):
         old = self.add_intent("implement", "run", question="A?")
 
         def plan(*args, **kwargs):
@@ -815,7 +819,8 @@ class EngineTest(unittest.TestCase):
 
         with mock.patch.object(engine.reconcile, "plan", side_effect=plan):
             self.run_pass()
-        self.assertEqual(self.db.decision(old.id).status, "blocked")
+        # The newer intent is current, so the spent limit blocks nothing: the older one is superseded.
+        self.assertEqual(self.db.decision(old.id).status, "re-routed")
         self.assertEqual((self.db.decision(self.newer.id).status, self.db.decision(self.newer.id).intent), ("re-routed", "write"))
         self.run_pass()
         self.assertEqual(self.db.decision(old.id).status, "superseded")

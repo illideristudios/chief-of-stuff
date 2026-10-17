@@ -95,9 +95,9 @@ class IntentCurrencyTest(unittest.TestCase):
         self.forge.rows[0]["stage"] = "merge"
         self.db.sync_from_forge(self.forge.snapshots())
         self.db.upsert_item(KEY, human_review=True)
-        done = self.asked("scope", "Ship?", "Yes")
+        done = self.asked("implement", "Ship?", "Yes")
         reversal = self.add_intent(done, "reverse", text="No")
-        self.assertEqual(reversal.intent, "run")
+        self.assertEqual((reversal.intent, reversal.rerouted_to), ("run", "implement"))
         self.run_pass()
         self.assertEqual(self.forge.writes, [(1, "implement", "merge", True)])
         self.assertFalse(self.db.item(KEY).human_review)

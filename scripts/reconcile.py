@@ -287,8 +287,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         item_decisions = (decisions or {}).get(item.issue_key, ())
         stage_write = (pending_stages or {}).get(item.issue_key)
         intent = decision_actions.current_intent(item_decisions)
-        if item.forge_state != "closed" and (stage_write or (intent and (intent.intent == "write" or intent.status == "blocked"))):
-            # The engine's own move, a re-route not yet written, or an intent a spent retry limit blocked: this issue waits.
+        if item.forge_state != "closed" and (stage_write or (intent and (intent.status == "blocked" or decision_actions.replaces_engine_move(intent, item.stage)))):
+            # The engine's own move, an intent whose stage is not yet written, or one a spent retry limit blocked: this issue waits.
             actions.append(Wait(item.issue_key, HOLD_STAGE_WRITE if stage_write else HOLD_REROUTE))
             continue
         if intent and item.forge_state != "closed":

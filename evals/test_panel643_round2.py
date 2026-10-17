@@ -141,6 +141,8 @@ class NotificationRecoveryTest(unittest.TestCase):
         self.recovered(w, later)
         self.assertEqual(len(self.rows(w, later)), 1)
         w.db.answer_decision(dec.id, "Back", status="re-routed", rerouted_to="fix", intent="run")
+        self.assertEqual(len(self.rows(w, later)), 1)  # a run intent whose stage is not written has its write to do too
+        w.db.upsert_item(notices.KEY, stage="fix")
         self.assertEqual(self.rows(w, later), [])
 
     def failure(self, message, kind=""):

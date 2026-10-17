@@ -176,7 +176,7 @@ def _intent(prev: DecisionState, status: str, verb: str, stage: str, text: str, 
                   answered_at=answered_at if answered_at is not None else prev.answered_at,
                   blocked_reason="", rerouted_to=stage, intent=phase, superseded_by=0)
     comment = ForgeComment(nxt.issue_key, f"Decision #{nxt.id} ({nxt.gate}) {verb} by {nxt.decided_by}: {nxt.answer}")
-    closed = replace(prev, status="superseded", blocked_reason="", superseded_by=row_id)
+    closed = replace(prev, status="superseded", blocked_reason="", intent="", superseded_by=row_id)
     return Transition(decision=nxt, store_write=_write_for(nxt), actions=(comment,), source=_write_for(closed))
 
 
@@ -190,8 +190,9 @@ def reverse(
     stage: str = "",
 ) -> Transition:
     prev = state_of(record)
-    # An answered decision whose action is blocked is still answered; a decision with an intent is not.
-    if prev.status not in {"answered", "blocked"} or prev.intent:
+    # An answered decision whose action is blocked is still answered; an intent not yet applied can be replaced,
+    # and a settled one (no intent left) cannot.
+    if prev.status not in {"answered", "blocked"} and not prev.intent:
         raise ValueError("only an answered decision can be reversed")
     if not answer_text.strip():
         raise ValueError("a reversal must contain text")
@@ -210,7 +211,7 @@ def reroute(
     answered_at: str | None = None,
 ) -> Transition:
     prev = state_of(record)
-    if prev.status not in OPEN_STATES | {"answered"} or prev.intent:
+    if prev.status not in OPEN_STATES | {"answered"} and not prev.intent:
         raise ValueError("decision is already closed")
     if not target_stage.strip():
         raise ValueError("a target stage is required")
@@ -235,7 +236,7 @@ def block(records: Sequence[Any], decision_id: int | None, reason: str) -> Decis
     """The decision a spent retry limit holds up shows as blocked with the reason; it keeps its target and intent,
     which hold the issue until a newer intent supersedes it."""
     found = _update(records, decision_id, frozenset({"re-routed", "reversed", "blocked"}))
-    if found is None:
+    if found is None or not _is_current(records, decision_id):
         return None
     nxt = refuse(found, reason).decision
     return DecisionUpdate(nxt, _write_for(nxt))
@@ -273,10 +274,21 @@ def supersede(records: Sequence[Any]) -> list[DecisionUpdate]:
     return [DecisionUpdate(nxt, _write_for(nxt)) for nxt in updates]
 
 
+def _is_current(records: Sequence[Any], decision_id: int | None) -> bool:
+    current = current_intent(records)
+    return current is not None and current.id == decision_id
+
+
+def replaces_engine_move(intent: DecisionState, stage: str) -> bool:
+    """Whether applying this intent moves the card, and so replaces a stage write the engine queued for itself."""
+    return intent.status != "blocked" and (intent.intent == "write" or (intent.intent == "run" and intent.rerouted_to != stage))
+
+
 def advance(records: Sequence[Any], decision_id: int) -> DecisionUpdate | None:
-    """An intent's next phase: its stage written, it runs; its worker launched, it is done. A blocked one stays."""
+    """An intent's next phase: its stage written, it runs; its worker launched, it is done. Only the current intent
+    advances, and a blocked one stays."""
     found = next((st for st in map(state_of, records) if st.id == decision_id and st.intent and st.status != "blocked"), None)
-    if found is None:
+    if found is None or not _is_current(records, decision_id):
         return None
     nxt = replace(found, intent="run" if found.intent == "write" else "")
     return DecisionUpdate(nxt, _write_for(nxt))

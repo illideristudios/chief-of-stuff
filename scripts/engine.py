@@ -67,9 +67,9 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
         raise ForgeError(result.error)
     fields: dict[str, Any] = {"stage": stage}
     board = getattr(forge, "kanban", None)
-    if board is not None and board.holds(stage):
-        # A retried write runs before planning, so cache its new hold immediately.
-        fields["human_review"] = True
+    if board is not None:
+        # A retried write runs before planning, so cache the hold the new stage enters, or leaves, immediately.
+        fields["human_review"] = board.holds(stage)
     with store.transaction():
         store.upsert_item(key, **fields)
         store.update_resume(key, lambda data: data.pop("pending_stage", None))
@@ -78,6 +78,20 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
 def _apply(store: Any, update: decision_actions.DecisionUpdate | None) -> None:
     if update is not None:
         store.update_decision(update.store_write)
+
+
+def _settle(store: Any, key: str, step: Callable[..., Any], decision_id: int, *args: Any) -> bool:
+    """Record an intent's outcome only while it is still the issue's current one, with any older intent superseded
+    in the same transaction so it can never become current again."""
+    with store.transaction():
+        rows = store.decisions(key)
+        current = decision_actions.current_intent(rows)
+        if current is None or current.id != decision_id:
+            return False
+        for update in decision_actions.supersede(rows):
+            _apply(store, update)
+        _apply(store, step(rows, decision_id, *args))
+    return True
 
 
 def _apply_intent(forge: Any, store: Any, key: str) -> None:
@@ -90,20 +104,28 @@ def _apply_intent(forge: Any, store: Any, key: str) -> None:
         for update in decision_actions.supersede(rows):
             _apply(store, update)
         intent = decision_actions.current_intent(rows)
-        store.update_resume(key, lambda data: data.pop("pending_stage", None))  # a person's intent replaces the engine's own move
-    if intent is None or intent.intent != "write" or intent.status == "blocked":
+        if decision_actions.replaces_engine_move(intent, store.item(key).stage):
+            store.update_resume(key, lambda data: data.pop("pending_stage", None))  # a person's intent replaces the engine's own move
+    if intent.status == "blocked":
         return
     item = store.item(key)
-    if item.stage != intent.rerouted_to:
+    if intent.rerouted_to and item.stage != intent.rerouted_to:
+        if not _is_current(store, key, intent.id):
+            return  # a newer intent arrived; the next pass applies it
         _write_stage(forge, store, key, intent.rerouted_to, item.stage)
-    with store.transaction():
-        _apply(store, decision_actions.advance(store.decisions(key), intent.id))
+    if intent.intent == "write":
+        _settle(store, key, decision_actions.advance, intent.id)
+
+
+def _is_current(store: Any, key: str, decision_id: int) -> bool:
+    current = decision_actions.current_intent(store.decisions(key))
+    return current is not None and current.id == decision_id
 
 
 def _replaced(store: Any, key: str, planned: decision_actions.DecisionState | None) -> bool:
-    """Whether a newer intent was appended since planning chose this one."""
+    """Whether the issue's current intent changed, or first appeared, since planning chose its action."""
     current = decision_actions.current_intent(store.decisions(key))
-    return planned is not None and (current is None or current.id != planned.id)
+    return (planned.id if planned else None) != (current.id if current else None)
 
 
 def _sync_decisions_with_action(store: Any, key: str, action: reconcile.Action) -> None:
@@ -236,8 +258,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                             launch=lambda: launch(key, stage, action.attempt, persona),
                             agent_type=agent_name, runtime="claude")
                 if planned is not None:
-                    with store.transaction():
-                        _apply(store, decision_actions.advance(store.decisions(key), planned.id))
+                    _settle(store, key, decision_actions.advance, planned.id)
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
@@ -248,8 +269,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
                 if isinstance(action, reconcile.Escalate) and planned is not None and planned.intent == "run":
                     # A spent retry limit blocks the intent's own decision, which keeps holding the issue.
-                    with store.transaction():
-                        _apply(store, decision_actions.block(store.decisions(key), planned.id, action.reason))
+                    _settle(store, key, decision_actions.block, planned.id, action.reason)
                 record = {"kind": type(action).__name__, "reason": action.reason}
                 if isinstance(action, reconcile.Ask):
                     record["gate"] = action.gate

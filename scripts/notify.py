@@ -35,7 +35,7 @@ try:
     import store_access  # noqa: E402
 except ModuleNotFoundError:
     store_access = None  # type: ignore[assignment]
-from decision_actions import current_intent, state_of
+from decision_actions import current_intent, replaces_engine_move, state_of
 from reconcile import OP_DECISION_COMMENT, OP_MERGE, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN  # noqa: E402
 from settings import Settings, SettingsError, load  # noqa: E402
 from workspace import ConfigError, read_config  # noqa: E402
@@ -145,7 +145,8 @@ def _recovered(entry, stamp: datetime, db, segments: list, zone, now: datetime) 
     state = state if isinstance(state, dict) else {}
     if entry.kind == OP_STAGE_WRITE:
         intent = current_intent(db.decisions(entry.issue_key))
-        return not state.get("pending_stage") and not (intent and intent.intent == "write")
+        item = db.item(entry.issue_key)
+        return not state.get("pending_stage") and not (intent and (intent.intent == "write" or replaces_engine_move(intent, item.stage if item else "")))
     if entry.kind == OP_DECISION_COMMENT:
         return not state.get("decision_comments")
     if entry.kind == OP_WORKER_RUN:

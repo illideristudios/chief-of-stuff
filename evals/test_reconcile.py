@@ -81,8 +81,12 @@ class ReconcileTest(unittest.TestCase):
                                    decisions=self.intent("implement")), [reconcile.Wait(KEY, "needs input")])
 
     def test_a_pending_run_intent_to_review_plans_the_review(self):
+        self.assertEqual(self.plan(replace(Item(), stage="review"), history=[Segment("implement")],
+                                   decisions=self.intent("review")), [reconcile.Review(KEY, 1)])
+
+    def test_a_run_intent_waits_for_the_engine_to_write_its_stage(self):
         self.assertEqual(self.plan(history=[Segment("implement")], decisions=self.intent("review")),
-                         [reconcile.Review(KEY, 1)])
+                         [reconcile.Wait(KEY, "re-route pending")])
 
     def test_a_pending_run_intent_takes_the_next_attempt_and_stops_at_the_retry_limit(self):
         history = [Segment("implement", 1, outcome="failed"), Segment("implement", 2, outcome="failed")]
