@@ -1,5 +1,6 @@
 """Completed stage reviews require launcher evidence, independent of entry gates (#130)."""
 
+import re
 import sys
 import unittest
 from dataclasses import replace
@@ -129,7 +130,6 @@ class StageReviewTest(unittest.TestCase):
         self.assertNotEqual(held.get(named), task_forge.STAGE_REVIEW)
 
     def test_review_evidence_outside_the_chart_window_and_across_midnight_still_holds(self):
-        import flow_chart
         import issue_page
         from workspace import Config
         lanes = {"code": settings.Lane(("plan",))}
@@ -146,13 +146,77 @@ class StageReviewTest(unittest.TestCase):
         page = issue_page.render(3, [(now.date(), today)], board_sources.EMPTY, now, lanes, cfg,
                                  review_stages={"plan"}, review_log=review_log)
         self.assertIn(task_forge.REVIEW_LABEL, page)
-        log = tracker_log.day_moves(review_log, timezone.utc)
-        self.assertEqual(log[-1].stage, "plan")
-        built = flow_chart.build(log, parse_tracker(today).tasks, lanes,
-                                 { "Review plan": task_forge.REVIEW_LABEL }, {}, now)
-        self.assertEqual(built[0][0], "needs input")
+        for html in (board, page):
+            figures = re.findall(r'<figure class="gantt".*?</figure>', html, re.S)
+            self.assertEqual(len(figures), 2)
+            for figure in figures:
+                self.assertIn('class="gantt-name">Review plan<', figure)
+                self.assertIn('class="gantt-note">needs input · needs your review<', figure)
+                self.assertIn('class="gantt-bar gantt-hold"', figure)
 
     def test_the_golden_fixture_carries_the_launcher_review_contract(self):
         root = Path(__file__).resolve().parents[0] / "cases/completed-stage-needs-human-review/fixture"
-        self.assertIn("[review_after=specify]", (root / "daily/{{today}}-tracker.md").read_text())
+        from evals import run
+        now = datetime(2000, 1, 1, 10, tzinfo=timezone.utc)
+        text = run.render_value((root / "daily/{{today}}-tracker.md").read_text(), run.context("UTC", now))
+        moves = tracker_log.moves(text, now.date(), timezone.utc)
+        self.assertEqual(moves[-1].stage, "specify")
+        self.assertEqual(tracker_log.review_completions(moves), {"cache design": ("specify", now)})
         self.assertIn("review_stage: specify", (root / ".chief-of-stuff/reports/cache-design.toon").read_text())
+
+
+    def test_multi_word_review_stage_round_trips_and_holds_at_terminal(self):
+        task = replace(parse_tracker(TRACKER).tasks[2], stage="design yes")
+        moves = completion(stage="design yes")
+        at = datetime(2000, 1, 1, 10, tzinfo=timezone.utc)
+        self.assertEqual(moves[-1].stage, "design yes")
+        self.assertEqual(tracker_log.review_completions(moves), {"review plan": ("design yes", at)})
+        held = task_forge.hold_causes([task], None, board_sources.EMPTY,
+                                      {"code": settings.Lane(("design yes",))}, (), {"design yes"}, moves=moves)
+        self.assertEqual(held.get(task), task_forge.STAGE_REVIEW)
+
+    def test_unnamed_row_keeps_its_completed_review_hold_and_since(self):
+        import flow_chart
+        # Legacy trackers have no Name column; the launcher identifies these rows by item.
+        text = "\n".join("|" + "|".join(line.split("|")[2:]) if line.startswith("|") else line
+                         for line in TRACKER.splitlines())
+        task = parse_tracker(text).tasks[2]
+        self.assertEqual(task.name, "")
+        lanes = {"code": settings.Lane(("plan",))}
+        moves = completion()
+        held = task_forge.hold_causes([task], None, board_sources.EMPTY, lanes, (), {"plan"}, moves=moves)
+        self.assertEqual(held.get(task), task_forge.STAGE_REVIEW)
+        self.assertEqual(task_forge.hold_began(held, moves, {}, None, [task])[task],
+                         datetime(2000, 1, 1, 10, tzinfo=timezone.utc))
+        cols = render_board.build_columns([task], lanes, held=held, review_stages={"plan"})
+        self.assertEqual(cols[0].cards[0].flag.text, task_forge.REVIEW_LABEL)
+        rows = flow_chart.build(moves, [task], lanes, task_forge.held_names(held), {},
+                                datetime(2000, 1, 1, 12, tzinfo=timezone.utc))
+        self.assertEqual(rows[0][0], "needs input")
+        self.assertIn(task_forge.REVIEW_LABEL, rows[0][1].note)
+
+    def test_issue_page_uses_the_launcher_outcome_independently_of_review_stage(self):
+        import issue_page
+        now = datetime(2000, 1, 1, 12, tzinfo=timezone.utc)
+        for stage in ("plan", "implement", "specify", "review"):
+            with self.subTest(stage=stage):
+                # STARTED_DETAIL requires the launcher's worktree notation.
+                text = TRACKER + "## Log\n" + tracker_log.started_line(
+                    "09:00", "w", "claude", "opus", "worktree `trees/w`", "Review plan") + "\n"
+                text += tracker_log.ended_line("10:00", "w", "done", "completed", "artifact", review_stage=stage)
+                page = issue_page.render(3, [(DAY, text)], board_sources.EMPTY, now)
+                self.assertIn("ended completed · w", page)
+                self.assertIn('class="st">completed<', page)
+                self.assertNotIn("ended ended", page)
+
+    def test_issue_page_without_current_trackers_has_no_page(self):
+        import issue_page
+        now = datetime(2000, 1, 8, 12, tzinfo=timezone.utc)
+        self.assertIsNone(issue_page.render(3, [], board_sources.EMPTY, now, review_log=[(DAY, TRACKER)]))
+
+    def test_a_reused_name_does_not_claim_another_issues_historical_alias(self):
+        old = replace(parse_tracker(TRACKER).tasks[2], item="Old artifact")
+        reused = replace(old, issue="#4")
+        renamed = replace(old, name="Renamed plan", item="New artifact")
+        aliases = task_forge.canonical_names([reused, renamed], [old])
+        self.assertEqual(aliases["old artifact"], "renamed plan")
