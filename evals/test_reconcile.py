@@ -722,7 +722,6 @@ class ReconcileTest(unittest.TestCase):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
 
     def test_an_item_that_waits_for_a_slot_claims_nothing_for_the_next(self):
-        import readiness
         keys = [f"github:example/project#{n}" for n in (1, 2, 3)]
         items = [replace(Item(), issue_key=key) for key in keys]
         claims = (readiness.Claim(keys[0], "docs/"), readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))

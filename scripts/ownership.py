@@ -72,6 +72,11 @@ def issue_scopes(body: str) -> list[tuple[str, str]] | None:
             continue
         if mode not in ("write", "read", "read-only"):
             return None
+        if not row.paths:
+            continue
+        tokens = re.findall(r"`([^`]+)`", row.paths) or row.paths.split(",")
+        if any(token.strip() != "." and _paths(token) == ["."] for token in tokens):
+            return None
         if "`" in row.paths and not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", row.paths):
             return None
         if any(token != token.strip() for token in re.findall(r"`([^`]+)`", row.paths)):

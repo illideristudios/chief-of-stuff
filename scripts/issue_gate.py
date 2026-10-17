@@ -64,5 +64,6 @@ def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None 
         except (KeyError, ValueError) as exc:
             return Started(refused=str(exc))
     store.upsert_item(key, title=title)
+    # The store atomically retains the launch scope while any segment is open.
     store.replace_file_ownership(key, declared or [])
     return Started(issue_key=key)

@@ -34,7 +34,7 @@ body:
     attributes:
       label: File ownership
       description: "Keep the ## File ownership heading. List repository-relative paths after write: or read-only:. Use . only for the whole repository."
-      value: |
+      placeholder: |
         ## File ownership
         - write:
     validations:

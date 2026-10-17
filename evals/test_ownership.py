@@ -60,22 +60,22 @@ class IssueScopesTest(unittest.TestCase):
             with self.subTest(template=name):
                 # Read the actual ownership field and its literal YAML block without a YAML dependency.
                 fields = (templates / name).read_text().split("  - type: ")[1:]
-                fields = [field for field in fields if "    id: file_ownership\n" in field]
-                self.assertEqual(len(fields), 1, "the form must include the ownership field")
-                field = fields[0]
+                ownership_fields = [field for field in fields if "    id: file_ownership\n" in field]
+                self.assertEqual(len(ownership_fields), 1, "the form must include the ownership field")
+                field = ownership_fields[0]
                 self.assertRegex(field, r"validations:\n      required: true")
                 default = re.search(r"(?m)^      value:", field)
                 self.assertIsNone(default, "a prefilled skeleton satisfies required without declaring a path")
                 placeholder = re.search(r"(?m)^      placeholder: \|\n((?:        .*\n)+)", field)
                 self.assertIsNotNone(placeholder)
                 skeleton = textwrap.dedent(placeholder[1]).rstrip()
-                label = re.search(r"(?m)^      label: (.+)$", field)[1]
-                submitted = skeleton.replace("- write:", "- write: `src/`")
-                body = f"### {label}\n\n{submitted}"
-                self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
-                # Appending a filled row to the visible skeleton must also work.
-                body = f"### {label}\n\n{skeleton}\n- write: `src/`"
-                self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
+                for submitted in (skeleton.replace("- write:", "- write: `src/`"),
+                                  skeleton + "\n- write: `src/`"):
+                    # GitHub renders each form field's label and response in template order.
+                    body = "\n\n".join(
+                        f"### {re.search(r'(?m)^      label: (.+)$', entry)[1]}\n\n"
+                        + (submitted if entry == field else "Example response") for entry in fields)
+                    self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
 
 
 class ReadOnlyTest(unittest.TestCase):

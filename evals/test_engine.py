@@ -381,7 +381,7 @@ class EngineTest(unittest.TestCase):
         self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
         self.run_pass()
         tree = str(self.trees / "fake")
-        self.db.set_ownership(KEY, tree)
+        self.db.set_ownership(KEY, tree, "tree")
         for body in ("## File ownership\n- read-only: `docs/`", "scope removed"):
             self.forge.rows[0]["body"] = body
             self.run_pass()
@@ -471,6 +471,7 @@ class EngineTest(unittest.TestCase):
         self.forge.rows.append({**self.forge.rows[0], "issue_key": OTHER})
         for key in (KEY, OTHER):
             self.db.upsert_item(key, stage="implement")
+            self.db.replace_file_ownership(key, [(".", "write")])
             self.db.record_segment(key, "implement", 1, started_at=NOW.isoformat())
             self.launch(key, "implement", 1, "builder")
             run = Path(self.db.resume(key)["runs"]["implement-1"]["run_dir"])
