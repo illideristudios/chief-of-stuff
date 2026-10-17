@@ -184,6 +184,22 @@ class WorkMainTest(unittest.TestCase):
         self.assertEqual((self.root / "store.db").exists() or (state / "migrate.lock").exists(), False,
                          "a preview must not create, migrate or lock the store")
 
+    def test_work_records_an_answer_for_the_named_issues_ask(self):
+        self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Parser"), tf.gh_issue(4, "Other")])
+        store.migrate(self.root / "store.db")
+        db = store.Store(self.root / "store.db")
+        self.addCleanup(db.engine.dispose)
+        key = "github:example/app#3"
+        db.upsert_item(key)
+        ask = db.add_ask(key, "implement", 1, "session", "Continue?", ["yes"], "")
+        self.assertEqual(self.run_work("--issue", "3", "--answer-ask", str(ask), "--answer", "yes")[0], 0)
+        self.assertIsNone(db.asks(key)[0].answer, "preview writes nothing")
+        self.assertEqual(self.run_work("--issue", "4", "--answer-ask", str(ask), "--answer", "yes", "--commit")[0], 1)
+        self.assertIsNone(db.asks(key)[0].answer, "another issue cannot answer this ask")
+        code, _, err = self.run_work("--issue", "3", "--answer-ask", str(ask), "--answer", "yes", "--commit")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(db.asks(key)[0].answer, "yes")
+
     def test_existing_issue_preview_does_not_open_the_store(self):
         self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])
         with mock.patch.object(store, "migrate") as migrated:
