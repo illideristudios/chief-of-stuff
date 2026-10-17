@@ -672,12 +672,14 @@ class Forge:
             raise ForgeError(f"merged requests: {exc}") from exc
 
     def landings(self, pipeline: Pipeline, keys: list[str], *,
-                 errors: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
+                 errors: dict[str, str] | None = None,
+                 heads: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
         """Prove the newest closing request's head landed in current main with a passing suite.
 
         Uses forge ancestry, so a stale local checkout or an original PR head is no landing proof.
         Missing bounded history or unreadable comparisons remain unknown.
         When provided, errors receives per-issue failure details for the planner's wait log.
+        heads receives the source head of each verified landing, even after branch deletion.
         """
         found = {key: (None, None) for key in keys}
         if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
@@ -726,6 +728,8 @@ class Forge:
                     errors.update((key, f"landing comparison: {exc}") for key in mine)
             for key in mine:
                 found[key] = result
+                if heads is not None and result[0] is True:
+                    heads[key] = identity[1]
         return found
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:

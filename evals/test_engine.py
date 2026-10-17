@@ -22,7 +22,7 @@ import reconcile
 import slots
 import store
 import supervisor
-from tree_state import TreeState
+from tree_state import TreeState, at_risk
 from orphans import Claim
 from evals import test_forge as tf
 from forge_port import ForgeError
@@ -259,7 +259,7 @@ class EngineTest(unittest.TestCase):
     def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
-        def landings(pipeline, keys, *, errors=None):
+        def landings(pipeline, keys, *, errors=None, heads=None):
             if errors is not None:
                 errors[KEY] = "compare: permission denied"
             return {KEY: (None, None)}
@@ -543,11 +543,13 @@ class EngineTest(unittest.TestCase):
 
     def test_squash_landed_final_stage_clean_tree_completes_without_a_hold(self):
         tree, git = self.squash_landed_final_tree()
-        self.assertEqual(engine.engine_facts._tree_facts(tree)[0].dirty, 0)
+        self.assertEqual(at_risk(engine.engine_facts.git_trees.read_state(tree)),
+                         ("2 not on origin/main", "no upstream"))
         self.assertEqual(git("branch", "--list", "work"), "")
         self.assertEqual(self.run_pass(), [])
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
         self.assertFalse(self.db.items()[0].human_review)
+        self.assertEqual(self.db.resume(KEY)["verified_landing_head"], git("rev-parse", "HEAD"))
         self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
         self.assertEqual(self.run_pass(), [])  # remembered landing still certifies this head
         (tree / "extra").write_text("work after landing")

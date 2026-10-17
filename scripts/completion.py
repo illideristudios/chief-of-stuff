@@ -2,8 +2,9 @@
 
 Landing means on main, with the suite run there: unknown does not clear. Stage completion can
 precede landing. Before landing, dirty files and commits absent from remote refs need recovery;
-inherited, published PR commits do not. Missing tree or read-only baseline evidence requires a
-human hold without changing the reported outcome. Retryable and blocked writable runs keep
+inherited, published PR commits do not. A verified landing of this tree's HEAD and a clean tree
+clear squash history even after branch deletion. Missing tree or read-only baseline evidence
+requires a human hold without changing the reported outcome. Retryable and blocked writable runs keep
 their outcome and tree unless the tree is unreadable. Final completion also judges orphans.
 """
 
@@ -59,7 +60,7 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
               changed: bool | None = None, on_main: bool | None = None, suite_on_main: bool | None = None,
               tree: TreeState | None = None, tree_name: str = "",
               tree_claims: Sequence[Claim] = (), tree_unreadable: bool = False,
-              landing_required: bool = True) -> Verdict | None:
+              landing_required: bool = True, tree_landed: bool = False) -> Verdict | None:
     """Close a gone worker using the module contract; holds preserve its report or failed outcome."""
     if worker_alive is not False:
         return None
@@ -83,10 +84,12 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
         reason = ", ".join(left) if left else ("" if report == "done" else "worker gone")
         return Verdict(outcome, reason, bool(left))
     left = unlanded(tree)
+    landed = (tree_landed and tree is not None and tree.dirty == 0
+              and done_on_main(on_main, suite_on_main) is None)
     # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
-    if report == "done" and left:
+    if report == "done" and left and not landed:
         return Verdict("done", left, True)
-    orphaned = orphan_reason(tree_name, tree, tree_claims)
+    orphaned = None if landed and report == "done" else orphan_reason(tree_name, tree, tree_claims)
     if orphaned:
         return Verdict("failed", orphaned, True)
     if report == "done":

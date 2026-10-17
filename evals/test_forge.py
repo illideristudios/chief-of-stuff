@@ -362,8 +362,10 @@ class LandingTest(unittest.TestCase):
                 ("older", "passed", "older", (False, False))):
             with self.subTest(sha=sha, status=status), \
                  mock.patch.object(forge.Forge, "_pipeline_read", return_value={"merge_base_commit": {"sha": base}}):
-                result = adapter.landings(forge.Pipeline(1, "main", sha, status, ""), [key])
+                heads = {}
+                result = adapter.landings(forge.Pipeline(1, "main", sha, status, ""), [key], heads=heads)
                 self.assertEqual(result[key], expected)
+                self.assertEqual(heads, {key: "head"} if expected[0] else {})
         merged["baseRefName"] = "release"
         gh.merged = [merged]
         self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""), [key])[key], (None, None))
@@ -376,7 +378,9 @@ class LandingTest(unittest.TestCase):
              mock.patch.object(forge.Forge, "_pipeline_read", side_effect=lambda path:
                                [] if path.startswith("merge_requests?") else {"id": "squash"}) as read:
             key = adapter.key(3)
-            self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], (True, True))
+            heads = {}
+            self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key], heads=heads)[key], (True, True))
+            self.assertEqual(heads, {key: "head"})
             self.assertIn("repository/merge_base?", read.call_args.args[0])
 
     def test_gitlab_fast_forward_uses_source_sha_and_verifies_ancestry(self):

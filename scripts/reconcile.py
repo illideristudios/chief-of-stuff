@@ -160,6 +160,8 @@ class Facts:
     unreadable: tuple[str, ...] = ()  # git tree/status could not be read; independent of baseline evidence
     on_main: tuple[tuple[str, bool | None], ...] = ()
     suite_on_main: tuple[tuple[str, bool | None], ...] = ()
+    landing_heads: tuple[tuple[str, str], ...] = ()  # source head of the forge-verified landing
+    landed_trees: tuple[str, ...] = ()  # recorded tree HEAD matches that source head
     trees: tuple[tuple[str, TreeState], ...] = ()
     tree_names: tuple[tuple[str, str], ...] = ()
     tree_claims: tuple[tuple[str, tuple], ...] = ()
@@ -310,7 +312,7 @@ def completion_verdict(key: str, segment: Segment, facts: Facts, workflow: Workf
         on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
         tree_unreadable=key in facts.unreadable,
         tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
-        tree_claims=claims, landing_required=not workflow.next(segment.stage))
+        tree_claims=claims, landing_required=not workflow.next(segment.stage), tree_landed=key in facts.landed_trees)
     if verdict is None or verdict.human_review or report != "done":
         return verdict
     found = dict(facts.suites).get((key, segment.stage, segment.attempt),
