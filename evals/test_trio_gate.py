@@ -15,12 +15,12 @@ import store  # noqa: E402
 import trio_gate  # noqa: E402
 
 KEY = "github:example/app#7"
-DEFAULT = ("reviewer", "architect", "implementer")
-TAGGED = ("operator", "reviewer", "architect")
+DEFAULT = ("reviewer", "designer", "implementer")
+TAGGED = ("operator", "reviewer", "designer")
 OPTIONS = ("Split the parser", "Keep the parser")
 PERSONAS = {
     "reviewer": policy.Persona("reviewer", "checks correctness", "review-model", "high", ("Explain risks",)),
-    "architect": policy.Persona("architect", "checks boundaries", "design-model", "max"),
+    "designer": policy.Persona("designer", "checks boundaries", "design-model", "max"),
     "implementer": policy.Persona("implementer", "checks feasibility", "build-model"),
     "operator": policy.Persona("operator", "checks operations", "ops-model", "medium"),
 }
@@ -59,8 +59,8 @@ class SelectionTest(unittest.TestCase):
         self.assertEqual(tuple(p.name for p in trio_gate.select(self.policy, PERSONAS, ("operations", "design"))), TAGGED)
 
     def test_missing_duplicate_or_unknown_personas_are_policy_errors(self):
-        for names in ((), ("reviewer", "architect"), (*DEFAULT, "operator"),
-                      ("reviewer", "reviewer", "architect"), ("reviewer", "architect", "unknown")):
+        for names in ((), ("reviewer", "designer"), (*DEFAULT, "operator"),
+                      ("reviewer", "reviewer", "designer"), ("reviewer", "designer", "unknown")):
             for tagged in (False, True):
                 with self.subTest(names=names, tagged=tagged):
                     p = replace(self.policy, **({"trios": {"operations": names}} if tagged else {"trio": names}))
@@ -280,8 +280,8 @@ class GateTest(unittest.TestCase):
         self.assertEqual((got.recommendation, got.unanimous, len(retry_model.requests)), ("Split the parser", True, 3))
 
     def test_invalid_selection_makes_no_model_calls_and_writes_no_decision(self):
-        for resolved in (policy.Policy(), policy.Policy(trio=("reviewer", "reviewer", "architect")),
-                         policy.Policy(trio=DEFAULT, trios={"design": ("reviewer", "architect", "missing")})):
+        for resolved in (policy.Policy(), policy.Policy(trio=("reviewer", "reviewer", "designer")),
+                         policy.Policy(trio=DEFAULT, trios={"design": ("reviewer", "designer", "missing")})):
             with self.subTest(resolved=resolved):
                 with self.assertRaises(policy.PolicyError):
                     self.consult([reply()] * 3, resolved=resolved)

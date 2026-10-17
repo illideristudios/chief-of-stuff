@@ -576,10 +576,13 @@ class EngineTest(unittest.TestCase):
         rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question,
                              answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
-        self.assertEqual(self.db.decisions(KEY)[-1].record.get("restarted"), "implement")
-        self.finish("implement", 2)
         model = self._votes([("adopt", "Keep the parser")] * 3)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        self.assertEqual(self.db.decisions(KEY)[-1].record.get("restarted"), "implement")
+        self.assertEqual(model.n, 0)
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 0)
+        self.finish("implement", 2)
         self.assertEqual(self.run_pass(model=model), [reconcile.Review(KEY, 2)])
         self.assertEqual(model.n, 3)
         self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep the parser")
@@ -641,7 +644,7 @@ class EngineTest(unittest.TestCase):
                                                                     "zach_gates": ("merge",)})
         self.p.workflows["standard"] = policy.Workflow("standard", "implement", (
             policy.Edge("implement", "review"), policy.Edge("review", "merge", "merge")))
-        # Empty item/ask stage resolves workflow.start policy ("implement"); closed items are skipped; launches run first.
+        # Empty item/ask stage resolves workflow.start policy ("implement"); closed items are skipped; decisions precede continuations.
         closed = "github:example/project#2"
         self.forge.rows = [{"issue_key": KEY, "title": "Open", "stage": "", "forge_state": "open",
                             "review_state": "", "merge_state": "", "human_review": False}]
@@ -662,7 +665,7 @@ class EngineTest(unittest.TestCase):
 
         engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
                         launch=launch, clock=lambda: NOW, model=model)
-        self.assertEqual(events[0], ("launch", "implement"))
+        self.assertEqual(events[-1], ("launch", "implement"))
         self.assertEqual(len([e for e in events if e[0] == "model"]), 3)
         self.assertEqual(self.db.asks(KEY)[0].answer, "Split")
         self.assertIsNone(self.db.asks(closed)[0].answer)
@@ -689,6 +692,141 @@ class EngineTest(unittest.TestCase):
         self.now += timedelta(hours=2)
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertNotIn("quota_percent", self.db.resume(KEY))
+
+    def _merge_gate(self):
+        self._trio()
+        self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",)})
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement", (
+            policy.Edge("implement", "review"), policy.Edge("review", "implement"),
+            policy.Edge("review", "merge", "merge")))
+        self.forge.rows[0].update(stage="merge", review_state="approved")
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(),
+                               (NOW - timedelta(minutes=1)).isoformat(), "done")
+        self.findings()
+
+    def test_merge_gate_retries_outages_and_clears_ambiguity(self):
+        self._merge_gate()
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "outage"))
+        self.assertIsInstance(self.run_pass(model=failed)[0], reconcile.Ask)
+        model = self._votes([("adopt", "approve")] * 3)
+        self.assertIsInstance(self.run_pass(model=model)[0], reconcile.Ask)
+        self.assertEqual(model.n, 3)
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertEqual(self.run_pass(model=model), [reconcile.Merge(KEY)])
+
+    def test_gate_context_excludes_out_of_band_architect_and_is_not_a_wildcard(self):
+        self._merge_gate()
+        self.db.record_segment(KEY, "architect", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        self.db.add_decision(KEY, topic="merge", question="gate requires Zach's approval", answer="hold",
+                             record={"decision": {"context": "", "options": ["approve", "hold"]}})
+        model = self._votes([("adopt", "hold")] * 3)
+        self.assertIsInstance(self.run_pass(model=model)[0], reconcile.Ask)
+        self.assertEqual(model.n, 3)
+        self.assertEqual(self.db.decisions(KEY)[-1].record["decision"]["context"], "review-1")
+        self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(model.n, 3)
+
+    def test_gate_consultations_respect_limits_and_backoff(self):
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic", {"zach_gates": ("merge",), "spend_usd": 1})
+        self.db.set_resume(KEY, {**self.db.resume(KEY), "spend_usd": 1})
+        model = self._votes([("adopt", "approve")] * 3)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Limit(KEY, "spend", "reached spend limit")])
+        self.db.set_resume(KEY, {"review_findings": {"attempt": 1, "counts": {}},
+                                 "quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
+        self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(model.n, 0)
+
+    def test_pending_asks_wait_before_continuation_and_do_not_displace_each_other(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        for context in ("parser one", "parser two"):
+            self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], context)
+        model = self._votes([("concern", "Split")] * 6)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 6)
+        self.assertEqual(self.launched, [])
+        self.assertEqual(len(self.db.decisions(KEY)), 2)
+
+    def test_identical_ask_in_a_later_attempt_consults_again(self):
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        model = self._votes([("adopt", "Split")] * 6)
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        self.run_pass(model=model)
+        self.db.add_ask(KEY, "implement", 2, "s2", "Which parser?", ["Split", "Keep"], "")
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 6)
+        self.assertEqual([a.answer for a in self.db.asks(KEY)], ["Split", "Split"])
+
+    def test_ask_backoff_and_limits_notify_even_with_an_open_worker(self):
+        self._trio(quota_percent=80)
+        self.run_pass()
+        self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
+        model = self._votes([("adopt", "Split")] * 3)
+        self.db.set_resume(KEY, {**self.db.resume(KEY), "quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 0)
+        self.db.set_resume(KEY, {**self.db.resume(KEY), "quota_percent": 85})
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 0)
+        self.assertEqual(self.db.resume(KEY)["interrupt"], {"kind": "limit", "reason": "reached quota limit"})
+
+    def test_repeated_quota_occurrences_each_log_once(self):
+        self._trio(quota_percent=80)
+        self.db.upsert_item(KEY, stage="implement")
+        for _ in range(2):
+            self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}), "quota_percent": 100,
+                "quota": {"retry_at": (self.now + timedelta(hours=1)).isoformat()}})
+            self.run_pass()
+            self.run_pass()
+            self.now += timedelta(hours=1)
+            self.run_pass()
+            self.assertNotIn("interrupt", self.db.resume(KEY))
+            # End the fake worker so a new exhaustion can block a later launch.
+            for seg in self.db.segments(KEY):
+                if not seg.ended_at:
+                    self.db.end_segment(KEY, seg.stage, seg.attempt, self.now.isoformat(), "unknown")
+        self.assertEqual(sum(e.message == "limit: reached quota limit" for e in self.db.log(KEY)), 2)
+
+    def test_reversal_crash_after_claim_recovers_replacement_after_completion(self):
+        import decision_actions
+        self._trio()
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_decision(KEY, topic="ask", question="Which parser?", answer="Split", record={
+            "decision": {"options": ["Split", "Keep"], "context": "original"}})
+        rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        # Durable segment exists; crash prevented appending the restarted row.
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        model = self._votes([("adopt", "Keep")] * 3)
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 0)
+        self.finish("implement")
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
+        self.assertIn("implement-1", self.db.decisions(KEY)[-1].record["decision"]["context"])
+
+    def test_reversed_gate_waits_for_reworked_source_attempt(self):
+        import decision_actions
+        self._merge_gate()
+        model = self._votes([("adopt", "approve")] * 6)
+        self.run_pass(model=model)
+        rev = decision_actions.reverse(self.db.decisions(KEY), "merge", "gate requires Zach's approval")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        self.finish("implement")
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        self.finish("review", 2)
+        self.findings(2)
+        self.assertIsInstance(self.run_pass(model=model)[0], reconcile.Ask)
+        self.assertEqual(model.n, 6)
+        self.assertEqual(self.db.decisions(KEY)[-1].record["decision"]["context"], "review-2")
 
 
 class MainTest(unittest.TestCase):
