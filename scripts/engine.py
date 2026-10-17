@@ -36,6 +36,7 @@ from forge_port import ForgeError
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
+MAX_TRIO_RETRIES = 8  # Stop automatic consultations after repeated outages in the same decision context.
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -129,7 +130,7 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
     prior = decision_actions.latest(earlier).get((topic, question, instance))
     if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
-            and datetime.fromisoformat(retry["retry_at"]) > clock()):
+            and (retry["failures"] >= MAX_TRIO_RETRIES or datetime.fromisoformat(retry["retry_at"]) > clock())):
         return None
     outcome = trio_gate.decide(decision, earlier, resolved, personas,
                                _metered(store, key, model) if model is not None else None, store)
@@ -311,8 +312,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         quota = data.get("quota")
         if quota and datetime.fromisoformat(quota["retry_at"]) <= now and "quota_percent" in data:
             data.pop("quota_percent")
-            if data.get("interrupt") == {"kind": "limit", "reason": "reached quota limit",
-                                         "stage": item.stage or _workflow_for(policies, store, item).start}:
+            # The planner stamps the evaluated stage, which need not be item.stage.
+            interrupt = data.get("interrupt") or {}
+            if (interrupt.get("kind"), interrupt.get("reason")) == ("limit", "reached quota limit"):
                 data.pop("interrupt")
             store.set_resume(item.issue_key, data)
     # Retry label writes even when a successful merge closed the issue since the last pass.
