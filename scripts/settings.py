@@ -28,6 +28,7 @@ HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 OFFSET = re.compile(r"^(\d+)([hm])$")
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HERDR_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+RULES_TOTAL_CAP = 8000  # worst-case assignment without rules is ~6.5k, so this keeps compose_issue under dispatch_prompt.BODY_CAP
 CLAUDE_AS_PROFILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # claude-as's valid_profile_name
 DEFAULT_WARNINGS = ("24h", "3h", "1h")
 POLICY = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"  # the shipped policy and workflow
@@ -318,9 +319,9 @@ def _workers(table) -> Workers:
         isinstance(rule, str) and rule.strip() and len(rule.splitlines()) == 1
         and "(via " not in rule and len(rule) <= 2400
         and not any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in rule) for rule in rules
-    ):
+    ) or sum(map(len, rules)) > RULES_TOTAL_CAP:
         raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
-                            'or "(via " markers, each at most 2400 characters')
+                            'or "(via " markers, each at most 2400 characters and 8000 in all')
     # Preserve the user's wording, including surrounding spaces.
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
                    claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -20,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_prompt as dp  # noqa: E402
 import inbox  # noqa: E402
 import make_repo  # noqa: E402
+import settings  # noqa: E402
 from settings import Settings, Stage, Workers, Workflow  # noqa: E402
 from evals.rules_text import one_shot_paragraph, rules_text, sections, skill_body  # noqa: E402
 
@@ -648,6 +650,13 @@ class PromptCharacterBoundsTest(unittest.TestCase):
         (self.root / "daily" / "2026-09-18-tracker.md").write_text(large_tracker)
         body = dp.compose(self.root, "2026-09-18", item)
         self.assertLessEqual(len(body), dp.BODY_CAP)
+
+    def test_max_standing_rules_with_max_row_fit_under_cap(self):
+        row = SimpleNamespace(issue_key="k" * dp.LINE_CAP, title="t" * dp.LINE_CAP)
+        persona = SimpleNamespace(role="r" * 20, rules=())
+        rules = ("x" * 2000,) * 4
+        self.assertEqual(sum(map(len, rules)), settings.RULES_TOTAL_CAP)
+        dp.compose_issue(row, "T", "B", "review", persona, skills=("s",) * 3, rules=rules, require_green=True)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
         item = "Security audit " + ("x" * 2000)
@@ -1369,9 +1378,9 @@ class StandingWorkerRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
             self.compose()
 
-    def test_rules_count_toward_the_assignment_size_limit(self):
+    def test_rules_over_the_total_cap_refuse_dispatch(self):
         self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
-        with self.assertRaisesRegex(dp.RefusedError, "over the .* cap"):
+        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
             self.compose()
 
     def test_named_dispatch_preserves_literal_placeholder_in_rules(self):
