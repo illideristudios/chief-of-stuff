@@ -727,6 +727,24 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
         self.assertEqual(self.forge.rows[0]["stage"], "implement")
 
+    def test_reversal_launch_exit_rolls_back_stage_without_losing_resume(self):
+        import decision_actions
+        self._merge_gate()
+        self.p.stages["review"] = policy.Place("review", "critic")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
+                             record={"decision": {"options": ["Split", "Keep"]}})
+        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
+        with mock.patch.object(self, "launch", side_effect=SystemExit("launch exited")):
+            with self.assertRaisesRegex(SystemExit, "launch exited"):
+                self.run_pass()
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.assertEqual(self.db.resume(KEY)["review_findings"], {"attempt": 1, "counts": {}})
+        self.assertFalse(any(s.stage == "implement" for s in self.db.segments(KEY)))
+        self.assertEqual(self.forge.writes, [])
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+
     def test_permission_asks_context_options_limits_and_failure_spend(self):
         import guard_binding
         import worker_guard
