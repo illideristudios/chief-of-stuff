@@ -637,6 +637,15 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
 
     def test_failed_handoff_is_dropped_when_a_person_moves_the_card(self):
+        self.assert_failed_handoff_drift("merge", "open", restore=True)
+
+    def test_failed_handoff_drift_does_not_restore_a_hold_on_a_closed_card(self):
+        self.assert_failed_handoff_drift("merge", "closed", restore=False)
+
+    def test_failed_handoff_drift_does_not_restore_a_hold_on_a_card_without_a_stage(self):
+        self.assert_failed_handoff_drift("", "open", restore=False)
+
+    def assert_failed_handoff_drift(self, stage, state, *, restore):
         self.forge.kanban = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.db.sync_from_forge(self.forge.snapshots())
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
@@ -645,12 +654,14 @@ class EngineTest(unittest.TestCase):
             with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
                 self.run_pass()
         self.assertEqual(self.db.resume(KEY)["pending_stage"]["stage"], "review")
-        self.forge.rows[0]["stage"] = "merge"  # moved while the forge was failing
+        self.forge.rows[0].update(stage=stage, forge_state=state)  # changed while the forge was failing
         self.forge.writes.clear()
-        self.run_pass()
+        with mock.patch.object(self.forge, "add_human_hold", wraps=self.forge.add_human_hold) as hold:
+            self.run_pass()
+        self.assertEqual(hold.call_count, int(restore))
         self.assertEqual(self.forge.writes, [])
         self.assertNotIn("pending_stage", self.db.resume(KEY))
-        self.assertTrue(self.forge.rows[0]["human_review"])
+        self.assertEqual(bool(self.forge.rows[0].get("human_review")), restore)
         self.assertNotIn("pending_hold", self.db.resume(KEY))
 
     def test_exhausted_launch_failures_leave_a_plain_human_hold(self):

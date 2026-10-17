@@ -60,6 +60,18 @@ class ReconcileTest(unittest.TestCase):
     def setUp(self):
         self.p = policies()
 
+    def test_drifted_pending_stage_replaces_a_hold_only_on_an_open_card_with_a_stage(self):
+        for stage in ("merge", ""):
+            for state in ("open", "closed"):
+                for restore in (False, True):
+                    with self.subTest(stage=stage, state=state, restore=restore):
+                        item = replace(Item(), stage=stage, forge_state=state)
+                        pending = {"stage": "review", "expected": "implement", "restore_hold": restore}
+                        action = reconcile.hold_recovery(item, (), pending_hold=None, pending_release=None,
+                                                         owned=None, pending_stage=pending)
+                        expected = "replace" if restore and state == "open" and stage else "drop_stage"
+                        self.assertEqual(action, expected)
+
     def plan(self, item=Item(), history=(), findings=None, slots=4, **kwargs):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
                               {} if findings is None else {item.issue_key: findings}, **kwargs)
