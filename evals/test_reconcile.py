@@ -71,6 +71,24 @@ class ReconcileTest(unittest.TestCase):
                             history=[Segment("review")], findings={}, decisions={KEY: [dec]})
         self.assertEqual(actions, [reconcile.Wait(KEY, "decision pending")])
 
+    def test_a_pending_redispatch_obeys_the_human_hold(self):
+        pending = {KEY: {"stage": "implement", "persona": "builder", "attempt": 2}}
+        self.assertEqual(self.plan(replace(Item(), human_review=True), history=[Segment("implement")], redispatches=pending),
+                         [reconcile.Wait(KEY, "needs input")])
+
+    def test_a_pending_redispatch_to_review_plans_the_review(self):
+        pending = {KEY: {"stage": "review", "persona": "critic", "attempt": 1}}
+        self.assertEqual(self.plan(history=[Segment("implement")], redispatches=pending), [reconcile.Review(KEY, 1)])
+
+    def test_a_pending_redispatch_takes_the_next_attempt_and_stops_at_the_retry_limit(self):
+        pending = {KEY: {"stage": "implement", "persona": "builder", "attempt": 1}}
+        history = [Segment("implement", 1, outcome="failed"), Segment("implement", 2, outcome="failed")]
+        self.assertEqual(self.plan(history=history[:1], redispatches=pending),
+                         [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        tired = [Segment("implement", n, outcome="done") for n in range(1, 6)]
+        self.assertEqual(self.plan(history=tired, redispatches=pending),
+                         [reconcile.Escalate(KEY, "retry limit reached for implement")])
+
     def test_closed_items_and_any_running_segment_get_no_actions(self):
         self.assertEqual(self.plan(replace(Item(), forge_state="closed")), [])
         self.assertEqual(self.plan(history=[Segment("review", ended_at=None)]), [])

@@ -206,6 +206,21 @@ class StoreTest(unittest.TestCase):
                          [("architecture", "trio", {"votes": ["yes", "yes", "yes"]})])
         self.assertEqual([(e.at, e.message) for e in self.store.log(KEY)], [("09:00", "launched")])
 
+    def test_update_resume_changes_only_its_keys_from_the_current_value(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        self.store.set_resume(KEY, {"redispatch": {"stage": "fix"}, "decision_comments": ["a"]})
+        seen = []
+
+        def drop_comments(data):
+            seen.append(dict(data))
+            data["decision_comments"] = []
+            data["interrupt"] = {"kind": "Ask"}
+
+        self.store.update_resume(KEY, drop_comments)
+        self.assertEqual(seen, [{"redispatch": {"stage": "fix"}, "decision_comments": ["a"]}])
+        self.assertEqual(self.store.resume(KEY), {"redispatch": {"stage": "fix"}, "decision_comments": [],
+                                                  "interrupt": {"kind": "Ask"}})
+
     def test_resume_state_round_trips(self) -> None:
         self.store.upsert_item(KEY, title="x")
         self.assertIsNone(self.store.resume(KEY))

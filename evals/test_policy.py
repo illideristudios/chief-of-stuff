@@ -20,7 +20,11 @@ BASE = """
 default_workflow = "standard"
 
 [policy]
-trio = ["reviewer", "architect", "implementer"]
+trio = ["reviewer", "staff", "implementer"]
+
+[personas.staff]
+role = "weighs the trade-offs"
+model = "opus"
 
 [personas.implementer]
 role = "implements"
@@ -154,7 +158,7 @@ class ResolveTest(unittest.TestCase):
         self.assertFalse(self.p.resolve("implementer", "implement").architect)
 
     def test_the_base_policy_reaches_every_scope(self):
-        self.assertEqual(self.p.resolve("implementer", "implement", "ops").trio, ("reviewer", "architect", "implementer"))
+        self.assertEqual(self.p.resolve("implementer", "implement", "ops").trio, ("reviewer", "staff", "implementer"))
 
     def test_an_unknown_name_is_refused(self):
         for args in (("nobody",), (None, "nowhere"), (None, None, "attic")):
@@ -208,13 +212,26 @@ class FieldTest(unittest.TestCase):
         self.assertEqual((got.spend_usd, got.quota_percent, got.time_minutes), (20, 80.5, 90))
 
     def test_a_trio_is_three_distinct_known_personas(self):
-        for trio in ('["reviewer", "architect"]', '["reviewer", "reviewer", "architect"]', '["reviewer", "architect", "ghost"]'):
+        for trio in ('["reviewer", "staff"]', '["reviewer", "reviewer", "staff"]', '["reviewer", "staff", "ghost"]'):
             with self.subTest(trio=trio):
-                refused(self, BASE.replace('trio = ["reviewer", "architect", "implementer"]', f"trio = {trio}"), "trio")
+                refused(self, BASE.replace('trio = ["reviewer", "staff", "implementer"]', f"trio = {trio}"), "trio")
+
+    def test_the_architect_is_never_a_trio_member(self):
+        # Section 6: the architect is a standing session the engine never starts; the trio would launch it.
+        refused(self, BASE.replace('"staff", "implementer"]', '"architect", "implementer"]', 1), "architect")
+        refused(self, BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["architect", "reviewer", "staff"] }\n'),
+                "architect")
+        refused(self, BASE.replace("[rooms.lab]\n", '[rooms.lab]\n[rooms.lab.policy]\ntrio = ["architect", "reviewer", "staff"]\n'),
+                "architect")
+
+    def test_the_shipped_policy_has_no_architect_in_its_trio(self):
+        got = settings.load_policy().resolve()
+        self.assertEqual(len(got.trio), 3)
+        self.assertNotIn("architect", got.trio)
 
     def test_the_trio_map_takes_a_topic_tag_to_three_personas(self):
-        got = parse(BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["architect", "reviewer", "implementer"] }\n'))
-        self.assertEqual(got.resolve().trios, {"security": ("architect", "reviewer", "implementer")})
+        got = parse(BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["staff", "reviewer", "implementer"] }\n'))
+        self.assertEqual(got.resolve().trios, {"security": ("staff", "reviewer", "implementer")})
         refused(self, BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["architect"] }\n'), "security")
 
     def test_a_stage_or_persona_can_ask_for_a_full_session(self):

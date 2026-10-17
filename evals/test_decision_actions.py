@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import decision_actions as da  # noqa: E402
+import policy  # noqa: E402
 import reconcile  # noqa: E402
+import settings  # noqa: E402
 
 KEY = "github:example/repo#12"
 ASKED_AT = "2026-10-09T10:00:00+00:00"
@@ -148,6 +150,75 @@ class DecisionActionsTest(unittest.TestCase):
                 da.reverse(rec, "Again")
             with self.assertRaises(ValueError):
                 da.reroute(rec, "plan")
+
+    def test_a_refused_reroute_keeps_its_target_and_returns_to_rerouted_when_the_write_lands(self):
+        rerouted = make_decision(status="re-routed", answer="Back", rerouted_to="implement")
+        refused = da.refuse(rerouted, "write refused")
+        self.assertEqual((refused.decision.status, refused.decision.rerouted_to), ("blocked", "implement"))
+        self.assertEqual(refused.store_write.rerouted_to, "implement")
+        restored = da.meet_action(refused.decision, None)
+        self.assertEqual((restored.decision.status, restored.decision.blocked_reason), ("re-routed", ""))
+        self.assertEqual(restored.store_write.rerouted_to, "implement")
+
+    def test_an_answered_decision_whose_action_is_blocked_can_still_be_reversed(self):
+        blocked = make_decision(status="blocked", answer="Ship", blocked_reason="merge conflicts")
+        self.assertEqual(da.reverse(blocked, "No").decision.status, "reversed")
+        rerouted = make_decision(status="blocked", answer="Back", blocked_reason="refused", rerouted_to="plan")
+        with self.assertRaises(ValueError):
+            da.reverse(rerouted, "No")
+
+
+SEGMENT = lambda stage, attempt: SimpleNamespace(stage=stage, attempt=attempt)  # noqa: E731
+
+
+class RespondTest(unittest.TestCase):
+    """The use case chooses the stage, persona and attempt; the page driver only executes the result."""
+
+    def setUp(self) -> None:
+        self.policies = settings.load_policy()
+
+    def respond(self, action, text="Because", *, record=None, target="", stage="review", history=(), issue_type=None,
+                policies=None):
+        return da.respond(record or make_decision(), action, text, target_stage=target, current_stage=stage,
+                          history=history, policies=policies or self.policies, issue_type=issue_type,
+                          answered_at=ANSWERED_AT)
+
+    def test_reroute_picks_the_persona_and_next_attempt_of_the_target_stage(self):
+        tr = self.respond("reroute", target="implement", history=[SEGMENT("implement", 1), SEGMENT("implement", 2)])
+        self.assertEqual(tr.redispatch, da.Redispatch(KEY, "implement", "implementer", 3, "decision re-routed to implement"))
+        self.assertIn(da.ForgeStageWrite(KEY, "implement", "review"), tr.actions)
+
+    def test_reroute_refuses_unknown_stages_and_stages_with_no_worker(self):
+        for target in ("nowhere", "merge", ""):
+            with self.subTest(target=target), self.assertRaises(da.BadRequest):
+                self.respond("reroute", target=target)
+
+    def test_reverse_returns_to_the_stage_that_did_the_work_never_to_merge(self):
+        history = [SEGMENT("implement", 1), SEGMENT("review", 1), SEGMENT("merge", 1)]
+        tr = self.respond("reverse", record=make_decision(status="answered", answer="Yes", gate="merge"),
+                          stage="merge", history=history)
+        self.assertEqual((tr.redispatch.stage, tr.redispatch.attempt, tr.redispatch.persona), ("implement", 2, "implementer"))
+
+    def test_reverse_with_no_history_starts_the_issue_types_own_workflow(self):
+        custom = policy.parse({
+            "default_workflow": "standard",
+            "personas": {"builder": {"role": "builds", "model": "example"}, "writer": {"role": "writes", "model": "example"}},
+            "stages": {"implement": {"persona": "builder"}, "draft": {"persona": "writer"}, "merge": {}},
+            "workflows": {"standard": {"start": "implement", "edges": [{"from": "implement", "to": "merge"}]},
+                          "docs": {"start": "draft", "edges": [{"from": "draft", "to": "merge"}]}},
+        })
+        tr = self.respond("reverse", record=make_decision(status="answered", answer="Yes", gate="merge"),
+                          stage="merge", issue_type="docs", policies=custom)
+        self.assertEqual(tr.redispatch.stage, "draft")
+
+    def test_bad_requests_are_told_apart_from_state_conflicts(self):
+        with self.assertRaises(da.BadRequest):
+            self.respond("answer", "  ")
+        with self.assertRaises(da.BadRequest):
+            self.respond("shrug")
+        with self.assertRaises(ValueError) as closed:
+            self.respond("answer", record=make_decision(status="answered", answer="Yes"))
+        self.assertNotIsInstance(closed.exception, da.BadRequest)
 
 
 if __name__ == "__main__":

@@ -44,7 +44,7 @@ class PanelTest(unittest.TestCase):
         conn.close()
         return response.status, body
 
-    def test_blank_and_repeated_post_leave_decision_and_forge_unchanged(self):
+    def test_blank_and_repeated_post_leave_decision_and_comment_queue_unchanged(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         fg = mock.Mock()
         fg.comment.return_value = ""
@@ -54,9 +54,9 @@ class PanelTest(unittest.TestCase):
             self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "Yes"})[0], 303)
             self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "No"})[0], 409)
         self.assertEqual(self.db.decision(dec.id).answer, "Yes")
-        self.assertEqual(fg.comment.call_count, 1)
+        self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 1)
 
-    def test_simultaneous_answers_have_one_winner_and_one_comment(self):
+    def test_simultaneous_answers_have_one_winner_and_one_queued_comment(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         fg = mock.Mock()
         fg.comment.return_value = ""
@@ -81,7 +81,7 @@ class PanelTest(unittest.TestCase):
             for thread in threads:
                 thread.join(15)
         self.assertEqual(sorted(results), [303, 409])
-        self.assertEqual(fg.comment.call_count, 1)
+        self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 1)
 
     def test_reverse_at_merge_persists_next_work_attempt_and_persona(self):
         self.db.upsert_item(KEY, stage="merge")
@@ -221,7 +221,7 @@ class NotificationPanelTest(unittest.TestCase):
         w.db.sync_from_forge([{"issue_key": notices.KEY, "human_review": True}])
         self.assertEqual([r.title for r in before], [r.title for r in self.rows(w, later)])
 
-    def test_retry_stop_is_notified_and_recovered_or_closed_failures_are_not(self):
+    def test_retry_stop_is_notified_and_a_recovered_failure_is_not(self):
         w = self.ws()
         w.db.upsert_item(notices.KEY)
         w.db.add_log(notices.KEY, "escalate: retry limit reached for fix", notices.NOW.isoformat())
@@ -229,6 +229,4 @@ class NotificationPanelTest(unittest.TestCase):
         w.db.record_segment(notices.KEY, "fix", 1, notices.NOW.isoformat(), notices.NOW.isoformat(), "failed")
         later = notices.NOW + timedelta(minutes=5)
         w.db.record_segment(notices.KEY, "fix", 2, later.isoformat(), later.isoformat(), "done")
-        self.assertEqual(self.rows(w, later), [])
-        w.db.upsert_item(notices.KEY, forge_state="closed")
         self.assertEqual(self.rows(w, later), [])

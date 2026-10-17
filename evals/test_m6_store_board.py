@@ -268,7 +268,8 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             self.assertEqual(d3.status, "re-routed")
             self.assertEqual(self.db.item(KEY).stage, "implement")
             fake_forge.write_stage.assert_called_once_with(12, "implement", expected="review", commit=True)
-            fake_forge.comment.assert_called_with(12, mock.ANY, commit=True)
+            fake_forge.comment.assert_not_called()
+            self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 3)
 
 
 class StorePagesAndRoutesTest(unittest.TestCase):

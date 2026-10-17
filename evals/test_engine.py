@@ -553,6 +553,129 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.launched, [(KEY, "implement", 2, "builder")])
         self.assertNotIn("redispatch", self.db.resume(KEY))
 
+    def blocked_reroute(self, error="write refused"):
+        self.db.sync_from_forge(self.forge.snapshots())
+        dec = self.db.add_decision(KEY, "design", "Back to review?")
+        self.db.answer_decision(dec.id, "Back", status="blocked", blocked_reason=error, rerouted_to="review")
+        self.db.set_resume(KEY, {"pending_stage": {"stage": "review", "expected": "implement"},
+                                 "redispatch": {"stage": "review", "persona": "critic", "attempt": 1}})
+        return dec
+
+    def test_a_retried_reroute_that_lands_restores_the_decision_and_clears_the_intent(self):
+        dec = self.blocked_reroute()
+        self.run_pass()
+        saved = self.db.decision(dec.id)
+        self.assertEqual((saved.status, saved.blocked_reason, saved.rerouted_to), ("re-routed", "", "review"))
+        self.assertEqual(self.db.item(KEY).stage, "review")
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+
+    def test_a_retried_reroute_that_is_refused_again_keeps_the_decision_blocked_with_the_new_reason(self):
+        dec = self.blocked_reroute()
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+        saved = self.db.decision(dec.id)
+        self.assertEqual((saved.status, saved.rerouted_to), ("blocked", "review"))
+        self.assertIn("offline", saved.blocked_reason)
+        self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "review", "expected": "implement"})
+
+    def test_a_pending_sibling_decision_does_not_clear_another_decisions_block(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        blocked = self.db.add_decision(KEY, "design", "Approve schema?")
+        self.db.answer_decision(blocked.id, "Yes", status="blocked", blocked_reason="merge conflicts")
+        self.db.add_decision(KEY, "scope", "Still open?")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+            self.run_pass()
+        saved = self.db.decision(blocked.id)
+        self.assertEqual((saved.status, saved.blocked_reason), ("blocked", "merge conflicts"))
+
+    def test_comment_delivery_keeps_what_the_board_queued_meanwhile(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.set_resume(KEY, {"decision_comments": ["first"]})
+
+        def comment(number, body, commit=False):
+            data = self.db.resume(KEY)  # the board POST commits while the forge call is in flight
+            self.db.set_resume(KEY, {**data, "redispatch": {"stage": "implement", "persona": "builder", "attempt": 2},
+                                     "decision_comments": [*data["decision_comments"], "second"]})
+            return ""
+
+        self.forge.comment = comment
+        with mock.patch.object(engine.reconcile, "plan", return_value=[]):
+            self.run_pass()
+        data = self.db.resume(KEY)
+        self.assertEqual(data["decision_comments"], ["second"])
+        self.assertEqual(data["redispatch"]["attempt"], 2)
+
+    def test_a_comment_that_fails_stays_queued_and_is_logged_once(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.set_resume(KEY, {"decision_comments": ["first"]})
+        self.forge.comment = mock.Mock(return_value="offline")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[]):
+            self.run_pass()
+            self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["decision_comments"], ["first"])
+        self.assertEqual([e.message for e in self.db.log(KEY)], ["decision comment failed: offline"])
+
+    def trio_policy(self, **policy_table):
+        return policy.parse({
+            "policy": policy_table,
+            "personas": {n: {"role": "advises", "model": "example"} for n in ("one", "two", "three")},
+            "stages": {"implement": {}},
+            "default_workflow": "standard",
+            "workflows": {"standard": {"start": "implement"}},
+        })
+
+    def adopting_model(self, side_effect=None):
+        import model_port
+        reply = model_port.Reply("", {"vote": "adopt", "choice": "adopt", "reasoning": "Evidence"}, "", 0, 1)
+        return mock.Mock(return_value=reply, side_effect=side_effect)
+
+    def test_a_trio_consult_keeps_what_the_board_queued_meanwhile(self):
+        self.p = self.trio_policy(trio=["one", "two", "three"])
+
+        def board_post(request):
+            self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}),
+                                     "redispatch": {"stage": "implement", "persona": "builder", "attempt": 2}})
+            return mock.DEFAULT
+
+        model = self.adopting_model(side_effect=board_post)
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split module?")]):
+            self.run_pass(trio_port=model)
+        data = self.db.resume(KEY)
+        self.assertEqual(data["redispatch"]["attempt"], 2)
+        self.assertEqual(data["interrupt"]["gate"], "gate")
+
+    def test_a_policy_with_only_tagged_trios_is_consulted_for_the_gate_tag(self):
+        self.p = self.trio_policy(trios={"gate": ["one", "two", "three"]})
+        model = self.adopting_model()
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split module?")]):
+            self.run_pass(trio_port=model)
+        self.assertEqual(model.call_count, 3)
+        self.assertFalse([e for e in self.db.log(KEY) if "failed" in e.message])
+
+    def test_a_gate_with_no_matching_trio_and_no_default_stays_open_and_unconsulted(self):
+        self.p = self.trio_policy(trios={"other": ["one", "two", "three"]})
+        model = self.adopting_model()
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split module?")]):
+            self.run_pass(trio_port=model)
+        model.assert_not_called()
+        self.assertEqual([d.status for d in self.db.decisions(KEY)], ["open"])
+        self.assertFalse([e for e in self.db.log(KEY) if "failed" in e.message])
+
+    def test_a_unanimous_trio_answer_queues_its_issue_comment(self):
+        self.p = self.trio_policy(trio=["one", "two", "three"])
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split module?")]):
+            self.run_pass(trio_port=self.adopting_model())
+        [body] = self.db.resume(KEY)["decision_comments"]
+        self.assertIn("answered by trio: adopt", body)
+
+    def test_the_segment_records_the_agent_the_launcher_uses_from_the_stage_defaults(self):
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- Settings: `chief-of-stuff.toml`\n- Agent: specialist task\n")
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[lanes.code]\nstages = ["implement"]\n[stages.implement]\nagent = "specialist"\n')
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "specialist")
+
 
 class MainTest(unittest.TestCase):
     def setUp(self):
