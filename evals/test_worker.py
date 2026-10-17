@@ -877,6 +877,30 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(len(list(run.parent.glob(f"{run.name}-canceled-*"))), 1)
         self.assertFalse(run.exists())
 
+    def test_a_dead_start_without_a_cancel_mark_counts_as_a_failed_attempt(self):
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        run.mkdir(parents=True)
+        (run / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": "s"}))
+        self.db.set_resume(KEY, {"worktree": str(self.tree), "work_branch": "work/issue-1-implement-1"})
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.segments()[0].outcome, "failed")
+        self.assertTrue(run.is_dir())
+        self.assertFalse(any("nothing had started" in e.message for e in self.db.log(KEY)))
+
+    def test_a_cancel_mark_drops_the_attempt_even_when_exit_json_arrived(self):
+        run = self.launched()
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        (run / "canceled").write_text("canceled\n")
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.segments(), [])
+        self.assertFalse(run.exists())
+        self.assertEqual(len(list(run.parent.glob(f"{run.name}-canceled-*"))), 1)
+
     def orphans(self, worktrees, **spec):
         import shutil
         from evals import make_repo
@@ -911,6 +935,21 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.trees / "issue-1-implement-1"), kept)
             self.assertEqual(len(self.db.asks(KEY)), 1)
             self.assertNotIn(worker.dispatch_prompt.RECOVERY, request.prompt)
+
+    def test_abort_retires_the_conflicting_trees_and_the_next_launch_reuses_the_fresh_one(self):
+        from evals import git_taint as taint, make_repo
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.diverged()
+            with self.assertRaisesRegex(RuntimeError, "diverged"):
+                self.launch_in(clone, attempt=3)
+            self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="abort")
+            fresh = Path(self.launch_in(clone, attempt=3).cwd)
+            again = Path(self.launch_in(clone, attempt=4).cwd)
+            self.assertEqual(again.resolve(), fresh.resolve())
+            self.assertFalse((self.trees / "issue-1-implement-1").exists())
+            self.assertFalse((self.trees / "issue-1-implement-2").exists())
+            self.assertEqual(make_repo.git(["branch", "--list", "work/issue-1-implement-1"], clone), "")
+            self.assertEqual(len(self.db.asks(KEY)), 1)
 
     def test_abort_starts_fresh_on_the_next_engine_pass(self):
         from evals import git_taint as taint
@@ -956,6 +995,59 @@ class WorkerTest(unittest.TestCase):
             make_repo.git(["branch", "-D", "work/issue-1-implement-2"], clone)
             request = self.launch_in(clone, attempt=3)
             self.assertEqual(Path(request.cwd).name, "issue-1-implement-1")
+
+    def test_hold_is_a_planner_wait_and_does_not_take_a_slot(self):
+        import shutil
+        from evals import git_taint as taint, make_repo
+        from evals.test_engine import OTHER, FakeForge
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.diverged()
+            forge = FakeForge()
+            seen = []
+
+            def launch(key, stage, attempt, persona):
+                seen.append(key)
+                if key != KEY:
+                    return "m", ""
+                return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root,
+                                     trees=self.trees, policies=self.p, forge=self.forge, clone=clone, clock=lambda: NOW)
+
+            def run(**kwargs):
+                return engine.run_pass(forge=forge, store=self.db, policies=self.p, root=self.root,
+                                       trees=self.trees, launch=launch, workers=engine.settings.Workers(),
+                                       clock=lambda: NOW, clone=clone, **kwargs)
+
+            with mock.patch.object(engine, "_record_limits"), \
+                 mock.patch.object(engine.cleanup, "execute", return_value=0), \
+                 mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+                 mock.patch.object(worker.process_status, "identity", return_value="start"):
+                run()
+                self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="hold")
+                forge.rows.append(
+                    {"issue_key": OTHER, "stage": "implement", "forge_state": "open", "merge_state": "ready"})
+                seen.clear()
+                before = len(self.db.log(KEY))
+                actions = run(max_concurrency=1)
+            self.assertEqual(actions, [
+                reconcile.Wait(KEY, "orphan recovery held"),
+                reconcile.Dispatch(OTHER, "implement", "builder", 1)])
+            self.assertEqual(seen, [OTHER])
+            self.assertEqual(slots.running(self.db), 1)
+            self.assertFalse(any(s.issue_key == KEY for s in self.db.segments()))
+            self.assertFalse(any("dispatch failed" in e.message for e in self.db.log(KEY)[before:]))
+            shutil.rmtree(self.trees / "issue-1-implement-2")
+            make_repo.git(["worktree", "prune"], clone)
+            make_repo.git(["branch", "-D", "work/issue-1-implement-2"], clone)
+            self.db.end_segment(OTHER, "implement", 1, NOW.isoformat(), "done")
+            seen.clear()
+            with mock.patch.object(engine, "_record_limits"), \
+                 mock.patch.object(engine.cleanup, "execute", return_value=0), \
+                 mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+                 mock.patch.object(worker.process_status, "identity", return_value="start"):
+                actions = run()
+            self.assertIsInstance(actions[0], reconcile.Dispatch)
+            self.assertEqual(actions[0].issue_key, KEY)
+            self.assertEqual(seen, [KEY])
 
     def test_an_abort_prefix_is_not_the_abort_option(self):
         from evals import git_taint as taint
