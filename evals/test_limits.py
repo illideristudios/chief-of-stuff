@@ -146,6 +146,11 @@ class Sources(unittest.TestCase):
             scans = decoded.call_count
             self.assertEqual(workers_page.activity(tree), (NOW, 12))
             self.assertEqual(decoded.call_count, scans)
+        self.write(f".claude/projects/{project}/subagents/agent.jsonl", [
+            {"type": "assistant", "timestamp": NOW.isoformat(), "message": {
+                "id": "subagent", "usage": {"input_tokens": 1000}}}])
+        # Worker activity has always counted its direct session files, not nested subagent logs.
+        self.assertEqual(workers_page.activity(tree), (NOW, 12))
 
     def test_unknown_event_keeps_an_unexpired_numeric_limit(self):
         known = {"type": "rate_limit_event", "timestamp": (NOW - timedelta(minutes=2)).isoformat(),
