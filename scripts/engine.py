@@ -14,6 +14,7 @@ from typing import Any
 
 import cleanup
 import clock as engine_clock
+import engine_facts
 import engine_merge
 import forge
 import issue_gate
@@ -130,13 +131,21 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     store.add_log(item.issue_key, message, at)
 
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
-    held = None
-    if clone is not None:
-        def held(key, stage, repo=clone):
-            return worker.recovery_held(store, key, stage, trees=trees, repo=repo)
+    holds: dict[str, set[str] | None] = {}
+    for item in items:
+        try:
+            holds[item.issue_key] = engine_facts.held_stages(store, item.issue_key, trees=trees, repo=clone)
+        except Exception as exc:
+            store.add_log(item.issue_key, f"recovery facts failed: {exc}", at)
+            holds[item.issue_key] = None
+
+    def recovery_held(key: str, stage: str) -> bool:
+        stages = holds.get(key, set())
+        return True if stages is None else stage in stages
+
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             recovery_held=held, **_planning_inputs(store, items))
+                             recovery_held=recovery_held, **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:

@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import json
 import os
 import re
-import stat
 import subprocess
 import time
 import uuid
-from dataclasses import asdict, replace
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -181,25 +179,19 @@ def _candidate_paths(issue_key: str, number: int, data: dict, store: Any, trees:
     return candidates, review_paths
 
 
-def recovery_held(store: Any, key: str, stage: str, *, trees: Path, repo: Path) -> bool:
-    """True when this stage's conflict is answered `hold` and the trees still conflict. The planner waits."""
-    decisions = store.decisions(key)
-    if not any(d.topic == "conflict" and d.answer == "hold" for d in decisions):
-        return False
+def recovery_conflict(store: Any, key: str, *, trees: Path, repo: Path) -> str | None:
+    """The current orphan conflict, or None when there is nothing left to hold. A missing repository raises."""
     number = int(key.rpartition("#")[2])
     data = _resume(store, key)
     candidates, review_paths = _candidate_paths(key, number, data, store, trees)
     common = _common(repo)
     if common is None:
-        return False
+        raise RuntimeError("no repository to recover from")
     with make_worktree.clone_lock(repo):
         found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
-    chosen = completion.recovery(found, preferred=str(Path(data["worktree"])) if data.get("worktree") else None)
-    if not isinstance(chosen, completion.Conflict):
-        return False
-    question = _conflict_question(stage, chosen.reason)
-    rows = [d for d in decisions if (d.topic, d.question) == ("conflict", question)]
-    return bool(rows and rows[-1].answer == "hold")
+    preferred = str(Path(data["worktree"])) if data.get("worktree") else None
+    chosen = completion.recovery(found, preferred=preferred)
+    return chosen.reason if isinstance(chosen, completion.Conflict) else None
 
 
 def _conflict_choice(store: Any, key: str, stage: str, attempt: int, reason: str, clock: engine_clock.Clock) -> str:
@@ -259,7 +251,7 @@ def _read_branches(number: int, data: dict, repo: Path, common: Path,
                          if ref and not ref.removeprefix(strip).startswith(f"work/issue-{number}-review-"))
     found = []
     for name in dict.fromkeys(names):
-        if name in checked_out:
+        if name in checked_out or name in _quarantined_branches(repo, number, common):
             continue
         for ref in (f"refs/heads/{name}", f"refs/remotes/origin/{name}"):
             code, sha = make_worktree.git(["rev-parse", "--verify", "-q", ref], repo, expected_common=common)
@@ -295,9 +287,11 @@ def _read_orphans(candidates: list[Path], review_paths: set[Path], number: int, 
     found: list[completion.OrphanTree] = []
     seen: set[Path] = set()
     for path in candidates:
-        if not path.is_dir() or not (path / ".git").exists():
+        if "quarantine" in path.parts or not path.is_dir() or not (path / ".git").exists():
             continue
         resolved = path.resolve()
+        if "quarantine" in resolved.parts:
+            continue
         if resolved in seen or resolved in review_paths or not resolved.is_relative_to(trees.resolve()):
             continue
         seen.add(resolved)
@@ -334,162 +328,97 @@ def _legacy_worktree(issue_key: str, number: int, stage: str, attempt: int, tree
     return made.path, branch, False
 
 
-def _tree_contents(tree: Path, common: Path) -> str:
-    """Fingerprint what git tracks or would track, and the index, which may hold a staged-only version (#774).
-    Ignored paths (node_modules, .venv, build output) are neither read nor hashed. Nothing is followed or opened
-    unless it is a regular file: a socket, FIFO or device is recorded by name and type. An unreadable listing or
-    file must prevent retirement."""
-    layout = git_view.locate(tree, expected_common=common)
-    digest = hashlib.sha256()
+def _quarantine_ref(issue: str, stamp: str, ref: str) -> str:
+    return f"refs/quarantine/{issue}/{stamp}/{ref.removeprefix('refs/')}"
+
+
+def _quarantined_branches(repo: Path, number: int, common: Path) -> set[str]:
+    """Branch names git already stores under the quarantine namespace, or checked out in a quarantine directory."""
     names: set[str] = set()
-    for options in (["-z"], ["-z", "--others", "--exclude-standard"]):
-        listed = git_view.run(["ls-files", *options], tree, env=git_trees.audit_env(),
-                              timeout=git_trees.GIT_TIMEOUT, expected_common=common)
-        if listed.returncode:
-            raise RuntimeError("cannot list orphan files")
-        names.update(name.rstrip("/") for name in listed.stdout.split("\0") if name)
-
-    def include(path: Path, name: str) -> None:
-        try:
-            mode = path.lstat().st_mode
-        except FileNotFoundError:  # tracked and deleted: the index hash holds the rest
-            digest.update(os.fsencode(name) + b"\0missing\0")
-            return
-        digest.update(os.fsencode(name) + b"\0" + str(mode).encode() + b"\0")
-        if stat.S_ISLNK(mode):
-            digest.update(os.fsencode(os.readlink(path)) + b"\0")
-        elif stat.S_ISDIR(mode):  # a nested repository or submodule: its own files are work too
-            for child in sorted(path.iterdir()):
-                include(child, f"{name}/{child.name}")
-        elif stat.S_ISREG(mode):
-            with os.fdopen(os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW), "rb") as source:
-                if not stat.S_ISREG(os.fstat(source.fileno()).st_mode):  # swapped for a FIFO since lstat
-                    raise RuntimeError("orphan snapshot file changed type while hashing")
-                digest.update(hashlib.file_digest(source, "sha256").digest())
-
-    for name in sorted(names):
-        include(tree / name, name)
-    include(layout.gitdir / "index", "<index>")
-    return digest.hexdigest()
+    code, out = make_worktree.git(["for-each-ref", "--format=%(refname)", f"refs/quarantine/{number}/"],
+                                 repo, expected_common=common)
+    if code == 0:
+        for ref in out.splitlines():
+            marker = "/heads/"
+            if marker in ref:
+                names.add(ref.split(marker, 1)[1])
+    code, listed = make_worktree.git_trusted(["worktree", "list", "--porcelain"], repo)
+    if code:
+        raise RuntimeError("cannot list worktrees; preserving work")
+    path = None
+    for line in listed.splitlines():
+        if line.startswith("worktree "):
+            path = Path(line.removeprefix("worktree "))
+        elif line.startswith("branch ") and path is not None and "quarantine" in path.parts:
+            names.add(line.removeprefix("branch refs/heads/"))
+    return names
 
 
-def _ref_head(repo: Path, common: Path, ref: str) -> str | None:
+def _ref_sha(repo: Path, common: Path, ref: str) -> str | None:
     code, out = make_worktree.git(["for-each-ref", "--format=%(refname) %(objectname)", ref],
                                  repo, expected_common=common)
     if code:
-        raise RuntimeError("cannot read orphaned ref for retirement")
+        raise RuntimeError("cannot read orphaned ref; preserving work")
     return next((line.split()[1] for line in out.splitlines() if line.split()[0] == ref), None)
 
 
-def _observe(path: Path, common: Path) -> completion.RetirementSnapshot:
-    """What is on disk now. A read that fails proves nothing about the work, so it is preserved."""
-    try:
-        actual = _read_tree(path, common)
-        contents = None if actual.unreadable else _tree_contents(path, common)
-    except (OSError, git_view.Unviewable) as exc:
-        raise RuntimeError("cannot verify orphaned worktree snapshot; preserving work") from exc
-    return completion.RetirementSnapshot(actual.branch, actual.head, contents, actual.unreadable)
-
-
-def _snapshot_orphans(found: list[completion.OrphanTree], repo: Path, common: Path) -> list[dict]:
-    """Save abort's state under the discovery lock, before preparing a replacement."""
-    snapshots = []
-    for c in found:
-        if c.unreadable:  # nothing is verified, so nothing is deleted: retirement sets it aside whole
-            snapshots.append({"path": c.path, "branch": c.branch, "head": c.head, "contents": None,
-                              "unreadable": True, "refs": {}})
-            continue
-        current = _observe(Path(c.path), common) if c.path else completion.RetirementSnapshot(c.branch, c.head, None)
-        expected = completion.RetirementSnapshot(c.branch, c.head, current.contents, c.unreadable)
-        if not completion.may_retire(expected, current):
-            raise RuntimeError("cannot snapshot unreadable or changed orphaned worktree; preserving work")
-        saved = {"path": c.path, **asdict(current)}
-        saved["refs"] = {ref: _ref_head(repo, common, ref)
-                         for ref in (f"refs/heads/{c.branch}", f"refs/remotes/origin/{c.branch}")
-                         if c.branch.startswith("work/")}
-        snapshots.append(saved)
-    return snapshots
-
-
-def _set_aside(repo: Path, trees: Path, path: Path, detail: str) -> None:
-    """Move a tree git cannot remove out of the way, whole (#774). `worktree move` keeps a valid tree registered, so
-    its HEAD stays referenced; a tree with corrupt metadata is renamed. Nothing is deleted."""
-    aside = trees / f".retired-{path.name}-{uuid.uuid4()}"
-    code, _ = make_worktree.git_trusted(["worktree", "move", str(path), str(aside)], repo)
+def _move_tree(repo: Path, trees: Path, path: Path, issue: str, stamp: str) -> None:
+    """Move a tree into the quarantine directory. Nothing is deleted."""
+    if not os.path.lexists(path) or "quarantine" in path.parts:
+        return
+    dest = trees / "quarantine" / issue / stamp / path.name
+    if dest.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    code, detail = make_worktree.git_trusted(["worktree", "move", str(path), str(dest)], repo)
     if code or os.path.lexists(path):
         try:
-            os.rename(path, aside)
+            os.rename(path, dest)
         except OSError as exc:
-            raise RuntimeError(f"could not retire orphaned worktree: {detail or exc}") from exc
+            raise RuntimeError(f"could not quarantine orphaned worktree: {detail or exc}") from exc
 
 
-def _checked_out(repo: Path) -> dict[str, list[Path]]:
-    """Each branch ref and every worktree, the clone included, that has it checked out."""
-    code, out = make_worktree.git_trusted(["worktree", "list", "--porcelain"], repo)
-    if code:
-        raise RuntimeError("cannot list worktrees before retiring orphaned refs; preserving work")
-    held: dict[str, list[Path]] = {}
-    path = None
-    for line in out.splitlines():
-        if line.startswith("worktree "):
-            path = Path(line.removeprefix("worktree "))
-        elif line.startswith("branch ") and path is not None:
-            held.setdefault(line.removeprefix("branch "), []).append(path.resolve())
-    return held
-
-
-def _retire_orphans(repo: Path, trees: Path, found: list[dict]) -> None:
-    """Retire only the saved state. The caller holds clone_lock across the re-read, comparison and removal."""
-    common = git_view.locate(repo).common
-
-    def check_tree(c: dict) -> None:
-        if not c["path"] or not os.path.lexists(c["path"]):
-            return  # already retired before an interruption
-        path = Path(c["path"])
-        if not path.resolve().is_relative_to(trees.resolve()):
-            raise RuntimeError("orphaned worktree is outside the worktrees directory")
-        if c.get("unreadable"):
-            return
-        saved = completion.RetirementSnapshot(c["branch"], c["head"], c.get("contents"), False)
-        if not completion.may_retire(saved, _observe(path, common)):
-            raise RuntimeError("orphaned worktree changed since abort snapshot; preserving work")
-
-    # Check every candidate before deleting any, including refs whose trees were already removed.
-    refs = {}
-    for c in found:
-        check_tree(c)
-        if "refs" not in c:
-            raise RuntimeError("orphaned refs have no abort snapshot; preserving work")
-        refs.update(c["refs"])
-    for ref, expected in refs.items():
-        current = _ref_head(repo, common, ref)
-        if current is not None and current != expected:
-            raise RuntimeError("orphaned ref changed since abort snapshot; preserving work")
-    # A branch checked out beyond the saved trees stays whole: refuse before any tree is removed.
-    leaving = {Path(c["path"]).resolve() for c in found if c["path"]}
-    held = _checked_out(repo)
-    for ref, expected in refs.items():
-        if expected is not None and (others := [p for p in held.get(ref, []) if p not in leaving]):
-            raise RuntimeError(f"could not retire orphaned ref {ref}: checked out at {others[0]}")
-    for c in found:
-        if not c["path"] or not os.path.lexists(c["path"]):
+def _apply_quarantine(repo: Path, trees: Path, number: int, plan: dict, common: Path) -> None:
+    """Move the saved trees and rename the saved refs. A ref that git will not rename stays, and the quarantine ref holds it."""
+    issue, stamp = str(number), plan["stamp"]
+    for path_s in plan["paths"]:
+        path = Path(path_s)
+        if not path.is_dir():
             continue
-        check_tree(c)  # the window is one tree's hash, not every tree's
-        path = Path(c["path"])
-        detail = ""
-        if not c.get("unreadable"):
-            _, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
-        if os.path.lexists(path):
-            # Git cannot remove it (corrupt metadata), or its state was never readable: keep every file, and its branch.
-            _set_aside(repo, trees, path, detail)
-            for ref in c["refs"]:
-                refs.pop(ref, None)
-    for ref, expected in refs.items():
-        if expected is not None:
-            # Compare-and-delete: a tip moved by a writer outside clone_lock survives. Checkouts were refused above.
-            _, detail = make_worktree.git_trusted(["update-ref", "-d", ref, expected], repo)
-            if _ref_head(repo, common, ref) is not None:
-                raise RuntimeError(f"could not retire orphaned ref {ref}: {detail}")
+        code, sha = make_worktree.git(["rev-parse", "HEAD"], path, expected_common=common)
+        if code == 0 and sha:
+            anchor = f"refs/quarantine/{issue}/{stamp}/commits/{path.name}"
+            wrote, detail = make_worktree.git_trusted(["update-ref", anchor, sha], repo)
+            if wrote:
+                raise RuntimeError(f"could not quarantine ref {anchor}: {detail}")
+        _move_tree(repo, trees, path, issue, stamp)
+    for ref in plan["refs"]:
+        sha = _ref_sha(repo, common, ref)
+        if sha is None:
+            continue
+        dest = _quarantine_ref(issue, stamp, ref)
+        wrote, detail = make_worktree.git_trusted(["update-ref", dest, sha], repo)
+        if wrote:
+            raise RuntimeError(f"could not quarantine ref {ref}: {detail}")
+        if ref.startswith("refs/heads/"):
+            code, listed = make_worktree.git_trusted(["worktree", "list", "--porcelain"], repo)
+            if code == 0:
+                held = None
+                for line in listed.splitlines():
+                    if line.startswith("worktree "):
+                        held = Path(line.removeprefix("worktree "))
+                    elif line == f"branch {ref}" and held is not None and "quarantine" in held.parts:
+                        make_worktree.git_trusted(["symbolic-ref", "HEAD", dest], held)
+        make_worktree.git_trusted(["update-ref", "-d", ref, sha], repo)
+
+
+def _quarantine_plan(found: list[completion.OrphanTree], tree_name: str) -> dict:
+    stamp = uuid.uuid4().hex
+    fresh = f"{tree_name}-{stamp}"
+    refs = sorted({ref for c in found if c.branch.startswith("work/")
+                   for ref in (f"refs/heads/{c.branch}", f"refs/remotes/origin/{c.branch}")})
+    return {"stamp": stamp, "fresh": fresh, "branch": f"work/{fresh}",
+            "paths": [c.path for c in found if c.path], "refs": refs}
 
 
 def _assert_stopped(run: Path) -> None:
@@ -509,15 +438,18 @@ def _assert_stopped(run: Path) -> None:
 
 def _abort_workers_gone(root: Path, number: int) -> None:
     """A released slot or a cancellation marker is not proof that its worker stopped.
-    Include archived starts: collect may have moved the evidence before cancellation succeeded (#774)."""
-    for run in (supervisor.state_dir(root) / "runs").glob(f"{number}-*"):
+    A pre-start (command.json, no started.json) never ran: quarantine it and move on."""
+    runs = supervisor.state_dir(root) / "runs"
+    for run in runs.glob(f"{number}-*"):
         try:
             if (run / "started.json").is_file():
                 _assert_stopped(run)
+            elif any(mark in run.name for mark in ("-canceled-", "-quarantine-", "-refused-")):
+                continue
             elif (run / "command.json").is_file() and not (run / "exit.json").is_file():
-                raise RuntimeError("worker start is unverified")
+                run.rename(run.with_name(f"{run.name}-quarantine-{uuid.uuid4().hex}"))
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
-            raise RuntimeError(f"cannot retire orphaned work with live or unverified worker {run.name}: {exc}") from exc
+            raise RuntimeError(f"cannot quarantine orphaned work with live or unverified worker {run.name}: {exc}") from exc
 
 
 def _verify_replacement(tree: Path, branch: str, head: str, trees: Path, common: Path) -> None:
@@ -532,19 +464,32 @@ def _verify_replacement(tree: Path, branch: str, head: str, trees: Path, common:
         raise RuntimeError("abort replacement does not match its prepared branch and head")
 
 
-def _finish_abort(issue_key: str, number: int, data: dict, store: Any, root: Path,
-                  trees: Path, repo: Path, common: Path) -> tuple[Path, str, bool]:
-    """Resume retirement from the saved replacement, even after a partial removal or a stage change."""
-    tree, branch = Path(data["worktree"]), data["work_branch"]
-    pending = data["abort_replacement"]
-    with make_worktree.clone_lock(repo):
-        _verify_replacement(tree, branch, pending["head"], trees, common)
-        _abort_workers_gone(root, number)
-        store.set_ownership(issue_key, str(tree))
-        _retire_orphans(repo, trees, pending["retire"])
-        data.pop("abort_replacement")
-        store.set_resume(issue_key, data)
-    return tree, branch, False
+def _finish_quarantine(issue_key: str, number: int, agent: str, data: dict, store: Any, root: Path,
+                       trees: Path, repo: Path) -> tuple[Path, str, bool]:
+    """Quarantine the saved trees and refs, then build the fresh tree. A later pass finishes a partial one."""
+    plan = data["abort_quarantine"]
+    _abort_workers_gone(root, number)
+    with make_worktree.clone_lock(repo) as common:
+        _apply_quarantine(repo, trees, number, plan, common)
+    fresh, branch = trees / plan["fresh"], plan["branch"]
+    if not fresh.is_dir():
+        fresh = make_worktree.build(root, repo, str(trees), plan["fresh"], branch, agent).path
+    common = _common(repo)
+    code, head = make_worktree.git(["rev-parse", git_trees.REF], repo, expected_common=common)
+    if code or not head:
+        raise RuntimeError("abort replacement base is unreadable")
+    try:
+        _verify_replacement(fresh, branch, head, trees, common)
+    except RuntimeError:
+        if fresh.is_dir():
+            with make_worktree.clone_lock(repo) as common:
+                _move_tree(repo, trees, fresh, str(number), f"{plan['stamp']}-rejected")
+        raise
+    store.set_ownership(issue_key, str(fresh))
+    data.update(worktree=str(fresh), work_branch=branch)
+    data.pop("abort_quarantine")
+    store.set_resume(issue_key, data)
+    return fresh, branch, False
 
 
 def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tree_name: str, branch: str,
@@ -557,8 +502,8 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
     if common is None:
         return _legacy_worktree(issue_key, number, stage, attempt, tree_name, branch, agent, data, store, root, trees, repo)
 
-    if data.get("abort_replacement"):
-        return _finish_abort(issue_key, number, data, store, root, trees, repo, common)
+    if data.get("abort_quarantine"):
+        return _finish_quarantine(issue_key, number, agent, data, store, root, trees, repo)
 
     if data.get("worktree") and Path(data["worktree"]).exists():
         tree = Path(data["worktree"])
@@ -572,20 +517,18 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
         found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
         preferred = str(Path(data["worktree"])) if data.get("worktree") else None
         chosen = completion.recovery(found, preferred=preferred)
-        if isinstance(chosen, completion.Conflict):
+        if isinstance(chosen, completion.Quarantine):
+            abort, chosen = True, None
+        elif isinstance(chosen, completion.Conflict):
             choice = _conflict_choice(store, issue_key, stage, attempt, chosen.reason, clock)
             if choice == "hold":
                 raise RuntimeError(f"orphan recovery held: {chosen.reason}")
-            abort = True
-            chosen = None
+            abort, chosen = True, None
         if chosen is not None and chosen.path is not None:
             tree = Path(chosen.path)
             if next(c.head for c in found if c.path == chosen.path) != chosen.head:
                 code, detail = make_worktree.git_trusted(["merge", "--ff-only", chosen.head], tree)
                 if code != 0:
-                    reason = f"could not fast-forward orphaned worktree: {detail}"
-                    if _conflict_choice(store, issue_key, stage, attempt, reason, clock) == "hold":
-                        raise RuntimeError(f"orphan recovery held: {reason}")
                     abort, chosen = True, None
         elif chosen is not None:
             make_worktree.git_trusted(["worktree", "prune"], repo)
@@ -601,21 +544,10 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
                 raise RuntimeError(f"git worktree add failed: {detail}")
         if abort:
             _abort_workers_gone(root, number)
-            retire = _snapshot_orphans(found, repo, common)
-    if abort:
-        # build takes the clone lock itself. Until it succeeds and is saved, all old work stays intact.
-        fresh = f"{tree_name}-{uuid.uuid4()}"
-        fresh_branch = f"work/{fresh}"
-        made = make_worktree.build(root, repo, str(trees), fresh, fresh_branch, agent)
-        with make_worktree.clone_lock(repo):
-            code, head = make_worktree.git(["rev-parse", git_trees.REF], repo, expected_common=common)
-            if code:
-                raise RuntimeError("abort replacement base is unreadable")
-            _verify_replacement(made.path, fresh_branch, head, trees, common)
-            data.update(worktree=str(made.path), work_branch=fresh_branch, abort_replacement={
-                "head": head, "retire": retire})
+            data["abort_quarantine"] = _quarantine_plan(found, tree_name)
             store.set_resume(issue_key, data)
-        return _finish_abort(issue_key, number, data, store, root, trees, repo, common)
+    if abort:
+        return _finish_quarantine(issue_key, number, agent, data, store, root, trees, repo)
     if chosen is not None:
         recovered = (chosen.recovered or data.get("worktree") != str(tree) or attempt > 1 or bool(data.get("runs")))
         store.set_ownership(issue_key, str(tree))
@@ -743,11 +675,19 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
-    except BaseException:  # an interrupt too: a start that was never verified must not leave a runner behind
-        # Cancel first: a mark written before a cancel that fails would tell collect the worker is gone. Once cancel
-        # returns, the start can no longer produce anything, so archive it now and forget its record; slots.claim
-        # drops the segment on an ordinary exception, and nothing would collect the mark.
+    except BaseException as exc:  # an interrupt too: a start that was never verified must not leave a runner behind
+        # Cancel first. Archive only once the host is confirmed stopped, or when the run never started.
         claude_adapter.cancel(runner)
+        stopped = True
+        if (run_dir / "started.json").is_file():
+            try:
+                _assert_stopped(run_dir)
+            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                stopped = False
+        if not stopped:
+            if isinstance(exc, Exception):
+                return actor.model, actor.effort or ""  # the reservation stays until the host is confirmed stopped
+            raise
         with contextlib.suppress(OSError):
             (run_dir / "canceled").write_text("canceled\n")
         with contextlib.suppress(OSError):

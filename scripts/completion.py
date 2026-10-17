@@ -19,23 +19,9 @@ class OrphanTree:
     dirty: bool = False
     conflicted: bool = False
     unreadable: bool = False  # detached, unreadable, or its history could not be compared
+    quarantined: bool = False  # already under the quarantine namespace or directory
     ahead: int | None = 0  # commits past the base; None when unknown
     ancestors: frozenset[str] = frozenset()  # the other candidates' heads in this head's history
-
-
-@dataclass(frozen=True)
-class RetirementSnapshot:
-    """The observed state abort may retire; contents is None for a branch without a tree."""
-    branch: str
-    head: str
-    contents: str | None
-    unreadable: bool = False
-
-
-def may_retire(saved: RetirementSnapshot, current: RetirementSnapshot) -> bool:
-    """Only matching, readable state is disposable. Two blank heads never prove a match."""
-    return bool(not saved.unreadable and not current.unreadable and saved.branch and saved.head
-                and saved.contents != "" and saved == current)
 
 
 @dataclass(frozen=True)
@@ -48,6 +34,12 @@ class Recovery:
 
 @dataclass(frozen=True)
 class Conflict:
+    reason: str
+
+
+@dataclass(frozen=True)
+class Quarantine:
+    """Not reusable. The driver quarantines the candidates and starts fresh."""
     reason: str
 
 
@@ -68,8 +60,8 @@ def recovery(candidates: Sequence[OrphanTree], *, preferred: str | None = None) 
     conflict that needs the user. Uncommitted work is never put behind a fast-forward or beside other uncommitted work."""
     if not candidates:
         return None
-    if bad := [c for c in candidates if c.unreadable]:
-        return Conflict(f"orphaned worktree {_label(bad[0])} is detached or unreadable")
+    if any(c.unreadable or c.quarantined for c in candidates):
+        return Quarantine("orphaned work is unreadable or quarantined")
     if bad := [c for c in candidates if c.conflicted]:
         return Conflict(f"orphaned worktree {_label(bad[0])} has unresolved merge conflicts")
     dirty = [c for c in candidates if c.dirty]
