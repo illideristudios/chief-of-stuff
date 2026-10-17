@@ -156,7 +156,8 @@ class GateTest(unittest.TestCase):
                 self.assertTrue(got.escalated)
                 self.assertEqual(len(self.model.requests), 3)
                 row = self.store.decisions(KEY)[-1]
-                self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+                self.assertEqual((row.answer, row.decided_by),
+                                 (None, "" if kind in model_port.RETRYABLE else "zach"))
                 verdict = row.record["verdicts"][0]
                 self.assertEqual(verdict["vote"], "concern")
                 self.assertIsNone(verdict["choice"])
@@ -252,37 +253,39 @@ class GateTest(unittest.TestCase):
         self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
         self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), ask))
 
-    def test_pending_interrupts_follow_decision_state_and_context(self):
-        import decision_actions
-        gate = decision_actions.DecisionUpdate("plan", "Gate?", None, "zach", {
-            "retry_exhausted": 8, "error": "gate unavailable",
-            "decision": {"context": "implement-1", "options": ["approve", "hold"]}})
-        ask = decision_actions.DecisionUpdate("ask", "Parser?", None, "zach", {
-            "retry_exhausted": 8, "error": "parser unavailable",
-            "decision": {"instance": "ask-1", "context": "ctx", "options": ["Split", "Keep"]}})
-        gate_interrupt = {"kind": "ambiguity", "reason": "gate unavailable", "decision": {
-            "topic": "plan", "question": "Gate?", "instance": "", "context": "implement-1"}}
-        ask_interrupt = {"kind": "ambiguity", "reason": "parser unavailable", "decision": {
-            "topic": "ask", "question": "Parser?", "instance": "ask-1", "context": "ctx"}}
-        choose = decision_actions.pending_interrupt
-        self.assertEqual(choose([gate, ask], gate_interrupt), gate_interrupt)
-        for update in (replace(gate, answer="approve"),
-                       replace(gate, record={**gate.record, "reversed": True}),
-                       replace(gate, record={**gate.record, "restarted": "implement"}),
-                       replace(gate, record={**gate.record, "decision": {
-                           **gate.record["decision"], "context": "implement-2"}}, answer="approve")):
-            with self.subTest(update=update):
-                self.assertEqual(choose([gate, update, ask], gate_interrupt), ask_interrupt)
-                self.assertIsNone(choose([gate, update], gate_interrupt))
-        # A split still waits for a person; an explicit hold still blocks its gate.
-        for pending in (replace(gate, record={"decision": gate.record["decision"]}),
-                        replace(gate, answer="hold", record={"decision": gate.record["decision"]})):
-            self.assertEqual(choose([pending, ask], gate_interrupt), gate_interrupt)
-        limit = {"kind": "limit", "reason": "reached spend_usd limit", "stage": "implement"}
-        self.assertEqual(choose([ask], limit), limit)
-        historical = replace(gate, record=None)
-        self.assertIsNone(choose([historical]))
-        self.assertEqual(choose([historical], gate_interrupt), gate_interrupt)
+    def test_needs_zach_reads_only_the_latest_row_for_a_decision_attempt(self):
+        import decision_actions as actions
+        row = actions.DecisionUpdate("plan", "Gate?", None, "zach", {
+            "error": "gate unavailable", "decision": {
+                "stage": "implement", "attempt": 1, "context": "implement-1"}})
+        expected = actions.NeedsZach(("plan", "Gate?", ""), "implement", 1, "gate unavailable")
+        self.assertEqual(actions.needs_zach([row]), expected)
+        # Split, hold and exhaustion need no special eligibility rule.
+        for record in ({}, {"recommendation": "hold"}, {"retry_exhausted": 8}, None):
+            pending = replace(row, record=record)
+            self.assertIsNotNone(actions.needs_zach([pending]))
+        for settled in (replace(row, answer="approve"), replace(row, decided_by="trio"),
+                        replace(row, decided_by="")):
+            self.assertIsNone(actions.needs_zach([row, settled]))
+        self.assertIsNone(actions.needs_zach([]))
+
+    def test_a_new_context_cannot_reuse_an_unanswered_exhaustion(self):
+        decision = replace(self.decision, context="implement-1")
+        self.store.add_decision(KEY, decision.topic, decision.question, None, "zach", {
+            "retry_exhausted": 8, "decision": asdict(decision)})
+        model = FakeModel([reply(choice=OPTIONS[1])] * 3)
+        got = trio_gate.decide(replace(decision, context="implement-2"), self.store.decisions(KEY),
+                               self.policy, PERSONAS, model, self.store)
+        self.assertEqual((got.recommendation, len(model.requests)), (OPTIONS[1], 3))
+        self.assertEqual([r.record["decision"]["context"] for r in self.store.decisions(KEY)],
+                         ["implement-1", "implement-2"])
+
+    def test_a_gate_hold_is_recorded_as_unanswered_for_zach(self):
+        decision = replace(self.decision, options=("approve", "hold"), stage="implement", attempt=1)
+        self.consult([reply(choice="hold")] * 3, decision=decision)
+        row, = self.store.decisions(KEY)
+        self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+        self.assertEqual(row.record["recommendation"], "hold")
 
     def test_replacement_ask_specification_and_link_are_decision_updates(self):
         import decision_actions
