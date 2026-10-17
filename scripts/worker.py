@@ -343,14 +343,68 @@ def _retire_orphans(repo: Path, trees: Path, found: list[completion.OrphanTree])
             continue
         if not inside:
             continue
-        code, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
-        if code != 0 and path.exists():
+        _, detail = make_worktree.git_trusted(["worktree", "remove", "--force", str(path)], repo)
+        if path.exists():
             raise RuntimeError(f"could not retire orphaned worktree: {detail}")
     for c in found:
         if not c.branch.startswith("work/"):
             continue
-        make_worktree.git_trusted(["branch", "-D", c.branch], repo)
-        make_worktree.git_trusted(["update-ref", "-d", f"refs/remotes/origin/{c.branch}"], repo)
+        for ref, command in ((f"refs/heads/{c.branch}", ["branch", "-D", c.branch]),
+                             (f"refs/remotes/origin/{c.branch}", ["update-ref", "-d", f"refs/remotes/origin/{c.branch}"])):
+            _, detail = make_worktree.git_trusted(command, repo)
+            check, remaining = make_worktree.git(["for-each-ref", "--format=%(refname)", ref], repo)
+            if check or remaining:
+                raise RuntimeError(f"could not retire orphaned ref {ref}: {detail or remaining}")
+
+
+def _abort_workers_gone(root: Path, number: int) -> None:
+    """A released slot or a cancellation marker is not proof that its worker stopped.
+    Include archived starts: collect may have moved the evidence before cancellation succeeded (#774)."""
+    for run in (supervisor.state_dir(root) / "runs").glob(f"{number}-*"):
+        try:
+            if not (run / "started.json").is_file():
+                if (run / "command.json").is_file() and not (run / "exit.json").is_file():
+                    raise RuntimeError("worker start is unverified")
+                continue
+            started = json.loads((run / "started.json").read_text())
+            session = started["session_id"]
+            if not isinstance(session, str) or not session:
+                raise ValueError("missing session identity")
+            for field, host in (("pid", True), ("runner_pid", False)):
+                pid = started[field]
+                if type(pid) is not int or pid <= 0:
+                    raise ValueError("missing process identity")
+                if process_status.identity(pid, session, host=host) is not None:
+                    raise RuntimeError("worker is still live")
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+            raise RuntimeError(f"cannot retire orphaned work with live or unverified worker {run.name}: {exc}") from exc
+
+
+def _verify_replacement(tree: Path, branch: str, head: str, trees: Path, common: Path) -> None:
+    if not tree.resolve().is_relative_to(trees.resolve()):
+        raise RuntimeError("abort replacement is outside the worktrees directory")
+    try:
+        git_view.locate(tree, expected_common=common)
+        actual = _read_tree(tree, common)
+    except (git_view.Unviewable, OSError) as exc:
+        raise RuntimeError("abort replacement is unreadable") from exc
+    if actual.unreadable or actual.conflicted or actual.branch != branch or not head or actual.head != head:
+        raise RuntimeError("abort replacement does not match its prepared branch and head")
+
+
+def _finish_abort(issue_key: str, number: int, data: dict, store: Any, root: Path,
+                  trees: Path, repo: Path, common: Path) -> tuple[Path, str, bool]:
+    """Resume retirement from the saved replacement, even after a partial removal or a stage change."""
+    tree, branch = Path(data["worktree"]), data["work_branch"]
+    pending = data["abort_replacement"]
+    with make_worktree.clone_lock(repo):
+        _verify_replacement(tree, branch, pending["head"], trees, common)
+        _abort_workers_gone(root, number)
+        store.set_ownership(issue_key, str(tree))
+        _retire_orphans(repo, trees, [completion.OrphanTree(**c) for c in pending["retire"]])
+        data.pop("abort_replacement")
+        store.set_resume(issue_key, data)
+    return tree, branch, False
 
 
 def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tree_name: str, branch: str,
@@ -362,6 +416,9 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
     common = _common(repo)
     if common is None:
         return _legacy_worktree(issue_key, number, stage, attempt, tree_name, branch, agent, data, store, root, trees, repo)
+
+    if data.get("abort_replacement"):
+        return _finish_abort(issue_key, number, data, store, root, trees, repo, common)
 
     if data.get("worktree") and Path(data["worktree"]).exists():
         tree = Path(data["worktree"])
@@ -402,16 +459,21 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
                 ["worktree", "add", "--no-track", "-B", chosen.branch, "--", str(tree), chosen.head], repo)
             if code != 0:
                 raise RuntimeError(f"git worktree add failed: {detail}")
-        if abort:
-            _retire_orphans(repo, trees, found)
     if abort:
-        # A fresh tree from main. Its name cannot be one the conflicting checkouts already hold.
+        # build takes the clone lock itself. Until it succeeds and is saved, all old work stays intact.
+        _abort_workers_gone(root, number)
         fresh = f"{tree_name}-{uuid.uuid4()}"
-        made = make_worktree.build(root, repo, str(trees), fresh, f"work/{fresh}", agent)
-        store.set_ownership(issue_key, str(made.path))
-        data.update(worktree=str(made.path), work_branch=f"work/{fresh}")
-        store.set_resume(issue_key, data)
-        return made.path, f"work/{fresh}", False
+        fresh_branch = f"work/{fresh}"
+        made = make_worktree.build(root, repo, str(trees), fresh, fresh_branch, agent)
+        with make_worktree.clone_lock(repo):
+            code, head = make_worktree.git(["rev-parse", git_trees.REF], repo, expected_common=common)
+            if code:
+                raise RuntimeError("abort replacement base is unreadable")
+            _verify_replacement(made.path, fresh_branch, head, trees, common)
+            data.update(worktree=str(made.path), work_branch=fresh_branch, abort_replacement={
+                "head": head, "retire": [{"path": c.path, "branch": c.branch, "head": c.head} for c in found]})
+            store.set_resume(issue_key, data)
+        return _finish_abort(issue_key, number, data, store, root, trees, repo, common)
     if chosen is not None:
         recovered = (chosen.recovered or data.get("worktree") != str(tree) or attempt > 1 or bool(data.get("runs")))
         store.set_ownership(issue_key, str(tree))

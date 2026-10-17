@@ -1060,9 +1060,24 @@ class WorkerTest(unittest.TestCase):
             (run / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": "live"}))
             (run / "canceled").write_text("canceled\n")
             self.assertEqual(self.db.segments(), [])
-            with self.assertRaisesRegex(RuntimeError, "live|unverified"):
-                self.launch_in(clone, attempt=3)
-            self.assert_abort_work_preserved(clone, heads)
+            for identity in (lambda *a, **kw: "live", lambda *a, **kw: None if kw.get("host") else "live",
+                             mock.Mock(side_effect=RuntimeError("ps unavailable"))):
+                with self.subTest(identity=identity), \
+                     mock.patch.object(worker.process_status, "identity", side_effect=identity), \
+                     mock.patch.object(worker.claude_adapter, "start") as start:
+                    with self.assertRaisesRegex(RuntimeError, "live|unverified"):
+                        worker.launch(KEY, "implement", 3, None, store=self.db, root=self.root,
+                                      trees=self.trees, policies=self.p, forge=self.forge, clone=clone, clock=lambda: NOW)
+                    start.assert_not_called()
+                    self.assert_abort_work_preserved(clone, heads)
+            # Once both identities are gone, the archived marker must not prevent an intentional abort.
+            with mock.patch.object(worker.process_status, "identity", return_value=None):
+                fresh, _, _ = worker._resolve_worktree(
+                    KEY, 1, "implement", 3, "issue-1-implement-3", "work/issue-1-implement-3", "",
+                    self.db.resume(KEY), self.db, self.root, self.trees, clone, lambda: NOW)
+            self.assertNotIn(fresh, heads)
+            self.assertTrue(fresh.is_dir())
+            self.assertTrue(all(not tree.exists() for tree in heads))
 
     def test_abort_starts_fresh_on_the_next_engine_pass(self):
         from evals import git_taint as taint
