@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import plistlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,7 +21,7 @@ class SupervisorTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        base = Path(tmp.name)
+        base = Path(tmp.name).resolve()
         self.release, self.data, self.jobs, self.root = (base / n for n in ("release", "data", "agents", "ws"))
         (self.release / ".claude-plugin").mkdir(parents=True)
         self.root.mkdir()
@@ -116,7 +117,7 @@ class CurrentReleaseTest(SupervisorTest):
                 elif target.name == "missing":
                     self.assertIn(f"No such file or directory: '{target}'", errors.getvalue())
                 else:
-                    self.assertRegex(errors.getvalue(), rf"(?:[Ll]oop|Too many levels of symbolic links).*{pointer}")
+                    self.assertRegex(errors.getvalue(), rf"(?:[Ll]oop|Too many levels of symbolic links).*{re.escape(str(pointer))}")
 
 
 class VenvTest(SupervisorTest):

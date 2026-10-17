@@ -1372,7 +1372,7 @@ class MainTest(unittest.TestCase):
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
         path = self.root / "settings.toml"
-        path.write_text(path.read_text() + 'rules = ["Keep tests."]\n')
+        path.write_text(path.read_text() + '\nrules = ["Keep tests."]\n')
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
@@ -1509,7 +1509,12 @@ class MainTest(unittest.TestCase):
         python = data / "venv-new/bin/python"
         errors, stops = io.StringIO(), []
         serving = threading.Event()
+        now = mock.Mock(return_value=1000)
+        ticks = iter((1010, 1020, 1060))
         passed = mock.Mock(side_effect=lambda **_kw: self.assertTrue(serving.wait(2)))
+
+        def sleep(_interval):
+            now.return_value = next(ticks)
 
         def serve(_root, stop):
             stops.append(stop)
@@ -1534,8 +1539,8 @@ class MainTest(unittest.TestCase):
              mock.patch.object(pages, "supervise", side_effect=serve), \
              mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass", passed), \
-             mock.patch.object(engine.time, "sleep", side_effect=[None, None, None, KeyboardInterrupt]), \
-             mock.patch.object(engine.time, "time", side_effect=[1000, 1010, 1020, 1060]), \
+             mock.patch.object(engine.time, "sleep", side_effect=sleep), \
+             mock.patch.object(engine.time, "time", now), \
              mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         self.assertEqual(passed.call_count, 3, "backoff must leave engine passes running")
@@ -1559,11 +1564,12 @@ class MainTest(unittest.TestCase):
             now.return_value = 1000
             self.assertIsNone(engine._prepare_handoff(current))
             # A new interpreter reads the same persisted retry deadline, rather than trying pip again.
-            probe = "import engine; from pathlib import Path; " \
+            probe = "import engine; from pathlib import Path; from unittest.mock import Mock; " \
                     f"engine.supervisor.data_dir = lambda: Path({str(data)!r}); " \
                     "engine.time.time = lambda: 1010; " \
-                    "engine.supervisor.ensure_venv = lambda *a, **k: (_ for _ in ()).throw(AssertionError('retried')); " \
-                    f"assert engine._prepare_handoff(Path({str(current)!r})) is None"
+                    "engine.supervisor.ensure_venv = Mock(side_effect=AssertionError('retried')); " \
+                    f"assert engine._prepare_handoff(Path({str(current)!r})) is None; " \
+                    "engine.supervisor.ensure_venv.assert_not_called()"
             result = subprocess.run([sys.executable, "-c", probe], cwd=Path(engine.__file__).parent,
                                     capture_output=True, text=True, timeout=30)
             self.assertEqual(result.returncode, 0, result.stderr)

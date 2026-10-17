@@ -170,19 +170,21 @@ def ensure_venv(data: Path, *, release: Path | None = None) -> Path:
         raise ServiceError(f"could not identify the engine's base Python: {exc}") from exc
     if identity.returncode:
         raise ServiceError(f"could not identify the engine's base Python: {(identity.stderr or identity.stdout).strip()[-2000:]}")
-    # Keyed by the pins and Python identity, so a rebuild never touches the venv a running engine uses.
+    # Changed pins or Python identity use a separate venv; same-key repairs must protect the running one.
     # shortcut: superseded venvs are never removed, prune them once an engine per workspace is common.
     key = hashlib.sha256(requirements.read_bytes() + b"\0" + identity.stdout.encode()).hexdigest()[:16]
     venv = data / f"venv-{key}"
     python, done = venv / "bin/python", venv / ".installed"
     if done.exists() and _venv_python_runs(python):
         return python
+    if Path(sys.executable).absolute().parent.parent == venv.absolute() or Path(sys.prefix).resolve() == venv.resolve():
+        raise ServiceError(f"cannot rebuild the running interpreter's venv: {venv}")
     shutil.rmtree(venv, ignore_errors=True)
     for argv in ([base, "-m", "venv", str(venv)],
                  [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
         result = subprocess.run(argv, capture_output=True, text=True, timeout=900)
         if result.returncode:
-            raise ServiceError(f"engine dependencies failed to install, engine not started: "
+            raise ServiceError(f"engine dependencies failed to install: "
                                f"{(result.stderr or result.stdout).strip()[-2000:]}")
     done.touch()
     return python

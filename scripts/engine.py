@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import sys
 import threading
@@ -468,13 +470,38 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
 
 def _prepare_handoff(release: Path) -> Path | None:
-    """Prepare the selected release while this engine can still run if its dependency build fails."""
+    """Prepare an update, persisting failed release/pins retries with 60s–1h exponential backoff."""
     try:
-        if not (release / "scripts/engine.py").is_file():
-            raise supervisor.ServiceError(f"missing engine entry file: {release / 'scripts/engine.py'}")
         data = supervisor.data_dir()
-        with supervisor.lock(data / "supervisor.lock", wait=True):
-            return supervisor.ensure_venv(data, release=release)
+        # Lock order is engine.lock -> supervisor.lock; never wait on another workspace's build.
+        with supervisor.lock(data / "supervisor.lock"):
+            key = hashlib.sha256(os.fsencode(release) + b"\0" + (release / "requirements.txt").read_bytes()).hexdigest()
+            failure = data / f"handoff-{key}.json"
+            try:
+                previous = json.loads(failure.read_text())
+            except (FileNotFoundError, ValueError):
+                previous = {}
+            now = time.time()
+            if now < previous.get("retry_at", 0):
+                return None
+            try:
+                if not (release / "scripts/engine.py").is_file():
+                    raise supervisor.ServiceError(f"missing engine entry file: {release / 'scripts/engine.py'}")
+                python = supervisor.ensure_venv(data, release=release)
+            except Exception as exc:
+                delay = min(previous.get("delay", 30) * 2, 3600)
+                message = str(exc)
+                supervisor.atomic_write(failure, json.dumps({
+                    "retry_at": time.time() + delay, "delay": delay, "message": message,
+                }).encode())
+                if message != previous.get("message"):
+                    print(f"engine: cannot prepare release {release}: {exc}; keeping {supervisor.RELEASE}",
+                          file=sys.stderr, flush=True)
+                return None
+            failure.unlink(missing_ok=True)
+            return python
+    except supervisor.ServiceError:  # another workspace or CLI owns the global lock; try on a later pass
+        return None
     except Exception as exc:
         print(f"engine: cannot prepare release {release}: {exc}; keeping {supervisor.RELEASE}",
               file=sys.stderr, flush=True)
