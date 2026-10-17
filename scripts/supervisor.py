@@ -177,8 +177,10 @@ def require_macos():
         raise ServiceError("the engine supervisor requires macOS (launchd)")
 
 
-def install(root: Path, engine: tuple[str, ...] = ENGINE, jobs_dir: Path | None = None) -> str:
+def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | None = None) -> str:
     """Start the engine under launchd, or restart it when the plugin version, its path or its pins changed."""
+    if engine is None:
+        engine = (str(RELEASE / "scripts/engine.py"),)
     if not engine:
         raise ServiceError("the engine entry command is not set yet (supervisor.ENGINE, M3 engine loop)")
     require_macos()

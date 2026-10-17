@@ -48,12 +48,16 @@ from html import escape
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import page_reload
+import supervisor
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
 CACHE = ".sources.json"
 REFRESH = 60  # seconds between forge reads
+POLL = 5  # seconds between healthy server checks
+RETRY_MIN = 1
+RETRY_MAX = 60
 RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-\d+(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 ISSUE = re.compile(r"/issues/(\d+)(/source)?")
@@ -500,6 +504,12 @@ def _stop(pages_dir: Path, port: int) -> None:
 def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
     moves to another port: the URL is the board's address, and a board that wanders is a board nobody has open."""
+    with supervisor.lock(pages_dir / ".ensure.lock", wait=True):
+        return _ensure(pages_dir, port, log, root)
+
+
+def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None) -> str:
+    """Probe, replace and start under the same lock, including concurrent CLI ensures."""
     who = _who(port)
     restart = False
     if who is not None:
@@ -539,6 +549,35 @@ def from_config(root: Path) -> tuple[Path, int]:
         return pages_address(root)
     except (OSError, ConfigError) as e:
         raise PagesError(str(e)) from None
+
+
+def supervise(root: Path, stop: threading.Event) -> None:
+    """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts."""
+    try:
+        with supervisor.lock(supervisor.state_dir(root) / "pages-supervisor.lock"):
+            retry, last_error = RETRY_MIN, None
+            while not stop.is_set():
+                try:
+                    cfg = read_config(root)
+                    if not cfg.pages_dir and not cfg.board_url:
+                        return
+                    pages_dir, port = from_config(root)
+                    status = ensure(pages_dir, port, supervisor.state_dir(root) / "pages.log", root)
+                    last_error = None
+                except (PagesError, ConfigError, OSError, ValueError) as exc:
+                    status = None
+                    if str(exc) != last_error:
+                        print(f"pages: {exc}", file=sys.stderr, flush=True)
+                        last_error = str(exc)
+                if status == "pages: serving":
+                    delay, retry = POLL, RETRY_MIN
+                else:
+                    # A start is only healthy once a later probe still finds it serving.
+                    delay, retry = retry, min(RETRY_MAX, retry * 2)
+                if stop.wait(delay):
+                    return
+    except supervisor.ServiceError:
+        return  # Another engine already supervises this workspace's board.
 
 
 def main(argv: list[str] | None = None) -> int:

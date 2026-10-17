@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -470,7 +471,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--root", type=Path, default=Path("."), help="workspace holding store.db and CLAUDE.md")
     ap.add_argument("--interval", type=float, default=60, help="seconds between passes (default 60)")
     ap.add_argument("--once", action="store_true", help="run one pass and exit")
+    ap.add_argument("cmd", nargs="?", choices=("install", "uninstall", "status"),
+                    help="manage the engine's LaunchAgent")
     args = ap.parse_args(argv)
+    if args.cmd:
+        return supervisor.main(argv)
     if not 0 < args.interval < float("inf"):
         ap.error("--interval must be a finite positive number")
     root = args.root.resolve()
@@ -502,7 +507,14 @@ def main(argv: list[str] | None = None) -> int:
                              clone=root / selected if selected else root,
                              claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
                              require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+            stop_pages = threading.Event()
+            page_thread = None
             try:
+                version = supervisor.version()
+                if not args.once:
+                    import pages
+                    page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                    page_thread.start()
                 while True:
                     failed = False
                     try:
@@ -515,7 +527,12 @@ def main(argv: list[str] | None = None) -> int:
                     if args.once:
                         return 1 if failed else 0
                     time.sleep(args.interval)
+                    if supervisor.version() != version:
+                        return 0  # launchd restarts with the updated instructions and scripts.
             finally:
+                stop_pages.set()
+                if page_thread is not None and page_thread.ident is not None:
+                    page_thread.join()
                 db.engine.dispose()
     except KeyboardInterrupt:
         return 0
