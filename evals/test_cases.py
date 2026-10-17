@@ -2134,7 +2134,7 @@ class CaseLintTest(unittest.TestCase):
                         "chief-of-stuff worker --task 'Rate limit headers' --dry-run", "grep -rn steps notes/", "cat trees/rate-limit/.chief-of-stuff/one-shot.pid",
                         "cat daily/tracker.md; ls maps", "chief-of-stuff tracker tasks --not done",
                         "chief-of-stuff processes --root . # not ps or pgrep", "chief-of-stuff processes --root . && echo no ps needed",
-                        "grep -n 'ps ' agents/x.md", "docker ps -a", "git log --grep 'ps aux'", "echo ps", "ls pspdf", "psql -c x", "python3 ps.py",
+                        "grep -n 'ps ' agents/x.md", "runner ps -a", "git log --grep 'ps aux'", "echo ps", "ls pspdf", "psql -c x", "python3 ps.py",
                         "cat tps.log", "ls\ntpsx\n"):
             self.assertFalse(hit(listing, command), command)
 
