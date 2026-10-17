@@ -552,8 +552,9 @@ class EngineTest(unittest.TestCase):
 
     def test_exhausted_release_returns_to_a_human_releasable_hold(self):
         self.pending_release(held=False)
-        self.p = replace(self.p, base=policy.Policy(retry_limit=0))
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
         with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="refused")):
+            self.run_pass()
             self.run_pass()
             self.run_pass()
         self.assertNotIn("pending_stage", self.db.resume(KEY))
