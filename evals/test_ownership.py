@@ -8,6 +8,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import ownership  # noqa: E402
 
 
+class IssueScopesTest(unittest.TestCase):
+    def test_issue_section_uses_the_shared_table_and_bullet_reader(self):
+        body = "## File ownership\n| Mode | Paths |\n| --- | --- |\n| write | `src/`, `tests/` |\n- read-only: `docs/`\n## Other\n- write: `secrets/`"
+        self.assertEqual(ownership.issue_scopes(body), [("src", "write"), ("tests", "write"), ("docs", "read")])
+
+    def test_absent_empty_or_invalid_scope_defaults_to_whole_repository_write(self):
+        for body in ("", "## File ownership\n", "## File ownership\n- typo: `src/`",
+                     "## File ownership\n- write: `../outside`", "## File ownership\n- write: `/absolute`"):
+            with self.subTest(body=body):
+                self.assertEqual(ownership.issue_scopes(body), [(".", "write")])
+
+
 class ReadOnlyTest(unittest.TestCase):
     def test_a_cell_that_starts_with_the_word_none_is_read_only(self):
         for cell in ("none", "None; read-only review", "  NONE; read-only", "none; worktree `t` (b)",

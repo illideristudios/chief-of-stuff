@@ -57,6 +57,18 @@ class GateTest(unittest.TestCase):
         self.assertEqual(got.issue_key, "github:example/app#3")
         self.assertEqual([(i.issue_key, i.title) for i in self.store.items()], [("github:example/app#3", "Fix the parser")])
 
+    def test_new_and_existing_issues_supply_ownership_from_their_body(self):
+        body = "## File ownership\n- read-only: `src/`"
+        f = forge.Forge(tf.GH, gh=tf.FakeGh(issues=[{**tf.gh_issue(3, "Parser"), "body": body}]))
+        for number in (None, 3):
+            with self.subTest(number=number):
+                got = issue_gate.start(f, self.store, "Parser", body=body if number is None else "ignored", issue=number, commit=True)
+                self.assertEqual([(r.path, r.mode) for r in self.store.ownership(got.issue_key)], [("src", "read")])
+
+    def test_intake_without_a_scope_owns_the_repository(self):
+        got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Parser", commit=True)
+        self.assertEqual([(r.path, r.mode) for r in self.store.ownership(got.issue_key)], [(".", "write")])
+
     def test_a_supplied_issue_the_forge_does_not_confirm_is_refused_and_writes_no_row(self):
         got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Add a flag", issue=999999, commit=True)
         self.assertIn("#999999", got.refused)

@@ -77,7 +77,8 @@ class FakeForge:
 
     def issue(self, number):
         row = next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))
-        return SimpleNamespace(ok=True, issue=SimpleNamespace(is_open=row["forge_state"] == "open", labels=[]))
+        return SimpleNamespace(ok=True, issue=SimpleNamespace(is_open=row["forge_state"] == "open", labels=[],
+                               body=row.get("body", "")))
 
     def merge(self, number, commit=False, issue_key=None, approval=None, head=None, stage_mark=None):
         self.merges.append((number, commit, issue_key))
@@ -188,8 +189,8 @@ class EngineTest(unittest.TestCase):
         self.db.upsert_item(KEY, stage="implement", forge_state="open")
         self.db.upsert_item(OTHER, stage="implement", forge_state="open")
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
-        self.db.set_ownership(KEY, "src/a.py")
-        self.db.set_ownership(OTHER, "src/a.py")
+        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
+        self.forge.rows[1]["body"] = "## File ownership\n- write: `src/a.py`"
         self.db.record_segment(OTHER, "implement", 1, started_at=NOW.isoformat())
         run_dir = engine.worker._run_dir(self.root, OTHER, "implement", 1)
         self.db.set_resume(OTHER, {"runs": {"implement-1": {
@@ -197,12 +198,45 @@ class EngineTest(unittest.TestCase):
             "run_dir": str(run_dir), "tree": str(self.trees / "fake")}}})
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, f"file ownership conflict with {OTHER}")])
         self.assertEqual(self.launched, [])
+        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [("src/a.py", "write")])
 
     def test_launch_worktree_rows_do_not_conflict_two_fresh_issues(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
+        self.forge.rows[1]["body"] = "## File ownership\n- read-only: `.`"
+        self.db.upsert_item(KEY, stage="implement", forge_state="open")
         self.db.upsert_item(OTHER, stage="implement", forge_state="open")
+        self.db.set_ownership(KEY, str(self.trees / "issue-1-implement-1"))
         self.db.set_ownership(OTHER, str(self.trees / "issue-2-implement-1"))
         self.assertEqual({a.issue_key for a in self.run_pass()}, {KEY, OTHER})
+        facts = engine.engine_facts.gather(forge=self.forge, store=self.db, root=self.root,
+                                          trees=self.trees, now=self.now)
+        self.assertEqual(set(facts.read_only), {KEY, OTHER})
+
+    def test_undeclared_fresh_issues_conflict_in_the_same_pass(self):
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
+                                          reconcile.Wait(OTHER, f"file ownership conflict with {KEY}")])
+
+    def test_scope_edits_replace_old_claims_and_keep_worktree_registrations(self):
+        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
+        self.run_pass()
+        tree = str(self.trees / "fake")
+        self.db.set_ownership(KEY, tree)
+        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `docs/`"
+        self.run_pass()
+        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("docs", "read")})
+        self.forge.rows[0]["body"] = "scope removed"
+        self.run_pass()
+        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), (".", "write")})
+
+    def test_root_layout_keeps_declared_file_scopes(self):
+        self.trees = self.root
+        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
+                                "body": "## File ownership\n- write: `src/a.py`"})
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
+                                          reconcile.Wait(OTHER, f"file ownership conflict with {KEY}")])
 
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={})
