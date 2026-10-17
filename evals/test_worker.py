@@ -1045,25 +1045,56 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(self.db.resume(KEY), before)
             self.assertTrue(Path(self.launch_in(clone, attempt=3).cwd).is_dir())
 
-    def test_abort_refuses_unreadable_candidates_before_building_or_saving_a_replacement(self):
+    def aside(self, name):
+        return sorted(self.trees.glob(f".retired-{name}-*"))
+
+    def test_abort_sets_an_unreadable_candidate_aside_whole_and_never_deletes_it(self):
         from evals import git_taint as taint, make_repo
         with taint.private_git_views(self.root / "private-views"):
             clone = self.diverged()
             old = sorted(self.trees.glob("issue-1-*"))[0]
+            other = sorted(self.trees.glob("issue-1-*"))[1]
             head = make_repo.git(["rev-parse", "HEAD"], old)
             make_repo.git(["checkout", "--detach"], old)
             (old / "scratch.txt").write_text("keep detached work\n")
             with self.assertRaisesRegex(RuntimeError, "detached or unreadable"):
                 self.launch_in(clone, attempt=3)
             self.db.add_decision(KEY, "conflict", self.db.decisions(KEY)[0].question, answer="abort")
-            before = self.db.resume(KEY)
-            with mock.patch.object(worker.make_worktree, "build", wraps=worker.make_worktree.build) as build:
-                with self.assertRaisesRegex(RuntimeError, "preserving work"):
-                    self.launch_in(clone, attempt=3)
-            build.assert_not_called()
-            self.assertEqual(self.db.resume(KEY), before)
-            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], old), head)
-            self.assertEqual((old / "scratch.txt").read_text(), "keep detached work\n")
+            fresh = Path(self.launch_in(clone, attempt=3).cwd)
+            self.assertTrue(fresh.is_dir())
+            self.assertFalse(old.exists())
+            self.assertFalse(other.exists())
+            (kept,) = self.aside(old.name)
+            self.assertEqual((kept / "scratch.txt").read_text(), "keep detached work\n")
+            self.assertEqual(make_repo.git(["rev-parse", "HEAD"], kept), head)  # still a registered worktree
+            self.assertEqual(self.aside(other.name), [])
+
+    def test_abort_sets_a_tree_git_cannot_remove_aside_and_keeps_its_branch(self):
+        from evals import git_taint as taint, make_repo
+        for move_works in (True, False):
+            with self.subTest(move_works=move_works):
+                self.db.engine.dispose()
+                self.setUp()
+                with taint.private_git_views(self.root / "private-views"):
+                    clone, heads = self.abort_fixture()
+                    trusted = worker.make_worktree.git_trusted
+
+                    def refuse(args, cwd):
+                        if args[:2] == ["worktree", "remove"]:
+                            return 1, "corrupt worktree metadata"
+                        if args[:2] == ["worktree", "move"] and not move_works:
+                            return 1, "corrupt worktree metadata"
+                        return trusted(args, cwd)
+
+                    with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=refuse):
+                        fresh = Path(self.launch_in(clone, attempt=3).cwd)
+                    self.assertTrue(fresh.is_dir())
+                    for tree, head in heads.items():
+                        self.assertFalse(tree.exists())
+                        (kept,) = self.aside(tree.name)
+                        self.assertEqual((kept / "scratch.txt").read_text(), "uncommitted work\n")
+                        # The branch stays: the tree set aside may still hold it.
+                        self.assertEqual(make_repo.git(["rev-parse", f"refs/heads/work/{tree.name}"], clone), head)
 
     def test_abort_keeps_refs_checked_out_in_the_clone_or_an_external_worktree(self):
         from evals import git_taint as taint, make_repo
