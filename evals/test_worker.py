@@ -852,6 +852,17 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(forge_review.github_requests("example/project", "", gh)[0].branch, "feature/existing")
         self.assertIn("headRefName", gh.call_args.args[0][-1])
 
+    def test_collect_records_host_spend_and_elapsed_minutes(self):
+        run = self.launched()
+        self.report(run)
+        (run / "stdout").write_text(json.dumps({"is_error": False, "result": "done", "total_cost_usd": 0.25}))
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.25)
+        self.assertEqual(self.db.resume(KEY)["time_minutes"], 1)
+
     def test_quota_reset_formats_and_backoff(self):
         from model_port import retry_at
         self.assertEqual(retry_at("resets at 5pm.", NOW), NOW + timedelta(hours=17))

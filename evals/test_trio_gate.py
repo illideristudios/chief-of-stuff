@@ -227,6 +227,16 @@ class GateTest(unittest.TestCase):
             "recommendation": "Split the parser", "unanimous": True,
         })
 
+    def test_reopen_appends_an_unanswered_reversal_of_the_adopted_decision(self):
+        self.consult([reply()] * 3)
+        trio_gate.reopen(self.store, KEY, self.decision.topic, self.decision.question)
+        first, second = self.store.decisions(KEY)
+        self.assertEqual(first.answer, "Split the parser")
+        self.assertIsNone(second.answer)
+        self.assertEqual(second.record, {"reversed": True, "recommendation": "Split the parser"})
+        with self.assertRaisesRegex(ValueError, "adopted"):
+            trio_gate.reopen(self.store, KEY, self.decision.topic, self.decision.question)
+
     def test_invalid_selection_makes_no_model_calls_and_writes_no_decision(self):
         for resolved in (policy.Policy(), policy.Policy(trio=("reviewer", "reviewer", "architect")),
                          policy.Policy(trio=DEFAULT, trios={"design": ("reviewer", "architect", "missing")})):

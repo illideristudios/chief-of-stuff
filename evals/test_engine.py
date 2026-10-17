@@ -13,6 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import engine
 import issue_gate
+import model_port
 import policy
 import reconcile
 import store
@@ -470,6 +471,82 @@ class EngineTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
+
+    def _trio(self, **fields):
+        self.p = policy.parse({
+            "default_workflow": "standard",
+            "policy": {"trio": ["builder", "critic", "operator"], **fields},
+            "personas": {"builder": {"role": "implements", "model": "build"},
+                         "critic": {"role": "reviews", "model": "review"},
+                         "operator": {"role": "operates", "model": "ops"}},
+            "stages": {"implement": {"persona": "builder"}, "review": {"persona": "critic"}, "merge": {}},
+            "workflows": {"standard": {"start": "implement", "edges": [
+                {"from": "implement", "to": "review", "gate": "plan"},
+                {"from": "review", "to": "implement"}, {"from": "review", "to": "merge"},
+            ]}},
+        })
+
+    def _votes(self, votes):
+        pending = list(votes)
+
+        def call(request):
+            vote, choice = pending.pop(0)
+            call.n += 1
+            return model_port.Reply("", {"vote": vote, "choice": choice, "reasoning": "because"}, "", 0.1, 1)
+
+        call.n = 0
+        return call
+
+    def test_a_unanimous_trio_adopts_an_ask_with_no_ping(self):
+        self._trio()
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "session", "Which parser?", ["Split the parser", "Keep the parser"], "")
+        model = self._votes([("adopt", "Split the parser")] * 3)
+        self.run_pass(model=model)
+        self.run_pass(model=model)
+        self.assertEqual(self.db.asks(KEY)[0].answer, "Split the parser")
+        row = self.db.decisions(KEY)[0]
+        self.assertEqual((row.answer, row.decided_by, row.record["unanimous"]), ("Split the parser", "trio", True))
+        self.assertEqual([v["vote"] for v in row.record["verdicts"]], ["adopt", "adopt", "adopt"])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.3)
+        self.assertEqual(model.n, 3)
+
+    def test_a_split_trio_escalates_once(self):
+        self._trio()
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        self.db.add_ask(KEY, "implement", 1, "session", "Which parser?", ["Split the parser", "Keep the parser"], "")
+        model = self._votes([("adopt", "Split the parser"), ("concern", "Keep the parser"), ("adopt", "Split the parser")])
+        self.run_pass(model=model)
+        self.run_pass(model=model)
+        self.assertIsNone(self.db.asks(KEY)[0].answer)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "ambiguity")
+        self.assertEqual(sum(entry.message.startswith("ambiguity:") for entry in self.db.log(KEY)), 1)
+        self.assertEqual(model.n, 3)
+
+    def test_a_unanimous_gate_approval_is_applied_on_the_next_pass(self):
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        model = self._votes([("adopt", "approve")] * 3)
+        self.assertEqual(self.run_pass(model=model), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
+        self.assertEqual(self.db.decisions(KEY)[0].answer, "approve")
+        self.run_pass(model=model)
+        self.assertEqual(self.launched[-1][1], "review")
+        self.assertEqual(model.n, 3)
+
+    def test_a_reached_limit_pings_once_and_does_not_launch(self):
+        self._trio(spend_usd=1)
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        self.db.set_resume(KEY, {"spend_usd": 1})
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "limit")
+        self.assertEqual(sum(entry.message.startswith("limit:") for entry in self.db.log(KEY)), 1)
 
 
 class MainTest(unittest.TestCase):

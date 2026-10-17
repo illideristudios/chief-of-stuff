@@ -39,6 +39,7 @@ class Decision:
     answer: str | None = None
     topic: str = "scope"
     question: str = "Split the parser?"
+    record: dict | None = None
 
 
 def policies():
@@ -268,6 +269,31 @@ class ReconcileTest(unittest.TestCase):
                 actions = self.plan(item, [Segment("review")], {}, decisions={KEY: [Decision(answer)]})
                 self.assertEqual(actions, [reconcile.Merge(KEY)] if answer and answer.strip() else
                                  [reconcile.Wait(KEY, "decision pending")])
+
+    def test_measured_usage_at_a_configured_limit_stops_dispatch(self):
+        for field, kind, value in (("spend_usd", "spend", 2), ("quota_percent", "quota", 80), ("time_minutes", "time", 30)):
+            with self.subTest(field=field):
+                self.p = replace(policies(), base=replace(policies().base, **{field: value}))
+                self.assertEqual(self.plan(usage={KEY: {field: value}}),
+                                 [reconcile.Limit(KEY, kind, f"approaching {kind} limit")])
+                self.p = replace(policies(), base=replace(policies().base, **{field: value}))
+                self.assertEqual(self.plan(usage={KEY: {field: value - 0.1}}),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+                self.p = policies()
+                self.assertEqual(self.plan(usage={KEY: {field: value}}),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
+    def test_a_room_limit_overrides_an_unset_base(self):
+        self.p.rooms["lab"] = policy.Place("lab", policy={"time_minutes": 5})
+        self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}, rooms={KEY: "lab"}),
+                         [reconcile.Limit(KEY, "time", "approaching time limit")])
+        self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}),
+                         [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
+    def test_a_reversed_decision_routes_back_to_the_workflow_start(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        actions = self.plan(item, [Segment("review")], {}, decisions={KEY: [Decision(None, record={"reversed": True})]})
+        self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 
     def test_a_later_answer_resolves_an_earlier_pending_row_for_the_same_question(self):
         item = replace(Item(), stage="merge", merge_state="ready")
