@@ -98,6 +98,21 @@ def retired_provider_files(root: Path) -> list[str]:
     return sorted(found)
 
 
+GUARD_EXAMPLE_GLOBS = ("scripts/guard_*.py", "evals/test_guard_*.py", "evals/test_cases.py")
+
+
+def guard_example_files(root: Path) -> list[str]:
+    return sorted(p.relative_to(root).as_posix() for pattern in GUARD_EXAMPLE_GLOBS for p in root.glob(pattern))
+
+
+def guard_runtime_hits(root: Path) -> list[str]:
+    """`path:line:match` for each real container runtime name in a guard example file."""
+    runtimes = "|".join(("dock" + "er", "pod" + "man"))
+    return [f"{rel}:{n}:{m.group(0)}" for rel in guard_example_files(root)
+            for n, line in enumerate((root / rel).read_text(encoding="utf-8").splitlines(), 1)
+            if (m := re.search(rf"\b(?:{runtimes})\b", line, re.I))]
+
+
 def grader_hits(g: dict, tool: str, **tool_input) -> bool:
     """Whether a tool_use grader's `tool` and `input_match` fire on a call, as run.py matches them."""
     return bool(re.fullmatch(g["tool"], tool) and re.search(g["input_match"], json.dumps(tool_input)))
