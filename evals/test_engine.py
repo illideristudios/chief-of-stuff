@@ -543,8 +543,8 @@ class EngineTest(unittest.TestCase):
                                (NOW + timedelta(minutes=2)).isoformat(), "done")
         self.db.record_segment(KEY, "implement", 2, (NOW + timedelta(minutes=3)).isoformat(),
                                (NOW + timedelta(minutes=4)).isoformat(), "done")
-        self.fake.issues = [{"issue_key": KEY, "title": "Parser", "stage": "implement", "forge_state": "open",
-                             "review_state": "", "merge_state": "", "human_review": False}]
+        self.forge.rows = [{"issue_key": KEY, "title": "Parser", "stage": "implement", "forge_state": "open",
+                            "review_state": "", "merge_state": "", "human_review": False}]
         self.assertEqual(self.run_pass(model=model), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
         self.assertEqual(model.n, 6)
 
@@ -556,7 +556,7 @@ class EngineTest(unittest.TestCase):
         model = self._votes([("adopt", "hold")] * 3)
         self.assertEqual(self.run_pass(model=model), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
         self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "ambiguity")
-        self.assertEqual(self. run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "decision pending")])
         self.assertEqual(sum(entry.message.startswith("ambiguity:") for entry in self.db.log(KEY)), 1)
         self.assertEqual(sum(entry.message == "wait: decision pending" for entry in self.db.log(KEY)), 1)
         self.assertEqual(model.n, 3)
@@ -564,8 +564,8 @@ class EngineTest(unittest.TestCase):
     def test_a_reversed_decision_restarts_once_and_reconsults(self):
         import decision_actions
         self._trio()
-        self.fake.issues = [{"issue_key": KEY, "title": "Parser", "stage": "review", "forge_state": "open",
-                             "review_state": "approved", "merge_state": "ready", "human_review": False}]
+        self.forge.rows = [{"issue_key": KEY, "title": "Parser", "stage": "review", "forge_state": "open",
+                            "review_state": "approved", "merge_state": "ready", "human_review": False}]
         self.db.upsert_item(KEY, title="Parser", stage="review")
         self.db.record_segment(KEY, "implement", 1, (NOW - timedelta(hours=2)).isoformat(),
                                (NOW - timedelta(hours=1)).isoformat(), "done")
@@ -611,7 +611,9 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(sum(entry.message.startswith("limit:") for entry in self.db.log(KEY)), 1)
 
     def test_stage_policy_resolution_and_ask_ordering(self):
-        self._trio(trio=())
+        from dataclasses import replace
+        self._trio()
+        self.p = replace(self.p, base=policy.Policy())
         self.p.stages["implement"] = policy.Place("implement", "builder", {"trio": ("builder", "critic", "operator")})
         self.p.stages["review"] = policy.Place("review", "critic", {"trio": ("builder", "critic", "operator"),
                                                                     "zach_gates": ("merge",)})
@@ -619,8 +621,8 @@ class EngineTest(unittest.TestCase):
             policy.Edge("implement", "review"), policy.Edge("review", "merge", "merge")))
         # Empty item/ask stage resolves workflow.start policy ("implement"); closed items are skipped; launches run first.
         closed = "github:example/project#2"
-        self.fake.issues = [{"issue_key": KEY, "title": "Open", "stage": "", "forge_state": "open",
-                             "review_state": "", "merge_state": "", "human_review": False}]
+        self.forge.rows = [{"issue_key": KEY, "title": "Open", "stage": "", "forge_state": "open",
+                            "review_state": "", "merge_state": "", "human_review": False}]
         self.db.upsert_item(KEY, title="Open", stage="")
         self.db.upsert_item(closed, title="Closed", stage="implement", forge_state="closed")
         self.db.add_ask(KEY, "", 1, "s1", "Which parser?", ["Split", "Keep"], "")
@@ -629,21 +631,22 @@ class EngineTest(unittest.TestCase):
 
         def launch(issue_key, stage, attempt, persona):
             events.append(("launch", stage))
+            self.launch(issue_key, stage, attempt, persona)
             return "claude", "high"
 
         def model(request):
             events.append(("model", request.model))
             return model_port.Reply("", {"vote": "adopt", "choice": "Split", "reasoning": "ok"}, "", 0.0, 1)
 
-        engine.run_pass(forge=self.fake, store=self.db, policies=self.p, root=self.root, trees=self.trees,
+        engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
                         launch=launch, clock=lambda: NOW, model=model)
         self.assertEqual(events[0], ("launch", "implement"))
         self.assertEqual(len([e for e in events if e[0] == "model"]), 3)
         self.assertEqual(self.db.asks(KEY)[0].answer, "Split")
         self.assertIsNone(self.db.asks(closed)[0].answer)
         # Merge gate on an item already at "merge" resolves the incoming edge.source ("review") policy.
-        self.fake.issues = [{"issue_key": KEY, "title": "Open", "stage": "merge", "forge_state": "open",
-                             "review_state": "approved", "merge_state": "ready", "human_review": False}]
+        self.forge.rows = [{"issue_key": KEY, "title": "Open", "stage": "merge", "forge_state": "open",
+                            "review_state": "approved", "merge_state": "ready", "human_review": False}]
         self.db.upsert_item(KEY, title="Open", stage="merge", review_state="approved", merge_state="ready")
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
         self.db.record_segment(KEY, "review", 1, (NOW + timedelta(minutes=1)).isoformat(),

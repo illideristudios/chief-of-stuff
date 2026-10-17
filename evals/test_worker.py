@@ -888,6 +888,26 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(retry_at("unknown", NOW, 4), NOW + timedelta(minutes=8))
         self.assertEqual(retry_at("reset at 2000-99-99T02:00:00Z", NOW), NOW + timedelta(minutes=1))
 
+    def test_collection_retries_usage_once_when_segment_completion_fails(self):
+        run = self.launched()
+        self.report(run)
+        (run / "stdout").write_text(json.dumps({"is_error": False, "result": "done", "total_cost_usd": 0.25}))
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0, "ended_at": (NOW + timedelta(minutes=1)).isoformat()}))
+        with mock.patch.object(self.db, "end_segment", side_effect=RuntimeError("interrupted")):
+            with self.assertRaises(RuntimeError):
+                worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=5))
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.25)
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=10))
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.25)
+        self.assertEqual(self.db.resume(KEY)["time_minutes"], 1)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+
+    def test_observed_quota_exhaustion_records_a_limit_measurement(self):
+        self.finish("quota")
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        self.assertEqual(self.db.resume(KEY)["quota_percent"], 100)
+
 
 class IdentityTest(unittest.TestCase):
     def test_host_identity_waits_for_login_shell_to_exec(self):
