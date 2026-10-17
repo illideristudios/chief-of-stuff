@@ -97,6 +97,21 @@ class EngineTest(unittest.TestCase):
         identity.start()
         self.addCleanup(identity.stop)
 
+    def test_pass_delivers_exception_pings_after_store_updates(self):
+        def ping(root, now):
+            self.assertEqual(root, self.root)
+            self.assertEqual(now, NOW)
+            self.assertEqual(len(self.db.segments(KEY)), 1)
+        with mock.patch("notify.sync_workspace", side_effect=ping) as sync:
+            self.run_pass()
+        sync.assert_called_once_with(self.root, NOW)
+
+    def test_ping_failure_does_not_abort_pass(self):
+        with mock.patch("notify.sync_workspace", side_effect=RuntimeError("queue unavailable")) as sync:
+            actions = self.run_pass()
+        self.assertTrue(actions)
+        sync.assert_called_once_with(self.root, NOW)
+
     def launch(self, key, stage, attempt, persona):
         self.launched.append((key, stage, attempt, persona))
         # A live fake worker must supply the run record the production Launch port now promises.

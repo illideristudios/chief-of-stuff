@@ -27,6 +27,8 @@ import render_board as rb  # noqa: E402
 import settings as st  # noqa: E402
 import source_page  # noqa: E402
 import store  # noqa: E402
+import store_access  # noqa: E402
+import task_forge  # noqa: E402
 import workers_page  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 
@@ -166,7 +168,7 @@ class StoreGanttAndBoardTest(unittest.TestCase):
             },
         )
         bs._write(self.root / "pages" / bs.CACHE, sources)
-        board_path, *_ = rb.write(self.root, now=NOW)
+        board_path, *_ = pg.write_board(self.root, now=NOW)
         html = board_path.read_text(encoding="utf-8")
         # Full issue key routes on the board:
         self.assertIn(f'href="/issues/{KEY}"', html)
@@ -199,7 +201,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         })
 
     def test_board_renders_open_and_blocked_decisions_and_blocked_is_never_closed(self) -> None:
-        board_path, *_ = rb.write(self.root, now=NOW)
+        board_path, *_ = pg.write_board(self.root, now=NOW)
         html = board_path.read_text(encoding="utf-8")
         self.assertIn("Split upload parser?", html)
         self.assertIn("Use Redis for cache?", html)
@@ -210,7 +212,8 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
 
     def test_pages_post_answer_reverse_and_reroute_write_store_and_forge(self) -> None:
         fake_forge = mock.MagicMock()
-        fake_forge.write_stage.return_value = SimpleNamespace(ok=True, error="")
+        fake_forge.write_stage.return_value = SimpleNamespace(ok=True, done=True, error="")
+        fake_forge.comment.return_value = ""
         server = pg.make_server(self.root / "pages", 0, root=self.root, refresh=lambda r, n: None, every=3600)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self.addCleanup(server.shutdown)
@@ -228,7 +231,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
 
         with mock.patch.object(pg.forge, "for_workspace", return_value=fake_forge):
             # 1. Answer the open decision:
-            resp = post("/decisions", {"decision_id": str(self.d_open.id), "action": "answer", "answer": "Split into two"})
+            resp = post("/", {"decision_id": str(self.d_open.id), "action": "answer", "answer": "Split into two"})
             self.assertEqual(resp.status, 303)
             d1 = next(d for d in self.db.decisions(KEY) if d.id == self.d_open.id)
             self.assertEqual(d1.status, "answered")
@@ -236,14 +239,14 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             self.assertEqual(d1.decided_by, "user")
 
             # 2. Reverse the answered decision:
-            resp = post("/decisions", {"decision_id": str(self.d_open.id), "action": "reverse", "answer": "Keep single pass"})
+            resp = post("/", {"decision_id": str(self.d_open.id), "action": "reverse", "answer": "Keep single pass"})
             self.assertEqual(resp.status, 303)
             d2 = next(d for d in self.db.decisions(KEY) if d.id == self.d_open.id)
             self.assertEqual(d2.status, "reversed")
             self.assertEqual(d2.answer, "Keep single pass")
 
             # 3. Re-route the decision to another stage:
-            resp = post("/decisions", {
+            resp = post("/", {
                 "decision_id": str(self.d_open.id),
                 "action": "reroute",
                 "target_stage": "implement",
@@ -253,7 +256,8 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             d3 = next(d for d in self.db.decisions(KEY) if d.id == self.d_open.id)
             self.assertEqual(d3.status, "re-routed")
             self.assertEqual(self.db.item(KEY).stage, "implement")
-            fake_forge.write_stage.assert_called()
+            fake_forge.write_stage.assert_called_once_with(12, "implement", expected="review", commit=True)
+            fake_forge.comment.assert_called_with(12, mock.ANY, commit=True)
 
 
 class StorePagesAndRoutesTest(unittest.TestCase):
@@ -333,3 +337,97 @@ class StorePagesAndRoutesTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRegressionsTest(StorePagesAndRoutesTest):
+    def request(self, method, route, data=None):
+        server = pg.make_server(self.root / "pages", 0, root=self.root, refresh=lambda r, n: None, every=3600)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
+        conn.request(method, route, body=urllib.parse.urlencode(data) if data else None)
+        resp = conn.getresponse()
+        body = resp.read().decode()
+        conn.close()
+        return resp.status, body
+
+    def test_wal_commit_invalidates_board_without_checkpoint(self):
+        pg.RENDERED_AT.clear()
+        self.db.engine.dispose()
+        import sqlite3
+        with sqlite3.connect(self.root / "store.db") as writer:
+            writer.execute("PRAGMA journal_mode=WAL")
+            writer.execute("PRAGMA wal_autocheckpoint=0")
+            self.assertEqual(self.request("GET", "/")[0], 200)
+            before = (self.root / "store.db").read_bytes()
+            writer.execute("UPDATE work_item SET title=? WHERE issue_key=?", ("Changed only in WAL", KEY))
+            writer.commit()
+            self.assertEqual((self.root / "store.db").read_bytes(), before)
+            status, body = self.request("GET", "/")
+            self.assertEqual(status, 200)
+            self.assertIn("Changed only in WAL", body)
+
+    def test_blocked_decision_holds_gantt(self):
+        dec = self.db.add_decision(KEY, "design", "Choose parser")
+        import decision_actions
+        transition = decision_actions.answer(dec, "Split", answered_at=NOW.isoformat())
+        self.db.update_decision(transition.store_write)
+        transition = decision_actions.meet_action(self.db.decision(dec.id), None, blocked_reason="conflict")
+        # meet_action examines actions; use the persisted blocked write for this rendering regression.
+        self.db.update_decision(replace(transition.store_write, status="blocked", blocked_reason="conflict"))
+        row = next((status, row) for status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
+                   if row.href.endswith(KEY))
+        self.assertEqual(row[0], "needs input")
+        self.assertIn("hold", [s.kind for s in row[1].segments])
+
+    def test_workers_only_count_local_today_including_midnight_boundary(self):
+        self.db.record_segment(KEY, "review", 2, started_at=(NOW - timedelta(days=2)).isoformat(),
+                               ended_at=(NOW - timedelta(days=1)).isoformat(), outcome="human_review", runner="old-run")
+        # UTC next day, still today in Chicago.
+        end = NOW.replace(hour=23, minute=30).astimezone(ZoneInfo("UTC"))
+        self.db.record_segment(KEY, "fix", 1, started_at=NOW.isoformat(), ended_at=end.isoformat(),
+                               outcome="done", runner="late-local")
+        body = workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=self.db)
+        self.assertNotIn("old-run", body)
+        self.assertIn("late-local", body)
+        self.assertIn("Ended today · 2", body)
+        self.assertRegex(body, r'<b>1</b><span class="cap">NEEDS INPUT')
+
+    def test_presenters_render_detached_use_case_data(self):
+        data = task_forge.page_data(self.db)
+        self.db.engine.dispose()
+        with mock.patch.object(store, "Store", side_effect=AssertionError("presenter opened store")):
+            body = issue_page.render(12, [], bs.EMPTY, NOW, root=self.root, db=data)
+            self.assertIn("Upload size limit", body)
+            body = source_page.render(12, [], bs.EMPTY, NOW, root=self.root, db=data)
+            self.assertIn("Upload size limit", body)
+            self.assertIn("impl-a1", workers_page.render("", bs.EMPTY, NOW, self.root / "trees", 4, db=data))
+
+    def test_render_driver_opens_migrated_store_once_per_page(self):
+        for name in (f"{NOW.date()}-board.html", "issue-12.html", "issue-12-source.html", "workers.html"):
+            pg.RENDERED_AT.clear()
+            with self.subTest(page=name), mock.patch.object(store_access, "migrated_store", wraps=store_access.migrated_store) as opened:
+                self.assertEqual(pg.fresh(self.root, self.root / "pages", name), "")
+                opened.assert_called_once_with(self.root)
+
+    def test_reroute_refusal_keeps_stage_and_blocks_answer(self):
+        dec = self.db.add_decision(KEY, "design", "Choose parser")
+        fg = mock.Mock()
+        fg.write_stage.return_value = SimpleNamespace(ok=False, done=False, error="write refused")
+        with mock.patch.object(pg.forge, "for_workspace", return_value=fg):
+            status, body = self.request("POST", "/", {"decision_id": dec.id, "action": "reroute",
+                                                         "target_stage": "review", "answer": "Review again"})
+        self.assertEqual(status, 409)
+        self.assertEqual(self.db.item(KEY).stage, "implement")
+        self.assertEqual(self.db.decision(dec.id).status, "blocked")
+        self.assertIn("write refused", self.db.decision(dec.id).blocked_reason)
+        fg.write_stage.assert_called_once_with(12, "review", expected="implement", commit=True)
+
+    def test_store_decisions_have_only_board_post(self):
+        dec = self.db.add_decision(KEY, "design", "Choose parser")
+        status, _ = self.request("POST", "/decisions", {"decision_id": dec.id, "answer": "Split"})
+        self.assertEqual(status, 404)
+        self.assertEqual(self.db.decision(dec.id).status, "open")
+        body = self.request("GET", "/")[1]
+        self.assertRegex(body, r'<form method="post" action="/" class="decision-form">')
