@@ -30,6 +30,21 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
+def _detached(stage: str) -> bool:
+    """Reviews and architect consults read the request's head in a detached tree; only fixes use the writable one."""
+    return stage in ("review", "architect")
+
+
+def _tree_key(stage: str, attempt: int) -> str:
+    return str(attempt) if stage == "review" else f"{stage}-{attempt}"
+
+
+def run_sessions(data: dict, history: Any, stage: str) -> dict[int, str]:
+    """Each attempt's launched session, so a report from another session cannot stand in for it."""
+    return {s.attempt: data.get("runs", {}).get(f"{stage}-{s.attempt}", {}).get("session_id")
+            for s in history if s.stage == stage}
+
+
 def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
     number = key.rpartition("#")[2]
     if not number.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_-]+", stage) or attempt < 1:
@@ -57,7 +72,7 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                 raise RuntimeError("existing worker start is unverified; preserving its evidence")
             return None
         record = json.loads(started.read_text())
-        prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
+        prepared = data.get("review_trees", {}).get(_tree_key(stage, attempt), {}) if _detached(stage) else {
             "tree": data.get("worktree"), "branch": data.get("work_branch")}
         record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
                       started_at=clock().isoformat())
@@ -139,11 +154,12 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                                                skills=defaults.skills if defaults else ())
     if stage == "architect" or (segment is not None and segment.finding_key):
         history = store.segments(issue_key)
-        sessions = {s.attempt: data.get("runs", {}).get(f"review-{s.attempt}", {}).get("session_id")
-                    for s in history if s.stage == "review"}
-        findings = reconcile.review_findings(store.reports(issue_key), history, sessions=sessions)
+        findings = reconcile.review_findings(store.reports(issue_key), history,
+                                             sessions=run_sessions(data, history, "review"),
+                                             consults=run_sessions(data, history, "architect"))
         if stage == "architect":
-            assignment += ("\nConsult on these review findings and report your judgement without changing code:\n"
+            assignment += ("\nConsult on these review findings without changing code. In your report, return each finding "
+                           "unchanged with its finding_key and a disposition: fix, file, keep or discard:\n"
                            + json.dumps(findings) + "\n")
         else:
             finding = next((f for f in findings or () if f["finding_key"] == segment.finding_key), None)
@@ -153,10 +169,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
-    # build's from_branch is detached. Reviews use it; fixes need the original writable checkout.
-    prepared_review = data.get("review_trees", {}).get(str(attempt)) if stage == "review" else None
-    request_head = forge.closing_request(issue_key) if stage == "review" else None
-    if stage == "review" and (request_head is None or not request_head.branch or not request_head.head):
+    # build's from_branch is detached. Reviews and consults use it; fixes need the original writable checkout.
+    detached = _detached(stage)
+    prepared_review = data.get("review_trees", {}).get(_tree_key(stage, attempt)) if detached else None
+    request_head = forge.closing_request(issue_key) if detached else None
+    if detached and (request_head is None or not request_head.branch or not request_head.head):
         raise RuntimeError("request head branch or SHA is unreadable")
     if prepared_review:
         tree, branch = Path(prepared_review["tree"]), prepared_review["branch"]
@@ -170,14 +187,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             # Retain the obsolete tree under cleanup ownership; build the new head in a fresh checkout.
             tree_name = f"{tree_name}-{uuid.uuid4()}"
             prepared_review = None
-    if stage != "review" and data.get("worktree"):
+    if not detached and data.get("worktree"):
         tree, branch = Path(data["worktree"]), data["work_branch"]
         code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
         if code or actual != branch or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
         store.set_ownership(issue_key, str(tree))
     elif not prepared_review:
-        if stage == "fix" or (stage != "review" and attempt > 1):
+        if not detached and (stage == "fix" or attempt > 1):
             raise RuntimeError("fix/retry has no existing worktree; refusing a fresh branch")
         from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
@@ -185,12 +202,12 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                                    agent, from_branch=from_branch)
         tree = made.path
         store.set_ownership(issue_key, str(tree))
-        if stage != "review":
+        if not detached:
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
             data.update(worktree=str(tree), work_branch=branch)
             store.set_resume(issue_key, data)
         else:
-            data["review_trees"] = {**data.get("review_trees", {}), str(attempt): {
+            data["review_trees"] = {**data.get("review_trees", {}), _tree_key(stage, attempt): {
                 "tree": str(tree), "branch": branch, "head": request_head.head}}
             store.set_resume(issue_key, data)
             code, actual_head = make_worktree.git(["rev-parse", "HEAD"], tree)

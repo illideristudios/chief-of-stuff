@@ -36,24 +36,36 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _planning_inputs(store: Any, items: list, forge: Any = None) -> dict:
-    """Read the same issue context for the engine pass and merge recheck."""
+def _planning_inputs(store: Any, items: list, forge: Any = None, at: str = "") -> dict:
+    """Read the same issue context for the engine pass and merge recheck; `at` stamps a head-read failure log."""
     segments = {item.issue_key: store.segments(item.issue_key) for item in items}
     states = {item.issue_key: _resume(store, item.issue_key) for item in items}
     findings = {}
     heads = {}
+    requests, listing = None, None
+    if forge is not None:
+        try:
+            requests = forge.requests()  # one list per pass, shared by every item's closing request
+        except ForgeError as exc:
+            listing = exc
     for item in items:
         key = item.issue_key
-        runs = states[key].get("runs", {})
-        sessions = {s.attempt: runs.get(f"review-{s.attempt}", {}).get("session_id")
-                    for s in segments[key] if s.stage == "review"}
-        findings[key] = reconcile.review_findings(store.reports(key), segments[key], sessions=sessions)
+        findings[key] = reconcile.review_findings(
+            store.reports(key), segments[key], sessions=worker.run_sessions(states[key], segments[key], "review"),
+            consults=worker.run_sessions(states[key], segments[key], "architect"))
         if forge is not None and item.forge_state != "closed":
             try:
-                request = forge.closing_request(key)
+                if listing is not None:
+                    raise listing
+                request = forge.closing_request(key, requests)
                 heads[key] = request.head if request else None
-            except ForgeError:
+            except ForgeError as exc:
+                # Review and merge stay blocked on an unknown head; say why, once per change of message.
                 heads[key] = None
+                message = f"change head unreadable: {exc}"
+                logged = store.log(key)
+                if at and (not logged or logged[-1].message != message):
+                    store.add_log(key, message, at)
     return {
         "segments": segments,
         "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
@@ -131,7 +143,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
-                             **_planning_inputs(store, items, forge))
+                             **_planning_inputs(store, items, forge, at))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
     for action in actions:

@@ -7,7 +7,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 from guard_binding import Binding
-from policy import SEVERITIES
+from policy import DISPOSITIONS, SEVERITIES
 from store import Store
 
 
@@ -19,6 +19,15 @@ class Finding(BaseModel):
     path: str | None = None
     line: int | None = Field(default=None, ge=1)
     suggestion: str
+    finding_key: str | None = None  # an architect echoes the key and its disposition for each finding it was given
+    disposition: str | None = Field(default=None, json_schema_extra={"enum": list(DISPOSITIONS)})
+
+    @field_validator("disposition")
+    @classmethod
+    def disposition_known(cls, value: str | None) -> str | None:
+        if value is not None and value not in DISPOSITIONS:
+            raise ValueError(f"disposition must be one of {', '.join(DISPOSITIONS)}")
+        return value
 
     @field_validator("severity")
     @classmethod

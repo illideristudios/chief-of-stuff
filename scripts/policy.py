@@ -17,6 +17,7 @@ from math import isfinite
 from runtimes import EFFORTS
 
 SEVERITIES = ("critical", "important", "minor")  # extras:code-review's, most severe first
+DISPOSITIONS = ("fix", "file", "keep", "discard")  # what the architect decides for each finding
 LAUNCHES = ("adapter", "session")
 
 
