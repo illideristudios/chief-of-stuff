@@ -989,7 +989,8 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
             sampled_before = True
             if exc is not None:
                 _note(exc)
-                process_failed = kind == "process"
+                # A failed engine probe is not proof the tree is unowned.
+                process_failed = True
             else:
                 try:
                     discovered = discover_stacks(root, settings.workers.teardown_list)
@@ -998,9 +999,10 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 else:
                     after, exc, kind = _sample_claims(root, trees)
                     if exc is not None:
-                        # A failed second sample cannot prove a stack unowned.
+                        # A failed second sample cannot prove a stack or a tree unowned.
                         _note(exc)
                         discovered = []
+                        process_failed = True
                     else:
                         saw_after = True
     if saw_after:
@@ -1010,7 +1012,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     else:
         process_claims, exc, kind = _sample_claims(root, trees)
         _note(exc)
-        process_failed = kind == "process"
+        process_failed = exc is not None
     if discovered:
         base = base.relative_to(workspace)
         rows = [(name, path.relative_to(workspace) if path.is_relative_to(workspace) else path)

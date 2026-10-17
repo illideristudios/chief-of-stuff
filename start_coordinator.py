@@ -183,7 +183,7 @@ def check_once(root: Path, release: Path) -> str:
         audit = subprocess.CompletedProcess([], 1, "", str(exc))
     else:
         audit = subprocess.run([audit_python, str(scripts / "audit_tasks.py")],  # its default day is the workspace zone's, not the host's
-                               cwd=root, capture_output=True, text=True, timeout=60)
+                               cwd=root, capture_output=True, text=True, timeout=150)  # past run_command's 120s discovery bound
     workers = subprocess.run([sys.executable, str(scripts / "process_status.py"), "--root", str(root)],
                              capture_output=True, text=True, timeout=10)
     if inbox.returncode:

@@ -641,24 +641,32 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
     env["CHIEF_OF_STUFF_WORKER"] = name
     for log in ("worker-stdout.log", "worker-stderr.log"):
         (logs / log).write_text("")  # a fresh run's worker logs start empty; a retried run appends
-    exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes)
-    teardown_errors = teardown(root, cwd, name, cleanup)
-    if exit_code == 124 and not (cwd / RESULT).exists():
-        # The first timeout relaunches the run once, into the same tree with its partial commits
-        # (#110): the Log line is the once-per-row marker the second timeout finds, a result the
-        # killed worker wrote mid-window goes so only the second run's evidence is read, and the
-        # second wait gets a doubled timeout.
-        tracker = root / cfg.tracker_path(chosen_day)
-        if not timed_out_before(tracker, name):
-            tracker_write.edit(tracker, lambda text: tracker_write.append_log(
-                text, timed_out_line(tracker_write.stamp(cfg.zone), name, timeout_minutes, task)))
+    worker_pids: list[int] = []
+    exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes, worker_pids)
+    try:
+        teardown_errors = teardown(root, cwd, name, cleanup)
+        if exit_code == 124 and not (cwd / RESULT).exists():
+            # The first timeout relaunches the run once, into the same tree with its partial commits
+            # (#110): the Log line is the once-per-row marker the second timeout finds, a result the
+            # killed worker wrote mid-window goes so only the second run's evidence is read, and the
+            # second wait gets a doubled timeout.
+            tracker = root / cfg.tracker_path(chosen_day)
+            if not timed_out_before(tracker, name):
+                tracker_write.edit(tracker, lambda text: tracker_write.append_log(
+                    text, timed_out_line(tracker_write.stamp(cfg.zone), name, timeout_minutes, task)))
+                with suppress(OSError):
+                    (cwd / RESULT).unlink(missing_ok=True)
+                exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2, worker_pids)
+                teardown_errors.extend(teardown(root, cwd, name, cleanup))
+        report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
+                           read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common,
+                           teardown_errors=teardown_errors)  # held to what it was told
+    except BaseException:
+        # slot() drops a pidfile that still names this launcher. Keep the dead worker's pid so adopt() can find the run.
+        if worker_pids:
             with suppress(OSError):
-                (cwd / RESULT).unlink(missing_ok=True)
-            exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
-            teardown_errors.extend(teardown(root, cwd, name, cleanup))
-    report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
-                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common,
-                       teardown_errors=teardown_errors)  # held to what it was told
+                _write_pidfile(cwd.parent, cwd, f"{worker_pids[-1]} {task}\n", {os.getpid(), worker_pids[-1]})
+        raise
     print(toon_encode(report))
     return 0 if report["status"] == "done" and not any(
         not error.startswith("teardown:") for error in report["errors"]) else 1
@@ -672,7 +680,8 @@ def timed_out_before(tracker: Path, name: str) -> bool:
     return any((m := TIMED_OUT.match(line)) and m.group(3) == name for line in tracker.read_text().splitlines())
 
 
-def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: str, timeout_minutes: int) -> int:
+def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: str, timeout_minutes: int,
+                worker_pids: list | None = None) -> int:
     """Run the worker once, to completion or out of time: its exit code, 124 when the wait ran out,
     127 when it could not start. The worker runs in a session of its own: the coordinator's restart
     kills the launcher and the row, not the run, and the restarted coordinator adopts the finished
@@ -705,6 +714,8 @@ def _run_worker(cwd: Path, logs: Path, launch_argv: list[str], env: dict, task: 
             stderr.write(f"Could not start worker: {exc}\n")
         return 127
     finally:
+        if worker_pids is not None and worker is not None:
+            worker_pids.append(worker.pid)
         # The launcher owns the tree throughout cleanup, retry setup and reconciliation.
         # A still-running worker keeps its own pid so adoption can find it (#99).
         if worker is None or worker.poll() is not None:
