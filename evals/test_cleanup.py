@@ -248,16 +248,21 @@ class CleanupTest(unittest.TestCase):
         self.configure_teardown()
         tree = self.trees / "done"
         real_lock = cleanup.trees_lock
+        locked = False
 
         @contextlib.contextmanager
         def another_pass(trees):
+            nonlocal locked
             with real_lock(trees):
                 layout = cleanup.git_view.locate(tree)
                 self.store.claim_teardown(str(tree), cleanup.teardown_identity(layout, "stack-stop"))
+                locked = True
                 yield
+                locked = False
 
         def reopen():
-            self.finish("done", state="open")
+            if locked:
+                self.finish("done", state="open")
             return []
 
         with mock.patch.object(cleanup, "trees_lock", another_pass), \
