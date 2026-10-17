@@ -111,6 +111,24 @@ class PlanningInputsTest(unittest.TestCase):
             self.assertEqual(forge.requests.call_count, 2)  # once per call, not once per item
             self.assertEqual([e.message for e in db.log(other)], ["change head unreadable: no open request"])
 
+    def test_a_comment_read_failure_keeps_the_known_head(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            db.upsert_item(KEY, stage="review")
+            forge = SimpleNamespace(requests=mock.Mock(return_value=[]),
+                                    closing_request=mock.Mock(return_value=SimpleNamespace(head="h", number=10)),
+                                    change_comments=mock.Mock(side_effect=ForgeError("rate limit")))
+            rules = policies()
+            rules.stages["review"].policy["architect"] = True
+            inputs = engine._planning_inputs(db, db.items(), forge, NOW.isoformat(), rules)
+            self.assertEqual(inputs["heads"], {KEY: "h"})
+            forge.change_comments.assert_called_once()
+            self.assertEqual(inputs["architect_replies"], {})
+            self.assertEqual(db.log(KEY), [])
+
 
 class EngineTest(unittest.TestCase):
     def setUp(self):
@@ -569,7 +587,7 @@ class EngineTest(unittest.TestCase):
         self.forge.comments = [SimpleNamespace(body="Architect review requested: " + tf.tma.HEAD, time=NOW.isoformat()),
                                SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=NOW.isoformat()),
                                SimpleNamespace(body="Architect: CHANGES " + tf.tma.HEAD, time=NOW.isoformat())]
-        self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
+        self.assertEqual(self.run_pass()[0], reconcile.Wait(KEY, "architect requested changes"))
         self.assertEqual(len(self.forge.comments), 3)
         self.assertEqual(self.forge.merges, [])
 

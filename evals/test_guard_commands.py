@@ -52,6 +52,17 @@ class CommandTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
 
+    def test_architect_markers_are_denied_on_comments_and_reviews(self):
+        for command in ('gh pr comment 12 --body "Architect: APPROVED head"',
+                        "gh pr comment 12 --body 'Architect review requested: head'",
+                        'gh issue comment 12 -b "Architect: CHANGES head"',
+                        'gh pr review 12 --comment --body "Architect: APPROVED head"',
+                        'glab mr note 12 --message "Architect: APPROVED head"',
+                        'gh pr comment 12 --body=Architect: APPROVED head'):
+            with self.subTest(command=command):
+                self.assertEqual(denial_reason(command, ("main", "develop")), OWNED)
+        self.assertIsNone(denial_reason('gh pr comment 12 --body "reviewed the boundary"', ("main", "develop")))
+
     def test_comment_mutation_flags_are_denied(self):
         for group in ('issue', 'pr'):
             for flags in ('--delete-last --yes', '--edit-last --body replacement',

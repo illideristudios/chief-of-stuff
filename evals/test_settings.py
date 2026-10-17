@@ -37,6 +37,12 @@ class SettingsTest(unittest.TestCase):
     def test_no_settings_line_is_off(self):
         self.assertEqual(st.load(self.root, None).notify.adapter, "off")
 
+    def test_architect_login_is_optional_and_read_when_set(self):
+        self.assertIsNone(st.load(self.root, None).architect_login)
+        self.assertEqual(st.load(self.root, self.write('[architect]\nlogin = "frank"\n')).architect_login, "frank")
+        with self.assertRaises(st.SettingsError):
+            st.load(self.root, self.write('[architect]\nlogin = "not a login"\n'))
+
     def test_stage_profiles_and_skills_are_optional(self):
         text = ('[lanes.code]\nstages = ["implement", "review", "pr"]\n'
                 '[stages.review]\nagent = "reviewer"\nskills = ["security-review", "extras:code-review"]\n'

@@ -243,8 +243,9 @@ class WorkerTest(unittest.TestCase):
         (run / "stdout").write_text('{"is_error":false,"result":"done"}')
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code":0}')
-        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
-        self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "head")
+        self.forge.closing_request = lambda key, requests=None: SimpleNamespace(branch="feature/existing", head="forge-sha")
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=self.forge)
+        self.assertEqual(self.db.segments(KEY)[0].reviewed_head, "forge-sha")
 
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \

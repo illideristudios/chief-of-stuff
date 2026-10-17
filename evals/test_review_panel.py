@@ -248,17 +248,51 @@ class ReviewPanelTest(unittest.TestCase):
         self.consulted(("One", "fix"))
         self.db.record_segment(KEY, "review", 2, (NOW + timedelta(seconds=1)).isoformat(),
                                (NOW + timedelta(seconds=2)).isoformat())
-        self.assertIsInstance(self.plan()[0], reconcile.Consult)
+        # Production already posted the request. The reply still disposes "One"; a later panel end does not erase it.
+        self.requests = {KEY: ["head"]}
+        action = self.plan()[0]
+        self.assertEqual((action.stage, action.finding["title"]), ("fix", "One"))
 
     def test_failed_or_quota_fix_does_not_explain_an_external_push(self):
-        self.review(1, "critic", [finding()])
+        self.review(1, "critic", [finding("One"), finding("Two")])
         self.review(2, "security")
         action, = self.plan()
-        for outcome in ("quota", "failed", "done"):
+        for outcome in ("quota", "failed"):
             with self.subTest(outcome=outcome):
-                self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="head")
+                self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="external")
                 self.db.record_segment(KEY, "fix", 1, NOW.isoformat(), outcome=outcome)
                 self.assertTrue(all(isinstance(a, reconcile.Review) for a in self.plan(head="external")))
+        self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="external")
+        self.db.record_segment(KEY, "fix", 1, NOW.isoformat(), outcome="done")
+        self.assertEqual(self.plan(head="external")[0].finding["title"], "Two")
+
+    def test_a_gated_fix_is_not_rereviewed_when_the_head_moves(self):
+        from dataclasses import replace
+        workflow = self.p.workflows["standard"]
+        self.p.workflows["standard"] = replace(workflow, edges=tuple(
+            replace(edge, gate="plan") if edge.source == "review" and edge.target == "fix" else edge
+            for edge in workflow.edges))
+        self.p.stages["review"].policy["zach_gates"] = ("plan",)
+        self.review(1, "critic", [finding()], head="old")
+        self.review(2, "security", head="old")
+        self.assertEqual(self.plan(head="new"), [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+
+    def test_a_fix_push_keeps_dispositions_and_the_next_fix(self):
+        self.consulted(("Keep me", "keep"), ("Fix me", "fix"), ("Also", "fix"))
+        action, = self.plan()
+        self.assertEqual(action.finding["title"], "Fix me")
+        self.segment("fix", 1, finding_key=action.finding_key, reviewed_head="produced")
+        self.requests = {KEY: ["head"]}
+        nxt = self.plan(head="produced")[0]
+        self.assertEqual((nxt.stage, nxt.finding["title"]), ("fix", "Also"))
+
+    def test_approval_of_an_older_head_requests_only_the_new_head(self):
+        self.consulted(("Keep me", "keep"))
+        self.replies[KEY] = reconcile.ArchitectReply("old", "APPROVED", NOW.isoformat(), self.replies[KEY].dispositions)
+        self.requests = {KEY: ["old"]}
+        action = self.plan()[0]
+        self.assertIsInstance(action, reconcile.Consult)
+        self.assertEqual((action.head, list(action.findings)), ("head", []))
 
     def test_an_unreadable_current_head_blocks_a_finding_fix(self):
         self.review(1, "critic", [finding()])
@@ -330,3 +364,13 @@ class ArchitectCommentsTest(unittest.TestCase):
             SimpleNamespace(body='Architect: APPROVED old', time=(NOW - timedelta(seconds=1)).isoformat()),
             SimpleNamespace(body='Architect: APPROVED forged', time='')])
         self.assertEqual(reply.reviewed_head, 'new')
+
+    def test_a_later_reply_for_another_head_does_not_hide_this_head(self):
+        import engine_facts
+        reply, _ = engine_facts.architect_comments([
+            SimpleNamespace(author="frank", body='Architect: CHANGES head\n```json\n{"dispositions":{"1/1/a":"keep"}}\n```',
+                            time=(NOW - timedelta(seconds=1)).isoformat()),
+            SimpleNamespace(author="worker", body='Architect: APPROVED other', time=NOW.isoformat())],
+            head="head", author="frank")
+        self.assertEqual((reply.status, reply.reviewed_head, dict(reply.dispositions)),
+                         ("CHANGES", "head", {"1/1/a": "keep"}))

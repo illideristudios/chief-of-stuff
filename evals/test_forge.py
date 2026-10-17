@@ -65,7 +65,7 @@ class FakeGh(tma.FakeGhGraphql):
         validate_project_cli(args)
         if tuple(args[:2]) in self.fail:
             return 1, "", "rate limited"
-        if args[:2] == ["api", "--paginate"] and "/comments?" in args[2]:
+        if args[0] == "api" and "--paginate" in args and any("/comments?" in arg for arg in args):
             return 0, "[]", ""
         if args[:2] == ["issue", "list"]:
             state = args[args.index("--state") + 1] if "--state" in args else "open"
@@ -1381,10 +1381,13 @@ if __name__ == "__main__":
 
 class ChangeCommentsTest(unittest.TestCase):
     def test_github_reads_all_change_comments_and_posts_to_the_request(self):
-        gh = mock.Mock(return_value=(0, json.dumps([{"user": {"login": "robin"}, "created_at": "2000-01-01T00:00:00Z", "body": "Architect: APPROVED head"}]), ""))
+        pages = [[{"user": {"login": "robin"}, "created_at": "2000-01-01T00:00:00Z", "body": "first"}],
+                 [{"user": {"login": "robin"}, "created_at": "2000-01-01T00:01:00Z", "body": "Architect: APPROVED head"}]]
+        gh = mock.Mock(return_value=(0, json.dumps(pages), ""))
         source = forge.Forge(GH, gh=gh)
-        self.assertEqual(source.change_comments(21)[0].body, "Architect: APPROVED head")
+        self.assertEqual([note.body for note in source.change_comments(21)], ["first", "Architect: APPROVED head"])
         self.assertIn("--paginate", gh.call_args.args[0])
+        self.assertIn("--slurp", gh.call_args.args[0])
         source.comment_change(21, "Architect review requested: head")
         self.assertEqual(gh.call_args.args[0][:3], ["pr", "comment", "21"])
         self.assertEqual(gh.call_args.args[1], "Architect review requested: head")
