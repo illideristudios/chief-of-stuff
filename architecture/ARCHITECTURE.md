@@ -37,9 +37,20 @@ New work goes on the engine path: the store, the forge adapter, the model port, 
 The dependency rule of section 1 is enforced by `evals/test_architecture.py`. It holds the circle table of section 4 and fails on any import from an inner circle to an outer one. Imports that violate the rule today are listed in that test by name, the list may only shrink, and each entry is also a gap in `compliance.md`.
 ## 6. Reviewers
 
-chief-of-stuff stores no persona text and no review panel logic. A review is done by running the `extras:code-review` skill, which chooses the personas, including the Clean Architecture expert for the style section 1 declares. This is the current choice and may be revised.
+Review is policy, as the 1.0 ledger settles (D7, F10, F12, F13; plan M4). Personas (role, model, effort, rules), rooms, stages, and the review policy are data: `assets/policy.toml`, read and validated by `policy.py` (Entities). Which personas review a stage, what counts as an open finding, the retry limits, and when the architect is consulted live there, with defaults per persona that a stage or room overrides.
 
-The instruction reaches a one-shot review worker in its assignment, not in the coordinator's rules: `dispatch_prompt.compose` adds a `Review:` line, telling the worker to run `extras:code-review` and not fix, to a Tasks row whose `stage` cell is `review`. A `reviewer_session` gets its prompt from its own configuration and is not touched.
+The engine runs the review panel.
+- `reconcile.py` (Use Cases) plans one review launch for each persona the policy names for the stage, and they run in parallel.
+- It plans a fix for every open finding, so review burns down to none.
+- It routes findings to the architect when the policy says to: the architect disposes of each one as fix, file, keep or discard.
+- It pings after three fix rounds.
+- `engine.py` executes the plan through the model port.
+
+A review is bound to the head it reviewed: the segment records the reviewed commit, and a merge happens only when that commit is the change's current head.
+
+What a reviewer does inside its own run is its persona's rules. The default reviewer persona runs the `extras:code-review` skill and does not fix. chief-of-stuff does not reimplement that skill's review. Findings come back in one review report shape (issue #563) and are kept as store records.
+
+Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
 
 ## 7. Assignments
 
