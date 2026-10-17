@@ -560,8 +560,9 @@ class GitWriteTest(unittest.TestCase):
                         "timeout 5 git push", "bash -lc 'git push'", "sh -ec 'git push'",
                         'echo "$(git push)"', 'echo "`git push`"',
                         'echo "$(echo "$(git push)")"', "echo ok # ignored\ngit push",
-                        "git --config-env=user.name=NAME push"):
+                        "git --config-env=user.name=NAME push", "2>/dev/null git push", "git 2>/dev/null push"):
             with self.subTest(command=command):
+                self.assertIn("push", run.git_subcommands(command))
                 self.assertFalse(self.check(command))
 
     def test_quoted_operators_and_nonexecuted_shell_text_are_arguments(self) -> None:
@@ -569,6 +570,9 @@ class GitWriteTest(unittest.TestCase):
                         r"echo \; git push", "echo '$(git push)'", "echo '`git push`'",
                         "echo \"if\" git push", "echo ok # git push",
                         "echo \"$(git status)\"", "bash -lc 'git status'",
+                        "if git status; then echo ok; fi", "sudo -u nobody git status",
+                        "env -u HOME git status", "command -p git status", "exec -a label git status",
+                        "nice -n 5 git status", "timeout 5 git status",
                         "printf '%s' 'first\nsecond' git push"):
             with self.subTest(command=command):
                 self.assertTrue(self.check(command))
@@ -586,6 +590,12 @@ class GitWriteTest(unittest.TestCase):
 
     def test_unbalanced_quotes_fail_closed(self) -> None:
         self.assertFalse(self.check("git push 'oops"))
+
+    def test_dynamic_command_names_and_unsupported_syntax_fail_closed(self) -> None:
+        for command in ('git "$(printf push)"', 'g$(printf it) push', 'git "$verb"',
+                        "cat <<EOF\ngit push\nEOF", "env --unknown git push"):
+            with self.subTest(command=command):
+                self.assertFalse(self.check(command))
 
 
 class RegexTest(unittest.TestCase):
