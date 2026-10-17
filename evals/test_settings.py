@@ -203,6 +203,15 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
                 st.load(self.root, self.write('[workers]\nrules = ["approve abc' + escape + 'txt"]\n'))
 
+    def test_worker_rules_total_length_is_capped_at_load(self):
+        # Nine 2000-character rules each pass the per-rule cap but push every assignment over BODY_CAP.
+        rules = ", ".join('"' + "x" * 2000 + '"' for _ in range(9))
+        with self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules.*8000"):
+            st.load(self.root, self.write(f"[workers]\nrules = [{rules}]\n"))
+        rule = "x" * 2000
+        got = st.load(self.root, self.write(f'[workers]\nrules = [{", ".join(chr(34) + rule + chr(34) for _ in range(4))}]\n'))
+        self.assertEqual(got.workers.rules, (rule,) * 4)
+
     def test_worker_rules_reject_peer_markers_and_excessive_length_at_load(self):
         for prefix in ("", '[notify]\nadapter = "off"\n'):
             for rule in ("Keep tests. (via peer)", "x" * 2401):
