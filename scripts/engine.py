@@ -4,10 +4,11 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -68,9 +69,9 @@ def _measured(state: dict) -> dict:
             if type(state.get(key)) in (int, float)}
 
 
-def _interrupt(store: Any, key: str, kind: str, reason: str, at: str) -> None:
+def _interrupt(store: Any, key: str, kind: str, reason: str, at: str, *, scope: dict) -> None:
     data = _resume(store, key)
-    record = {"kind": kind, "reason": reason}
+    record = {"kind": kind, "reason": reason, **scope}
     if data.get("interrupt") != record:
         store.add_log(key, f"{kind}: {reason}", at)
         data["interrupt"] = record
@@ -116,50 +117,91 @@ def _clear_waived_gates(store: Any, key: str) -> None:
 def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str, ...],
             resolved: policy.Policy, personas, model, at: str, *, context: str = "", instance: str = "") -> str | None:
     """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
+    scope = {"decision": {"topic": topic, "question": question, "instance": instance, "context": context}}
     try:
         decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance)
     except ValueError as exc:
-        _interrupt(store, key, "ambiguity", str(exc), at)
+        _interrupt(store, key, "ambiguity", f"{question}: {exc}", at, scope=scope)
         return None
-    outcome = trio_gate.decide(decision, store.decisions(key), resolved, personas,
+    earlier = store.decisions(key)
+    retry_key = json.dumps([topic, question, instance, context, options])
+    retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
+    prior = decision_actions.latest(earlier).get((topic, question, instance))
+    if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
+            and datetime.fromisoformat(retry["retry_at"]) > datetime.fromisoformat(at)):
+        return None
+    outcome = trio_gate.decide(decision, earlier, resolved, personas,
                                _metered(store, key, model) if model is not None else None, store)
+    rows = store.decisions(key)
+    data = _resume(store, key)
+    retries = data.get("trio_retries") or {}
+    if len(rows) > len(earlier) and decision_actions.retryable_failure(rows[-1].record):
+        failures = retry.get("failures", 0) + 1
+        delay = min(3600, 60 * 2 ** min(failures - 1, 6))
+        retries[retry_key] = {"failures": failures,
+                              "retry_at": (datetime.fromisoformat(at) + timedelta(seconds=delay)).isoformat()}
+        data["trio_retries"] = retries
+        store.set_resume(key, data)
+    elif retry_key in retries:
+        retries.pop(retry_key)
+        if not retries:
+            data.pop("trio_retries", None)
+        store.set_resume(key, data)
     if outcome.unanimous:
-        _clear_interrupt(store, key, "ambiguity")
+        _clear_interrupt(store, key, "ambiguity", scope=scope)
         return outcome.recommendation
-    _interrupt(store, key, "ambiguity", outcome.reason or question, at)
+    _interrupt(store, key, "ambiguity", outcome.reason or question, at, scope=scope)
     return None
 
 
-def _clear_interrupt(store: Any, key: str, kind: str) -> None:
+def _clear_interrupt(store: Any, key: str, kind: str, *, scope: dict) -> None:
     data = _resume(store, key)
-    if data.get("interrupt", {}).get("kind") == kind:
+    record = data.get("interrupt", {})
+    if record.get("kind") == kind and all(record.get(name) == value for name, value in scope.items()):
         data.pop("interrupt")
         store.set_resume(key, data)
 
 
-def _consultation_blocked(store: Any, key: str, resolved: policy.Policy, at: str) -> bool:
+def _consultation_blocked(store: Any, key: str, resolved: policy.Policy, at: str, *, stage: str) -> bool:
     data = _resume(store, key)
     kind = policy.breach(resolved, _measured(data))
     if kind:
-        _interrupt(store, key, "limit", f"reached {kind} limit", at)
+        _interrupt(store, key, "limit", f"reached {kind} limit", at, scope={"stage": stage})
         return True
-    _clear_interrupt(store, key, "limit")
+    _clear_interrupt(store, key, "limit", scope={"stage": stage})
     quota = data.get("quota")
     return bool(quota and datetime.fromisoformat(quota["retry_at"]) > datetime.fromisoformat(at))
 
 
 def _route_asks(store: Any, policies: policy.Policies, model, at: str) -> None:
-    if model is None:
-        return
     for item in store.items():
         if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
             continue
         workflow = _workflow_for(policies, store, item)
-        pending = [ask for ask in store.asks(item.issue_key) if not ask.answer]
+        asks = store.asks(item.issue_key)
+        latest = decision_actions.latest(store.decisions(item.issue_key))
+        for ask in asks:
+            row = latest.get(("ask", ask.question, f"ask-{ask.id}"))
+            if (not ask.answer or row is None or row.answer or decision_actions.is_reversed(row)
+                    or decision_actions.is_restarted(row)):
+                continue
+            prior = row.record["decision"]
+            if prior.get("context", "") != ask.context or prior.get("options") != ask.options:
+                # A replacement after rework needs its own answer, not the original ask's.
+                continue
+            # A direct answer settles the same append-only decision as a trio adoption.
+            store.add_decision(item.issue_key, topic=row.topic, question=row.question, answer=ask.answer,
+                               decided_by="user", record=row.record)
+            _clear_interrupt(store, item.issue_key, "ambiguity", scope={"decision": {
+                "topic": row.topic, "question": row.question, "instance": prior.get("instance", ""),
+                "context": prior.get("context", "")}})
+        if model is None:
+            continue
+        pending = [ask for ask in asks if not ask.answer]
         for ask in pending:
             stage = ask.stage or item.stage or workflow.start
             resolved = _resolved(policies, store, item.issue_key, stage)
-            if _consultation_blocked(store, item.issue_key, resolved, at):
+            if _consultation_blocked(store, item.issue_key, resolved, at, stage=stage):
                 break
             choice = _choice(store, item.issue_key, "ask", ask.question, tuple(ask.options),
                              resolved, policies.personas, model, at, context=ask.context, instance=f"ask-{ask.id}")
@@ -170,11 +212,11 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str) -> None:
                                                      tuple(edge.gate for edge in workflow.edges if edge.gate))
         for row, segment in replacements:
             resolved = _resolved(policies, store, item.issue_key, segment.stage)
-            if _consultation_blocked(store, item.issue_key, resolved, at):
+            if _consultation_blocked(store, item.issue_key, resolved, at, stage=segment.stage):
                 break
             prior = row.record.get("decision")
             if not isinstance(prior, dict):
-                _interrupt(store, item.issue_key, "ambiguity", row.question, at)
+                _interrupt(store, item.issue_key, "ambiguity", row.question, at, scope={"stage": segment.stage})
                 continue
             # The completed restart defines a fresh replacement, rather than the old attempt's context.
             context = f"{prior.get('context', '')}\nRestart completed: {segment.stage}-{segment.attempt}"
@@ -244,7 +286,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         quota = data.get("quota")
         if quota and datetime.fromisoformat(quota["retry_at"]) <= now and "quota_percent" in data:
             data.pop("quota_percent")
-            if data.get("interrupt") == {"kind": "limit", "reason": "reached quota limit"}:
+            if data.get("interrupt") == {"kind": "limit", "reason": "reached quota limit",
+                                         "stage": item.stage or _workflow_for(policies, store, item).start}:
                 data.pop("interrupt")
             store.set_resume(item.issue_key, data)
     # Retry label writes even when a successful merge closed the issue since the last pass.
@@ -281,18 +324,29 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
-                if (stage != stages[key] and stage == _workflow_for(policies, store, by_key[key]).start
-                        and decision_actions.open_reversal(store.decisions(key), store.segments(key), stage)):
+                restart = (stage != stages[key] and stage == _workflow_for(policies, store, by_key[key]).start
+                           and decision_actions.open_reversal(store.decisions(key), store.segments(key), stage))
+                if restart:
                     # Persist the restart route before its durable segment consumes the
                     # reversal, so a crash still retries/advances from workflow.start.
                     data = _resume(store, key)
                     data["pending_stage"] = {"stage": stage, "expected": stages[key]}
                     store.set_resume(key, data)
-                slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
-                            max_concurrency=max_concurrency, clock=clock,
-                            launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
+                try:
+                    slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
+                                max_concurrency=max_concurrency, clock=clock,
+                                launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
+                except BaseException:
+                    # A rejected claim or failed launch leaves no segment. A crash
+                    # after a durable claim must keep the route for recovery.
+                    if restart and not any(s.stage == stage and s.attempt == action.attempt
+                                           for s in store.segments(key)):
+                        data = _resume(store, key)
+                        data.pop("pending_stage", None)
+                        store.set_resume(key, data)
+                    raise
                 _clear_waived_gates(store, key)
-                _clear_interrupt(store, key, "limit")
+                _clear_interrupt(store, key, "limit", scope={"stage": stage})
                 if isinstance(action, reconcile.Dispatch) and stage == _workflow_for(policies, store, by_key[key]).start:
                     for rev in decision_actions.restarted(store.decisions(key), stage, action.attempt):
                         store.add_decision(key, topic=rev.topic, question=rev.question,
@@ -307,7 +361,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Ask):
                 resolved = _resolved(policies, store, key, action.source)
-                if _consultation_blocked(store, key, resolved, at):
+                if _consultation_blocked(store, key, resolved, at, stage=action.source):
                     continue
                 choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
                                  resolved, policies.personas, model, at, context=action.context)
@@ -316,10 +370,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
                     store.set_resume(key, data)
                 else:
-                    _interrupt(store, key, "ambiguity", action.reason, at)
+                    _interrupt(store, key, "ambiguity", action.reason, at, scope={"decision": {
+                        "topic": action.gate, "question": action.reason, "instance": "", "context": action.context}})
             elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
                 kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
-                _interrupt(store, key, kind, action.reason, at)
+                _interrupt(store, key, kind, action.reason, at,
+                           scope={"stage": stages[key] or _workflow_for(policies, store, by_key[key]).start})
             elif isinstance(action, reconcile.Wait):
                 message = f"wait: {action.reason}"
                 last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)
