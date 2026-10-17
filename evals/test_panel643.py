@@ -126,6 +126,13 @@ class PanelTest(unittest.TestCase):
 
     def test_full_keys_have_distinct_issue_and_source_routes(self):
         self.db.upsert_item(OTHER, title="Other repository", stage="implement")
+        from dataclasses import replace
+        from backlog_ref import GitHubBacklog
+        fixtures.bs._write(self.root / "pages" / fixtures.bs.CACHE, replace(
+            fixtures.bs.EMPTY, home=GitHubBacklog("example/repo"), issues={
+                "#12": fixtures.bs.Issue("#12", "https://github.com/example/repo/issues/12", "First repository", "open", (), body="First source proof"),
+                "example/other#12": fixtures.bs.Issue("example/other#12", "https://github.com/example/other/issues/12", "Other repository", "open", (), body="Other source proof"),
+            }))
         for suffix in ("", "/source"):
             for key, title, absent in ((KEY, "First repository", "Other repository"),
                                        (OTHER, "Other repository", "First repository")):
@@ -133,6 +140,8 @@ class PanelTest(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertIn(title, body)
                 self.assertNotIn(absent, body)
+                if suffix:
+                    self.assertIn("First source proof" if key == KEY else "Other source proof", body)
 
     def test_store_items_are_visible_with_tracker_rows_and_closed_holds_are_ignored(self):
         self.db.upsert_item(OTHER, title="Closed repository", forge_state="closed", human_review=True)
