@@ -13,7 +13,6 @@ KIND = re.compile(r"[a-z][a-z0-9-]*")
 COLOUR = re.compile(r"[#\w(),.%/ -]+")  # a colour, var() or border shorthand; nothing that ends a declaration or a rule
 
 
-
 def esc(text: str) -> str:
     return html.escape(text, quote=True)
 

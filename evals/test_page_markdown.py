@@ -280,7 +280,7 @@ class MarkdownTest(unittest.TestCase):
                                    sources=sources(merged))
         name, = Structure(html).by_class('columns-card-name')
         self.assertEqual(name['tag'], 'a')
-        self.assertEqual(name['attrs'].get('href'), MR.url)
+        self.assertEqual(name['attrs'].get('href'), '/issues/109')
 
     def test_checklist_and_log_prose_use_inline_markdown(self):
         import issue_page

@@ -7,15 +7,14 @@ from __future__ import annotations
 import html
 import re
 from collections.abc import Callable
+from threading import RLock
 
 from _vendor.markdown_it import MarkdownIt
 from fragment import esc, href
 
 # References recognized in prose text tokens. Order is precedence.
 TOKEN = re.compile(r"""
-    (?P<tag><[^>]+>)
-  | `(?P<code>[^`]+)`
-  | (?<![\w/>])(?P<url>https?://[^\s<`]*[^\s<`.,;:)])
+    (?<![\w/>])(?P<url>https?://[^\s<`]*[^\s<`.,;:)])
   | \b(?:[Pp]ipeline|[Rr]un)\ \#(?P<pid>\d+)\b
   | (?<![\w&/!\#])(?P<sigil>[!\#])(?P<num>\d+)(?:\#(?P<note>note_\d+|issuecomment-\d+|discussion_r\d+))?\b
   | (?<![\w/.-])(?P<path>(?:[\w.-]+/)+(?![\w.-])|(?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z]\w*)
@@ -52,6 +51,7 @@ def _prose_text(text: str, resolve: ReferenceResolver | None) -> str:
 def _prose_references(state) -> None:
     """Decorate parsed prose tokens, leaving explicit links, images and code blocks intact."""
     resolve = state.env.get('resolve')
+    links = state.env.get('links', True)
     for block in state.tokens:
         if block.type != 'inline':
             continue
@@ -59,15 +59,20 @@ def _prose_references(state) -> None:
         for token in block.children or ():
             if token.type == 'link_open':
                 depth += 1
+                if not links:
+                    token.type, token.content = 'html_inline', ''
+                    continue
                 url = token.attrGet('href') or ''
                 if url.lower().startswith(('http://', 'https://')):
                     token.attrSet('target', '_blank')
                     token.attrSet('rel', 'noopener')
             elif token.type == 'link_close':
                 depth -= 1
-            elif depth == 0 and token.type == 'text':
+                if not links:
+                    token.type, token.content = 'html_inline', ''
+            elif links and depth == 0 and token.type == 'text':
                 token.type, token.content = 'html_inline', _prose_text(token.content, resolve)
-            elif depth == 0 and token.type == 'code_inline' and resolve:
+            elif links and depth == 0 and token.type == 'code_inline' and resolve:
                 match = TOKEN.fullmatch(token.content)
                 chip = _chip(match, resolve) if match else None
                 if chip:
@@ -76,17 +81,21 @@ def _prose_references(state) -> None:
 
 _MARKDOWN = MarkdownIt('commonmark').enable('table')
 _MARKDOWN.options['html'] = False
-_MARKDOWN.core.ruler.after('text_join', 'prose_references', _prose_references)
+_MARKDOWN.core.ruler.before('text_join', 'prose_references', _prose_references)
 # Keep the pages' existing bold markup and styling.
 _MARKDOWN.renderer.rules['strong_open'] = lambda *args: '<b>'
 _MARKDOWN.renderer.rules['strong_close'] = lambda *args: '</b>'
+# The threaded page server shares this parser, whose ruler caches compile lazily.
+_MARKDOWN_LOCK = RLock()
 
 
-def markdown_inline(text: str, resolve: ReferenceResolver | None = None) -> str:
-    """One-line prose: inline CommonMark only, with raw HTML escaped."""
-    return _MARKDOWN.renderInline(str(text), {'resolve': resolve})
+def markdown_inline(text: str, resolve: ReferenceResolver | None = None, *, links: bool = True) -> str:
+    """Inline CommonMark with raw HTML escaped; `links=False` keeps a navigation label free of anchors."""
+    with _MARKDOWN_LOCK:
+        return _MARKDOWN.renderInline(str(text), {'resolve': resolve, 'links': links})
 
 
 def markdown_blocks(text: str, resolve: ReferenceResolver | None = None) -> str:
     """Block prose: CommonMark plus tables, with raw HTML escaped."""
-    return _MARKDOWN.render(str(text), {'resolve': resolve})
+    with _MARKDOWN_LOCK:
+        return _MARKDOWN.render(str(text), {'resolve': resolve})

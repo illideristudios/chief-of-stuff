@@ -35,9 +35,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html import escape
 from pathlib import Path
@@ -45,7 +47,7 @@ from pathlib import Path
 import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config
 from clock import leading
-from fragment import FONTS, TAB_CSS, href, tab_bar, theme
+from fragment import FONTS, PROSE_CSS, TAB_CSS, href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
 from module_graph import section as _graph
@@ -128,6 +130,7 @@ GITHUB = {"issue": "issues/{}", "MR": "pull/{}", "commit": "commit/{}", "blob": 
 GITLAB = {"issue": "-/issues/{}", "MR": "-/merge_requests/{}", "commit": "-/commit/{}", "blob": "-/blob/{at}/{}",
           "tree": "-/tree/{at}/{}", "pipeline": "-/pipelines/{}"}
 DOCS = (".md", ".markdown", ".rst", ".adoc", ".txt")
+REFERENCE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,7 @@ class Linker:
     forge: Backlog | GitHubBacklog | None = None
     root: Path | None = None
     at: str | None = None
+    _files: dict[str, tuple[str, ...]] = field(default_factory=dict, compare=False, repr=False)
 
     def _url(self, what: str, target: str) -> str:
         gh = isinstance(self.forge, GitHubBacklog)
@@ -148,10 +152,22 @@ class Linker:
         """The `#` fragment for a section heading or a symbol's definition in a local copy, or "" (never guessed)."""
         if not self.root:
             return ""
-        f = (self.root / path).resolve()
-        if not f.is_relative_to(self.root.resolve()) or not f.is_file():
-            return ""
-        lines = f.read_text(errors="replace").splitlines()
+        if path not in self._files:
+            lines = ()
+            try:
+                f = (self.root / path).resolve()
+                if f.is_relative_to(self.root.resolve()):
+                    # Nonblocking open plus fstat covers a file replaced by a FIFO after resolution.
+                    with open(f, 'rb', opener=lambda p, flags: os.open(p, flags | os.O_NONBLOCK)) as source:
+                        info = os.fstat(source.fileno())
+                        if stat.S_ISREG(info.st_mode) and info.st_size <= REFERENCE_BYTES:
+                            data = source.read(REFERENCE_BYTES + 1)
+                            if len(data) <= REFERENCE_BYTES:
+                                lines = tuple(data.decode('utf-8', errors='replace').splitlines())
+            except OSError:
+                pass  # Unreadable or removed local copies still link to the forge without a fragment.
+            self._files[path] = lines
+        lines = self._files[path]
         if sym:
             hit = re.compile(rf"^\s*(?:(?:async\s+)?def|class|function|func|fn|const|let|var)\s+{sym}\b|^\s*{sym}\s*=")
             n = next((i for i, text in enumerate(lines, 1) if hit.search(text)), None)
@@ -308,7 +324,7 @@ def _saved_html(d: dict, when) -> str:
     a = saved(d)
     title = next((o.get("title", "") for o in d["options"] if o["key"] == a.get("key")), "")
     key = f'<span><span class="key">{escape(a["key"])}</span>{escape(title)}</span>' if a.get("key") else ""
-    words = f'<span class="words">“{markdown_inline(a["words"].strip())}”</span>' if str(a.get("words") or "").strip() else ""
+    words = f'<span class="words">“{markdown_inline(str(a["words"]).strip())}”</span>' if str(a.get("words") or "").strip() else ""
     return f'{key}{words}<span class="saved">answered, saved {when(datetime.fromisoformat(a["at"]))}</span>'
 
 
@@ -803,7 +819,7 @@ header.top>div{flex:1 1 auto;min-width:0}
 header .chip{color:var(--link);border:1px solid var(--brass);margin-bottom:4px}
 header .chip.answered{color:var(--surface);background:#009E73;border-color:#009E73}
 .ask{border-top:3px solid var(--brass);display:flex;flex-direction:column;gap:4px}
-.ask strong{font-size:16px}
+.ask b{font-size:16px}
 .ask p{color:var(--muted)}
 .ask>.prose:first-of-type p{color:var(--fg);font-size:16px}
 code{font-family:ui-monospace,monospace;font-size:.88em;background:var(--ref-bg);padding:0 3px;border-radius:3px;overflow-wrap:normal}
@@ -909,7 +925,7 @@ h2.pend{color:var(--link)}
 @media (max-width:760px){.row.pend,.row.done{grid-template-columns:minmax(0,1fr);gap:4px}.row.head{display:none}.row .stack:first-child{flex-direction:row;gap:8px}.unread .none{display:none}}
 @media (max-width:900px){.cols{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:480px){header.top{flex-direction:column;align-items:flex-start;gap:6px}.refs{grid-template-columns:minmax(0,1fr)}}
-""" + TAB_CSS + "</style>\n"
+""" + TAB_CSS + PROSE_CSS + "</style>\n"
 HEAD = HEAD_OPEN + PAGE_CSS
 
 # Picking an option saves it at once; the write-in saves on its button. Without JS the form posts and the server

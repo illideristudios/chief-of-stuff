@@ -63,7 +63,7 @@ table.split .lno,table.split .rno{width:40px;color:var(--muted);text-align:right
 table.split .rno{border-left:1px solid var(--line)} table.split .left,table.split .right{white-space:pre;overflow:hidden;text-overflow:ellipsis}
 td.left.del{background:color-mix(in srgb,var(--dl) 12%,transparent)} td.right.add{background:color-mix(in srgb,var(--stage-review) 12%,transparent)}
 td.empty{background:repeating-linear-gradient(135deg,var(--ref-bg) 0 4px,var(--surface) 4px 8px)}
-tr.note td{padding:4px 14px 8px 100px;font-family:"Alegreya Sans",system-ui,sans-serif}
+tr.note>td{padding:4px 14px 8px 100px;font-family:"Alegreya Sans",system-ui,sans-serif}
 .nt{background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--stage-pr);border-radius:5px;padding:7px 12px;margin:4px 0;font-size:13px;line-height:1.45;white-space:normal}
 .nt.resolved{border-top-color:var(--stage-review)} .nt p{color:var(--fg)}
 @media (max-width:760px){.src{grid-template-columns:minmax(0,1fr)} ul.files{position:static}}

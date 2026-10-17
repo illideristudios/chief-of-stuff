@@ -329,7 +329,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
-                  f'{columns.render(build_cols, inline=inline)}</section>\n')
+                  f'{columns.render(build_cols, inline=lambda text: markdown_inline(text, links=False))}</section>\n')
     flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
                   for m in tracker_log.moves(text, day, zone)]
     look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
