@@ -505,20 +505,75 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertTrue(any("not on main" in row.message for row in self.db.log(KEY)))
 
-    def test_squash_landed_final_stage_clean_tree_completes_without_a_hold(self):
-        # Squash deletes the branch: the commits are not ancestors of origin/main and have no upstream.
+    def squash_landed_final_tree(self):
+        from evals import git_taint
+        self.enterContext(git_taint.private_git_views(self.root / "git-views"))
         self.p.workflows["standard"] = policy.Workflow("standard", "implement")
         self.run_pass()
         self.publish_exit()
+        tree = self.trees / "fake"
+        tree.mkdir()
+
+        def git(*args):
+            return git_taint.git(list(args), tree).stdout.strip()
+
+        git("init", "-b", "main")
+        (tree / "file").write_text("base")
+        git("add", ".")
+        git("commit", "-m", "base")
+        git("checkout", "-b", "work")
+        for content in ("first", "second"):
+            (tree / "file").write_text(content)
+            git("commit", "-am", content)
+        head = git("rev-parse", "HEAD")
+        git("checkout", "main")
+        git("merge", "--squash", "work")
+        git("commit", "-m", "landed")
+        squash = git("rev-parse", "HEAD")
+        git("update-ref", "refs/remotes/origin/main", squash)
+        git("checkout", "--detach", head)
+        git("branch", "-D", "work")
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
-        self.forge.branch_head = lambda ref: SimpleNamespace(sha="squash-sha", status="passed")
-        self.forge.landings = lambda pipeline, keys, **kwargs: {KEY: (True, True)}
-        with mock.patch.object(engine.engine_facts, "_tree_facts",
-                               return_value=(TreeState("work", 0, 2, None), False, NOW)):
-            self.assertEqual(self.run_pass(), [])
+        self.forge.branch_head = lambda ref: tf.forge.Pipeline(1, "main", squash, "passed", "")
+        merged = {"number": 21, "headRefOid": head, "body": "Closes #1",
+                  "baseRefName": "main", "mergeCommit": {"oid": squash}}
+        self.forge.landings = tf.forge.Forge(tf.backlog.GitHubBacklog("example/project"),
+                                           gh=tf.FakeGh(merged=[merged])).landings
+        return tree, git
+
+    def test_squash_landed_final_stage_clean_tree_completes_without_a_hold(self):
+        tree, git = self.squash_landed_final_tree()
+        self.assertEqual(engine.engine_facts._tree_facts(tree)[0].dirty, 0)
+        self.assertEqual(git("branch", "--list", "work"), "")
+        self.assertEqual(self.run_pass(), [])
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
         self.assertFalse(self.db.items()[0].human_review)
-        self.assertFalse(any("not on origin/main" in row.message for row in self.db.log(KEY)))
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+        self.assertEqual(self.run_pass(), [])  # remembered landing still certifies this head
+        (tree / "extra").write_text("work after landing")
+        git("add", ".")
+        git("commit", "-m", "extra work")
+        facts = engine.engine_facts.gather(forge=self.forge, store=self.db, root=self.root,
+                                          trees=self.trees, now=self.now)
+        verdict = reconcile.completion_verdict(KEY, self.db.segments(KEY)[0], facts,
+                                               self.p.workflows["standard"], report="done", worker_alive=False)
+        self.assertTrue(verdict.human_review)
+
+    def test_real_squash_landing_still_holds_a_dirty_tree(self):
+        tree, _ = self.squash_landed_final_tree()
+        (tree / "extra").write_text("uncommitted work")
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertTrue(self.db.items()[0].human_review)
+
+    def test_real_squash_landing_still_holds_commits_outside_the_landed_change(self):
+        tree, git = self.squash_landed_final_tree()
+        (tree / "extra").write_text("unlanded work")
+        git("add", ".")
+        git("commit", "-m", "extra work")
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertTrue(self.db.items()[0].human_review)
 
     def test_both_completion_paths_use_the_same_missing_and_unknown_facts(self):
         self.run_pass()
