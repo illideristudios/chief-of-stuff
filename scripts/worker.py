@@ -109,7 +109,7 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", rules: tuple[str, ...] = (),
+           claude_as_profile: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
            clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
@@ -133,7 +133,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         raise RuntimeError(f"cannot read worker issue: {got.error}")
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
                                                skills=defaults.skills if defaults else (), rules=rules,
-                                               require_green=loaded.workers.require_green_tests)
+                                               require_green=require_green)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -231,10 +231,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None, forge: Any = None) -> None:
-    """Finish every exited or lost open segment, using only the engine's run directory."""
-    text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    require_green = load_settings(root, settings_path(text)).workers.require_green_tests
+            trees: Path | None = None, *, require_green: bool = False) -> None:
+    """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
     for segment in store.segments():
         if segment.ended_at is not None:
             continue
@@ -312,12 +310,9 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                             for name in dispatch_prompt.SUITE_KEYS)
                         reason = f"suite is not green; Suite: {shown}; worker said: {reports[-1].summary}"
                         store.set_human_review(key, True)
-                        add = getattr(forge, "add_human_hold", None) if forge is not None else None
-                        if add is not None:
-                            number = key.rpartition("#")[2]
-                            error = add(int(number)) if number.isdecimal() else "invalid issue number"
-                            if error:
-                                store.add_log(key, f"review hold: {error}", now.isoformat())
+                        data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
+                                              "published": False}
+                        store.set_resume(key, data)
                     else:
                         outcome = "done"
                 else:

@@ -155,16 +155,56 @@ class HoldReleaseFailed(ForgeError):
     """A hold release that failed and was already logged; the dispatch error would repeat it."""
 
 
+def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) -> None:
+    """Retry pending suite labels; only a published label's explicit removal accepts its segment."""
+    observed = {row["issue_key"]: row.get("human_review") for row in snapshots}
+    for item in store.items():
+        key = item.issue_key
+        data = _resume(store, key)
+        hold = data.get("suite_hold")
+        if not hold:
+            continue
+        if hold["published"]:
+            if observed.get(key) is False:
+                segment = next(s for s in store.segments(key)
+                               if s.stage == hold["stage"] and s.attempt == hold["attempt"])
+                store.record_segment(key, segment.stage, segment.attempt, segment.started_at,
+                                     ended_at=segment.ended_at, outcome="done")
+                record = data.get("runs", {}).get(f"{segment.stage}-{segment.attempt}", {})
+                if "result" in record:
+                    record["result"]["outcome"] = "done"
+                data.pop("suite_hold")
+                store.set_resume(key, data)
+                store.add_log(key, f"suite hold released: accepted {segment.stage} attempt {segment.attempt}", at)
+            else:
+                store.set_human_review(key, True)
+            continue
+        # Forge sync cannot erase an unpublished hold. Retry even after an engine restart.
+        store.set_human_review(key, True)
+        try:
+            error = forge.add_human_hold(int(key.rpartition("#")[2]))
+            if error:
+                raise ForgeError(error)
+        except Exception as exc:
+            message = f"review hold: {exc}"
+            logged = store.log(key)
+            if not logged or logged[-1].message != message:
+                store.add_log(key, message, at)
+        else:
+            hold["published"] = True
+            store.set_resume(key, data)
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None) -> list[reconcile.Action]:
+             max_concurrency: int | None = None, require_green: bool = False) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
     _record_limits(workers)
-    worker.collect(store, root, clock, trees, forge)
+    worker.collect(store, root, clock, trees, require_green=require_green)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -184,6 +224,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     now = clock()
     at = now.isoformat()
+    _sync_suite_holds(forge, store, snapshots, at)
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         key = item.issue_key
@@ -372,13 +413,15 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("no [repos] clone matches the workspace backlog")
             launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
                              clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules)
+                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
+                             require_green=config.workers.require_green_tests)
             try:
                 while True:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency)
+                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
+                                 require_green=config.workers.require_green_tests)
                     except Exception as exc:
                         failed = True
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)

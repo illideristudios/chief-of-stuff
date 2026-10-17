@@ -840,6 +840,15 @@ class MainTest(unittest.TestCase):
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         self.assertEqual(passed.call_args.kwargs["launch"].keywords["rules"], ("Keep tests.",))
 
+    def test_loaded_suite_policy_reaches_collect_and_launch(self):
+        with (self.root / "settings.toml").open("a") as config:
+            config.write("\n[workers]\nrequire_green_tests = true\n")
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed:
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        self.assertTrue(passed.call_args.kwargs["require_green"])
+        self.assertTrue(passed.call_args.kwargs["launch"].keywords["require_green"])
+
     def test_failed_pass_is_logged_and_the_loop_continues_at_the_interval(self):
         errors = io.StringIO()
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \

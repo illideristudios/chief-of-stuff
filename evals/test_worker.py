@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -531,13 +532,11 @@ class WorkerTest(unittest.TestCase):
                 (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
                 (run / "stderr").write_text("")
                 (run / "exit.json").write_text('{"exit_code": 0}')
-                labeled = []
-                forge = SimpleNamespace(add_human_hold=lambda number: labeled.append(number) or "")
                 with mock.patch.object(worker.process_status, "identity", return_value=None):
-                    worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), forge=forge)
+                    worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), require_green=enabled)
                 self.assertEqual(self.db.segments(KEY)[0].outcome, expected)
                 self.assertEqual(self.db.items()[0].human_review, held)
-                self.assertEqual(labeled, [1] if held else [])
+                self.assertEqual("suite_hold" in self.db.resume(KEY), held)
                 if held:
                     log = self.db.log(KEY)[-1].message
                     self.assertIn("suite is not green", log)
@@ -547,6 +546,12 @@ class WorkerTest(unittest.TestCase):
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
         (self.root / "chief-of-stuff.toml").write_text("[workers]\nrequire_green_tests = true\n")
         self.db.upsert_item(KEY, stage=stage)
+        if stage == "fix":
+            self.p.stages["fix"] = replace(self.p.stages["implement"], name="fix")
+            flow = self.p.workflows["standard"]
+            self.p.workflows["standard"] = replace(flow, edges=flow.edges + (
+                reconcile.Edge("review", "fix"), reconcile.Edge("fix", "review")))
+            self.db.set_resume(KEY, {"worktree": str(self.tree), "work_branch": "head"})
         run = self.launched(stage)
         self.report(run, stage=stage, outcome=outcome,
                     suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
@@ -561,7 +566,7 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(engine.cleanup, "execute", return_value=0):
             return engine.run_pass(store=self.db, root=self.root, trees=self.trees,
                                    forge=forge, policies=self.p, launch=launch,
-                                   clock=lambda: NOW + timedelta(minutes=1))
+                                   clock=lambda: NOW + timedelta(minutes=1), require_green=True)
 
     def test_a_non_done_report_is_not_suite_gated(self):
         forge = self.suite_run(outcome="blocked")
@@ -573,12 +578,14 @@ class WorkerTest(unittest.TestCase):
         forge.add_human_hold.assert_not_called()
 
     def test_suite_hold_survives_forge_errors_and_restart_until_release(self):
-        for failure in ("label unavailable", RuntimeError("forge offline")):
-            with self.subTest(failure=failure):
+        cases = ((stage, failure) for stage in ("implement", "fix")
+                 for failure in ("label unavailable", RuntimeError("forge offline")))
+        for stage, failure in cases:
+            with self.subTest(stage=stage, failure=failure):
                 if self.db.segments():
                     self.db.engine.dispose()
                     self.setUp()
-                forge = self.suite_run()
+                forge = self.suite_run(stage)
                 def hold(number):
                     if hold.failure:
                         if isinstance(hold.failure, Exception):
@@ -723,7 +730,7 @@ class WorkerTest(unittest.TestCase):
     def test_engine_collects_before_reading_forge(self):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
-        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a: order.append("collect")), \
+        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect")), \
              mock.patch.object(engine, "_record_limits"), \
              mock.patch.object(engine.cleanup, "execute", return_value=0):
             engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,

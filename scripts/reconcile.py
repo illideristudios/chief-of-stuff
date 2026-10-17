@@ -34,7 +34,7 @@ class Decision(Protocol):
 
 
 def suite_holds(counts: Mapping[str, int | None], *, require_green: bool) -> bool:
-    """An opted-in done is human review when a count is unknown, passed is 0, or a failure count is nonzero."""
+    """Hold unknown counts, zero passed, or nonzero failed/skipped/xfailed; opt-out never holds."""
     if not require_green:
         return False
     keys = ("passed", "failed", "skipped", "xfailed")
