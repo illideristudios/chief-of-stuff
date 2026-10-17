@@ -1486,13 +1486,16 @@ class ChangeCommentsTest(unittest.TestCase):
 
 class ForgeRetryabilityTest(unittest.TestCase):
     def test_adapter_classifies_request_failures(self):
-        import merge_ready
-        from unittest import mock
         source = forge.Forge(backlog.GitHubBacklog("example/project"))
-        for message, retryable in (("HTTP 429", True), ("HTTP 503", True), ("connection reset", True),
-                                   ("timed out", True), ("HTTP 403 rate limit exceeded", True),
-                                   ("HTTP 401", False), ("HTTP 404", False), ("unreadable JSON", False)):
-            with self.subTest(message=message), mock.patch.object(merge_ready, "github_ready", side_effect=RuntimeError(message)):
+        for message, retryable in (("gh: Too Many Requests (HTTP 429)", True),
+                                   ("gh: Server Error (HTTP 503)", True),
+                                   ('Get "https://api.github.com/graphql": read tcp: connection reset by peer', True),
+                                   ('Post "https://api.github.com/graphql": context deadline exceeded', True),
+                                   ("gh: API rate limit exceeded (HTTP 403)", True),
+                                   ("gh: Bad credentials (HTTP 401)", False),
+                                   ("gh: Not Found (HTTP 404)", False), ("unreadable JSON", False)):
+            with self.subTest(message=message), mock.patch.object(backlog.subprocess, "run",
+                    return_value=SimpleNamespace(returncode=1, stdout="", stderr=message)):
                 with self.assertRaises(forge.ForgeError) as raised:
                     source.requests()
                 self.assertEqual(raised.exception.retryable, retryable)
@@ -1508,6 +1511,18 @@ class ForgeRetryabilityTest(unittest.TestCase):
                 with self.assertRaises(forge.ForgeError) as raised:
                     source.closing_request("github:example/app#1")
                 self.assertFalse(raised.exception.retryable)
+
+    def test_http_status_and_transport_exception_survive_gitlab_request_gathering(self):
+        import urllib.error
+        source = forge.Forge(GL, token="fake")
+        failures = [(urllib.error.HTTPError("https://gitlab.example.test/pulls/512", code, "response", {}, None),
+                     code in (429, 503)) for code in (401, 404, 429, 503)]
+        failures += [(urllib.error.URLError("network failure"), True), (TimeoutError("slow read"), True)]
+        for error, retryable in failures:
+            with self.subTest(error=error), mock.patch.object(backlog.urllib.request, "urlopen", side_effect=error):
+                with self.assertRaises(forge.ForgeError) as raised:
+                    source.requests()
+                self.assertEqual(raised.exception.retryable, retryable)
 
     def test_engine_login_comes_from_the_authenticated_forge_user(self):
         from unittest import mock
