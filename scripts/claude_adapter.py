@@ -23,16 +23,22 @@ from shell_setup import ShellError, clean_env, login_argv, resolve
 RUNTIME = runtimes.get("claude")
 
 
-def command(request: Request, claude_as_profile: str = "") -> list[str]:
+def available() -> str | None:
+    """Claude's executable on the user's interactive login PATH; no model call."""
+    return resolve(RUNTIME.binary)
+
+
+def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[str, ...] = ()) -> list[str]:
     """Resolve the registry's host through shell setup and build exact login argv."""
     if request.session_id and not request.resume and not _is_uuid(request.session_id):
         raise ShellError(f"session_id {request.session_id!r} must be a UUID to start a session")
     program, lead = runtimes.program(RUNTIME.name, claude_as_profile)
-    binary = resolve(program)
+    binary = resolve(program) if claude_as_profile else available()
     if not binary:
         why = f"; claude_as_profile {claude_as_profile!r} needs it" if claude_as_profile else ""
         raise ShellError(f"`{program}` is not on the login shell's PATH{why}")
-    return login_argv(argv(request, binary, lead))
+    built = argv(request, binary, lead)
+    return login_argv([*built[:-2], *extra_args, *built[-2:]])
 
 
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
@@ -91,27 +97,34 @@ def _worker(run_dir: Path) -> None:
     _write(run_dir, "exit.json", {"exit_code": code})
 
 
-def call(request: Request, *, claude_as_profile: str = "") -> Reply | Failure:
-    """The model port for Claude. Bind the profile with `functools.partial` to get a `model_port.Model`."""
+def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str, ...] = (),
+         env: dict[str, str] | None = None) -> Reply | Failure:
+    """The model port for Claude. Bind the profile with `functools.partial` to get a `model_port.Model`.
+
+    Driver callers may supply an isolated tool/MCP policy as extra argv and an environment; neither
+    changes the port. Events, when requested, are returned only after the call completes.
+    """
     if request.session_id and not request.resume and not _is_uuid(request.session_id):
         return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
     try:
-        prepared = command(request, claude_as_profile)
+        prepared = command(request, claude_as_profile, extra_args=extra_args)
     except ShellError as exc:
         return Failure("missing_program", str(exc))
     try:
-        done = subprocess.run(prepared, env=clean_env(), cwd=request.cwd, stdin=subprocess.DEVNULL,
+        done = subprocess.run(prepared, env=clean_env(env), cwd=request.cwd, stdin=subprocess.DEVNULL,
                               capture_output=True, text=True, timeout=request.timeout_s)
     except subprocess.TimeoutExpired:
         return Failure("unknown", f"no answer within {request.timeout_s}s")
     except OSError as exc:  # e.g. the worktree in cwd was removed; the caller's retry policy decides
         return Failure("unknown", f"could not launch: {exc}")
-    return classify(done.returncode, done.stdout, done.stderr)
+    return classify(done.returncode, done.stdout, done.stderr, keep_events=request.keep_events)
 
 
 def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
     """The exact argv; the prompt follows `--`, so a prompt that starts with `-` stays the prompt."""
-    out = [binary, *lead, "-p", "--output-format", "json"]
+    out = [binary, *lead, "-p", "--output-format", "stream-json" if request.keep_events else "json"]
+    if request.keep_events:
+        out.append("--verbose")
     out += ["--model", request.model] if request.model else []
     out += RUNTIME.effort_tokens(request.effort)
     out += ["--json-schema", json.dumps(request.schema)] if request.schema is not None else []
@@ -138,16 +151,24 @@ def _is_uuid(value: str) -> bool:
     return True
 
 
-def classify(exit_code: int, stdout: str, stderr: str) -> Reply | Failure:
+def classify(exit_code: int, stdout: str, stderr: str, *, keep_events: bool = False) -> Reply | Failure:
+    events = None
     try:
-        envelope = json.loads(stdout)
+        if keep_events:
+            events = [json.loads(line) for line in stdout.splitlines() if line.strip()]
+            if not all(isinstance(event, dict) for event in events):
+                raise ValueError("non-object event")
+            envelope = events[-1] if events and events[-1].get("type") == "result" else None
+        else:
+            envelope = json.loads(stdout)
     except ValueError:
         envelope = None
     envelope = envelope if isinstance(envelope, dict) else None
     said = str(envelope.get("result", "")) if envelope else ""
     if exit_code == 0 and envelope and envelope.get("is_error") is False:
         return Reply(text=said, data=envelope.get("structured_output"), session_id=str(envelope.get("session_id", "")),
-                     cost_usd=float(envelope.get("total_cost_usd") or 0), num_turns=int(envelope.get("num_turns") or 0))
+                     cost_usd=float(envelope.get("total_cost_usd") or 0), num_turns=int(envelope.get("num_turns") or 0),
+                     events=events)
     # A quota stop is checked first: it is never reported as the model's failure (ledger E5, #422).
     reset = quota_reset(f"{stderr}\n{said}")
     if reset is not None:

@@ -1228,7 +1228,9 @@ class UnmeasuredVerdictTest(unittest.TestCase):
         import runpy
         buf = io.StringIO()
         case = run.load_cases(["stale-clock"])[0]
-        with unittest.mock.patch.object(run, "load_cases", return_value=[case]), \
+        with tempfile.TemporaryDirectory() as d, \
+             unittest.mock.patch.object(run, "EVALS", Path(d)), \
+             unittest.mock.patch.object(run, "load_cases", return_value=[case]), \
              unittest.mock.patch.object(run, "run_one", return_value=(results, error, {})), \
              contextlib.redirect_stdout(buf):
             code = run.main(["--arm", "agent"])

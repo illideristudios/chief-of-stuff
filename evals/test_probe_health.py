@@ -19,7 +19,6 @@ import tempfile
 import threading
 import time
 import unittest
-from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -27,8 +26,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import probe_health as ph  # noqa: E402
 import install_model_guidance as guidance  # noqa: E402
-import runtimes  # noqa: E402
-import test_shell_setup  # noqa: E402
 from shell_setup import ShellError  # noqa: E402
 import workspace  # noqa: E402
 
@@ -617,7 +614,6 @@ class SettingsCheckTest(unittest.TestCase):
 MODELS = (GOOD + '\n[models.deep]\nrotation = ["claude:opus@high", "claude:sonnet@high"]\n'
           '\n[models.implement]\nrotation = ["claude:haiku@high", "codex:gpt-x"]\n'
           '\n[models.review]\nrotation = ["cursor:some-model"]\n')
-NAMED = ("claude", "codex", "cursor")
 SETTINGS = f"- Settings: `{TOML}`\n"
 # Where the stand-in `resolve` says a present binary lives: a home path, which carries a username.
 HOME = "/Users/somebody"
@@ -635,9 +631,10 @@ class RuntimeCheckTest(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
 
     def test_missing_claude_is_one_fault_and_keeps_the_target_lines(self):
-        alone_code, alone, _ = self.run_health(self.targets())
+        targets = self.targets()
+        alone_code, alone, _ = self.run_health(targets)
         with mock.patch.object(ph.claude_adapter, "available", return_value=None):
-            code, lines, err = self.run_health(SETTINGS + self.targets(), MODELS)
+            code, lines, err = self.run_health(SETTINGS + targets, MODELS)
         self.assertEqual(code, alone_code + 1)
         self.assertEqual(lines[1], "runtimes claude missing")
         self.assertEqual(lines[2:], alone)

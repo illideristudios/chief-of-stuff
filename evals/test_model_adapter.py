@@ -240,6 +240,29 @@ class CallTest(unittest.TestCase):
         self.assertEqual((got.text, got.data), ("reply: hello", {"answer": "hello"}))
         self.assertEqual(self.resolved, ["claude"])
 
+    def test_real_stream_call_keeps_raw_events_and_resumes(self):
+        first = self.call("the word is heron", session_id=SID, keep_events=True)
+        self.assertEqual(first.events[1]["message"]["content"][0]["type"], "tool_use")
+        second = self.call("recall", session_id=SID, resume=True, keep_events=True)
+        self.assertIn("heron", second.text)
+        self.assertEqual(second.events[-1]["session_id"], SID)
+
+    def test_driver_options_and_environment_reach_the_cli_with_a_literal_prompt(self):
+        capture = self.dir / "capture.py"
+        capture.write_text("import json,os,sys\nprint(json.dumps({'type':'result','is_error':False,"
+                           "'result':json.dumps([sys.argv[1:], os.environ.get('CHIEF_EVAL_TEST'), "
+                           "os.environ.get('UNRELATED_SECRET')])}))\n")
+        capture.chmod(0o755)
+        with mock.patch.object(claude_adapter, "command", return_value=[sys.executable, str(capture)]) as command:
+            got = claude_adapter.call(Request(prompt="-literal"), extra_args=("--max-turns", "4"),
+                                      env={"CHIEF_EVAL_TEST": "set", "UNRELATED_SECRET": "discard"})
+        self.assertEqual(json.loads(got.text), [[], "set", None])
+        self.assertEqual(command.call_args.kwargs["extra_args"], ("--max-turns", "4"))
+        with mock.patch.object(claude_adapter, "resolve", return_value=str(self.cli)), \
+             mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}):
+            cmd = claude_adapter.command(Request(prompt="-literal"), extra_args=("--max-turns", "4"))
+        self.assertEqual(cmd[-4:], ["--max-turns", "4", "--", "-literal"])
+
     def test_a_session_minted_then_resumed_recalls_the_first_call(self):
         self.call("the code word is heron", session_id=SID)
         self.assertIn("heron", self.call("what was it?", session_id=SID, resume=True).text)

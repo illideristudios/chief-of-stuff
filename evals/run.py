@@ -1,7 +1,7 @@
 """Eval runner for the chief-of-stuff agent.
 
 `claude plugin eval` cannot run a case under `--agent`, so the default backend drives
-`claude -p` directly. `--runtime` selects a headless Codex, Cursor, or Antigravity CLI instead.
+Claude through the model adapter. `--runtime` selects a headless Codex, Cursor, or Antigravity CLI instead.
 Grader vocabulary follows `plugin eval` where it overlaps (`tool_used`, `regex`) so cases can
 be ported later. A case's `"runtimes_present": ["claude"]` makes those the only runtimes the login shell finds.
 
@@ -23,12 +23,11 @@ import signal
 import socket
 import subprocess
 import sys
-import queue
 import tempfile
 import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import asdict, dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from datetime import datetime, timedelta
 from datetime import time as dtime
@@ -41,6 +40,9 @@ import make_repo  # noqa: E402
 # Package-style, as start_coordinator imports it, so `host_prompt` and this module share one copy.
 sys.path.insert(1, str(Path(__file__).resolve().parent.parent))
 from scripts import runtimes  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import claude_adapter  # noqa: E402
+from model_port import Failure, Reply, Request  # noqa: E402
 
 EVALS = Path(__file__).resolve().parent
 PLUGIN_ROOT = EVALS.parent
@@ -1030,27 +1032,6 @@ def calendar_mcp_config(events: Path, log: Path, tz: str) -> dict[str, Any]:
     return {"mcpServers": {"calendar": {"type": "stdio", "command": sys.executable, "args": args}}}
 
 
-CLAUDE_ENV = "CHIEF_OF_STUFF_CLAUDE"
-# A GUI-launched terminal inherits launchd's PATH, not the shell's, so a bare `claude` is not on it
-# and every case a session writes from such a tab goes ungraded. Resolve it once, absolutely, and
-# leave an override for a machine that keeps it somewhere else.
-CLAUDE_FALLBACKS = ("/opt/homebrew/bin/claude", "/usr/local/bin/claude")
-
-
-def claude_binary() -> str:
-    """The `claude` to run: the override, then PATH, then the two places a Mac install puts it."""
-    override = os.environ.get(CLAUDE_ENV, "").strip()
-    if override:
-        return override
-    found = shutil.which("claude")
-    if found:
-        return str(Path(found).resolve())
-    for candidate in CLAUDE_FALLBACKS:
-        if Path(candidate).exists():
-            return candidate
-    return "claude"
-
-
 SNAPSHOT_SKIP = shutil.ignore_patterns(".git", "results", "__pycache__", "*.pyc", ".DS_Store")
 
 
@@ -1090,37 +1071,33 @@ def write_verdict(out: Path, case: str, arm: str, model: str, run_no: int,
     return path
 
 
-def command(case: Case, arm: str, model: str, prompt: str | None, mcp_config: dict[str, Any] | None = None,
-            root: Path | None = None, effort: str | None = None) -> list[str]:
-    """A `prompt` of None means a multi-turn case: user turns arrive as stream-json on stdin.
+def claude_request(case: Case, arm: str, model: str, prompt: str, work: Path,
+                   root: Path | None = None, effort: str | None = None) -> Request:
+    """The completed call retains the raw tool events the graders consume."""
+    return Request(prompt=prompt, model=model, effort=effort or "", cwd=str(work),
+                   plugin_dirs=(str(root or PLUGIN_ROOT),), agent=AGENT if arm == "agent" else "",
+                   timeout_s=case.spec.get("timeout_seconds", 300), keep_events=True)
 
-    `root` is the plugin tree this run reads — a snapshot when one was taken, the live checkout
-    otherwise. Both the allowlisted script paths and `--plugin-dir` follow it, because the agent
-    definition is read live too and is as much a mid-run moving part as the scripts are.
-    """
-    root = root or PLUGIN_ROOT
+
+def claude_options(spec: dict[str, Any], mcp_config: dict[str, Any] | None = None,
+                   root: Path | None = None) -> tuple[str, ...]:
+    """Driver-only eval isolation policy; host launch and parsing belong to the adapter."""
     mcp_config = mcp_config or {"mcpServers": {}}
-    allowed = allowed_tools(root) + ([CALENDAR_TOOL] if "calendar" in mcp_config["mcpServers"] else []) + (PEER_MOCK_TOOLS if "peers" in mcp_config["mcpServers"] else [])
-    cmd = [
-        claude_binary(), "-p", *([prompt] if prompt is not None else []),
-        "--model", model,
-        "--output-format", "stream-json", "--verbose",
-        "--no-session-persistence",
-        "--setting-sources", "project",
-        "--plugin-dir", str(root),
-        "--strict-mcp-config", "--mcp-config", json.dumps(mcp_config),
-        "--max-turns", str(case.spec.get("max_turns", 10)),
-        "--tools", *TOOLS,
-        "--allowedTools", *allowed,
-        "--disallowedTools", *DISALLOWED,
-    ]
-    if prompt is None:
-        cmd += ["--input-format", "stream-json"]
-    if arm == "agent":
-        cmd += ["--agent", AGENT]
-    if effort:
-        cmd += runtimes.get("claude").effort_tokens(effort)
-    return cmd
+    allowed = allowed_tools(root or PLUGIN_ROOT) + ([CALENDAR_TOOL] if "calendar" in mcp_config["mcpServers"] else []) + (PEER_MOCK_TOOLS if "peers" in mcp_config["mcpServers"] else [])
+    return ("--setting-sources", "project", "--strict-mcp-config", "--mcp-config", json.dumps(mcp_config),
+            "--max-turns", str(spec.get("max_turns", 10)), "--tools", *TOOLS,
+            "--allowedTools", *allowed, "--disallowedTools", *DISALLOWED)
+
+
+def call_claude(request: Request, options: tuple[str, ...], env: dict[str, str], out: Path,
+                suffix: str = "") -> Reply | Failure:
+    """Record the call inputs and the adapter's completed events for later regrading."""
+    (out / f"command{suffix}.json").write_text(json.dumps({"request": asdict(request), "extra_args": options}, indent=1))
+    got = claude_adapter.call(request, extra_args=options, env=env)
+    (out / f"stream{suffix}.jsonl").write_text(
+        "".join(json.dumps(e) + "\n" for e in got.events or []) if isinstance(got, Reply) else "")
+    (out / f"stderr{suffix}.txt").write_text(got.message if isinstance(got, Failure) else "")
+    return got
 
 
 def host_command(runtime: str, model: str, prompt: str, work: Path, root: Path,
@@ -1273,97 +1250,6 @@ class Turn:
 def has_notification(events: list[dict[str, Any]]) -> bool:
     """A background task's completion landed in this turn (`system:task_notification`)."""
     return any(e.get("type") == "system" and e.get("subtype") == "task_notification" for e in events)
-
-
-def split_turns(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
-    turns, current = [], []
-    for ev in events:
-        current.append(ev)
-        if ev.get("type") == "result":
-            turns.append(current)
-            current = []
-    if current:
-        turns.append(current)
-    return turns
-
-
-def drive_turns(
-    cmd: list[str],
-    prompts: list[str | None],
-    cwd: Path,
-    env: dict[str, str] | None,
-    timeout: float,
-    snapshot: Callable[[int], None],
-    wait_seconds: float = 180,
-    before_turn: Callable[[int], None] | None = None,
-    close_grace: float = 60,
-) -> list[Turn]:
-    """Feed each prompt as a stream-json user message; a turn ends at its `result` event.
-
-    A `None` prompt is a wait turn: send nothing and read the turn the session starts on its own
-    (a background task's completion notification does this). If the previous turn already carried
-    the notification (the task finished before the assistant stopped), there is nothing to wait for
-    and the wait turn is skipped. If no event arrives within `wait_seconds`, driving stops there and
-    later turns count as not reached. `timeout` bounds the
-    whole run and raises `TimeoutError`. After stdin closes, a process still running (a background
-    task) is killed after `close_grace`. `snapshot(n)` runs after turn n's result.
-    """
-    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    lines: queue.Queue[str | None] = queue.Queue()
-
-    def pump() -> None:
-        for line in proc.stdout:
-            lines.put(line)
-        lines.put(None)
-
-    threading.Thread(target=pump, daemon=True).start()
-    deadline = time.monotonic() + timeout
-    turns: list[Turn] = []
-    try:
-        for n, prompt in enumerate(prompts, start=1):
-            if prompt is None and turns and has_notification(turns[-1].events):
-                continue
-            if before_turn is not None:
-                before_turn(n)
-            t_start = datetime.now().astimezone()
-            if prompt is not None:
-                proc.stdin.write(json.dumps({"type": "user", "message": {"role": "user", "content": prompt}}) + "\n")
-                proc.stdin.flush()
-            events: list[dict[str, Any]] = []
-            eof = False
-            while True:
-                limit = deadline - time.monotonic()
-                if prompt is None and not events:
-                    limit = min(limit, wait_seconds)
-                if limit <= 0 and deadline - time.monotonic() <= 0:
-                    raise TimeoutError(f"turn {n} timed out after {timeout}s")
-                try:
-                    line = lines.get(timeout=max(limit, 0.01))
-                except queue.Empty:
-                    if deadline - time.monotonic() <= 0:
-                        raise TimeoutError(f"turn {n} timed out after {timeout}s") from None
-                    return turns  # wait turn: nothing arrived
-                if line is None:
-                    eof = True
-                    break
-                if line.strip():
-                    events.append(json.loads(line))
-                    if events[-1].get("type") == "result":
-                        break
-            if events:
-                turns.append(Turn(events, t_start, datetime.now().astimezone()))
-                snapshot(n)
-            if eof or events[-1].get("type") != "result":
-                break
-        proc.stdin.close()
-        try:
-            proc.wait(timeout=close_grace)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-    finally:
-        if proc.poll() is None:
-            proc.kill()
-    return turns
 
 
 def grade_turns(spec: dict[str, Any], turns: list[Turn], tz: str, out: Path, calls: list[dict[str, Any]]) -> list[tuple[str, bool, str]]:
@@ -1624,23 +1510,28 @@ def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = Non
                                       case_root=case.root, ctx=ctx)
             return run_turns(spec, arm, model, out, work, env, mcp_config, calls_log, tz, case_root=case.root, ctx=ctx,
                              root=root, effort=effort)
-        try:
-            cmd = (command(case, arm, model, spec["prompt"], mcp_config=mcp_config, root=root, effort=effort)
-                   if runtime == "claude" else host_command(runtime, model,
-                        host_prompt(runtime, arm, spec["prompt"], root or PLUGIN_ROOT, work),
-                        work, root or PLUGIN_ROOT, mcp_config, effort=effort, extra_write=out))
-        except RuntimeError as exc:
-            return [], str(exc), {"runtime": runtime}
-        (out / "command.json").write_text(json.dumps(cmd, indent=1))
         t_start = datetime.now(ZoneInfo(tz))
-        try:
-            proc = subprocess.run(cmd, cwd=work, env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                                  text=True, timeout=spec.get("timeout_seconds", 300))
-        except subprocess.TimeoutExpired:
-            return [], "timeout", {}
+        if runtime == "claude":
+            request = claude_request(Case(case.name, case.root, spec), arm, model, spec["prompt"], work, root, effort)
+            got = call_claude(request, claude_options(spec, mcp_config, root), env, out)
+            if isinstance(got, Failure):
+                return [], f"claude {got.kind}: {got.message}", {"runtime": runtime}
+        else:
+            try:
+                cmd = host_command(runtime, model,
+                    host_prompt(runtime, arm, spec["prompt"], root or PLUGIN_ROOT, work),
+                    work, root or PLUGIN_ROOT, mcp_config, effort=effort, extra_write=out)
+            except RuntimeError as exc:
+                return [], str(exc), {"runtime": runtime}
+            (out / "command.json").write_text(json.dumps(cmd, indent=1))
+            try:
+                proc = subprocess.run(cmd, cwd=work, env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                                      text=True, timeout=spec.get("timeout_seconds", 300))
+            except subprocess.TimeoutExpired:
+                return [], "timeout", {}
+            (out / "stream.jsonl").write_text(proc.stdout)
+            (out / "stderr.txt").write_text(proc.stderr)
         t_end = datetime.now(ZoneInfo(tz))
-        (out / "stream.jsonl").write_text(proc.stdout)
-        (out / "stderr.txt").write_text(proc.stderr)
         shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
     finally:
         stop_pages(work, int(ctx["pages_port"]))
@@ -1651,16 +1542,16 @@ def run_one(case: Case, arm: str, model: str, out: Path, root: Path | None = Non
     stream = (load_stream(out / "stream.jsonl") if runtime == "claude" else
               parse_host_stream((out / "stream.jsonl").read_text(), runtime, model))
     meta = {
-        "exit": proc.returncode,
+        "exit": 0 if runtime == "claude" else proc.returncode,
         "turns": (stream.result or {}).get("num_turns"),
         "notional_usd": (stream.result or {}).get("total_cost_usd"),
         "denials": len(stream.denied_ids), "runtime": runtime,
     }
-    if proc.returncode != 0 or stream.result is None:
+    if runtime != "claude" and (proc.returncode != 0 or stream.result is None):
         detail = stream.init.get("error") or proc.stderr.strip()
         return [], f"{runtime} exit {proc.returncode}: {str(detail)[:300]}", meta
     if runtime == "claude":
-        ok, detail = check_arm(stream.init, arm, agent_flag_used="--agent" in cmd and arm != "agent", needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
+        ok, detail = check_arm(stream.init, arm, needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
         if not ok:
             return [], f"arm check: {detail}", meta
     elif str((stream.result or {}).get("status", "SUCCESS")).upper() not in ("SUCCESS", "COMPLETED"):
@@ -1734,33 +1625,42 @@ def run_host_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: 
 
 
 def run_turns(spec: dict[str, Any], arm: str, model: str, out: Path, work: Path, env: dict[str, str], mcp_config: dict[str, Any] | None, calls_log: Path, tz: str, case_root: Path = Path("."), ctx: dict[str, str] | None = None, root: Path | None = None, effort: str | None = None) -> tuple[list[tuple[str, bool, str]], str | None, dict[str, Any]]:
-    """Multi-turn case: one stream-json process, graders scoped to each turn, fixture snapshot per turn."""
-    cmd = command(Case("", Path(), spec), arm, model, None, mcp_config=mcp_config, root=root, effort=effort)
-    (out / "command.json").write_text(json.dumps(cmd, indent=1))
-
-    def snapshot(n: int) -> None:
+    """Prompted turns are completed adapter calls, resumed by explicit session ID."""
+    if any("prompt" not in turn for turn in spec["turns"]):
+        return [], "claude cannot safely wake an idle conversation for a wait turn through the model port", {"runtime": "claude"}
+    turns: list[Turn] = []
+    request = claude_request(Case("", case_root, spec), arm, model, "", work, root, effort)
+    request = replace(request, session_id=str(uuid.uuid4()))
+    options = claude_options(spec, mcp_config, root)
+    deadline = time.monotonic() + request.timeout_s
+    for n, turn_spec in enumerate(spec["turns"], 1):
+        if "peers" in turn_spec:
+            (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return [], f"timeout before claude turn {n}", {"turns_reached": len(turns)}
+        request = replace(request, prompt=turn_spec["prompt"], timeout_s=remaining)
+        started = datetime.now(ZoneInfo(tz))
+        got = call_claude(request, options, env, out, suffix=f"-turn{n}")
+        if isinstance(got, Failure):
+            return [], f"claude turn {n} {got.kind}: {got.message}", {"turns_reached": len(turns)}
+        turns.append(Turn(got.events or [], started, datetime.now(ZoneInfo(tz))))
         shutil.copytree(work, out / f"fixture-turn{n}", dirs_exist_ok=True)
-
-    try:
-        def before_turn(n: int) -> None:
-            turn_spec = spec["turns"][n - 1]
-            if "peers" in turn_spec:
-                (out / "peers-sessions.json").write_text(render((case_root / turn_spec["peers"]).read_text(), ctx))
-
-        turns = drive_turns(cmd, [t.get("prompt") for t in spec["turns"]], work, env, spec.get("timeout_seconds", 300), snapshot, wait_seconds=spec.get("wait_seconds", 180), before_turn=before_turn)
-    except TimeoutError as exc:
-        return [], f"timeout: {exc}", {}
+        if n < len(spec["turns"]):
+            if not got.session_id:
+                return [], f"claude returned no conversation ID after turn {n}", {"turns_reached": len(turns)}
+            request = replace(request, session_id=got.session_id, resume=True)
     shutil.copytree(work, out / "fixture", dirs_exist_ok=True)
     (out / "stream.jsonl").write_text("".join(json.dumps(e) + "\n" for t in turns for e in t.events))
     streams = [parse_stream(t.events) for t in turns]
     meta = {
-        "turns_reached": len([st for st in streams if st.result]),
+        "runtime": "claude", "turns_reached": len(turns),
         "notional_usd": round(sum((st.result or {}).get("total_cost_usd", 0) for st in streams), 4),
         "denials": sum(len(st.denied_ids) for st in streams),
     }
     if not streams or streams[0].result is None:
         return [], "claude produced no result for turn 1", meta
-    ok, detail = check_arm(streams[0].init, arm, agent_flag_used="--agent" in cmd and arm != "agent", needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
+    ok, detail = check_arm(streams[0].init, arm, needs_calendar="calendar" in spec, model=model, needs_peers="peers" in spec)
     if not ok:
         return [], f"arm check: {detail}", meta
     calls = [json.loads(l) for l in calls_log.read_text().splitlines() if l.strip()] if calls_log.exists() else []
