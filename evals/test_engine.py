@@ -636,7 +636,7 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(failed.call_count, calls)
             self.now += timedelta(seconds=1)
 
-    def test_answered_short_ask_clears_only_its_own_ambiguity(self):
+    def test_answered_short_ask_clears_its_ambiguity(self):
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
         ask = self.db.add_ask(KEY, "implement", 1, "s1", "Which credentials?", [], "ctx")
@@ -756,13 +756,16 @@ class EngineTest(unittest.TestCase):
         replacement, = [ask for ask in self.db.asks(KEY) if not ask.answer]
         self.assertIn("Restart completed: implement-2", replacement.context)
         self.db.answer_ask(replacement.id, "Keep")
-        self.run_pass()
+        self.run_pass(model=split)
+        self.assertEqual(split.n, 3)
         self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
         self.assertNotIn("interrupt", self.db.resume(KEY))
         self.finish("review", 2)
         self.findings(2)
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
         self.assertEqual(len(self.forge.merges), 1)
+        self.run_pass(model=split)
+        self.assertEqual(split.n, 3)
 
     def test_short_asks_keep_the_question_in_the_interrupt(self):
         self._trio()
@@ -1145,11 +1148,112 @@ class EngineTest(unittest.TestCase):
         self.assertFalse(any(s.stage == "review" for s in self.db.segments(KEY)))
         ask, = self.db.asks(KEY)
         self.db.answer_ask(ask.id, "Keep")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.run_pass(model=model), [reconcile.Review(KEY, 1)])
+        self.assertEqual(model.n, 3)
         self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
         self.finish("review")
         self.findings()
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
+    def _retryable_replacement(self):
+        import decision_actions
+        self._trio()
+        self.db.clock = lambda: self.now
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
+            "decision": {"options": ["Split", "Keep"], "context": "original", "instance": "parser"}})
+        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        self.db.add_decision(KEY, rev.topic, rev.question, rev.answer, rev.decided_by, rev.record)
+        self.run_pass()
+        self.finish("implement")
+        failed = mock.Mock(return_value=model_port.Failure("unknown", "timeout"))
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 3)
+        return failed
+
+    def _linked_retryable_replacement(self):
+        # A durable linked ask can survive a later retryable consultation (including old store data).
+        self._retryable_replacement()
+        row = self.db.decisions(KEY)[-1]
+        asks = self.db.asks(KEY)
+        ask_id = asks[0].id if asks else self.db.add_ask(
+            KEY, "implement", 1, "", row.question, ["Split", "Keep"], row.record["decision"]["context"])
+        self.db.add_decision(KEY, row.topic, row.question, record={**row.record, "answer_ask_id": ask_id})
+        self.now += timedelta(seconds=60)
+        return ask_id
+
+    def test_retryable_replacement_uses_backoff_without_a_human_ask_or_ping(self):
+        failed = self._retryable_replacement()
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 3)
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+        self.addCleanup(self.db.engine.dispose)
+        self.now += timedelta(seconds=59)
+        self.run_pass(model=failed)
+        self.assertEqual(failed.call_count, 3)
+        self.now += timedelta(seconds=1)
+        model = self._votes([("adopt", "Keep")] * 3)
+        self.run_pass(model=model)
+        self.assertEqual(model.n, 3)
+        self.assertEqual(self.db.decisions(KEY)[-1].answer, "Keep")
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertNotIn("trio_retries", self.db.resume(KEY))
+
+    def test_replacement_adoption_commits_its_link_before_answering_the_ask(self):
+        import decision_actions
+        ask_id = self._linked_retryable_replacement()
+        model = self._votes([("adopt", "Keep")] * 3)
+        with mock.patch.object(self.db, "answer_ask", side_effect=SystemExit("crash before ask answer")):
+            with self.assertRaises(SystemExit):
+                self.run_pass(model=model)
+        row = self.db.decisions(KEY)[-1]
+        self.assertEqual(row.answer, "Keep")
+        self.assertEqual(row.record.get("answer_ask_id"), ask_id)
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+        self.addCleanup(self.db.engine.dispose)
+        self.run_pass()
+        ask, = self.db.asks(KEY)
+        self.assertEqual(ask.answer, "Keep")
+        self.assertEqual(decision_actions.identity(decision_actions.ask_decision(self.db.decisions(KEY), ask)),
+                         ("design", "Which parser?", "parser"))
+        self.assertEqual(model.n, 3)
+
+    def test_recovery_links_a_historical_ask_to_its_committed_adoption_without_a_model(self):
+        import decision_actions
+        ask_id = self._linked_retryable_replacement()
+        prior = self.db.decisions(KEY)[-1]
+        record = {key: value for key, value in prior.record.items() if key != "answer_ask_id"}
+        record.update(recommendation="Keep", unanimous=True)
+        self.db.add_decision(KEY, prior.topic, prior.question, "Keep", "trio", record)
+        self.run_pass()
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.id, ask.answer), (ask_id, "Keep"))
+        row = decision_actions.ask_decision(self.db.decisions(KEY), ask)
+        self.assertEqual(row.answer, "Keep")
+        self.assertEqual(row.record["answer_ask_id"], ask_id)
+        self.assertEqual({decision_actions.identity(row) for row in self.db.decisions(KEY)},
+                         {("design", "Which parser?", "parser")})
+
+    def test_replacement_loop_settles_adoption_when_a_sibling_ask_is_limit_blocked(self):
+        ask_id = self._linked_retryable_replacement()
+        # Put an earlier, blocked ask ahead of the replacement in the driver's ask snapshot.
+        sibling = self.db.add_ask(KEY, "review", 1, "", "Review choice?", ["Yes", "No"], "review")
+        self.p.stages["review"] = policy.Place("review", "critic", {"spend_usd": 0.1})
+        self.db.set_resume(KEY, {**self.db.resume(KEY), "spend_usd": 1})
+        original_asks = self.db.asks
+        def sibling_first(key):
+            return sorted(original_asks(key), key=lambda ask: ask.id != sibling)
+        model = self._votes([("adopt", "Keep")] * 3)
+        with mock.patch.object(self.db, "asks", side_effect=sibling_first):
+            self.run_pass(model=model)
+        answers = {ask.id: ask.answer for ask in self.db.asks(KEY)}
+        self.assertEqual(answers, {ask_id: "Keep", sibling: None})
+        self.assertEqual(self.db.decisions(KEY)[-1].record.get("answer_ask_id"), ask_id)
+        self.assertEqual(model.n, 3)
 
     def test_unrouted_ask_blocks_merge_even_without_a_model(self):
         self._merge_gate()

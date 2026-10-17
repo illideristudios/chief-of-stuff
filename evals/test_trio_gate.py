@@ -252,6 +252,27 @@ class GateTest(unittest.TestCase):
         self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
         self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), ask))
 
+    def test_replacement_ask_specification_and_link_are_decision_updates(self):
+        import decision_actions
+        from types import SimpleNamespace
+        origin = SimpleNamespace(topic="design", question=self.decision.question, record={
+            "decision": {"options": list(OPTIONS), "context": "original", "instance": "parser"}})
+        segment = SimpleNamespace(stage="implement", attempt=2)
+        context = decision_actions.replacement_context(origin, segment)
+        record = {"decision": {**origin.record["decision"], "context": context}, "unanimous": False}
+        row = SimpleNamespace(topic=origin.topic, question=origin.question, answer=None,
+                              decided_by="zach", record=record)
+        spec, existing, pending = decision_actions.replacement_ask(origin, segment, [row], [])
+        self.assertIsNone(existing)
+        self.assertEqual(spec, dict(stage="implement", attempt=2, session_id="", question=row.question,
+                                    options=list(OPTIONS), context=context))
+        update = decision_actions.link_ask(pending, 42)
+        self.assertIsInstance(update, decision_actions.DecisionUpdate)
+        self.assertEqual((update.topic, update.question, update.answer, update.decided_by),
+                         (row.topic, row.question, None, "zach"))
+        self.assertEqual(update.record, {**record, "answer_ask_id": 42})
+        self.assertNotIn("answer_ask_id", row.record)
+
     def test_decision_actions_reverse_and_restarted_manage_board_reversals(self):
         import decision_actions
         self.consult([reply()] * 3)
