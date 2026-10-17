@@ -33,13 +33,12 @@ class WorkspaceFile:
     command: str
 
 
-# Init's outputs, also read by health for older workspaces. Init needs user/forge inputs;
+# Init's config and settings, also read by health for older workspaces. Init needs user/forge inputs;
 # --help explains those rather than suggesting an incomplete command that would fail.
-# Init takes the "config" and "settings" names from here; install_model_guidance takes its NAME from "models".
+# Model guidance stays out: the engine rotates models (ledger D10), so preflight does not advise installing it.
 WORKSPACE_FILES: dict[str, WorkspaceFile] = {
     "config": WorkspaceFile("CLAUDE.md", "chief-of-stuff init --help"),
     "settings": WorkspaceFile("chief-of-stuff.toml", "chief-of-stuff init --help"),
-    "models": WorkspaceFile("chief-of-stuff-models.md", "chief-of-stuff models --root {root}"),
 }
 
 

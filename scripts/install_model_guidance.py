@@ -8,16 +8,16 @@ import argparse
 import sys
 from pathlib import Path
 
-from workspace import WORKSPACE_FILES, ConfigError, read_config
+from workspace import ConfigError, read_config
 
 TEMPLATE = Path(__file__).resolve().parent.parent / "assets" / "worker-model-guidance.md"
-NAME = WORKSPACE_FILES["models"].name
+NAME = "chief-of-stuff-models.md"
 
 
 def destination(root: Path) -> Path:
     if not root.is_dir():
         raise ValueError(f"workspace {root} is not a directory")
-    path = root / WORKSPACE_FILES["models"].name
+    path = root / NAME
     if path.exists() and not path.is_file():
         raise ValueError(f"{path} exists but is not a file")
     return path
@@ -43,7 +43,7 @@ def chosen(root: Path, name: str, after: str | None, not_family: str | None) -> 
         raise ValueError(f"cannot read the ## Coordinator block: {exc}") from None
     models = load(root, cfg.settings_path).models
     if not models:
-        raise ValueError(f"the Settings TOML has no [models]; choose from {WORKSPACE_FILES['models'].name}")
+        raise ValueError(f"the Settings TOML has no [models]; choose from {NAME}")
     if name not in models:
         raise ValueError(f"no [models.{name}] in the Settings TOML; classes: {', '.join(models)}")
     return str(pick(models[name], after, not_family))
