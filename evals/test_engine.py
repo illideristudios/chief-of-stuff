@@ -648,7 +648,7 @@ class EngineTest(unittest.TestCase):
         self.run_pass(max_concurrency=0)
         self.assertNotIn("interrupt", self.db.resume(KEY))
 
-    def test_retryable_trio_failures_stop_at_a_durable_cap_without_escalating(self):
+    def test_retryable_trio_failures_escalate_at_a_durable_cap_and_accept_an_answer(self):
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
         self.db.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "")
@@ -657,7 +657,10 @@ class EngineTest(unittest.TestCase):
             self.run_pass(model=failed)
             self.now += timedelta(hours=2)
         self.assertEqual(failed.call_count, 24)
-        self.assertNotIn("interrupt", self.db.resume(KEY))
+        interrupt = self.db.resume(KEY)["interrupt"]
+        self.assertEqual(interrupt, {"kind": "ambiguity",
+            "reason": "trio unavailable after 8 attempts: Which parser?",
+            "decision": {"topic": "ask", "question": "Which parser?", "instance": "ask-1", "context": ""}})
         self.db.engine.dispose()
         self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
         self.addCleanup(self.db.engine.dispose)
@@ -665,7 +668,7 @@ class EngineTest(unittest.TestCase):
             self.run_pass(model=failed)
             self.now += timedelta(hours=2)
         self.assertEqual(failed.call_count, 24)
-        self.assertNotIn("interrupt", self.db.resume(KEY))
+        self.assertEqual(self.db.resume(KEY)["interrupt"], interrupt)
         self.db.add_ask(KEY, "implement", 1, "s1", "Which backend?", ["Local", "Remote"], "")
         model = self._votes([("adopt", "Local")] * 3)
         self.run_pass(model=model)
@@ -674,6 +677,9 @@ class EngineTest(unittest.TestCase):
         self.db.answer_ask(self.db.asks(KEY)[0].id, "Split")
         self.run_pass(model=model)
         self.assertEqual(self.db.decisions(KEY)[-1].answer, "Split")
+        self.assertEqual(self.db.decisions(KEY)[-1].decided_by, "user")
+        self.assertEqual(failed.call_count, 24)
+        self.assertEqual(model.n, 3)
         self.assertNotIn("interrupt", self.db.resume(KEY))
 
     def test_retryable_gate_failures_stop_at_a_cap_without_repeated_interrupts(self):
@@ -687,6 +693,12 @@ class EngineTest(unittest.TestCase):
             self.now += timedelta(hours=2)
         self.assertEqual(failed.call_count, 24)
         self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), 1)
+        self.assertEqual(self.db.resume(KEY)["interrupt"], {"kind": "ambiguity",
+            "reason": "trio unavailable after 8 attempts: gate requires Zach's approval",
+            "decision": {"topic": "plan", "question": "gate requires Zach's approval", "instance": "",
+                         "context": "implement-1"}})
+        self.assertEqual(self.run_pass(model=failed), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(failed.call_count, 24)
         self.assertNotIn("waived_gates", self.db.resume(KEY))
         # A later crossing gets a fresh retry budget.
         self.db.record_segment(KEY, "implement", 2, self.now.isoformat(), self.now.isoformat(), "done")
@@ -695,13 +707,33 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(model.n, 3)
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
 
-    def test_retryable_replacement_failures_stop_at_a_cap_without_a_human_ask_or_ping(self):
+    def test_retryable_replacement_failures_escalate_with_an_answerable_ask_at_the_cap(self):
         failed = self._retryable_replacement()
         for _ in range(10):
             self.now += timedelta(hours=2)
             self.run_pass(model=failed)
         self.assertEqual(failed.call_count, 24)
-        self.assertEqual(self.db.asks(KEY), [])
+        ask, = self.db.asks(KEY)
+        self.assertIsNone(ask.answer)
+        self.assertEqual(ask.options, ["Split", "Keep"])
+        interrupt = self.db.resume(KEY)["interrupt"]
+        self.assertEqual(interrupt, {"kind": "ambiguity",
+            "reason": "trio unavailable after 8 attempts: Which parser?",
+            "decision": {"topic": "design", "question": "Which parser?", "instance": "parser",
+                         "context": ask.context}})
+        self.assertEqual(sum(e.message.startswith("ambiguity:") for e in self.db.log(KEY)), 1)
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+        self.addCleanup(self.db.engine.dispose)
+        self.assertEqual(self.run_pass(model=failed), [reconcile.Wait(KEY, "decision pending")])
+        self.assertEqual(failed.call_count, 24)
+        self.assertEqual(self.db.resume(KEY)["interrupt"], interrupt)
+        self.db.answer_ask(ask.id, "Keep")
+        self.run_pass(model=failed)
+        row = self.db.decisions(KEY)[-1]
+        self.assertEqual((row.answer, row.decided_by), ("Keep", "user"))
+        self.assertEqual(self.db.asks(KEY)[0].answer, "Keep")
+        self.assertEqual(failed.call_count, 24)
         self.assertNotIn("interrupt", self.db.resume(KEY))
 
     def test_answered_short_ask_clears_its_ambiguity(self):
