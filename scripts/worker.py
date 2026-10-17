@@ -273,7 +273,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
             finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
     """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
-    facts = gather() if gather is not None else None
+    completed = []
     for segment in store.segments():
         if segment.ended_at is not None:
             continue
@@ -365,6 +365,11 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     outcome, reason = reports[-1].outcome, reports[-1].summary
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
+        completed.append((segment, outcome, reason, now))
+    # Adopt and backfill every run before the shared snapshot; later exits wait for the next pass.
+    facts = gather() if gather is not None else None
+    for segment, outcome, reason, now in completed:
+        key = segment.issue_key
         if finish is not None:
             try:
                 finish(segment, outcome, reason, now, facts=facts)

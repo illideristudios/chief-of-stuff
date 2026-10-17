@@ -608,20 +608,21 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}") from exc
 
-    def _open_closers(self) -> list[dict]:
+    def _open_closers(self, base: str) -> list[dict]:
         """One bounded list of open closing identities, without CI, reviews or discussions."""
         try:
+            limit = backlog.GH_LIMIT if self.github else forge_review.REQUEST_LIMIT
             if self.github:
                 rows, error = _gh_json(self.gh, [
-                    "pr", "list", "-R", self.home.repo, "--state", "open",
-                    "--limit", str(forge_review.REQUEST_LIMIT), "--json",
+                    "pr", "list", "-R", self.home.repo, "--state", "open", "--base", base,
+                    "--limit", str(limit), "--json",
                     "number,headRefOid,baseRefName,closingIssuesReferences"])
                 if error:
                     raise ForgeError(error)
             else:
                 rows = self._pipeline_read("merge_requests?" + urlencode({
-                    "state": "opened", "per_page": forge_review.REQUEST_LIMIT}))
-            if (not isinstance(rows, list) or len(rows) >= forge_review.REQUEST_LIMIT
+                    "state": "opened", "target_branch": base, "per_page": limit}))
+            if (not isinstance(rows, list) or len(rows) >= limit
                     or any(not isinstance(row, dict) for row in rows)):
                 raise ValueError("expected a complete list of open closing identities")
             return rows
@@ -683,7 +684,7 @@ class Forge:
             return found
         merged = self._merged_requests()
         newest = {}
-        for row in [*merged, *self._open_closers()]:
+        for row in [*merged, *self._open_closers(pipeline.ref)]:
             if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
                 continue
             identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))

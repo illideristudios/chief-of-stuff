@@ -457,12 +457,14 @@ class LandingTest(unittest.TestCase):
                         args = gh.all_calls[0]
                         self.assertEqual(args[:2], ["pr", "list"])
                         self.assertEqual(args[args.index("--state") + 1], "open")
+                        self.assertEqual(args[args.index("--base") + 1], "main")
                         self.assertEqual(set(args[args.index("--json") + 1].split(",")),
                                          {"number", "headRefOid", "baseRefName", "closingIssuesReferences"})
                         call.assert_not_called()
                     else:
                         call.assert_called_once()
                         self.assertEqual(parse_qs(urlsplit(call.call_args.args[1]).query)["state"], ["opened"])
+                        self.assertEqual(parse_qs(urlsplit(call.call_args.args[1]).query)["target_branch"], ["main"])
                         self.assertTrue(urlsplit(call.call_args.args[1]).path.endswith("/merge_requests"))
 
     def test_open_closers_filter_the_base_and_use_the_paginated_github_limit(self):
