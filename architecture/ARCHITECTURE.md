@@ -20,9 +20,9 @@ The shared helpers the page modules use (the stylesheet head, the file write tha
 
 Each script under `scripts/`, the two launchers and each hook file belong to one circle. A module that does the work of two circles is a gap against this section until it is split. `inbox.py`, `audit_tasks.py` and `flow.py` are placed by their parts, as section 8 describes.
 
-The owner decisions in the 1.0 ledger (`docs/specs/2026-10-09-chief-of-stuff-1.0-ledger.md`, section "Owner decisions", Zach, 2026-10-10) amend this document. Where a section here disagrees with one of them, the owner decision stands and the section is rewritten to match. A module the ledger retires, such as the file mailbox, the tracker parser and its command lines, the flow tick, the notify service, the terminal launchers or the non-Claude watcher, keeps its circle in this table until it is deleted. A gap against a retiring module closes when the module is deleted.
+The owner decisions in the 1.0 ledger (`docs/specs/2026-10-09-chief-of-stuff-1.0-ledger.md`, section "Owner decisions", 2026-10-10) amend this document. Where a section here disagrees with one of them, the owner decision stands and the section is rewritten to match. A module the ledger retires, such as the file mailbox, the tracker parser and its command lines, the flow tick, the notify service, the terminal launchers or the non-Claude watcher, keeps its circle in this table until it is deleted. A gap against a retiring module closes when the module is deleted.
 
-New work goes on the engine path: the store, the forge adapter, the model port, the reconcile pass and the pages built on them. The goal is 1.0, then 1.1, with as much legacy dropped as possible (Zach, 2026-10-16), so getting the engine to run the workspace comes first. A retiring module takes only the fixes today's loop needs to keep running until that cutover. A new behaviour lands on the engine path. It also lands on a retiring module only when the loop needs it before the cutover, and then the engine side is in the same change or filed as its own issue. A change that adds behaviour only to a retiring module is a gap against this section.
+New work goes on the engine path: the store, the forge adapter, the model port, the reconcile pass and the pages built on them. The goal is 1.0, then 1.1, with as much legacy dropped as possible (owner, 2026-10-16), so getting the engine to run the workspace comes first. A retiring module takes only the fixes today's loop needs to keep running until that cutover. A new behaviour lands on the engine path. It also lands on a retiring module only when the loop needs it before the cutover, and then the engine side is in the same change or filed as its own issue. A change that adds behaviour only to a retiring module is a gap against this section.
 
 | Circle | Modules |
 |---|---|
@@ -48,7 +48,7 @@ The engine runs the review panel.
 
 A review is bound to the head it reviewed: the segment records the reviewed commit, and a merge happens only when that commit is the change's current head.
 
-The reviewer personas are the 22 personas of Zach's code-review skill (`extras` 1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (Zach, 2026-10-16).
+The reviewer personas are the 22 personas of the `extras` plugin's code-review skill (1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (owner, 2026-10-16).
 
 The panel for a change follows the skill's own selection rule, which ships as policy data in `assets/policy.toml`:
 - Every review gets Senior Architect (1) and Senior Staff Engineer (2).
@@ -66,13 +66,13 @@ The architect and the architecture reviewers are different roles, and nothing tr
 
 In policy, the name `architect` is reserved for the agent: `[personas.architect]`, with `agent = "frank-lloyd-aight"`, is what the consult and dispositions point at. Reviewer personas never use that name; they are `senior-architect` and `uncle-bob`. A finding from an architecture reviewer goes to the architect for disposition like any other finding.
 
-The engine never starts an architect run on its own (Zach, 2026-10-17). The architect is a standing session that keeps its context across consults.
+The engine never starts an architect run on its own (owner, 2026-10-17). The architect is a standing session that keeps its context across consults.
 - **A consult is a request.** The engine posts it where the architect watches, on the change or its issue, in the form `Architect review requested: <sha>`, with the findings to dispose of. It then waits for the architect's reply on the same thread, and treats the issue as waiting on the architect until the reply comes.
 - **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding.
 - **The head is the forge's.** "The current head" is the change's head as the forge adapter reports it, never a worker's local `HEAD`.
 - **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request.
 - **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
-- **A new architect run happens only when Zach asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
+- **A new architect run happens only when the owner asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
 
 Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
 
@@ -105,13 +105,13 @@ On the engine path, file ownership is declared on the issue, because the forge i
 - **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
 - **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
 - **Workers declare nothing.** They report what they changed, and `completion.py` judges that report against the issue's declared scope. A read-only run that changed anything is held for human review, with the paths named. They never grant themselves a scope.
-- **The engine handles a write outside the declared scope by judgement, with no automatic human hold** (Zach, 2026-10-17). Real fixes often touch a test, a README or a shared helper nobody listed, but a change with no reason to be there is a defect.
+- **The engine handles a write outside the declared scope by judgement, with no automatic human hold** (owner, 2026-10-17). Real fixes often touch a test, a README or a shared helper nobody listed, but a change with no reason to be there is a defect.
   - **Widen.** When a write run changed paths outside its declared write paths, the engine widens the issue's scope to what the run actually changed. It writes the widened scope to the issue's `## File ownership` section and to the store, so later readiness checks use the truth.
   - **Judge.** The review panel judges each out-of-scope path against the issue's outcome. The engine hands it the list of paths as an explicit check, so no extra model call is needed. A path the change needs, such as its test, its documentation or a helper it uses, is justified and stays. A path with no reason in the issue is a finding of at least Medium severity, "unjustified change outside scope", and it is fixed like any other: the fix stage reverts it, or the PR shows why it belongs. The architect's dispositions apply. A person is involved through the existing escalations: the three-round ping, or human review when the panel or the architect rules that a person must decide. The scope narrows again once a revert lands.
   - **No overlap.** If the widened scope overlaps no other in-flight issue's write scope, the run proceeds to review normally.
   - **Overlap.** If it does overlap, the engine orders the two issues' merges, so the one that finishes first lands first. The other rebases onto it and is reviewed again on its new head, which the merge gate already requires (a review of the current head, then main's CI). A conflict the rebase cannot settle goes back to the fix stage like any other finding, and a person is involved only through the existing three-round ping.
   - **No new dispatch.** While the overlap lasts, readiness counts the widened scope, so it dispatches no new issue into those paths.
-- **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (Zach, 2026-10-17).
+- **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (owner, 2026-10-17).
 - **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
 
 ```
@@ -119,7 +119,7 @@ I := an issue      S(I) := I has a valid File ownership section
 W(I) := I declares the whole repository, with the path "."
 D(I) := I may be dispatched      R(I) := I conflicts with every running write in its repository
 
-∀I: ¬S(I) → ¬D(I)      [Zach 2026-10-17: never allow the whole-repo fallback generally]
+∀I: ¬S(I) → ¬D(I)      [owner 2026-10-17: never allow the whole-repo fallback generally]
 ∀I: W(I) → S(I) ∧ R(I)  [the whole repository only when declared]
 intake refuses ¬S       [issue_gate.py; the issue forms]
 ∴ the engine serializes a repository only for an issue that asked for the whole of it, and an undeclared issue waits instead of blocking everyone
@@ -132,9 +132,9 @@ H(r) := r is held for human review
 J(p) := out-of-scope path p is justified by the issue's outcome (judged by the review panel)
 F(p) := p is a Medium+ finding, fixed by reverting it or justifying it in the PR
 
-∀r: ¬O(r) → Wd(r)              [Zach 2026-10-17: the orchestrator handles it]
+∀r: ¬O(r) → Wd(r)              [owner 2026-10-17: the orchestrator handles it]
 ∀p: J(p) → p stays             [a test, docs or a helper the change needs]
-∀p: ¬J(p) → F(p)               [Zach 2026-10-17: no excuse → rework, or human review]
+∀p: ¬J(p) → F(p)               [owner 2026-10-17: no excuse → rework, or human review]
 H(r) only through the existing escalations   [the three-round ping, or a panel or architect ruling]
 ∀r: Wd(r) ∧ X(r) → Q(r)        [merge gate: review of the current head, then main's CI]
 ∀r: Wd(r) → readiness uses the widened scope   [no new dispatch into those paths]
