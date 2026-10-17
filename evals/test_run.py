@@ -896,7 +896,8 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                 self.assertLess(elapsed, 2)
 
     def test_stream_driver_rejects_empty_prompted_turn_and_natural_exit_failure(self):
-        for mode, expected in (("empty", "unknown"), ("exit", "error"), ("quota", "quota"),
+        for mode, expected in (("empty", "unknown"), ("empty_quota", "quota"), ("exit", "error"), ("quota", "quota"),
+                               ("slow_exit", "error"), ("descendant_exit", "error"),
                                ("success", None), ("cleanup", None)):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
                 base = Path(d); cli = base / "claude"
@@ -905,29 +906,34 @@ class ClaudeAdapterRunTest(unittest.TestCase):
                     "sys.stdin.readline()\n" +
                     f"print(json.dumps({result!r}),flush=True)\n" +
                     ("sys.stdin.readline()\nsys.exit(0)\n" if mode == "empty" else
+                     "sys.stdin.readline()\nprint('API Error: 429 RESOURCE_EXHAUSTED, resets at 5pm.',file=sys.stderr)\nsys.exit(0)\n"
+                     if mode == "empty_quota" else
                      "sys.stdin.read()\n" +
                      ("print('API Error: 429 RESOURCE_EXHAUSTED, resets at 5pm.',file=sys.stderr)\nsys.exit(1)\n"
                       if mode == "quota" else "sys.exit(1)\n" if mode == "exit" else
+                      "time.sleep(0.5)\nsys.exit(1)\n" if mode == "slow_exit" else
+                      "import subprocess\nsubprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\nsys.exit(1)\n"
+                      if mode == "descendant_exit" else
                       "time.sleep(30)\n" if mode == "cleanup" else "sys.exit(0)\n")))
                 cli.chmod(0o755)
                 with unittest.mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}), \
                      unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
                     got = run.claude_adapter.drive_turns(
                         run.Request(prompt="", cwd=d, keep_events=True, timeout_s=3),
-                        ["one", "two"] if mode == "empty" else ["one"], [0, 0],
+                        ["one", "two"] if mode.startswith("empty") else ["one"], [0, 0],
                         env={}, artifacts=base / "out", snapshot=lambda n: True, before_turn=lambda n: None)
                 if expected:
                     self.assertIsInstance(got, run.Failure)
                     self.assertEqual(got.kind, expected)
                     if mode == "empty":
                         self.assertIn("exit 0 with no answer", got.message)
-                    if mode == "quota":
+                    if mode in ("quota", "empty_quota"):
                         self.assertEqual(got.message, "resets at 5pm.")
                 else:
                     self.assertIsInstance(got, list)
                     self.assertEqual(len(got), 1)
                 code = json.loads((base / "out/exit.json").read_text())["exit_code"]
-                self.assertEqual(code, 0 if mode in ("empty", "success") else -9 if mode == "cleanup" else 1)
+                self.assertEqual(code, 0 if mode in ("empty", "empty_quota", "success") else -9 if mode == "cleanup" else 1)
 
     def test_unreached_prompted_turns_do_not_crash_the_grader(self):
         spec = {"turns": [{"prompt": "one", "graders": []},
