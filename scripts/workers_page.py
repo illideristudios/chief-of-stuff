@@ -42,7 +42,7 @@ def activity(tree: Path) -> tuple[datetime | None, int]:
     A message split over lines repeats its usage, so each message id counts once."""
     last, usage = None, {}
     project = Path.home() / ".claude" / "projects" / re.sub(r"[^A-Za-z0-9]", "-", str(tree.resolve()))
-    for log, n, d in session_logs.records(project):
+    for log, n, d in session_logs.records(project, recursive=False):
         try:
             at = datetime.fromisoformat(d["timestamp"])
             if at.utcoffset() is None:

@@ -36,9 +36,9 @@ def _scan(path: Path, inode: int, size: int, modified: int) -> tuple[tuple[int, 
     return tuple(found)
 
 
-def records(root: Path):
+def records(root: Path, *, recursive: bool = True):
     """Yield (source path, byte offset, record) for Claude JSONL sessions below root."""
-    for path in root.rglob("*.jsonl"):
+    for path in (root.rglob("*.jsonl") if recursive else root.glob("*.jsonl")):
         try:
             path = path.resolve()
             stat = path.stat()
