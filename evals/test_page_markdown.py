@@ -282,6 +282,16 @@ class MarkdownTest(unittest.TestCase):
         self.assertEqual(name['tag'], 'a')
         self.assertEqual(name['attrs'].get('href'), '/issues/109')
 
+    def test_board_card_without_navigation_keeps_its_markdown_link(self):
+        import render_board
+        from workspace import parse_coordinator
+        from test_render_board import CLAUDE_MD, LANED_TRACKER, NOW
+        html = render_board.render(LANED_TRACKER.replace('Write eval README', '[docs](https://example.com)'),
+                                   parse_coordinator(CLAUDE_MD, today=NOW.date()), NOW)
+        name, = Structure(html).by_class('columns-card-name')
+        self.assertEqual(name['tag'], 'div')
+        self.assertIn('<a href="https://example.com"', html)
+
     def test_checklist_and_log_prose_use_inline_markdown(self):
         import issue_page
         html = issue_page._acceptance(replace(ISSUE, body='## Acceptance\n- [ ] **pass** *review* `cmd`'))
