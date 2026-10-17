@@ -32,7 +32,12 @@ class SupervisorTest(unittest.TestCase):
                               "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"]
         for patch in (mock.patch.object(supervisor, "RELEASE", self.release),
                       mock.patch.object(supervisor.sys, "platform", "darwin"),
-                      mock.patch.dict(supervisor.os.environ, {"CLAUDE_PLUGIN_DATA": str(self.data)}),
+                      mock.patch.dict(supervisor.os.environ, {
+                          "CLAUDE_PLUGIN_DATA": str(self.data),
+                          "CLAUDE_CONFIG_DIR": "",
+                          "CLAUDE_AS_PROFILES_DIR": "",
+                          "XDG_STATE_HOME": "",
+                      }),
                       mock.patch.object(supervisor.shell_setup, "resolve", return_value="/login/bin/python3"),
                       mock.patch.object(supervisor.subprocess, "run", side_effect=self.fake_run)):
             patch.start()
@@ -151,6 +156,18 @@ class AgentTest(SupervisorTest):
                          {"CLAUDE_PLUGIN_DATA": str(self.data), "CHIEF_OF_STUFF_VERSION": "1.0.0"})
         self.assertEqual(self.verbs(), ["print", "enable", "bootstrap"])
         self.assertEqual(supervisor.install(self.root, ENGINE, self.jobs), "engine: serving")
+
+    def test_install_keeps_limit_paths_from_the_installing_shell(self):
+        paths = {
+            "CLAUDE_CONFIG_DIR": str(self.root / "claude"),
+            "CLAUDE_AS_PROFILES_DIR": str(self.root / "profiles"),
+            "XDG_STATE_HOME": str(self.root / "state"),
+        }
+        with mock.patch.dict(supervisor.os.environ, paths):
+            supervisor.install(self.root, ENGINE, self.jobs)
+        env = self.job()["EnvironmentVariables"]
+        for name, value in paths.items():
+            self.assertEqual(env[name], value)
 
     def test_install_creates_the_engine_log_directory(self):
         self.assertFalse((self.root / ".chief-of-stuff").exists())

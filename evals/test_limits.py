@@ -92,6 +92,30 @@ class Sources(unittest.TestCase):
         self.assertTrue(limits_probe.read("claude", "missing")[0].unknown)
         self.assertTrue(limits_probe.read("claude", "../secondary")[0].unknown)
 
+    def test_an_unchanged_transcript_is_not_mapped_again(self):
+        event = {"type": "rate_limit_event", "timestamp": NOW.isoformat(), "rate_limit_info": {
+            "rateLimitType": "five_hour", "utilization": .85,
+            "resetsAt": (NOW + timedelta(hours=2)).timestamp()}}
+        self.write(".claude/projects/work/session.jsonl", [event])
+        import mmap
+        with patch("limits_probe._now", return_value=NOW), \
+                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
+            first = limits_probe.read("claude", "")
+            scans = mapped.call_count
+            second = limits_probe.read("claude", "")
+            self.assertEqual(scans, 1)
+            self.assertEqual(mapped.call_count, scans)
+        self.assertEqual(first[0].used, second[0].used)
+        later = dict(event, timestamp=(NOW + timedelta(minutes=5)).isoformat(), rate_limit_info={
+            "rateLimitType": "five_hour", "utilization": .1,
+            "resetsAt": (NOW + timedelta(hours=2)).timestamp()})
+        self.write(".claude/projects/work/session.jsonl", [later])
+        with patch("limits_probe._now", return_value=NOW), \
+                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
+            third = limits_probe.read("claude", "")
+            self.assertEqual(mapped.call_count, 1)
+        self.assertEqual(third[0].used, 10)
+
     def test_unknown_never_invents_zero_or_reads_prompt_text(self):
         self.write(".claude/projects/work/session.jsonl", [{"type": "assistant", "timestamp": NOW.isoformat(),
                    "message": {"usage": {"input_tokens": 100}, "content": "rate_limit_info utilization .4"}}])
