@@ -141,6 +141,26 @@ H(r) only through the existing escalations   [the three-round ping, or a panel o
 ∴ justified edits flow through; unjustified ones are reworked, or go to a person; no parallel run is overwritten unnoticed
 ```
 
+On the engine path, abort and recovery never delete a worker's work. They quarantine it.
+- **Abort quarantines.** When the engine abandons a run's tree, it moves the tree to a quarantine directory and renames the run's refs into a `refs/quarantine/<issue>/<stamp>/` namespace. The replacement is built fresh. Nothing is hashed, compared or deleted.
+- **Quarantine is durable and visible to discovery.** Orphan discovery skips the quarantine namespace and directory by their names, which git itself stores, so an interruption cannot restore a set-aside candidate. A later launch never fast-forwards onto quarantined commits.
+- **Recovery reuses only what is safe.** `completion.recovery` may reuse an orphan that is readable and not quarantined. Anything else is quarantined, and the run starts fresh. A failed fast-forward is quarantined too, not held.
+- **A run whose host may still be running is never quarantined.** The engine first confirms the host has stopped. Until then the run waits.
+- **Deleting quarantined work is a separate, explicit step**, not part of abort, and is 1.1 work. For 1.0, quarantine costs disk, not data.
+- **Recovery is per issue.** Gathering one issue's recovery facts sits inside that issue's exception boundary, so one issue's failure never stops planning for the rest.
+
+```
+A := the engine abandons a run      Qn := its tree and refs are quarantined (moved and renamed, not deleted)
+Del := work is deleted              L := the host has confirmed it stopped
+R(o) := orphan o is reused          Rd(o) := o is readable      Qo(o) := o is quarantined
+
+A ∧ L → Qn ∧ ¬Del        [abort never deletes]
+¬L → wait                [never set aside a live run]
+R(o) → Rd(o) ∧ ¬Qo(o)    [recovery reuses only safe, unquarantined work]
+Del only by an explicit step   [1.1]
+∴ no abort or recovery path can destroy work, and the abort machinery needs no content hashing, ignore rules or retire predicate
+```
+
 ## 9. Agent performance
 
 Agent performance is measured from the store's stage segments, as the 1.0 ledger's owner decision A3 settles: a query over segments, not a parser of Log lines. A run is one segment, keyed (issue, stage, attempt), with its start and end times and its outcome. The engine records the segment when it launches a worker, through `store.record_segment` with the runtime, model, effort and agent type it launched with, and closes it with the outcome when it collects the worker. The tracker Log, the one-shot reports and interactive sessions are not sources.
