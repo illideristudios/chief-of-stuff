@@ -370,6 +370,32 @@ class LandingTest(unittest.TestCase):
             self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], (True, True))
             self.assertIn("repository/merge_base?", read.call_args.args[0])
 
+    def test_gitlab_fast_forward_uses_source_sha_and_verifies_ancestry(self):
+        adapter = forge.Forge(GL)
+        row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
+               "merge_commit_sha": None, "squash_commit_sha": None, "sha": "source-head"}
+        for base, expected in (("source-head", (True, True)), ("older", (False, False))):
+            with self.subTest(base=base), \
+                 mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
+                 mock.patch.object(forge.Forge, "_pipeline_read", return_value={"id": base}) as read:
+                key = adapter.key(3)
+                self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], expected)
+                self.assertIn("source-head", read.call_args.args[0])
+
+    def test_landing_comparison_errors_are_attached_to_the_affected_issue(self):
+        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "mergeCommit": {"oid": "merge"}}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged]))
+        for response in (forge.ForgeError("compare: permission denied"), {"unexpected": "shape"}):
+            errors = {}
+            with self.subTest(response=response), \
+                 mock.patch.object(forge.Forge, "_pipeline_read", **(
+                     {"side_effect": response} if isinstance(response, Exception) else {"return_value": response})):
+                key = adapter.key(3)
+                result = adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key], errors=errors)
+                self.assertEqual(result[key], (None, None))
+                self.assertIn(key, errors)
+                self.assertTrue("permission denied" in errors[key] or "merge base" in errors[key])
+
 
 class StageWriteBackTest(unittest.TestCase):
     def edits(self, gh):

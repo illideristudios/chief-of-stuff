@@ -20,6 +20,7 @@ import reconcile
 import store
 import supervisor
 from tree_state import TreeState
+from orphans import Claim
 from evals import test_forge as tf
 from forge_port import ForgeError
 from settings import Kanban
@@ -175,6 +176,55 @@ class EngineTest(unittest.TestCase):
         status = "passed"
         self.assertEqual(self.run_pass(), [])
         self.assertEqual(len(self.forge.merges), 1)
+
+    def test_closed_merge_keeps_exit_segment_and_cleanup_hold_until_main_ci_passes(self):
+        self.run_pass()
+        self.publish_exit()
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", human_review=True)
+        status = "running"
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status=status)
+        self.forge.landings = lambda pipeline, keys, **kwargs: {KEY: (True, pipeline.status == "passed")}
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
+             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "main-sha")):
+            for status in ("running", "failed"):
+                actions = self.run_pass()
+                self.assertIsInstance(actions[0], reconcile.Wait)
+                self.assertIn("merged, awaiting main CI", actions[0].reason)
+                self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+                self.assertTrue(self.db.items()[0].human_review)
+                self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
+                self.assertFalse(any(row.message.startswith("worker implement attempt 1:") for row in self.db.log(KEY)))
+            status = "passed"
+            self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
+    def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged")
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
+        def landings(pipeline, keys, *, errors=None):
+            if errors is not None:
+                errors[KEY] = "compare: permission denied"
+            return {KEY: (None, None)}
+        self.forge.landings = landings
+        self.run_pass()
+        self.run_pass()
+        waits = [row.message for row in self.db.log(KEY) if row.message.startswith("wait: ")]
+        self.assertEqual(len(waits), 1)
+        self.assertIn("compare: permission denied", waits[0])
+
+    def test_terminal_failed_exit_replaces_its_live_claim_but_keeps_other_live_owners(self):
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement")
+        self.run_pass()
+        segment = self.db.segments(KEY)[0]
+        for others in ((), (Claim(OTHER, True, "running"),)):
+            facts = reconcile.Facts(trees=((KEY, TreeState("work", 1, 2, 0)),),
+                tree_names=((KEY, "work"),), tree_claims=((KEY, (Claim(KEY, True, ""), *others)),))
+            with self.subTest(others=others), mock.patch.object(engine.engine_facts, "gather", return_value=facts), \
+                 mock.patch.object(engine, "_close_segment") as close:
+                engine._finish_worker(self.forge, self.db, self.root, self.trees, segment,
+                                      "failed", "exit 1", NOW, policies=self.p)
+                self.assertEqual(close.call_args.args[7], not bool(others))
 
     def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message):
         self.run_pass()

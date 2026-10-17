@@ -172,6 +172,24 @@ class GatherTest(unittest.TestCase):
             (run / "starting_head").write_text("launch-head\n")
             self.assertEqual(dict(self.gather().changed)[KEY], False)
 
+    def test_invalid_baseline_evidence_remains_unknown_without_aborting_gather(self):
+        tree = self.trees / "review"
+        tree.mkdir()
+        run = self.root / "run"
+        run.mkdir()
+        (run / "starting_head").write_bytes(b"\xff")
+        self.db.replace_file_ownership(KEY, [(".", "read")])
+        for run_dir in (str(run), "bad\x00path"):
+            data = self.db.resume(KEY)
+            data["runs"]["implement-1"].update(tree=str(tree), run_dir=run_dir)
+            self.db.set_resume(KEY, data)
+            with self.subTest(run_dir=run_dir), \
+                 mock.patch.object(engine_facts, "_alive", return_value=False), \
+                 mock.patch.object(engine_facts, "_tree_facts", return_value=(TreeState("HEAD", 0, 2, 0), False, NOW)):
+                facts = self.gather(SimpleNamespace(blocked_by=lambda: {}))
+                self.assertIsNone(dict(facts.changed)[KEY])
+                self.assertNotIn(KEY, facts.unreadable)
+
     def test_read_only_changes_are_relative_to_starting_head_in_a_real_detached_tree(self):
         from evals import git_taint
         cache = Path(self.enterContext(tempfile.TemporaryDirectory()))
