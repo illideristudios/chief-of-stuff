@@ -314,6 +314,23 @@ class FetchBaseTest(Repo):
                 err = git_trees.fetch_base(self.clone, timeout=timeout)
             self.assertEqual(err, f"git fetch timed out after {timeout}s")
 
+    def test_a_timeout_after_a_ref_lock_names_both_attempts(self) -> None:
+        """#804: each cannot-lock-ref attempt gets a full timeout, so the named bound is the lock hold."""
+        seen = []
+
+        def run(argv, **kw):
+            seen.append(kw["timeout"])
+            if len(seen) == 1:
+                return subprocess.CompletedProcess(argv, 1, "", "fatal: cannot lock ref 'refs/remotes/origin/main'")
+            raise subprocess.TimeoutExpired(argv, kw["timeout"])
+
+        for timeout in (7, 30):
+            seen.clear()
+            with self.subTest(timeout=timeout), patch.object(git_trees.subprocess, "run", run):
+                err = git_trees.fetch_base(self.clone, timeout=timeout)
+            self.assertEqual(seen, [timeout, timeout])
+            self.assertEqual(err, f"git fetch timed out after {timeout * 2}s")
+
     def test_the_error_never_carries_the_exceptions_text(self) -> None:
         """#49 round 9, 5: a timeout's text repeats its command, which holds the tree's path; the error is printed."""
         cmd = ["git", "-C", str(self.clone), "fetch", "-q", "origin"]
