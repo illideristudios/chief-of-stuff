@@ -135,6 +135,22 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(len(list(run.parent.glob(run.name + "-quarantine-*"))), 1)
         self.assertIsNotNone(self.db.segments()[0].ended_at)
 
+    def test_torn_command_past_deadline_is_quarantined_and_frees_the_slot(self):
+        run = self.stranded()
+        (run / "command.json").write_text("{")
+        old = time.time() - 30
+        os.utime(run / "command.json", (old, old))
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(slots.running(self.db), 0)
+        self.assertIsNotNone(self.db.segments()[0].ended_at)
+        self.assertFalse(run.exists())
+        again = self.stranded()
+        (again / "command.json").write_text("{")
+        os.utime(again / "command.json", (old, old))
+        worker._abort_workers_gone(self.root, 1)
+        self.assertFalse(again.exists())
+
     def test_live_spawn_group_keeps_stranded_or_canceled_reservation_and_blocks_abort(self):
         run = self.stranded(canceled=True, age=10)
         with mock.patch.object(worker.claude_adapter, "spawn_alive", return_value=True):
@@ -1379,12 +1395,37 @@ class WorkerTest(unittest.TestCase):
             clone = self.orphans([{"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "dirty": True}])
             old = self.trees / "issue-1-implement-1"
             make_repo.git(["update-ref", "-d", worker.git_trees.REF], clone)
-            actual = worker._read_tree(old, worker._common(clone))
+            common = worker._common(clone)
+            actual = worker._read_tree(old, common)
+            reused = worker.completion.recovery([actual])
             self.assertIsNone(actual.ahead)
             self.assertTrue(actual.dirty)
+            self.assertIsInstance(reused, worker.completion.Recovery)
+            self.assertEqual(reused.path, str(old))
+            self.assertTrue(reused.recovered)
             layout = worker.git_view.locate(old)
-            (layout.gitdir / "HEAD").write_text("ref: refs/heads/missing\n")
-            self.assertTrue(worker._read_tree(old, worker._common(clone)).unreadable)
+            head = layout.gitdir / "HEAD"
+            original = head.read_text()
+            for kind in ("unborn", "missing", "link", "huge"):
+                if head.is_symlink() or head.exists():
+                    head.unlink()
+                if kind == "unborn":
+                    head.write_text("ref: refs/heads/missing\n")
+                elif kind == "link":
+                    head.symlink_to("not-a-head")
+                elif kind == "huge":
+                    head.write_bytes(b"x" * 1025)
+                broken = worker._read_tree(old, common)
+                self.assertTrue(broken.unreadable, kind)
+                self.assertIsInstance(worker.completion.recovery([broken]), worker.completion.Quarantine, kind)
+            head.unlink()
+            head.write_text(original)
+            head.chmod(0)
+            try:
+                with self.assertRaises(RuntimeError):
+                    worker._read_tree(old, common)
+            finally:
+                head.chmod(0o644)
 
     def test_replacement_uses_its_own_head_when_another_fetch_moves_main(self):
         from evals import git_taint as taint, make_repo

@@ -21,6 +21,12 @@ class RecoveryTest(unittest.TestCase):
                 self.assertIsInstance(recovery([bad]), completion.Quarantine)
         self.assertIsInstance(recovery([tree("/t/a"), tree("/t/b", unreadable=True)]), completion.Quarantine)
 
+    def test_recovery_is_needed_for_a_conflict_or_a_dead_open_segment(self):
+        self.assertTrue(completion.needs_recovery([("conflict", "implement\nwhy", None)], open_segment=False, live=True))
+        self.assertTrue(completion.needs_recovery([], open_segment=True, live=False))
+        self.assertFalse(completion.needs_recovery([], open_segment=True, live=True))
+        self.assertFalse(completion.needs_recovery([], open_segment=False, live=False))
+
     def test_holds_are_judged_from_latest_answers_and_current_conflict(self):
         decisions = [("conflict", "implement\nold", "hold"),
                      ("conflict", "implement\nold", "abort"),
@@ -36,9 +42,11 @@ class RecoveryTest(unittest.TestCase):
         import engine_facts
         rows = [SimpleNamespace(topic="conflict", question="implement\na", answer="abort"),
                 SimpleNamespace(topic="conflict", question="review\nb", answer="hold")]
-        store = SimpleNamespace(decisions=lambda key: rows)
-        with mock.patch.object(engine_facts.worker, "recovery_conflict", return_value="a"):
+        store = SimpleNamespace(decisions=lambda key: rows, segments=lambda key: [])
+        with mock.patch.object(completion, "needs_recovery", wraps=completion.needs_recovery) as gate, \
+             mock.patch.object(engine_facts.worker, "recovery_conflict", return_value="a"):
             facts = engine_facts.recovery(store, "repo#1", trees=Path("/trees"), repo=Path("/repo"))
+        gate.assert_called()
         self.assertEqual(facts["decisions"], [(r.topic, r.question, r.answer) for r in rows])
         self.assertEqual(facts["conflict"], "a")
         self.assertTrue(facts["readable"])

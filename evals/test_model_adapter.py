@@ -121,6 +121,75 @@ class StartTest(unittest.TestCase):
             self.assertFalse((run_dir / "command.json").exists())
             self.assertFalse((run_dir / "runner.stderr").exists())
 
+    def test_start_records_the_runner_group_and_keeps_command_when_that_write_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            process = mock.Mock(pid=4242)
+            with mock.patch.object(claude_adapter, "command", return_value=["/bin/fake"]), \
+                 mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process):
+                got = claude_adapter.start(Request(prompt="p", session_id=SID), run_dir)
+            record = json.loads((run_dir / "runner-spawn.json").read_text())
+            self.assertIs(got, process)
+            self.assertEqual((record["pid"], record["pgid"]), (4242, 4242))
+            self.assertGreater(record["start_time"], 0)
+            names = []
+            real = claude_adapter._write
+            def writing(path, name, data):
+                names.append(name)
+                if name == "runner-spawn.json":
+                    raise OSError("disk full")
+                real(path, name, data)
+            with mock.patch.object(claude_adapter, "command", return_value=["/bin/fake"]), \
+                 mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(claude_adapter, "_write", side_effect=writing), \
+                 mock.patch.object(claude_adapter, "cancel") as cancel:
+                with self.assertRaises(OSError):
+                    claude_adapter.start(Request(prompt="p", session_id=SID), run_dir)
+            cancel.assert_called_once_with(process)
+            self.assertEqual(names[0], "command.json")
+            self.assertTrue((run_dir / "command.json").is_file())
+
+    def test_a_failed_spawn_record_stops_the_host_before_publishing_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            (run / "command.json").write_text(json.dumps({"argv": ["fake"], "cwd": tmp, "session_id": SID, "env": {}}))
+            process = mock.Mock(pid=4242)
+            order = []
+            process.send_signal.side_effect = lambda sig: order.append(("signal", sig))
+            process.wait.side_effect = lambda timeout=None: order.append("wait") or 0
+            real = claude_adapter._write
+            def writing(run_dir, name, record):
+                if name == "spawn.json":
+                    raise OSError("disk full")
+                order.append(name)
+                real(run_dir, name, record)
+            with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(claude_adapter, "_write", side_effect=writing):
+                claude_adapter._worker(run)
+            self.assertLess(order.index(("signal", signal.SIGTERM)), order.index("exit.json"))
+            self.assertLess(order.index("wait"), order.index("exit.json"))
+            self.assertEqual(json.loads((run / "exit.json").read_text())["exit_code"], 127)
+            self.assertFalse((run / "started.json").exists())
+
+    def test_a_reused_or_foreign_process_group_is_not_the_worker(self):
+        from datetime import datetime
+        with tempfile.TemporaryDirectory() as tmp:
+            run = Path(tmp)
+            start = 1_700_000_000
+            (run / "runner-spawn.json").write_text(json.dumps({"pid": 10, "pgid": 10, "start_time": start}))
+            def listed(birth):
+                text = datetime.fromtimestamp(birth).strftime("%a %b %d %H:%M:%S %Y")
+                return mock.Mock(returncode=0, stdout=f"10 10 Ss {text}\n")
+            with mock.patch.object(claude_adapter.os, "killpg"), \
+                 mock.patch.object(claude_adapter.subprocess, "run", return_value=listed(start)):
+                self.assertTrue(claude_adapter.spawn_alive(run))
+            with mock.patch.object(claude_adapter.os, "killpg"), \
+                 mock.patch.object(claude_adapter.subprocess, "run", return_value=listed(start + 3600)):
+                self.assertFalse(claude_adapter.spawn_alive(run))
+            with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError("not ours")):
+                self.assertFalse(claude_adapter.group_alive(10))
+                self.assertFalse(claude_adapter.spawn_alive(run))
+
 
 class CancelTest(unittest.TestCase):
     def test_cancel_kills_a_child_that_outlives_its_group_leader(self):
