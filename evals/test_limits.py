@@ -89,18 +89,25 @@ class Sources(unittest.TestCase):
                              (runtime, "acct", "read in 1.1", None, None))
 
     def test_claude_structured_transcript_and_profile_isolation(self):
-        event = {"type": "rate_limit_event", "timestamp": NOW.isoformat(), "rate_limit_info": {
-            "rateLimitType": "five_hour", "utilization": .85,
-            "resetsAt": (NOW + timedelta(hours=2)).timestamp()}}
-        self.write(".claude/projects/default/session.jsonl", [event])
-        self.write("profiles/secondary/projects/work/session.jsonl", [dict(event, rate_limit_info={
-            "rateLimitType": "seven_day_opus", "utilization": .42,
-            "resetsAt": (NOW + timedelta(days=3)).timestamp()})])
-        with patch("limits_probe._now", return_value=NOW):
+        # Captured five_hour/seven_day resets are 23:40Z and 18 Sep; freeze after the transcript, before both.
+        frozen = datetime(2026, 9, 16, 21, 25, tzinfo=timezone.utc)
+        captured = ROOT / "evals" / "fixtures" / "stream-denied-commit.jsonl"
+        dest = self.home / ".claude" / "projects" / "default" / "session.jsonl"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(captured.read_bytes())
+        self.write("profiles/secondary/projects/work/session.jsonl", [{
+            "type": "rate_limit_event", "timestamp": "2026-09-16T21:24:00+00:00", "rate_limit_info": {
+                "rateLimitType": "seven_day_opus", "utilization": .42,
+                "resetsAt": datetime(2026, 9, 19, tzinfo=timezone.utc).timestamp()}}])
+        with patch("limits_probe._now", return_value=frozen):
             rows = limits_probe.read("claude", "secondary")
             main = limits_probe.read("claude", "")
         self.assertEqual([(r.limit, r.used, r.account) for r in rows], [("seven_day_opus", 42, "secondary")])
-        self.assertEqual(main[0].used, 85)
+        self.assertEqual([(r.limit, r.account) for r in main], [("five_hour", ""), ("seven_day", "")])
+        self.assertAlmostEqual(main[0].used, 14)
+        self.assertAlmostEqual(main[1].used, 19)
+        self.assertEqual(main[0].read_at, datetime.fromisoformat("2026-09-16T21:24:38.719+00:00"))
+        self.assertEqual(main[1].read_at, main[0].read_at)
         self.assertTrue(limits_probe.read("claude", "missing")[0].unknown)
         self.assertTrue(limits_probe.read("claude", "../secondary")[0].unknown)
 
