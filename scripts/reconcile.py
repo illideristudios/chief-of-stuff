@@ -48,6 +48,13 @@ def suite_holds(counts: Mapping[str, int | None], *, require_green: bool) -> boo
     return counts["passed"] == 0 or any(counts[key] for key in keys[1:])
 
 
+def suite_reason(counts: Mapping[str, int | None], summary: str) -> str:
+    shown = ", ".join(
+        f"{name}={counts[name] if counts[name] is not None else 'missing or invalid'}"
+        for name in ("passed", "failed", "skipped", "xfailed"))
+    return f"suite is not green; Suite: {shown}; worker said: {summary}"
+
+
 def suite_hold_action(item: WorkItem, hold: object, history: Sequence[Segment], *,
                       observed: bool | None) -> str:
     """Judge a persisted hold: retire closed work; accept only explicit removal after publication.
@@ -133,6 +140,7 @@ class Close:
     outcome: str
     reason: str
     human_review: bool = False
+    suite_hold: bool = False
 
 
 Action = Dispatch | Review | Merge | Ask | Escalate | Wait | Close
@@ -159,6 +167,8 @@ class Facts:
     landing_errors: tuple[tuple[str, str], ...] = ()  # per-issue forge landing failures
     blockers_error: str = ""  # why `blockers` is None
     stall_after: timedelta = timedelta(minutes=45)
+    suites: tuple[tuple[tuple[str, str, int], tuple], ...] = ()  # (issue, stage, attempt) → (counts, summary)
+    require_green: bool = False
 
 
 def _time(value: datetime | str) -> datetime:
@@ -294,13 +304,19 @@ def completion_verdict(key: str, segment: Segment, facts: Facts, workflow: Workf
     claims = dict(facts.tree_claims).get(key, ())
     if worker_alive is False:
         claims = tuple(Claim(claim.owner, False, "has no process", claim.ref) if claim.owner == key else claim for claim in claims)
-    return completion.abandoned(
+    verdict = completion.abandoned(
         worker_alive, report=report,
         read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
         on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
         tree_unreadable=key in facts.unreadable,
         tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),
         tree_claims=claims, landing_required=not workflow.next(segment.stage))
+    if verdict is None or verdict.human_review or report != "done":
+        return verdict
+    found = dict(facts.suites).get((key, segment.stage, segment.attempt))
+    if found is None or not suite_holds(found[0], require_green=facts.require_green):
+        return verdict
+    return completion.Verdict("human_review", suite_reason(found[0], found[1]), True, True)
 
 
 def _abandoned(item: WorkItem, segment: Segment, facts: Facts, workflow: Workflow) -> Close | None:
@@ -309,7 +325,8 @@ def _abandoned(item: WorkItem, segment: Segment, facts: Facts, workflow: Workflo
         worker_alive=dict(facts.alive).get((item.issue_key, segment.stage, segment.attempt)))
     if verdict is None:
         return None
-    return Close(item.issue_key, segment.stage, segment.attempt, verdict.outcome, verdict.reason, verdict.human_review)
+    return Close(item.issue_key, segment.stage, segment.attempt, verdict.outcome, verdict.reason,
+                 verdict.human_review, verdict.suite_hold)
 
 
 def _stalled(item: WorkItem, segment: Segment, facts: Facts, now: datetime) -> Wait | None:

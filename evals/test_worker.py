@@ -588,8 +588,9 @@ class WorkerTest(unittest.TestCase):
         forge.rows[0].update(stage=stage, human_review=False)
         return forge
 
-    def suite_pass(self, forge, launch):
-        with mock.patch.object(engine.cleanup, "execute", return_value=0), mock.patch.object(engine, "_record_limits"):
+    def suite_pass(self, forge, launch, tree=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+        with mock.patch.object(engine.cleanup, "execute", return_value=0), mock.patch.object(engine, "_record_limits"), \
+             mock.patch.object(engine.engine_facts, "_tree_facts", return_value=tree):
             return engine.run_pass(store=self.db, root=self.root, trees=self.trees,
                                    forge=forge, policies=self.p, launch=launch,
                                    workers=engine.settings.Workers(),
@@ -598,9 +599,8 @@ class WorkerTest(unittest.TestCase):
     def test_a_red_suite_does_not_replace_a_completion_hold(self):
         forge = self.suite_run()
         forge.add_human_hold = mock.Mock(return_value="")
-        with mock.patch.object(engine.engine_facts, "_tree_facts",
-                               return_value=(reconcile.TreeState("head", 3, 0, 0), False, NOW)):
-            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        self.suite_pass(forge, mock.Mock(return_value=("example", "")),
+                        tree=(reconcile.TreeState("head", 3, 0, 0), False, NOW))
         self.assertNotIn("suite_hold", self.db.resume(KEY) or {})
         self.assertTrue(self.db.items()[0].human_review)
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
@@ -612,9 +612,7 @@ class WorkerTest(unittest.TestCase):
         (run_dir / "exit.json").unlink()
         forge.add_human_hold = mock.Mock(return_value="")
         with mock.patch.object(worker.process_status, "identity", return_value=None), \
-             mock.patch.object(engine.engine_facts.process_status, "identity", return_value=None), \
-             mock.patch.object(engine.engine_facts, "_tree_facts",
-                               return_value=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+             mock.patch.object(engine.engine_facts.process_status, "identity", return_value=None):
             self.suite_pass(forge, mock.Mock(return_value=("example", "")))
         self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
         self.assertEqual(self.db.resume(KEY)["suite_hold"]["stage"], "implement")

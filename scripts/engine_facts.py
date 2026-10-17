@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import dispatch_prompt
 import git_trees
 import git_view
 import process_status
@@ -161,7 +162,8 @@ def _starting_head(record: dict | None) -> str | None:
     return None
 
 
-def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) -> Facts:
+def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
+           require_green: bool = False) -> Facts:
     """Read recorded worker trees directly; discovery is not evidence that a recorded tree is unreadable."""
     if now.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
@@ -226,26 +228,42 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime) ->
         suite_on_main.append((segment.issue_key, suite))
     merged = [item.issue_key for item in store.items()
               if item.forge_state == "closed" and item.merge_state == "merged"]
+    pending, remembered = [], []
+    for key in merged:
+        data = store.resume(key)
+        if isinstance(data, dict) and data.get("verified_landing") is True:
+            remembered.append(key)
+        else:
+            pending.append(key)
     landings = {}
     landing_errors = {}
-    if merged and pipeline is not None and callable(getattr(forge, "landings", None)):
+    if pending and pipeline is not None and callable(getattr(forge, "landings", None)):
         try:
-            landings = forge.landings(pipeline, merged, errors=landing_errors)
+            landings = forge.landings(pipeline, pending, errors=landing_errors)
         except (ForgeError, OSError, ValueError, TypeError) as exc:
-            landing_errors.update((key, str(exc)) for key in merged)
-    for key in merged:
+            landing_errors.update((key, str(exc)) for key in pending)
+    for key in pending:
         landed, suite = landings.get(key, (None, None))
         on_main.append((key, landed))
         suite_on_main.append((key, suite))
+    for key in remembered:
+        on_main.append((key, True))
+        suite_on_main.append((key, True))
     # Read after liveness, in insertion order, limited to the latest segment's stage and attempt.
+    suites = []
     for item in store.items():
         segment = latest.get(item.issue_key)
-        reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt)
-                       for row in sorted(store.reports(item.issue_key), key=lambda row: row.id)
-                       if segment is None or (row.stage, row.attempt) == (segment.stage, segment.attempt))
+        rows = [row for row in sorted(store.reports(item.issue_key), key=lambda row: row.id)
+                if segment is None or (row.stage, row.attempt) == (segment.stage, segment.attempt)]
+        reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt) for row in rows)
+        if rows and rows[-1].outcome == "done":
+            raw = rows[-1].suite if isinstance(rows[-1].suite, dict) else {}
+            suites.append(((rows[-1].issue_key, rows[-1].stage, rows[-1].attempt),
+                           (dispatch_prompt.suite_counts(raw), rows[-1].summary or "")))
     blockers, why = _blockers(forge)
     return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
                  asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
                  changed=tuple(changed), unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
                  trees=tuple(tree_rows), tree_names=tuple(names),
-                 tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()))
+                 tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),
+                 suites=tuple(suites), require_green=require_green)

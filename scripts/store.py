@@ -123,7 +123,7 @@ class Ask(WorkerRecord, Base):
 
 
 def _run_result(data: dict, stage: str, attempt: int, outcome: str, ended_at: str) -> None:
-    """The shared collected-result layout, used by completion and suite acceptance."""
+    """Record the review stage's collected result. Other stages leave runs unchanged."""
     runs = data.get("runs")
     record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
     if isinstance(record, dict) and stage == "review":
@@ -233,7 +233,10 @@ class Store:
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
 
     def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
-        """Atomically complete an open segment and its collected result, preserving start and actor."""
+        """Atomically complete an open segment, preserving start and actor.
+
+        A review also records its collected result. Other stages do not.
+        """
         with self.session() as s:
             changed = s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
                                                      Segment.attempt == attempt, Segment.ended_at.is_(None))
@@ -322,10 +325,11 @@ class Store:
             return row.data if row else None
 
     def finish_suite_hold(self, issue_key: str, *, accept: bool) -> None:
-        """Atomically retire the hold, optionally accepting its segment and collected run result.
+        """Atomically retire the hold, optionally accepting its segment.
 
-        The Use Case decides when this transition is allowed. Keep the historical review marker
-        and actor/timing fields when accepting; callers never edit the worker result layout.
+        Accepting a review records that collected result as done. Other stages only change the
+        segment outcome. The Use Case decides when this transition is allowed. Keep the historical
+        review marker and actor/timing fields when accepting; callers never edit the worker result layout.
         """
         with self.session() as s:
             resume = s.get(Resume, issue_key)

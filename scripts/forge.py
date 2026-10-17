@@ -661,13 +661,12 @@ class Forge:
         found = {key: (None, None) for key in keys}
         if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
             return found
-        seen = set()
+        verified = set()
         for row in self._merged_requests():
             mine = [self.key(int(ref[1:])) for ref in self._closed_refs(row)]
-            mine = [key for key in mine if key in found and key not in seen]
+            mine = [key for key in mine if key in found and key not in verified]
             if not mine:
                 continue
-            seen.update(mine)
             try:
                 target = row.get("baseRefName" if self.github else "target_branch")
                 commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
@@ -695,7 +694,15 @@ class Forge:
                 result = None, None
                 if errors is not None:
                     errors.update((key, f"landing comparison: {exc}") for key in mine)
-            found.update((key, result) for key in mine)
+            for key in mine:
+                previous = found[key]
+                if result == (True, True):
+                    found[key] = result
+                    verified.add(key)
+                elif result[0] is True and previous[0] is not True:
+                    found[key] = result
+                elif previous == (None, None):
+                    found[key] = result
         return found
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:

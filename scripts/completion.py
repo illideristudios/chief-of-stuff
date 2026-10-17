@@ -22,6 +22,7 @@ class Verdict:
     outcome: str
     reason: str
     human_review: bool = False
+    suite_hold: bool = False
 
 
 def done_on_main(on_main: bool | None, suite_on_main: bool | None) -> str | None:

@@ -113,7 +113,11 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                         os.killpg(child.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                child.wait()
+                    try:
+                        child.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        # shortcut: a child stuck after SIGKILL is left after 5s; reap it if teardown must not leave one
+                        child.returncode = -signal.SIGKILL
                 raise
             stderr = errors.read_text(errors="replace")
             stdout = output.read_text(errors="replace") if output.exists() else ""

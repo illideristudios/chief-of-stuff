@@ -763,7 +763,7 @@ class ReconcileTest(unittest.TestCase):
         import readiness
         from tree_state import TreeState
         red = {"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0}
-        suite = (((KEY, "implement", 1), red, "reported done"),)
+        suite = (((KEY, "implement", 1), (red, "reported done")),)
         report = (readiness.Report(KEY, "done", "implement", 1),)
         open_seg = [Segment("implement", ended_at=None)]
         held = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
@@ -783,8 +783,8 @@ class ReconcileTest(unittest.TestCase):
             True, True))
         missing = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report, changed=((KEY, False),),
                                   suites=(((KEY, "implement", 1),
-                                           {"passed": None, "failed": None, "skipped": None, "xfailed": None},
-                                           "reported done"),),
+                                           ({"passed": None, "failed": None, "skipped": None, "xfailed": None},
+                                            "reported done")),),
                                   require_green=True)
         self.assertTrue(self.plan(history=open_seg, facts=missing)[0].suite_hold)
 

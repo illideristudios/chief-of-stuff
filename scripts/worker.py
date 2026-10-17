@@ -104,6 +104,22 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> N
     store.set_resume(key, data)
 
 
+def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, command: str, at: str) -> None:
+    """Run workspace teardown once for a segment, when that segment closes."""
+    data = _resume(store, key)
+    runs = data.get("runs")
+    record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+    if not isinstance(record, dict) or record.get("torn_down"):
+        return
+    tree = record.get("tree")
+    if isinstance(tree, str) and tree:
+        for error in teardown(root, Path(tree), Path(tree).name, command):
+            store.add_log(key, f"worker teardown failed: {error}", at)
+    record["torn_down"] = True
+    data["runs"] = {**runs, f"{stage}-{attempt}": record}
+    store.set_resume(key, data)
+
+
 def _declared_agent(text: str, agent: str) -> str:
     """Pass the agent type only when the workspace's Agent: lines declare it (§9)."""
     if not agent:
@@ -233,15 +249,22 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
-    except Exception:
-        claude_adapter.cancel(runner)
-        # The process is already up. collect() never sees a segment slots.claim drops on this failure.
-        for error in teardown(root, tree, tree.name, teardown_command):
+    except Exception as start_error:
+        try:
+            claude_adapter.cancel(runner)
+        except Exception as cancel_error:
             try:
-                store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                store.add_log(issue_key, f"worker cancel failed: {cancel_error}", clock().isoformat())
             except Exception:
                 pass
-        raise
+        finally:
+            # The process is already up. collect() never sees a segment slots.claim drops on this failure.
+            for error in teardown(root, tree, tree.name, teardown_command):
+                try:
+                    store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                except Exception:
+                    pass
+        raise start_error
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
 
@@ -303,11 +326,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
-            for error in teardown(root, Path(record["tree"]), Path(record["tree"]).name, teardown_command):
-                store.add_log(key, f"worker teardown failed: {error}", now.isoformat())
             if not (run_dir / "exit.json").exists():
                 # The planner closes it from tree, report and orphan evidence.
                 continue
+            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
             code = _exit_code(run_dir)
             reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
             if isinstance(reply, Failure):
@@ -328,12 +350,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 elif reports[-1].outcome == "done":
                     raw = reports[-1].suite if isinstance(reports[-1].suite, dict) else {}
                     counts = dispatch_prompt.suite_counts(raw)
-                    if reconcile.suite_holds(counts, require_green=require_green):
+                    # With a finish callback the shared verdict sees the raw done report and arms the suite hold.
+                    if finish is None and reconcile.suite_holds(counts, require_green=require_green):
                         outcome = "human_review"
-                        shown = ", ".join(
-                            f"{name}={counts[name] if counts[name] is not None else 'missing or invalid'}"
-                            for name in dispatch_prompt.SUITE_KEYS)
-                        reason = f"suite is not green; Suite: {shown}; worker said: {reports[-1].summary}"
+                        reason = reconcile.suite_reason(counts, reports[-1].summary)
                         store.set_human_review(key, True)
                         data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
                                               "published": False}
