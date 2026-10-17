@@ -483,14 +483,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         except Exception as exc:
             error = str(exc)
         with db.transaction():
+            # The intent may be gone (the engine landed it) or replaced (a newer re-route): act only while it is still ours.
+            mine = (db.resume(write.issue_key) or {}).get("pending_stage", {}).get("decision_id") == tr.decision.id
             if error:
-                refused = decision_actions.block(db.decisions(write.issue_key), tr.decision.id, error)
+                refused = decision_actions.block(db.decisions(write.issue_key), tr.decision.id, error) if mine else None
                 if refused is not None:
                     db.update_decision(refused.store_write)
                 db.add_log(write.issue_key, f"stage write refused: {error}", now_iso, OP_STAGE_WRITE)
                 return 409, error
             db.upsert_item(write.issue_key, stage=write.stage)
-            db.update_resume(write.issue_key, lambda data: data.pop("pending_stage", None))
+            if mine:
+                db.update_resume(write.issue_key, lambda data: data.pop("pending_stage", None))
+                restored = decision_actions.unblock(db.decisions(write.issue_key), tr.decision.id)
+                if restored is not None:
+                    db.update_decision(restored.store_write)
 
     def do_POST(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a

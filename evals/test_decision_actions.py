@@ -238,9 +238,19 @@ class DecisionUpdateTest(unittest.TestCase):
         for status in ("open", "answered"):
             self.assertIsNone(da.block([make_decision(id=1, status=status)], 1, "offline"))
 
-    def test_block_takes_a_reversed_decision_past_the_retry_limit(self) -> None:
+    def test_block_takes_a_reversed_decision_past_the_retry_limit_and_keeps_it_reversed(self) -> None:
         update = da.block([make_decision(id=1, status="reversed", answer="Redo")], 1, "retry limit reached")
-        self.assertEqual((update.store_write.status, update.store_write.blocked_reason), ("blocked", "retry limit reached"))
+        self.assertEqual((update.store_write.status, update.store_write.blocked_reason), ("reversed", "retry limit reached"))
+        self.assertEqual(da.board_status(update.decision), "blocked")
+        self.assertIsNone(da.unblock([update.decision], 1))
+
+    def test_restore_held_restores_only_blocked_answers_when_no_decision_is_open(self) -> None:
+        row = dict(topic="design", rerouted_to="")
+        blocked = make_decision(id=1, question="a", status="blocked", answer="Yes", blocked_reason="merge is not ready", **row)
+        reroute = make_decision(id=2, question="b", status="blocked", answer="Back", blocked_reason="offline",
+                                **{**row, "rerouted_to": "review"})
+        self.assertEqual([u.store_write.decision_id for u in da.restore_held([blocked, reroute])], [1])
+        self.assertEqual(da.restore_held([blocked, make_decision(id=3, question="c", **row)]), [])
 
     def test_unblock_restores_only_the_decision_with_that_id(self) -> None:
         blocked = [make_decision(id=n, status="blocked", answer="Back", blocked_reason="offline", rerouted_to="review")

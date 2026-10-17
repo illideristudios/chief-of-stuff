@@ -80,18 +80,25 @@ def _apply(store: Any, update: decision_actions.DecisionUpdate | None) -> None:
         store.update_decision(update.store_write)
 
 
+def _current(store: Any, key: str, pending: dict) -> bool:
+    """Whether the intent is still the one stored: a newer re-route replaces it, and a late result must not touch that."""
+    return _resume(store, key).get("pending_stage") == pending
+
+
 def _stage_landed(store: Any, key: str, pending: dict) -> None:
     """The stage a pending write wanted is set: drop the intent and restore the decision that named it. A write
     without a decision id (the engine's own move, or one queued before ids) names none."""
     with store.transaction():
-        store.update_resume(key, lambda data: data.pop("pending_stage", None))
-        _apply(store, decision_actions.unblock(store.decisions(key), pending.get("decision_id")))
+        if _current(store, key, pending):
+            store.update_resume(key, lambda data: data.pop("pending_stage", None))
+            _apply(store, decision_actions.unblock(store.decisions(key), pending.get("decision_id")))
 
 
 def _block_reroutes(store: Any, key: str, pending: dict, reason: str) -> None:
     """A retried stage write was refused again: the decision that named it shows blocked with the new reason."""
     with store.transaction():
-        _apply(store, decision_actions.block(store.decisions(key), pending.get("decision_id"), reason))
+        if _current(store, key, pending):
+            _apply(store, decision_actions.block(store.decisions(key), pending.get("decision_id"), reason))
 
 
 def _drop_request(store: Any, key: str, request: dict | None) -> None:
@@ -103,14 +110,13 @@ def _sync_decisions_with_action(store: Any, key: str, action: reconcile.Action) 
     with store.transaction():
         decisions = store.decisions(key)
         if isinstance(action, reconcile.Wait) and action.reason == "decision pending":
-            # The hold names no block of an answered decision's own, and a blocked answer is what holds merge: restore it.
-            # A re-route's block waits on its stage write, which restores it by id.
-            for dec in decisions:
-                if not dec.rerouted_to:
-                    _apply(store, decision_actions.unblock(decisions, dec.id))
+            # With no open decision, a blocked answer is what holds merge: restore it.
+            for update in decision_actions.restore_held(decisions):
+                _apply(store, update)
             return
         for dec in decisions:
-            if dec.status not in {"answered", "blocked"}:
+            # A re-route's block waits on its stage write, which restores it by id; no action here decides it.
+            if dec.status not in {"answered", "blocked"} or dec.rerouted_to:
                 continue
             tr = decision_actions.meet_action(dec, action)
             if tr.store_write is not None:
@@ -210,6 +216,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     claude_text = (root / "CLAUDE.md").read_text(encoding="utf-8") if (root / "CLAUDE.md").is_file() else ""
     for action in actions:
         key = action.issue_key
+        op = (OP_MERGE_REFUSED if isinstance(action, reconcile.Merge)
+              else OP_WORKER_RUN if isinstance(action, (reconcile.Dispatch, reconcile.Review)) else "")
         try:
             _sync_decisions_with_action(store, key, action)
             stage = None
@@ -234,8 +242,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                           inputs=_planning_inputs(store, [by_key[key]])):
                     stage = "merge"
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
-                if isinstance(action, reconcile.Escalate) and key in requests:
-                    # A spent retry limit holds the decision that asked for the request and ends that request.
+                if isinstance(action, reconcile.Escalate) and (requests.get(key) or {}).get("decision_id"):
+                    # A spent retry limit holds the decision that asked for the request and ends that request;
+                    # a request queued before ids names none, and stays for the next pass.
                     with store.transaction():
                         _apply(store, decision_actions.block(store.decisions(key), requests[key].get("decision_id"), action.reason))
                         _drop_request(store, key, requests[key])
@@ -273,12 +282,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if last != message:
                     store.add_log(key, message, at)
             if stage is not None and stage != stages[key]:
+                op = OP_STAGE_WRITE
                 pending = {"stage": stage, "expected": stages[key]}  # the engine's own move: it names no decision
                 store.update_resume(key, lambda data: data.__setitem__("pending_stage", pending))
                 _write_stage(forge, store, key, pending)
         except Exception as exc:
-            store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at,
-                          OP_MERGE_REFUSED if isinstance(action, reconcile.Merge) else OP_WORKER_RUN)
+            store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at, op)
     try:
         notify.sync_workspace(root, now)
     except Exception as exc:

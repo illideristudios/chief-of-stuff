@@ -693,6 +693,8 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY).get("redispatch"), request)
 
     def test_a_failed_stage_write_after_a_dispatch_is_logged_as_a_stage_write(self):
+        self.run_pass()
+        self.finish("implement")
         with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="label offline")):
             self.run_pass()
         self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [reconcile.OP_STAGE_WRITE])

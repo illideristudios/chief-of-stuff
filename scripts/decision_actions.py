@@ -272,29 +272,41 @@ def refuse(record: Any, reason: str) -> Transition:
     return Transition(decision=nxt, store_write=_write_for(nxt))
 
 
-def _update(records: Sequence[Any], decision_id: int | None, statuses: frozenset[str]) -> DecisionState | None:
-    """The one decision with this id, if it is in a state the update applies to; an absent id matches nothing."""
+def _update(records: Sequence[Any], decision_id: int | None, statuses: frozenset[str]) -> Any | None:
+    """The one decision with this id, if its stored status is one the update applies to; an absent id matches nothing."""
     found = next((r for r in records if decision_id and getattr(r, "id", None) == decision_id), None)
-    prev = state_of(found) if found is not None else None
-    return prev if prev is not None and prev.status in statuses else None
+    return found if found is not None and getattr(found, "status", None) in statuses else None
 
 
 def block(records: Sequence[Any], decision_id: int | None, reason: str) -> DecisionUpdate | None:
-    """The decision a refused write or a spent retry limit holds up shows as blocked with the reason; it keeps its target."""
-    prev = _update(records, decision_id, frozenset({"re-routed", "reversed", "blocked"}))
-    if prev is None:
+    """The decision a refused write or a spent retry limit holds up shows as blocked with the reason; it keeps its target.
+    A reversal keeps its stored status, so no restore can mistake it for an answer a wait blocked."""
+    found = _update(records, decision_id, frozenset({"re-routed", "reversed", "blocked"}))
+    if found is None:
         return None
-    nxt = refuse(prev, reason).decision
+    nxt = refuse(found, reason).decision
+    if found.status == "reversed":
+        nxt = replace(nxt, status="reversed")
     return DecisionUpdate(nxt, _write_for(nxt))
 
 
 def unblock(records: Sequence[Any], decision_id: int | None) -> DecisionUpdate | None:
     """The decision whose block has cleared is restored."""
-    prev = _update(records, decision_id, frozenset({"blocked"}))
-    if prev is None:
+    found = _update(records, decision_id, frozenset({"blocked"}))
+    if found is None:
         return None
-    tr = meet_action(prev, None)
+    tr = meet_action(found, None)
     return DecisionUpdate(tr.decision, tr.store_write)
+
+
+def restore_held(records: Sequence[Any]) -> list[DecisionUpdate]:
+    """A decision-pending hold that no open decision explains is held by answers a wait blocked: restore them.
+    A re-route (restored by its stage write) and a reversal (blocked by a spent retry limit) stay as they are."""
+    latest = {(r.topic, r.question): r for r in records}  # rows are append-only: the latest row for a question is its state
+    if any(board_status(r) == "open" or not (r.answer or "").strip() for r in latest.values()):
+        return []
+    updates = (unblock(records, r.id) for r in records if not r.rerouted_to)
+    return [u for u in updates if u is not None]
 
 
 def _reverse_target(dec: DecisionState, current_stage: str, history: Sequence[Any], policies: Policies,

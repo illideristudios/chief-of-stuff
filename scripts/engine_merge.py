@@ -47,5 +47,6 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
     except (ForgeError, PolicyError) as exc:
         store.add_log(action.issue_key, f"merge refused: {exc}", at, reconcile.OP_MERGE_REFUSED)
         return False
-    store.add_log(action.issue_key, message, at, reconcile.OP_MERGE)
-    return message.startswith("merged ")
+    merged = message.startswith("merged ")
+    store.add_log(action.issue_key, message, at, reconcile.OP_MERGE if merged else "")  # queued or unknown: not a merge
+    return merged
