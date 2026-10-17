@@ -230,10 +230,32 @@ class MarkdownTest(unittest.TestCase):
 
     def test_diff_note_spacing_only_applies_to_the_outer_cell(self):
         thread = bs.ReviewThread(False, 'author', BLOCK, NOW, 'https://example.com')
-        note = sp._note(sp.Note('src/a.py', 1, 'new', thread), NOW)
-        self.assertIn('<table>', note)
+        f = sp.File('src/a.py', 'CHANGED')
+        f.rows = [('add', '', 1, 'x')]
+        note = sp.Note('src/a.py', 1, 'new', thread)
         self.assertIn('tr.note>td{padding:4px 14px 8px 100px', sp.CSS)
         self.assertNotRegex(sp.CSS, r'tr\.note\s+td\s*\{')
+        for html in (sp._rows(f, [note], NOW)[0], sp._split(f, [note], NOW)):
+            cells = [n for n in Structure(html).nodes if n['tag'] == 'td']
+            outer = [n for n in cells if n['parent']['attrs'].get('class') == 'note']
+            nested = [n for n in cells if n['text'] in ('build', 'pass')]
+            self.assertEqual(len(outer), 1)
+            self.assertEqual(len(nested), 2)
+            # `tr.note>td` reaches only the cell that holds the note, never a cell of the table inside it.
+            self.assertTrue(all(n['parent']['attrs'].get('class') != 'note' for n in nested))
+
+    def test_references_survive_escapes_and_entities_in_the_same_run(self):
+        resolve = lambda m: ('issue', m[0], '/i/' + m['num']) if m['num'] else None
+        cases = {
+            'https://example.com/?a=1&amp;b=2': 'href="https://example.com/?a=1&amp;b=2"',
+            'src/my\\_file.py:3': 'src/my_file.py:3</a>',
+        }
+        for text, expect in cases.items():
+            with self.subTest(text=text):
+                self.assertIn(expect, page_common.markdown_inline(text, lambda m: ('file', m[0], 'blob/' + m[0]) if m['path'] else None))
+        for escaped in ('\\#12', '&#35;12'):
+            with self.subTest(escaped=escaped):
+                self.assertNotIn('<a', page_common.markdown_inline(escaped, resolve))
 
     def test_issue_prose_links_forge_references(self):
         from workspace import parse_coordinator
