@@ -1,4 +1,4 @@
-"""#90: launcher-enforced stack cleanup."""
+"""#90: engine-enforced stack cleanup and its shell runner."""
 
 import contextlib
 import io
@@ -74,52 +74,16 @@ class WorkerTeardownTest(unittest.TestCase):
         got = settings.load(self.root, "settings.toml").workers
         self.assertEqual((got.teardown, got.teardown_list), ("python3 cleanup.py", "python3 stacks.py"))
 
-    def test_cleanup_runs_in_the_workspace_with_the_worker_name_before_reconciliation(self):
+    def test_one_shot_relies_on_assignment_cleanup_until_engine_cutover(self):
         self.configure(teardown=self.cleanup_command())
-        original = one_shot.reconcile
-        def reconcile(*args, **kwargs):
-            self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.root.resolve()} worker01\n")
-            return original(*args, **kwargs)
-        with mock.patch.object(one_shot, "reconcile", side_effect=reconcile):
-            self.assertEqual(self.launch(), 0)
-
-    def test_cleanup_runs_for_review_relaunch_crash_and_both_timeout_attempts(self):
-        for status, codes in (("human_review", (0,)), ("relaunch", (0,)), (None, (127,)),
-                              (None, (124, 124))):
-            with self.subTest(status=status, codes=codes):
-                self.fx.tracker.write_text(fixtures.TRACKER)
-                (self.tree / dispatch_prompt.DISPATCH_FILE).unlink(missing_ok=True)
-                (self.tree / one_shot.RESULT).unlink(missing_ok=True)
-                (self.root / "cleanup.log").unlink(missing_ok=True)
-                self.configure(teardown=self.cleanup_command())
-                self.launch(status, codes)
-                self.assertEqual((self.root / "cleanup.log").read_text().splitlines(),
-                                 [f"{self.root.resolve()} worker01"] * len(codes))
-
-    def test_failed_cleanup_is_reported_without_changing_the_tracker_outcome(self):
-        self.configure(teardown=self.cleanup_command(7))
-        self.assertEqual(self.launch(), 1)
-        report = self.report()
-        self.assertEqual(report["status"], "done")
-        self.assertTrue(any("teardown:" in e and "7" in e for e in report["errors"]))
-        self.assertNotIn("teardown failed:", self.fx.tracker.read_text())
-        self.assertEqual(decode((self.tree / one_shot.REPORT).read_text()), report)
+        self.assertEqual(self.launch(), 0)
+        self.assertFalse((self.root / "cleanup.log").exists())
+        self.assertEqual(self.report()["status"], "done")
         self.assertIn("completed; awaiting integration", self.fx.tracker.read_text())
-
-    def test_unstartable_and_timed_out_cleanup_still_reconcile(self):
-        self.configure(teardown=self.cleanup_command())
-        for error in (OSError("cannot execute shell"), subprocess.TimeoutExpired("cleanup", 120)):
-            with self.subTest(error=error):
-                self.fx.tracker.write_text(fixtures.TRACKER)
-                (self.tree / dispatch_prompt.DISPATCH_FILE).unlink(missing_ok=True)
-                with mock.patch.object(shell_setup, "run_command", side_effect=error):
-                    self.assertEqual(self.launch(), 1)
-                self.assertEqual(self.report()["status"], "done")
-                self.assertTrue(any(e.startswith("teardown:") for e in self.report()["errors"]))
 
     def test_unconfigured_workers_do_not_run_a_cleanup_command(self):
         with mock.patch.object(shell_setup, "run_command") as run:
-            self.assertEqual(self.launch(), 0)
+            self.assertEqual(shell_setup.teardown(self.root, self.tree, "worker01", ""), [])
         run.assert_not_called()
 
     def test_shell_timeout_also_stops_background_children(self):
@@ -227,13 +191,6 @@ class WorkerTeardownTest(unittest.TestCase):
                               trees=fx.trees, policies=fx.p, forge=fx.forge, clock=lambda: engine_fixtures.NOW,
                               teardown_command="down")
         self.assertEqual(calls, [(fx.root, fx.tree, fx.tree.name, "down")])
-
-    def test_cleanup_runs_in_finally_when_the_worker_wait_raises(self):
-        self.configure(teardown=self.cleanup_command())
-        with mock.patch.object(one_shot, "_run_worker", side_effect=RuntimeError("worker wait failed")):
-            with self.assertRaisesRegex(RuntimeError, "worker wait failed"):
-                self.fx._run(self.fx._fake(None, write_partial=False))
-        self.assertEqual((self.root / "cleanup.log").read_text(), f"{self.root.resolve()} worker01\n")
 
     def test_adoption_cli_reconciles_existing_evidence_without_teardown(self):
         # The architect leaves cleanup after a dead launcher to the engine at cutover.

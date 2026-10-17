@@ -655,7 +655,7 @@ class RunTest(unittest.TestCase):
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv):
             return one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=tree or self.tree, name="worker01", runtime=runtime, agent_type=None,
-                                model=model, effort=effort, dry_run=False, teardown=shell_setup.teardown)
+                                model=model, effort=effort, dry_run=False)
 
     def test_run_composes_with_already_loaded_workspace_policy(self):
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")

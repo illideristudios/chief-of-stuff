@@ -12,7 +12,6 @@ import subprocess
 from contextlib import contextmanager, suppress
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Callable
 
 import backlog
 import dispatch_prompt
@@ -510,8 +509,7 @@ def _clear_stale_dispatch(cwd: Path, task: str) -> None:
 
 def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
         runtime: str, agent_type: str | None, model: str, effort: str, dry_run: bool,
-        timeout_minutes: int = 60,
-        teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: []) -> int:
+        timeout_minutes: int = 60) -> int:
     cfg = dispatch_prompt.config(root)
     chosen_day = day or datetime.now(cfg.zone).date().isoformat()
     settings = load_settings(root, cfg.settings_path)
@@ -536,13 +534,11 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
     trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
     _clear_stale_dispatch(cwd, task)
     with slot(trees, cwd, task, workers.max_concurrency):
-        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv,
-                       timeout_minutes, common, teardown, workers.teardown)
+        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv, timeout_minutes, common)
 
 
 def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, runtime: str, model: str,
-            effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None,
-            teardown: Callable[[Path, Path, str, str], list[str]] = lambda *args: [], cleanup: str = "") -> int:
+            effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None) -> int:
     # Same clean login-shell path as interactive sessions; auth and user PATH come from shell setup.
     # Everything that can refuse runs before anything is written; a refused row takes its dispatch back.
     launch_argv, tree = login_argv(argv), _tree_note(root, cwd, expected_common)
@@ -569,11 +565,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
     env["CHIEF_OF_STUFF_WORKSPACE"] = str(root.resolve())
     for log in ("worker-stdout.log", "worker-stderr.log"):
         (logs / log).write_text("")  # a fresh run's worker logs start empty; a retried run appends
-    teardown_errors = []
-    try:
-        exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes)
-    finally:
-        teardown_errors.extend(teardown(root, cwd, name, cleanup))
+    exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes)
     if exit_code == 124 and not (cwd / RESULT).exists():
         # The first timeout relaunches the run once, into the same tree with its partial commits
         # (#110): the Log line is the once-per-row marker the second timeout finds, a result the
@@ -585,15 +577,9 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
                 text, timed_out_line(tracker_write.stamp(cfg.zone), name, timeout_minutes, task)))
             with suppress(OSError):
                 (cwd / RESULT).unlink(missing_ok=True)
-            try:
-                exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
-            finally:
-                teardown_errors.extend(teardown(root, cwd, name, cleanup))
+            exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
     report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
                        read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common)  # held to what it was told
-    if teardown_errors:
-        report["errors"].extend(teardown_errors)
-        report = write_report(root, cwd, report)
     print(toon_encode(report))
     return 0 if report["status"] == "done" and not report["errors"] else 1
 
