@@ -16,6 +16,9 @@ KEEP = {"PATH", "HOME", "USER", "LOGNAME", "SHELL", "TERM", "TERM_PROGRAM", "TMP
         "LANG", "LC_ALL", "LC_CTYPE", "COLORTERM", "TZ", "SSH_AUTH_SOCK", "XDG_CONFIG_HOME",
         "CHIEF_OF_STUFF_RELEASE", "CHIEF_OF_STUFF_WORKSPACE"}
 
+# Keep ownership until a later command can reap children that outlast bounded cleanup.
+_unreaped_children: list[subprocess.Popen] = []
+
 
 class ShellError(ValueError):
     pass
@@ -83,6 +86,8 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
     optional worktree identity travel in the environment. Execution has its own timeout;
     cleanup allows at most one additional second to reap the shell after a failure.
     """
+    # Popen.poll uses WNOHANG: a stuck child must not delay the next command either.
+    _unreaped_children[:] = [child for child in _unreaped_children if child.poll() is None]
     env = {**clean_env(), "CHIEF_OF_STUFF_WORKSPACE": str(workspace.resolve()),
            "CHIEF_OF_STUFF_WORKER": worker}
     if worktree:
@@ -119,9 +124,15 @@ def run_command(command: str, cwd: Path, *, workspace: Path, worker: str = "",
                     try:
                         child.wait(timeout=1)
                     except subprocess.TimeoutExpired:
-                        # SIGKILL may be pending on an uninterruptible child. Popen retains
-                        # unreaped children for later nonblocking collection; do not stall callers.
-                        pass
+                        # SIGKILL may still be pending on an uninterruptible child. Retain it
+                        # explicitly; Popen's destructor has not run while the exception holds it.
+                        _unreaped_children.append(child)
+                        detail = f"child pid {child.pid} not reaped after SIGKILL"
+                        if isinstance(exc, subprocess.TimeoutExpired):
+                            # TimeoutExpired formats its message from cmd, not args.
+                            exc.cmd = f"({detail}) {exc.cmd}"
+                        else:
+                            exc.args = (*exc.args, detail)
                 raise
             stderr = errors.read_text(errors="replace")
             stdout = output.read_text(errors="replace") if output.exists() else ""
