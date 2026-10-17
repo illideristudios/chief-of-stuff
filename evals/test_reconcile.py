@@ -745,6 +745,10 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement")], facts=facts),
                          [reconcile.Wait(KEY, "read-only run left changes")])
 
+    def test_unknown_finished_tree_does_not_reinstate_a_released_read_only_hold(self):
+        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, None),), blockers=())
+        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
+
 
 class SuiteHoldTest(unittest.TestCase):
     def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):

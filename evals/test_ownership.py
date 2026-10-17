@@ -19,6 +19,16 @@ class IssueScopesTest(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual(ownership.issue_scopes(body), [(".", "write")])
 
+    def test_a_malformed_line_cannot_silently_drop_a_write_scope(self):
+        for bad in ("write src/", "- write src/", "| write |", "some prose", "| write | src/ | extra |"):
+            with self.subTest(bad=bad):
+                self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n" + bad), [(".", "write")])
+
+    def test_noncanonical_path_segments_cannot_bypass_overlap(self):
+        for path in ("src//a.py", "src/./a.py", "src/../a.py"):
+            with self.subTest(path=path):
+                self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + path), [(".", "write")])
+
 
 class ReadOnlyTest(unittest.TestCase):
     def test_a_cell_that_starts_with_the_word_none_is_read_only(self):

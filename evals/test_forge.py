@@ -257,6 +257,18 @@ class GitHubTest(unittest.TestCase):
                 request, = forge.Forge(GH, approver="robin", gh=FakeGh(prs=[tma.pr(21, reviews)])).requests()
                 self.assertEqual((request.approval, tma.ma.blocked(request)), (approval, blockers))
 
+    def test_snapshots_include_issue_bodies_from_the_list_read(self):
+        gh = github()
+        def listed(args, input_text=None):
+            code, out, err = gh(args, input_text)
+            if args[:2] == ["issue", "list"]:
+                fields = args[args.index("--json") + 1].split(",")
+                out = json.dumps([{k: v for k, v in row.items() if k in fields} for row in json.loads(out)])
+            return code, out, err
+        rows = forge.Forge(GH, gh=listed).snapshots()
+        self.assertEqual([row["body"] for row in rows], ["the body", "the body"])
+        self.assertFalse([args for args in gh.all_calls if args[:2] == ["issue", "view"]])
+
     def test_snapshots_carry_identity_stage_review_and_merge_state(self):
         got = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshots()
         self.assertEqual(got, [

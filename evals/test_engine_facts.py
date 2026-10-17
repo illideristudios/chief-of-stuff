@@ -112,6 +112,23 @@ class GatherTest(unittest.TestCase):
                 self.assertEqual(facts.changed, ((KEY, None),))
                 self.assertEqual(facts.progress, ((KEY, None),))
 
+    def test_recorded_trees_are_read_even_when_discovery_omits_them(self):
+        tree = self.root / "issue-1"
+        tree.mkdir()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["tree"] = str(tree)
+        self.db.set_resume(KEY, data)
+        for trees in (self.trees, self.root):
+            with self.subTest(trees=trees), \
+                 mock.patch.object(engine_facts.git_trees, "discover", return_value=[]), \
+                 mock.patch.object(engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)) as read:
+                facts = engine_facts.gather(forge=SimpleNamespace(blocked_by=lambda: {}), store=self.db,
+                                            root=self.root, trees=trees, now=NOW)
+                read.assert_called_once_with(tree)
+                self.assertEqual(facts.changed, ((KEY, False),))
+                self.assertEqual(facts.progress, ((KEY, NOW),))
+                self.assertEqual(facts.on_main, ((KEY, True),))
+
     def test_late_reports_from_an_older_run_do_not_replace_the_latest_stop(self):
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
         self.db.record_segment(KEY, "review", 1, started_at=NOW.isoformat())
