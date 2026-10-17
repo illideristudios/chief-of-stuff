@@ -54,18 +54,27 @@ class LimitsHistory:
         @event.listens_for(self.engine, "begin")
         def _begin(conn) -> None:  # noqa: ANN001 - SQLAlchemy connection
             # Serialize the check and insert across workspace engines sharing this account history, as store.Store does.
-            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            conn.exec_driver_sql("BEGIN" if conn.get_execution_options().get("history_read") else "BEGIN IMMEDIATE")
+
+    def _revision(self) -> str | None:
+        with self.engine.connect().execution_options(history_read=True) as conn:
+            return MigrationContext.configure(conn).get_current_revision()
 
     def _migrate(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         cfg = migration_config(self.path, Base.metadata,
                                Path(__file__).with_name("migrations") / "limits_versions")
+        scripts = ScriptDirectory.from_config(cfg)
+        head = scripts.get_current_head()
+        if self.path.exists() and self._revision() == head:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         # Different workspaces can take their first reading at the same time.
         with self.path.with_suffix(".migrate.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
-            with self.engine.connect() as conn:
-                current = MigrationContext.configure(conn).get_current_revision()
-            if current != ScriptDirectory.from_config(cfg).get_current_head():
+            current = self._revision()
+            if current != head:
+                if current is not None and current not in {r.revision for r in scripts.walk_revisions()}:
+                    raise ValueError(f"unknown limits history revision: {current}")
                 command.upgrade(cfg, "head")
 
     def record(self, readings: list[Reading]) -> None:
@@ -87,10 +96,12 @@ class LimitsHistory:
                 session.execute(insert(LimitReading).values(**values).on_conflict_do_nothing())
 
     def readings(self, runtime: str, account: str, since: datetime) -> list[Reading]:
-        """Read since an inclusive aware timestamp (naive raises), migrating under the shared lock first."""
+        """Read since an inclusive aware timestamp; migrate an older existing database under the lock."""
         since_stamp = _stamp(since)
+        if not self.path.exists():
+            return []
         self._migrate()
-        with Session(self.engine) as session:
+        with Session(self.engine.execution_options(history_read=True)) as session:
             rows = session.scalars(select(LimitReading).where(
                 LimitReading.runtime == runtime, LimitReading.account == account,
                 LimitReading.read_at >= since_stamp).order_by(LimitReading.read_at, LimitReading.id)).all()

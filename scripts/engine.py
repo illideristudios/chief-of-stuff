@@ -405,15 +405,22 @@ def main(argv: list[str] | None = None) -> int:
                 selected = next(iter(config.repos.values()))
             if not selected and config.repos:
                 raise ValueError("no [repos] clone matches the workspace backlog")
+            launch_config = config
             try:
                 while True:
                     failed = False
                     try:
                         # Every launch in this pass shares rules and stage defaults, even if the file changes.
-                        launch_config = settings.load(root, settings_path(text))
+                        reloaded_config = settings.load(root, settings_path(text))
+                        if reloaded_config.kanban is None:
+                            raise settings.SettingsError("no [kanban] stage labels configured")
+                        launch_config = reloaded_config
+                    except settings.SettingsError as exc:
+                        print(f"engine: settings reload failed; keeping last good snapshot: {exc}",
+                              file=sys.stderr, flush=True)
+                    try:
                         launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                                         clone=root / selected if selected else root, config=launch_config,
-                                         claude_as_profile=launch_config.workers.claude_as_profile)
+                                         clone=root / selected if selected else root, config=launch_config)
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
                                  launch=launch, workers=launch_config.workers,
                                  max_concurrency=launch_config.workers.max_concurrency,

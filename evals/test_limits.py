@@ -212,17 +212,17 @@ class History(unittest.TestCase):
             db = limits_history.LimitsHistory(path)
             self.addCleanup(db.engine.dispose)
             db.record([reading(20)])
-            db.engine.dispose()
+            # Keep SQLite's WAL sidecars present; this refusal is about creating the migration lock.
+            reader = limits_history.LimitsHistory(path)
+            self.addCleanup(reader.engine.dispose)
             path.with_suffix(".migrate.lock").unlink()
-            path.chmod(0o444)
             path.parent.chmod(0o555)
             try:
-                self.assertEqual(db.readings("codex", "", NOW), [reading(20)])
+                self.assertEqual(reader.readings("codex", "", NOW), [reading(20)])
                 self.assertFalse(path.with_suffix(".migrate.lock").exists())
             finally:
-                db.engine.dispose()
+                reader.engine.dispose()
                 path.parent.chmod(0o755)
-                path.chmod(0o644)
 
     def test_unknown_history_revision_is_refused_without_attempting_upgrade(self):
         with tempfile.TemporaryDirectory() as tmp:

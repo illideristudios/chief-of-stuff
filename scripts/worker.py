@@ -110,9 +110,9 @@ def _declared_agent(text: str, agent: str) -> str:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", config: Settings | None = None,
+           claude_as_profile: str | None = None, config: Settings | None = None,
            clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
-    """The Launch port: verify a live start or adopt durable completion before slots records it."""
+    """Verify start or adopt completion; return (model, effort). Use config or load it; an explicit claude_as_profile overrides config (empty selects default login)."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
         raise ValueError(f"no worker persona for {stage}")
@@ -127,6 +127,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     if config is None:
         config = load_settings(root, settings_path(text))
+    if claude_as_profile is None:
+        claude_as_profile = config.workers.claude_as_profile
     defaults = config.stages.get(stage)
     agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
     row = next(item for item in store.items() if item.issue_key == issue_key)
