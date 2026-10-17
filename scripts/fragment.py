@@ -69,10 +69,11 @@ def theme() -> str:
 
 
 def tab_bar(tab: str, pending: int, parent: bool = False, since: tuple[int, str] = (0, ""),
-            epics: tuple[int, int] = (0, 0), workers: int = 0, dispatch: int = 0) -> str:
+            epics: tuple[int, int] = (0, 0), workers: int = 0, dispatch: int = 0, decisions: int | None = None) -> str:
     """The nav, `tab` marked as this page's (`aria-current`), or as its parent's on a detail page (`parent`).
     Counts come from the pages' shared context; zero badges are omitted. Unbuilt pages still carry their counts.
     Epics preserves its at-risk/late breakdown (#230); `since` preserves the last-look time (#229)."""
+    pending = pending if decisions is None else decisions
     mark = ' class="tab-parent"' if parent else ' aria-current="page"'
     at_risk = " · ".join(f"{n} {what}" for n, what in zip(epics, ("at risk", "late")) if n)
     badges = {"Workers": (str(workers) if workers else "", f"{workers} need input", "hot"),
@@ -87,3 +88,15 @@ def tab_bar(tab: str, pending: int, parent: bool = False, since: tuple[int, str]
         attrs = (mark if name == tab else "") + (f' data-tone="{tone}"' if text else "")
         out.append(f"<a {href(url)}{attrs}>{name}{badge}</a>" if url else f"<span{attrs}>{name}{badge}</span>")
     return '<nav class="tabs" aria-label="Board sections">' + "".join(out) + "</nav>\n"
+
+
+def issue_href(key: str | int) -> str:
+    """An issue identity as one encoded route component, including its forge namespace."""
+    from urllib.parse import quote
+    return "/issues/" + quote(str(key), safe="")
+
+
+def issue_page_name(key: str | int, source: bool = False) -> str:
+    raw = str(key)
+    token = raw if raw.isdecimal() else "k" + raw.encode().hex()
+    return f"issue-{token}{'-source' if source else ''}.html"

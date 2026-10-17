@@ -55,9 +55,9 @@ SERVER = "chief-of-stuff-pages"
 PID = ".pid"
 CACHE = ".sources.json"
 REFRESH = 60  # seconds between forge reads
-RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-\d+(?:-source)?\.html")
+RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
-ISSUE = re.compile(r"/issues/(?:[a-z0-9_.-]+:[A-Za-z0-9_./-]+#)?(\d+)(/source)?")
+ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
@@ -135,7 +135,8 @@ def _page_data(root: Path):
         return None
     db = store_access.migrated_store(root)
     try:
-        return task_forge.page_data(db)
+        with db.transaction(write=False):
+            return task_forge.page_data(db)
     finally:
         db.engine.dispose()
 
@@ -147,28 +148,15 @@ def write_board(root: Path, day: str | None = None, *, now: datetime | None = No
 
 
 def _navigation(root: Path, pages_dir: Path, data):
-    import board_sources
-    import decision_page
-    import task_forge
-    from settings import load
-    from workspace import looked_before, with_workspace_decision_deadlines
-    cfg = read_config(root)
-    now = datetime.now(cfg.zone)
-    day = now.date()
-    path = root / cfg.tracker_path(day.isoformat())
-    text = path.read_text() if path.is_file() else ""
-    cfg = with_workspace_decision_deadlines(root, cfg, text, day)
-    settings = load(root, cfg.settings_path)
-    ctx = decision_page.context(root, day.isoformat())
-    pending = decision_page.entries(pages_dir, ctx) if ctx else []
-    earlier = [(d, p.read_text()) for d, p in daily_trackers(root, cfg) if d < day]
-    counts = task_forge.tab_counts(text, cfg, now, settings.lanes, settings.kanban,
-                                   board_sources.load(pages_dir), decision_page.held_refs(pending, ctx),
-                                   looked_before(pages_dir), earlier, settings.workers.max_concurrency or 1)
-    if data is not None:
-        counts["workers"] += sum(1 for seg in data.segments() if seg.outcome == "human_review"
-                                  and seg.ended_at and datetime.fromisoformat(seg.ended_at).astimezone(cfg.zone).date() == day)
-    return counts
+    import decision_actions
+    if data is None:
+        return {}
+    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+
+
+def _issue_identity(name: str, source: bool = False):
+    token = name[len("issue-"):-len("-source.html") if source else -5]
+    return bytes.fromhex(token[1:]).decode() if token.startswith("k") else int(token)
 
 
 def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()) -> str:
@@ -236,10 +224,10 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                         if name == "workers.html":
                             workers_page.write(root, pages_dir, db=data, navigation=navigation)
                         elif name.endswith("-source.html"):
-                            source_page.write(root, pages_dir, int(name[len("issue-"):-len("-source.html")]),
+                            source_page.write(root, pages_dir, _issue_identity(name, source=True),
                                               db=data, navigation=navigation)
                         else:
-                            issue_page.write(root, pages_dir, int(name[len("issue-"):-5]), db=data, navigation=navigation)
+                            issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
                     else:
                         render_board.write(root, day, db=data)
             RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
@@ -320,7 +308,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not m:
                 self.send_error(404, "no such issue")
                 return False
-            self.path = f"/issue-{int(m[1])}{'-source' if m[2] else ''}.html"
+            self.path = "/" + fragment.issue_page_name(m[1], bool(m[2]))
         elif RENDERED.fullmatch(Path(self.translate_path(path)).name.casefold()):
             # A rendered page is a route only. casefold: long s and a case-insensitive disk reach it too (#335).
             self.send_error(404)
@@ -418,46 +406,91 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         answer_val = form.get("answer", [""])[0].strip()
         target_stage = form.get("target_stage", [""])[0].strip()
         now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
-        db = store_access.migrated_store(root)
+        import sqlite3
+        from dataclasses import asdict
+        from sqlalchemy.exc import OperationalError
+        from supervisor import ServiceError
+        from settings import load_policy
+
+        db = None
         try:
-            dec = db.decision(int(dec_id))
-            if dec is None:
-                return self.send_error(404, "no such decision")
-            item = db.item(dec.issue_key)
-            if action == "answer":
-                tr = decision_actions.answer(dec, answer_val, decided_by="user", answered_at=now_iso)
-            elif action == "reverse":
-                tr = decision_actions.reverse(dec, answer_val, decided_by="user", answered_at=now_iso,
-                                              stage=item.stage if item else "")
-            elif action in ("reroute", "re-route"):
-                tr = decision_actions.reroute(dec, target_stage, answer_text=answer_val, decided_by="user",
-                                              answered_at=now_iso, current_stage=item.stage if item else "")
-            else:
-                return self.send_error(400, "unknown decision action")
-            fg = forge.for_workspace(root)
-            try:
+            db = store_access.migrated_store(root)
+            # Reserve before checking state: a competing POST or engine write cannot interleave.
+            def apply():
+                dec = db.decision(int(dec_id))
+                if dec is None:
+                    return (404, "no such decision")
+                item = db.item(dec.issue_key)
+                if action == "answer" and not answer_val:
+                    return (400, "an answer must contain text")
+                policies = load_policy()
+                history = db.segments(dec.issue_key)
+                stage = target_stage if action in ("reroute", "re-route") else (item.stage if item else dec.gate)
+                if action == "reverse":
+                    affected = next((s.stage for s in reversed(history) if s.stage not in {"review", "merge"}), None)
+                    stage = dec.gate if dec.gate in policies.stages and dec.gate != "merge" else affected or stage
+                    if stage == "merge":
+                        stage = policies.workflow_for(None).start
+                if action != "answer" and stage not in policies.stages:
+                    return (400, "unknown target stage")
+                persona = policies.stages[stage].persona or "" if stage in policies.stages else ""
+                attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
+                try:
+                    if action == "answer":
+                        tr = decision_actions.answer(dec, answer_val, decided_by="user", answered_at=now_iso)
+                    elif action == "reverse":
+                        tr = decision_actions.reverse(dec, answer_val, answered_at=now_iso,
+                                                      stage=stage, persona=persona, attempt=attempt)
+                    elif action in ("reroute", "re-route"):
+                        tr = decision_actions.reroute(dec, target_stage, answer_text=answer_val,
+                                                      answered_at=now_iso, current_stage=item.stage if item else "",
+                                                      persona=persona, attempt=attempt)
+                    else:
+                        return (400, "unknown decision action")
+                except ValueError as exc:
+                    return (409, str(exc))
+                fg = forge.for_workspace(root)
+                if fg is None:
+                    return (409, "no forge configured")
                 for fw in tr.actions:
-                    number = int(fw.issue_key.rpartition("#")[2])
-                    if fg is None:
-                        raise RuntimeError("no forge configured")
                     if isinstance(fw, decision_actions.ForgeStageWrite):
-                        result = fg.write_stage(number, fw.stage, expected=fw.previous_stage or None, commit=True)
+                        number = int(fw.issue_key.rpartition("#")[2])
+                        try:
+                            result = fg.write_stage(number, fw.stage, expected=fw.previous_stage or None, commit=True)
+                        except Exception as exc:
+                            db.add_log(dec.issue_key, f"decision stage write failed: {exc}", now_iso)
+                            return (409, str(exc))
                         if not result.ok or not result.done:
-                            raise RuntimeError(result.error or "stage write was not committed")
+                            error = result.error or "stage write was not committed"
+                            db.answer_decision(dec.id, tr.decision.answer, status="blocked", blocked_reason=error)
+                            return (409, error)
                         db.upsert_item(fw.issue_key, stage=fw.stage)
-                    elif isinstance(fw, decision_actions.ForgeComment):
-                        error = fg.comment(number, fw.body, commit=True)
+                data = db.resume(dec.issue_key) or {}
+                if tr.redispatch is not None:
+                    data["redispatch"] = asdict(tr.redispatch)
+                comments = list(data.get("decision_comments", []))
+                for fw in tr.actions:
+                    if isinstance(fw, decision_actions.ForgeComment):
+                        try:
+                            error = fg.comment(int(fw.issue_key.rpartition("#")[2]), fw.body, commit=True)
+                        except Exception as exc:
+                            error = str(exc)
                         if error:
-                            raise RuntimeError(error)
-            except Exception as exc:
-                import reconcile
-                blocked = decision_actions.meet_action(tr.decision, reconcile.Wait(dec.issue_key, str(exc)))
-                db.update_decision(blocked.store_write)
-                db.add_log(dec.issue_key, f"decision action failed: {exc}", now_iso)
-                return self.send_error(409, str(exc))
-            db.update_decision(tr.store_write)
+                            comments.append(fw.body)
+                            db.add_log(dec.issue_key, f"decision comment failed: {error}", now_iso)
+                if comments:
+                    data["decision_comments"] = comments
+                db.set_resume(dec.issue_key, data)
+                db.update_decision(tr.store_write)
+            with db.transaction():
+                error = apply()
+            if error is not None:
+                return self.send_error(*error)
+        except (ServiceError, sqlite3.OperationalError, OperationalError) as exc:
+            return self.send_error(503, f"store unavailable: {exc}")
         finally:
-            db.engine.dispose()
+            if db is not None:
+                db.engine.dispose()
         for page in Path(self.directory).iterdir():
             if RENDERED.fullmatch(page.name):
                 RENDERED_AT[str(page)] = 0, None, ""

@@ -92,9 +92,6 @@ class Decision(Base):
 
     @property
     def status(self) -> str:
-        meta = getattr(self, "_resume_meta", None) or {}
-        if isinstance(meta, dict) and meta.get("status"):
-            return str(meta["status"])
         if isinstance(self.record, dict) and self.record.get("status"):
             return str(self.record["status"])
         return "answered" if self.answer else "open"
@@ -107,18 +104,12 @@ class Decision(Base):
 
     @property
     def blocked_reason(self) -> str:
-        meta = getattr(self, "_resume_meta", None) or {}
-        if isinstance(meta, dict) and meta.get("blocked_reason"):
-            return str(meta.get("blocked_reason", "") or "")
         if isinstance(self.record, dict) and self.record.get("blocked_reason"):
             return str(self.record.get("blocked_reason", "") or "")
         return ""
 
     @property
     def rerouted_to(self) -> str:
-        meta = getattr(self, "_resume_meta", None) or {}
-        if isinstance(meta, dict) and meta.get("rerouted_to"):
-            return str(meta.get("rerouted_to", "") or "")
         if isinstance(self.record, dict) and self.record.get("rerouted_to"):
             return str(self.record.get("rerouted_to", "") or "")
         return ""
@@ -213,6 +204,7 @@ def migrate(path: Path | str) -> None:
 class Store:
     def __init__(self, path: Path | str, clock: clock.Clock = clock.system) -> None:
         self.clock = clock
+        self._active_session = None
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"timeout": 30, "isolation_level": None})
 
         @event.listens_for(self.engine, "connect")
@@ -222,16 +214,33 @@ class Store:
         @event.listens_for(self.engine, "begin")
         def _begin(conn) -> None:  # noqa: ANN001 - SQLAlchemy connection
             # Take the write lock before reading: a WAL snapshot cannot upgrade after another writer commits.
-            conn.exec_driver_sql("BEGIN IMMEDIATE")
+            conn.exec_driver_sql("BEGIN IMMEDIATE" if conn.get_execution_options().get("store_write") else "BEGIN")
 
     def _stamp(self) -> str:
         return self.clock().isoformat()
 
     @contextmanager
-    def session(self) -> Iterator[Session]:
-        """One transaction: commits on a clean exit, rolls back on an error."""
-        with Session(self.engine) as s, s.begin():
-            yield s
+    def session(self, *, write: bool = True) -> Iterator[Session]:
+        """One transaction; readers use a deferred WAL snapshot, writers reserve before reading."""
+        if self._active_session is not None:
+            yield self._active_session
+            return
+        with self.engine.connect().execution_options(store_write=write) as conn:
+            with Session(conn) as s, s.begin():
+                yield s
+
+    @contextmanager
+    def transaction(self, *, write: bool = True):
+        """Keep related store operations in one snapshot, including the decision POST's state check."""
+        if self._active_session is not None:
+            yield self
+            return
+        with self.session(write=write) as s:
+            self._active_session = s
+            try:
+                yield self
+            finally:
+                self._active_session = None
 
     def _upsert(self, model: type[Base], keys: tuple[str, ...], values: dict[str, Any]) -> None:
         stmt = insert(model).values(**values)
@@ -243,10 +252,19 @@ class Store:
     # work items
     def upsert_item(self, issue_key: str, **fields: Any) -> None:
         allowed = {k: v for k, v in fields.items() if k in FORGE_COLUMNS}
-        self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **allowed, "updated_at": self._stamp()})
+        with self.transaction():
+            prior = self.item(issue_key)
+            if "human_review" in allowed and (prior is None or prior.human_review != allowed["human_review"]):
+                data = self.resume(issue_key) or {}
+                # The hold's identity survives cache refreshes and changes to other forge fields.
+                data["human_review_since"] = self._stamp() if allowed["human_review"] else None
+                self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **allowed, "updated_at": self._stamp()})
+                self.set_resume(issue_key, data)
+            else:
+                self._upsert(WorkItem, ("issue_key",), {"issue_key": issue_key, **allowed, "updated_at": self._stamp()})
 
     def item(self, issue_key: str) -> WorkItem | None:
-        with self.session() as s:
+        with self.session(write=False) as s:
             row = s.get(WorkItem, issue_key)
             if row is not None:
                 s.expunge(row)
@@ -260,7 +278,7 @@ class Store:
                 raise KeyError(issue_key)
 
     def items(self) -> list[WorkItem]:
-        with self.session() as s:
+        with self.session(write=False) as s:
             rows = s.scalars(select(WorkItem).order_by(WorkItem.issue_key)).all()
             s.expunge_all()
             return list(rows)
@@ -348,15 +366,20 @@ class Store:
             return row
 
     def decision(self, decision_id: int) -> Decision | None:
-        with self.session() as s:
+        with self.session(write=False) as s:
             row = s.get(Decision, decision_id)
             if row is not None:
-                res = s.get(Resume, row.issue_key)
                 s.expunge(row)
-                if res and isinstance(res.data, dict):
-                    decs_raw = res.data.get("decisions")
-                    row._resume_meta = decs_raw.get(str(row.id), {}) if isinstance(decs_raw, dict) else {}
             return row
+
+    def record_trio(self, decision_id: int, answer: str | None, decided_by: str, record: dict) -> None:
+        with self.session() as s:
+            row = s.get(Decision, decision_id)
+            if row is None or row.status != "open" or row.answer:
+                return  # A person answered while the model was consulting.
+            row.answer = answer
+            row.decided_by = decided_by
+            row.record = record
 
     def answer_decision(self, decision_id: int, answer: str, *, decided_by: str = "user",
                         answered_at: str | None = None, status: str = "answered",
@@ -397,13 +420,7 @@ class Store:
         stmt = select(Decision).order_by(Decision.id)
         if issue_key is not None:
             stmt = stmt.where(Decision.issue_key == issue_key)
-        rows = self._all(stmt)
-        for row in rows:
-            res = self.resume(row.issue_key)
-            if isinstance(res, dict):
-                decs_raw = res.get("decisions")
-                row._resume_meta = decs_raw.get(str(row.id), {}) if isinstance(decs_raw, dict) else {}
-        return rows
+        return self._all(stmt)
 
     def add_log(self, issue_key: str, message: str, at: str) -> None:
         with self.session() as s:
@@ -423,7 +440,7 @@ class Store:
         self._upsert(Resume, ("issue_key",), {"issue_key": issue_key, "data": data})
 
     def resume(self, issue_key: str) -> Any:
-        with self.session() as s:
+        with self.session(write=False) as s:
             row = s.get(Resume, issue_key)
             return row.data if row else None
 
@@ -478,7 +495,7 @@ class Store:
         return self._all(stmt)
 
     def _all(self, stmt: Any) -> list[Any]:
-        with self.session() as s:
+        with self.session(write=False) as s:
             rows = s.scalars(stmt).all()
             s.expunge_all()
             return list(rows)

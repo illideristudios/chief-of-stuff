@@ -52,6 +52,7 @@ def _planning_inputs(store: Any, items: list) -> dict:
                           if (counts := reconcile.review_findings(states[key], history)) is not None},
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
+        "redispatches": {key: state["redispatch"] for key, state in states.items() if state.get("redispatch")},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
                          if (quota := state.get("quota"))},
     }
@@ -74,20 +75,17 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
 
 
 def _sync_decisions_with_action(store: Any, key: str, action: reconcile.Action) -> None:
-    for dec in store.decisions(key):
-        if dec.status == "open" and not dec.answer:
-            continue
-        tr = decision_actions.meet_action(dec, action)
-        if tr.store_write is not None:
-            store.update_decision(tr.store_write)
-            data = _resume(store, key)
-            decisions_map = dict(data.get("decisions") or {})
-            decisions_map[str(dec.id)] = {
-                "status": tr.decision.status,
-                "blocked_reason": tr.decision.blocked_reason,
-            }
-            data["decisions"] = decisions_map
-            store.set_resume(key, data)
+    with store.transaction():
+        for dec in store.decisions(key):
+            if dec.status not in {"answered", "blocked"}:
+                continue
+            # The planner has checked the external merge blockers before reporting only a decision hold.
+            if isinstance(action, reconcile.Wait) and action.reason == "decision pending":
+                tr = decision_actions.meet_action(dec, None) if dec.status == "blocked" else None
+            else:
+                tr = decision_actions.meet_action(dec, action)
+            if tr is not None and tr.store_write is not None:
+                store.update_decision(tr.store_write)
 
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
@@ -135,6 +133,20 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if not logged or logged[-1].message != message:  # retried every pass; log only a change
                     store.add_log(item.issue_key, message, at)
 
+    for item in store.items():
+        data = _resume(store, item.issue_key)
+        pending = data.get("decision_comments", [])
+        if pending:
+            remaining = []
+            for body in pending:
+                try:
+                    if forge.comment(int(item.issue_key.rpartition("#")[2]), body, commit=True):
+                        remaining.append(body)
+                except Exception:
+                    remaining.append(body)
+            data["decision_comments"] = remaining
+            store.set_resume(item.issue_key, data)
+
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
@@ -156,12 +168,17 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
                 persona_cfg = policies.personas.get(persona) if persona else None
                 agent_name = getattr(persona_cfg, "agent", None) or ""
-                if agent_name and agent_name not in declared_agents:
-                    raise ValueError(f"undeclared agent_type {agent_name!r} for persona {persona!r}")
+                if agent_name not in declared_agents:
+                    agent_name = ""
                 slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                             max_concurrency=max_concurrency, clock=clock,
                             launch=lambda: launch(key, stage, action.attempt, persona),
-                            agent_type=agent_name or persona, runtime="claude")
+                            agent_type=agent_name, runtime="claude")
+                data = _resume(store, key)
+                pending = data.get("redispatch")
+                if pending and (pending["stage"], pending["attempt"]) == (stage, action.attempt):
+                    data.pop("redispatch")
+                    store.set_resume(key, data)
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
@@ -180,13 +197,17 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     )
                     if existing_dec is None:
                         existing_dec = store.add_decision(key, action.gate, action.reason)
-                    if trio_port is not None and existing_dec.status == "open":
+                    if (trio_port is not None and existing_dec.status == "open"
+                            and not (isinstance(existing_dec.record, dict) and "verdicts" in existing_dec.record)):
                         trio_dec = trio_gate.Decision(key, action.gate, action.reason, ("adopt", "escalate"))
                         eff_policy = policies.resolve(stage=stages.get(key) if stages.get(key) in policies.stages else None)
-                        outcome = trio_gate.consult(trio_dec, eff_policy, policies.personas, trio_port, store)
-                        tr = decision_actions.from_trio(existing_dec, outcome, answered_at=at)
-                        if tr.store_write is not None:
-                            store.update_decision(tr.store_write)
+                        outcome = trio_gate.consult(trio_dec, eff_policy, policies.personas, trio_port, store, decision_id=existing_dec.id)
+                        with store.transaction():
+                            current = store.decision(existing_dec.id)
+                            if current.status == "answered" and current.decided_by == "trio":
+                                tr = decision_actions.from_trio(existing_dec, outcome, answered_at=at)
+                                if tr.store_write is not None:
+                                    store.update_decision(tr.store_write)
                 if data.get("interrupt") != record:
                     store.add_log(key, f"{record['kind'].lower()}: {action.reason}", at)
                     data["interrupt"] = record  # M5/M6 delivers and resolves the interrupt.

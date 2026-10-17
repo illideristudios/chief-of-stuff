@@ -74,7 +74,7 @@ def _verdict(persona: Persona, got: Reply | Failure, options: tuple[str, ...]) -
     return {"persona": persona.name, "vote": "concern", "choice": None, "reasoning": reasoning}
 
 
-def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any) -> Outcome:
+def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any, *, decision_id: int | None = None) -> Outcome:
     """Consult all three under a resolved policy, then record adoption or escalation on the existing issue."""
     trio = select(policy, personas, decision.tags)
     described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
@@ -82,8 +82,11 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
     unanimous = (all(v["vote"] == "adopt" for v in verdicts)
                  and len({v["choice"] for v in verdicts}) == 1)
     recommendation = verdicts[0]["choice"] if unanimous else None
-    store.add_decision(decision.issue_key, topic=decision.topic, question=decision.question,
-                       answer=recommendation, decided_by="trio" if unanimous else "zach",
-                       record={"decision": described, "verdicts": verdicts,
-                               "recommendation": recommendation, "unanimous": unanimous})
+    record = {"decision": described, "verdicts": verdicts,
+              "recommendation": recommendation, "unanimous": unanimous}
+    if decision_id is None:
+        store.add_decision(decision.issue_key, topic=decision.topic, question=decision.question,
+                           answer=recommendation, decided_by="trio" if unanimous else "zach", record=record)
+    else:
+        store.record_trio(decision_id, recommendation, "trio" if unanimous else "zach", record)
     return Outcome(recommendation, unanimous)

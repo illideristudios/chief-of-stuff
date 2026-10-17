@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfoNotFoundError
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -116,7 +117,7 @@ def board_base_url(root: Path, settings: Settings) -> str:
 def board_item_url(root: Path, settings: Settings, issue_key: str) -> str:
     if not issue_key:
         return ""
-    return f"{board_base_url(root, settings)}/issues/{issue_key}"
+    return f"{board_base_url(root, settings)}/issues/{quote(issue_key, safe="")}"
 
 
 def _short_key(issue_key: str) -> str:
@@ -149,6 +150,7 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
         items = db.items()
         segments = db.segments()
         decisions = db.decisions()
+        opened = {i.issue_key for i in items if i.forge_state != "closed"}
         logs = db.log()
         segs_by_key: dict[str, list] = {}
         for seg in segments:
@@ -158,23 +160,25 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
             if item.forge_state == "closed":
                 continue
             item_segs = segs_by_key.get(item.issue_key, [])
-            hr_segs = [s for s in item_segs if s.outcome == "human_review"]
+            latest = item_segs[-1] if item_segs else None
+            hr_segs = [latest] if latest is not None and latest.outcome == "human_review" else []
             if item.human_review or hr_segs:
-                stamp_raw = (hr_segs[-1].ended_at or hr_segs[-1].started_at) if hr_segs else item.updated_at
+                stamp_raw = ((hr_segs[-1].ended_at or hr_segs[-1].started_at) if hr_segs
+                             else (db.resume(item.issue_key) or {}).get("human_review_since"))
                 stamp = _parse_stamp(stamp_raw, cfg.zone, now)
                 short = _short_key(item.issue_key)
                 what = f"{short} {item.title}".strip()
                 rows.append(
                     Row(
                         now.strftime(WHEN),
-                        event_title("awaiting", what, stamp),
+                        event_title("awaiting", what, stamp) if stamp_raw else f"{KINDS["awaiting"]} — {what} (hold)",
                         f"Needs input on {what}",
                         open_url=board_item_url(root, settings, item.issue_key),
                     )
                 )
 
         for dec in decisions:
-            if dec.status != "open":
+            if dec.issue_key not in opened or dec.status not in ("open", "blocked"):
                 continue
             stamp = _parse_stamp(dec.created_at, cfg.zone, now)
             short = _short_key(dec.issue_key)
@@ -189,7 +193,11 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
             )
 
         for seg in segments:
-            if seg.outcome not in ("failed", "crashed", "timed_out"):
+            if seg.issue_key not in opened or seg.outcome not in ("failed", "crashed", "timed_out"):
+                continue
+            stamp = _parse_stamp(seg.ended_at or seg.started_at, cfg.zone, now)
+            if any(s.outcome == "done" and _parse_stamp(s.ended_at or s.started_at, cfg.zone, now) > stamp
+                   for s in segs_by_key.get(seg.issue_key, [])):
                 continue
             short = _short_key(seg.issue_key)
             resume = db.resume(seg.issue_key)
@@ -209,7 +217,11 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
 
         for entry in logs:
             lowered = entry.message.casefold()
-            if not any(word in lowered for word in ("failed", "refused")):
+            if entry.issue_key not in opened or not any(word in lowered for word in ("failed", "refused", "escalate: retry limit")):
+                continue
+            stamp = _parse_stamp(entry.at, cfg.zone, now)
+            if any(s.outcome == "done" and _parse_stamp(s.ended_at or s.started_at, cfg.zone, now) > stamp
+                   for s in segs_by_key.get(entry.issue_key, [])):
                 continue
             short = _short_key(entry.issue_key)
             stamp = _parse_stamp(entry.at, cfg.zone, now)

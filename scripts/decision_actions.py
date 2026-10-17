@@ -82,7 +82,7 @@ def state_of(record: Any, *, blocked_reason: str = "", rerouted_to: str = "") ->
         return record
     rec_blocked = str(getattr(record, "blocked_reason", "") or blocked_reason or "")
     rec_rerouted = str(getattr(record, "rerouted_to", "") or rerouted_to or "")
-    status = str(getattr(record, "status", "open") or "open")
+    status = str(getattr(record, "status", "answered" if getattr(record, "answer", None) else "open") or "open")
     if rec_blocked and status in CLOSED_STATES:
         status = "blocked"
     return DecisionState(
@@ -136,6 +136,10 @@ def answer(
 ) -> Transition:
     prev = state_of(record)
     cleaned = answer_text.strip()
+    if prev.status not in OPEN_STATES:
+        raise ValueError("decision is already closed")
+    if not cleaned:
+        raise ValueError("an answer must contain text")
     nxt = replace(
         prev,
         status="answered",
@@ -158,15 +162,8 @@ def from_trio(
     answered_at: str | None = None,
 ) -> Transition:
     prev = state_of(record)
-    status = str(getattr(outcome, "status", "") or "")
-    unanimous = bool(getattr(outcome, "unanimous", False))
-    if status == "decided" or unanimous:
-        rationale = str(
-            getattr(outcome, "rationale", None)
-            or getattr(outcome, "recommendation", None)
-            or ""
-        ).strip()
-        return answer(prev, rationale, decided_by="trio", answered_at=answered_at)
+    if outcome.unanimous:
+        return answer(prev, outcome.recommendation or "", decided_by="trio", answered_at=answered_at)
     nxt = replace(prev, status="open", decided_by="", blocked_reason="")
     return Transition(decision=nxt, store_write=None, actions=())
 
@@ -182,6 +179,10 @@ def reverse(
     attempt: int = 1,
 ) -> Transition:
     prev = state_of(record)
+    if prev.status != "answered":
+        raise ValueError("only an answered decision can be reversed")
+    if not answer_text.strip():
+        raise ValueError("a reversal must contain text")
     cleaned = answer_text.strip()
     nxt = replace(
         prev,
@@ -216,6 +217,10 @@ def reroute(
     attempt: int = 1,
 ) -> Transition:
     prev = state_of(record)
+    if prev.status not in OPEN_STATES | {"answered"}:
+        raise ValueError("decision is already closed")
+    if not target_stage.strip():
+        raise ValueError("a target stage is required")
     cleaned_stage = target_stage.strip()
     cleaned_answer = answer_text.strip() or f"Re-routed to {cleaned_stage}"
     nxt = replace(
@@ -261,7 +266,7 @@ def meet_action(
     blocked_reason: str = "",
 ) -> Transition:
     prev = state_of(record, blocked_reason=blocked_reason)
-    if prev.status == "open":
+    if prev.status not in {"answered", "blocked"}:
         return Transition(decision=prev, store_write=None, actions=())
     reason = _action_block_reason(action)
     if reason:
@@ -270,3 +275,16 @@ def meet_action(
     restored = "answered" if prev.status == "blocked" else prev.status
     nxt = replace(prev, status=restored, blocked_reason="")
     return Transition(decision=nxt, store_write=_write_for(nxt), actions=())
+
+
+def tab_counts(items, decisions, segments) -> dict:
+    """Lead counts from engine rows. Tabs without a store source omit their count."""
+    opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
+    pending = [d for d in decisions if d.issue_key in opened and board_status(d) in OPEN_STATES]
+    held = {d.issue_key for d in pending}
+    latest = {s.issue_key: s for s in segments}
+    waiting = {i.issue_key for i in opened.values() if i.human_review}
+    waiting.update(key for key, seg in latest.items() if key in opened and seg.outcome == "human_review")
+    held.update(waiting)
+    running = {s.issue_key for s in segments if s.issue_key in opened and not s.ended_at}
+    return {"workers": len(waiting), "dispatch": len(opened.keys() - held - running), "decisions": len(pending)}

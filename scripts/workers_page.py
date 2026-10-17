@@ -8,6 +8,7 @@ session log; and ENDED TODAY, a row per one-shot launcher end line in today's tr
 
 from __future__ import annotations
 
+
 import json
 import re
 from datetime import date, datetime
@@ -16,9 +17,10 @@ from pathlib import Path
 
 import board_sources
 import panels
+from clock import parse_stamp
 from task_forge import PageData
 from decision_page import HEAD, context, pending_count, write_if_changed
-from fragment import tab_bar
+from fragment import tab_bar, issue_href
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
 from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STAGE, STARTED
@@ -69,7 +71,7 @@ def _task(t, fallback: str) -> str:
     if t and ":" in t.issue and "#" in t.issue and not t.issue.strip().startswith(("http://", "https://")):
         raw = t.issue.strip()
         num = raw.rsplit("#", 1)[1]
-        return f'<a class="ref" data-k="issue" href="/issues/{escape(raw)}">#{escape(num)}</a> {name}'
+        return f'<a class="ref" data-k="issue" href="{escape(issue_href(raw))}">#{escape(num)}</a> {name}'
     m = TRAILING_NUMBER.search(t.issue) if t else None
     return f'<a class="ref" data-k="issue" href="/issues/{m[1]}">#{m[1]}</a> {name}' if m else name
 
@@ -149,13 +151,13 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             runner = getattr(seg, "runner", "") or f"{seg.stage}-{seg.attempt}"
             title = item.title if item and item.title else seg.issue_key
             num = seg.issue_key.rsplit("#", 1)[1] if "#" in seg.issue_key else seg.issue_key
-            task_link = f'<a class="ref" data-k="issue" href="/issues/{escape(seg.issue_key)}">#{escape(num)}</a> {escape(title)}'
+            task_link = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a> {escape(title)}'
             if seg.ended_at is None:
                 if runner in seen_running:
                     continue
                 seen_running.add(runner)
                 store_shots += 1
-                started_dt = datetime.fromisoformat(seg.started_at)
+                started_dt = parse_stamp(seg.started_at, now)
                 w_obj = board_sources.Worker(runner, "one-shot", seg.runtime, seg.model, title, runner, started_dt, None)
                 is_looping = fix_by_issue.get(seg.issue_key, 0) >= 2
                 last, tokens = activity(trees / runner) if (trees / runner).exists() else (None, 0)
@@ -164,7 +166,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
                                 panels.hm(started_dt, now),
                                 f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""])
             else:
-                ended_dt = datetime.fromisoformat(seg.ended_at).astimezone(now.tzinfo)
+                ended_dt = parse_stamp(seg.ended_at, now)
                 if ended_dt.date() != now.date():
                     continue
                 reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
@@ -173,8 +175,8 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
                 if seg.outcome == "human_review":
                     need += 1
                 state = "DONE" if done else "CRASHED"
-                ended_dt = datetime.fromisoformat(seg.ended_at).astimezone(now.tzinfo)
-                action = (f'<a class="ref" data-k="issue" href="/issues/{escape(seg.issue_key)}">#{escape(num)}</a>'
+                ended_dt = parse_stamp(seg.ended_at, now)
+                action = (f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
                           if done else '<span class="chip redispatch">re-dispatch</span>')
                 ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(runner)}</b>',
                               f"{ended_dt:%H:%M}", task_link, escape(summary), action])

@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Protocol, Sequence
 
+import decision_actions
 from model_port import RETRYABLE
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow
 
@@ -147,7 +148,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
     stages = {workflow.start} | {e.target for e in workflow.edges}
     # Decision rows are append-only, oldest first: the latest row for a question is its state.
     latest = {(d.topic, d.question): d for d in decisions}
-    if any(not d.answer or not d.answer.strip() for d in latest.values()):
+    if any(decision_actions.board_status(d) == "open" or not d.answer or not d.answer.strip() for d in latest.values()):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
@@ -178,6 +179,13 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
             return Wait(key, "architect consultation is required")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
+    if any(not decision_actions.is_closed(d) for d in latest.values()):
+        return Wait(key, "decision pending")
+    for dec in latest.values():
+        if decision_actions.board_status(dec) == "reversed":
+            answered = getattr(dec, "answered_at", None)
+            if not answered or not any(_time(s.started_at) >= _time(answered) for s in completed):
+                return Wait(key, "decision pending")
     if workflow.start == "merge" and not any(e.target == "merge" for e in workflow.edges):
         return Merge(key)
     if len(edges) != 1:
@@ -251,7 +259,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
-         quota_resets: Mapping[str, datetime] | None = None) -> list[Action]:
+         quota_resets: Mapping[str, datetime] | None = None,
+         redispatches: Mapping[str, Mapping] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
@@ -268,9 +277,16 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
         if reset is not None and _time(reset) > now and item.forge_state != "closed":
             actions.append(Wait(item.issue_key, "quota reset pending"))
             continue
-        action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
-                       (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
-                       (decisions or {}).get(item.issue_key, ()))
+        history = segments.get(item.issue_key, ())
+        pending = (redispatches or {}).get(item.issue_key)
+        if pending and item.forge_state != "closed":
+            if any(s.started_at and not s.ended_at for s in history):
+                continue
+            action = Dispatch(item.issue_key, pending["stage"], pending["persona"], pending["attempt"])
+        else:
+            action = _item(item, history, policies, issue_types.get(item.issue_key),
+                           (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
+                           (decisions or {}).get(item.issue_key, ()))
         if isinstance(action, (Dispatch, Review)):
             if free_slots:
                 free_slots -= 1

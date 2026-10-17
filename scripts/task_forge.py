@@ -23,6 +23,18 @@ import tracker_log
 from tracker_log import Move
 
 
+def source_key(key: str, home) -> str:
+    """Translate an engine identity to the cache's repository-relative key without dropping its namespace."""
+    namespace, sep, number = key.rpartition("#")
+    if sep and number.isdecimal():
+        if namespace.startswith("github:"):
+            return issue_key(f"https://github.com/{namespace[len("github:"):]}/issues/{number}", home)
+        if namespace.startswith("gitlab:"):
+            host, _, project = namespace[len("gitlab:"):].partition("/")
+            return issue_key(f"https://{host}/{project}/-/issues/{number}", home)
+    return issue_key(key, home)
+
+
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
                home, lane) -> str:
     """What holds the task, or "" when nothing does, at `stage` (its own cell when None): `decision` when a pending
@@ -32,7 +44,7 @@ def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers:
     stage = task.stage.strip() if stage is None else stage
     if task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1]):
         return ""
-    if task.issue.strip() and issue_key(task.issue, home) in pending_refs:
+    if task.issue.strip() and source_key(task.issue, home) in pending_refs:
         return "decision"
     if kanban is not None and kanban.holds(stage):
         return stage
@@ -47,8 +59,8 @@ def worker_names(sources: board_sources.Sources) -> set[str]:
 
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
     """The changes naming the task's issue: the open ones, or else the merged ones."""
-    key = issue_key(task.issue, sources.home) if task.issue.strip() else None
-    named = [c for c in sources.changes.values() if key and key in c.issues and c.state != "closed"]
+    key = source_key(task.issue, sources.home) if task.issue.strip() else None
+    named = [c for c in sources.changes.values() if key and (key in c.issues or task.issue in c.issues) and c.state != "closed"]
     return tuple(c for c in named if c.state == "open") or tuple(named)
 
 
@@ -295,6 +307,7 @@ class PageData:
     board_decisions: tuple
     stage_reports: tuple
     resumes: dict[str, Any]
+    issue_logs: tuple = ()
 
     def items(self):
         return self.work_items
@@ -311,6 +324,9 @@ class PageData:
     def reports(self, key, *, stage, attempt):
         return [r for r in self.stage_reports if (r.issue_key, r.stage, r.attempt) == (key, stage, attempt)]
 
+    def log(self, key=None):
+        return [entry for entry in self.issue_logs if key is None or entry.issue_key == key]
+
     def resume(self, key):
         return self.resumes.get(key)
 
@@ -319,4 +335,4 @@ def page_data(store) -> PageData:
     """Read the store through the use case once, before handing rows to presenters."""
     items = tuple(store.items())
     return PageData(items, tuple(store.segments()), tuple(store.decisions()), tuple(store.reports()),
-                    {i.issue_key: store.resume(i.issue_key) for i in items})
+                    {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()))

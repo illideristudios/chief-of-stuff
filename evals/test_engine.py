@@ -483,7 +483,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(self.launched), 1)
 
     def test_undeclared_agent_type_runs_default_agent(self):
-        # Compliance C8: agent_type is checked against make_worktree.agent_types before recording a segment.
+        # Section 9: undeclared persona agents use the default and record an empty agent type.
         self.p = policy.parse({
             "default_workflow": "standard",
             "personas": {"builder": {"role": "implements", "model": "example", "agent_type": "nonexistent-agent"},

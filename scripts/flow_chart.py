@@ -12,13 +12,14 @@ A done task's last segment ends at its done time, not now.
 
 from __future__ import annotations
 
+
 import heapq
 from dataclasses import replace
 from datetime import datetime, timedelta
 
 import gantt
-from clock import done_clock
-from fragment import esc
+from clock import done_clock, parse_stamp as _parse_store_dt
+from fragment import esc, issue_href
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
 # here as well, so `flow_chart.moves` still names it.
@@ -214,20 +215,6 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
                   key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
 
 
-def _parse_store_dt(raw: str | None, fallback: datetime) -> datetime:
-    if raw:
-        try:
-            dt = datetime.fromisoformat(raw)
-            if dt.tzinfo is None and fallback.tzinfo is not None:
-                dt = dt.replace(tzinfo=fallback.tzinfo)
-            elif dt.tzinfo is not None and fallback.tzinfo is not None:
-                dt = dt.astimezone(fallback.tzinfo)
-            return dt
-        except ValueError:
-            pass
-    return fallback
-
-
 def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> list[tuple[str, gantt.Row]]:
     """Build one Gantt row per store issue with all its `(issue, stage, attempt)` segments (M6 item 1, Exit S2)."""
     items = db.items()
@@ -288,7 +275,7 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
             name=item.title or key,
             note=note,
             segments=tuple(g_segs),
-            href=f"/issues/{key}",
+            href=issue_href(key),
             ref_title=item.title or key,
         )
         out.append((status, row))

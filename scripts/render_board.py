@@ -7,6 +7,7 @@ The renderer writes the board HTML and prints its path and summary.
 
 from __future__ import annotations
 
+
 import argparse
 import hashlib
 import html
@@ -30,10 +31,10 @@ import board_sources  # noqa: E402
 import columns  # noqa: E402
 import decision_page  # noqa: E402
 from decision_page import write_if_changed  # noqa: E402
-from fragment import FONTS, TAB_CSS, tab_bar, theme  # noqa: E402
+from fragment import FONTS, TAB_CSS, tab_bar, theme, issue_href  # noqa: E402
 import flow_chart  # noqa: E402
 import panels  # noqa: E402
-from task_forge import PageData  # noqa: E402
+from task_forge import PageData, source_key  # noqa: E402
 import tracker_log  # noqa: E402
 
 LONG_ITEM = 80
@@ -177,7 +178,7 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         """A card name's link: its task page when the issue ends in a number, as Flow rows link, else `other` (#194)."""
         raw = cell.strip()
         if ":" in raw and "#" in raw and not raw.startswith(("http://", "https://")):
-            return f"/issues/{raw}"
+            return issue_href(raw)
         m = TRAILING_NUMBER.search(raw)
         return f"/issues/{int(m[1])}" if m else other
 
@@ -291,7 +292,7 @@ def _render_store_decisions(decisions: list) -> str:
         )
         items.append(
             f'<div class="decision-item" data-status="{_esc(st_name)}">'
-            f'{badge} <a href="/issues/{_esc(d.issue_key)}">{_esc(d.issue_key)}</a> '
+            f'{badge} <a href="{_esc(issue_href(d.issue_key))}">{_esc(d.issue_key)}</a> '
             f'<strong>{_esc(d.question)}</strong>{ans}{form}</div>'
         )
     return '<div class="board-decisions">\n' + "\n".join(items) + "\n</div>\n"
@@ -323,9 +324,9 @@ def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kan
                  due="", checklist="", name=item.title or item.issue_key, lane=lane_name,
                  stage=stage_name, issue=item.issue_key)
         tasks.append(t)
-        if open_decs:
+        if open_decs and t.kind != "done":
             held[t] = "decision"
-        elif is_held:
+        elif is_held and t.kind != "done":
             held[t] = stage_name or cfg.user
         if sum(1 for s in item_segs if s.stage.strip().casefold() == "fix") >= 2:
             loops.add(t)
@@ -355,8 +356,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     store_decisions: list = []
     if db is not None:
         s_tasks, store_held, store_loops, store_decisions = _tasks_from_store(db, cfg, lanes, kanban, today)
-        if not tasks:
-            tasks = s_tasks
+        tasks = s_tasks
     active = [task for task in tasks if task.kind != "done"]
     nearest = nearest_deadline(cfg, now)
     hist = history(tasks, cfg, now)
@@ -374,8 +374,9 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     for d in store_decisions:
         if d.status in ("open", "blocked"):
             pending_refs.setdefault(d.issue_key, None)
-            pending_refs.setdefault(issue_key(d.issue_key, sources.home), None)
+            pending_refs.setdefault(source_key(d.issue_key, sources.home), None)
     held = {**hold_causes(tasks, kanban, sources, lanes or {}, pending_refs), **store_held}
+    held = {t: why for t, why in held.items() if t.kind != "done"}
     # Each snapshot is parsed once even when Flow, holds and loop marks all need it.
     flow_log = [*(stage_log or []), (tracker_day or today, tracker_text)]
     all_log = dict([*(loop_log if loop_log is not None else look_log or []), *(look_log or []), *flow_log])
@@ -391,9 +392,13 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
-    navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
-                            [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
-    if db is not None and not flow_moves and db.segments():
+    if db is not None:
+        import decision_actions
+        navigation = decision_actions.tab_counts(db.items(), db.decisions(), db.segments())
+    else:
+        navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
+                                [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
+    if db is not None:
         flow_rows = flow_chart.build_from_store(db, now, include_hold_bars=True)
     else:
         flow_rows = flow_chart.build(flow_moves, known, lanes or {}, held_names(held), ends, now,
@@ -405,7 +410,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     issue_cells = {issue_key(t.issue, sources.home): t.issue.strip() for t in known if t.issue.strip() and not t.workflow}
 
     def flow_ref(row):
-        if row.href.startswith("/issues/") and ":" in row.href:
+        if row.href.startswith("/issues/") and (db is not None or ":" in row.href):
             return row
         if (number := issue_number(row.ref)) is not None:
             return replace(row, ref=f"#{number}", href=f"/issues/{number}", ref_title=issue_cells.get(row.ref, row.ref))
