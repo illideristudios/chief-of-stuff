@@ -1,6 +1,6 @@
 """How a forge's review state reads: whether the approver approved a pull or merge request's head, and how its
 pipeline stands, and the request that reading yields. merge_approved.py merges on it, merge_ready.py prints its
-verdict, review_threads.py replies on it, and board_sources.py caches it for the pages.
+verdict, review_threads.py replies on it, board_sources.py caches it, and forge.py reuses its pipeline status mapping.
 """
 
 from __future__ import annotations
