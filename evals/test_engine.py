@@ -664,7 +664,7 @@ class EngineTest(unittest.TestCase):
             return model_port.Reply("", {"vote": "adopt", "choice": "Split", "reasoning": "ok"}, "", 0.0, 1)
 
         engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
-                        launch=launch, clock=lambda: NOW, model=model)
+                        launch=launch, workers=engine.settings.Workers(), clock=lambda: NOW, model=model)
         self.assertEqual(events[-1], ("launch", "implement"))
         self.assertEqual(len([e for e in events if e[0] == "model"]), 3)
         self.assertEqual(self.db.asks(KEY)[0].answer, "Split")
@@ -969,7 +969,7 @@ class MainTest(unittest.TestCase):
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
         path = self.root / "settings.toml"
-        path.write_text(path.read_text() + '\n[workers]\nrules = ["Keep tests."]\n')
+        path.write_text(path.read_text() + 'rules = ["Keep tests."]\n')
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
