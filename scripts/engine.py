@@ -14,10 +14,13 @@ from typing import Any
 
 import cleanup
 import clock as engine_clock
+import dispatch_prompt
 import engine_merge
 import engine_facts
 import forge
 import issue_gate
+import limits_history
+import limits_probe
 import policy
 import reconcile
 import settings
@@ -40,9 +43,10 @@ def _resume(store: Any, key: str) -> dict:
 _planning_inputs = engine_facts.gather
 
 
-def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
+def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
+                *, release_hold: bool = False) -> None:
     result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None,
-                               initialize=not expected, commit=True)
+                               initialize=not expected, commit=True, release_hold=release_hold)
     if not result.ok:
         raise ForgeError(result.error)
     fields: dict[str, Any] = {"stage": stage}
@@ -50,21 +54,137 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
     if board is not None and board.holds(stage):
         # A retried write runs before planning, so cache its new hold immediately.
         fields["human_review"] = True
+    elif release_hold:
+        fields["human_review"] = False
     store.upsert_item(key, **fields)
     data = _resume(store, key)
     data.pop("pending_stage", None)
+    if release_hold:
+        data.pop("launcher_hold", None)
+        store.add_log(key, f"hold released for {stage}", store.clock().isoformat())
     store.set_resume(key, data)
 
 
+def _restore_hold(forge: Any, store: Any, key: str) -> None:
+    """Verify a durable hold restoration before consuming its local gate."""
+    data = _resume(store, key)
+    pending = data["pending_hold"]
+    store.set_human_review(key, True)
+    error = forge.add_human_hold(int(key.rpartition("#")[2]))
+    if error:
+        raise ForgeError(f"restoring hold failed: {error}")
+    data.pop("pending_hold")
+    if pending["retry"]:
+        data["launcher_hold"] = {"stage": pending["stage"], "attempt": pending["attempt"]}
+    store.set_resume(key, data)
+
+
+def _record_limits(workers: settings.Workers) -> None:
+    """A failed reading never stops the pass."""
+    try:
+        history = limits_history.LimitsHistory()
+        try:
+            history.record(limits_probe.read_all(workers))
+        finally:
+            history.engine.dispose()
+    except Exception as exc:
+        print(f"engine: limits reading failed: {exc}", file=sys.stderr, flush=True)
+
+
+def _retry_restore(forge: Any, store: Any, key: str, at: str) -> None:
+    """Retry a pending restoration; a failure keeps the local gate and logs only a change."""
+    try:
+        _restore_hold(forge, store, key)
+    except Exception as exc:
+        store.set_human_review(key, True)
+        message = str(exc)
+        logged = store.log(key)
+        if not logged or logged[-1].message != message:
+            store.add_log(key, message, at)
+
+
+def _retire_ownership(forge: Any, store: Any, key: str, stage: str, at: str) -> None:
+    """End automatic release: the hold becomes a normal human hold, restored now if a release removed it."""
+    data = _resume(store, key)
+    owned = data.pop("launcher_hold", None)
+    if owned is None:
+        return
+    if (pending := data.get("pending_stage")) and pending.get("release_hold"):
+        data.pop("pending_stage")
+        data["pending_hold"] = {"stage": stage, "attempt": owned["attempt"], "retry": False}
+    store.set_resume(key, data)
+    if "pending_hold" in data:
+        _retry_restore(forge, store, key, at)
+
+
+def _fail_start(forge: Any, store: Any, key: str, stage: str, current: str, attempt: int,
+                has_board: bool, cause: Exception) -> None:
+    """Keep a failed start's stage move and replace its hold, so ownership sits on the stage that failed."""
+    store.set_human_review(key, True)
+    data = _resume(store, key)
+    data.pop("launcher_hold", None)
+    store.set_resume(key, data)
+    try:
+        if stage != current:
+            data["pending_stage"] = {"stage": stage, "expected": current, "restore_hold": has_board}
+            store.set_resume(key, data)
+            _write_stage(forge, store, key, stage, current)
+        if has_board:
+            data = _resume(store, key)
+            data["pending_hold"] = {"stage": stage, "attempt": attempt, "retry": True}
+            store.set_resume(key, data)
+            _restore_hold(forge, store, key)
+    except Exception as exc:
+        raise ForgeError(f"{cause}; keeping the failed start's state also failed: {exc}") from cause
+
+
+class HoldReleaseFailed(ForgeError):
+    """A hold release that failed and was already logged; the dispatch error would repeat it."""
+
+
+def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) -> None:
+    """Retry pending suite labels; only a published label's explicit removal accepts its segment."""
+    observed = {row["issue_key"]: row.get("human_review") for row in snapshots}
+    for item in store.items():
+        key = item.issue_key
+        data = _resume(store, key)
+        if "suite_hold" not in data:
+            continue
+        try:
+            action = reconcile.suite_hold_action(item, data["suite_hold"], store.segments(key),
+                                                  observed=observed.get(key))
+            if action in ("retire", "accept"):
+                store.finish_suite_hold(key, accept=action == "accept")
+                if action == "accept":
+                    store.add_log(key, "suite hold released: accepted completion", at)
+                continue
+            store.set_human_review(key, True)
+            if action == "publish":
+                error = forge.add_human_hold(int(key.rpartition("#")[2]))
+                if error:
+                    raise ForgeError(error)
+                data["suite_hold"]["published"] = True
+                store.set_resume(key, data)
+        except Exception as exc:
+            # A corrupt record or one unavailable forge operation must not halt unrelated work.
+            store.set_human_review(key, True)
+            message = f"suite hold: {exc}"
+            logged = store.log(key)
+            if not logged or logged[-1].message != message:
+                store.add_log(key, message, at)
+
+
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
-             launch: Launch, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None, architect_login: str | None = None) -> list[reconcile.Action]:
+             launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
+             max_concurrency: int | None = None, require_green: bool = False,
+             architect_login: str | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
     as Forge does. Materialize first so a failed page cannot sync or close any item.
     """
-    worker.collect(store, root, clock, trees, forge)
+    _record_limits(workers)
+    worker.collect(store, root, clock, trees, forge, require_green=require_green)
     snapshots = list(forge.snapshots())
     board = getattr(forge, "kanban", None)
     if board is not None:
@@ -84,26 +204,67 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     now = clock()
     at = now.isoformat()
+    _sync_suite_holds(forge, store, snapshots, at)
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
-        pending = _resume(store, item.issue_key).get("pending_stage")
+        key = item.issue_key
+        data = _resume(store, key)
+        pending = data.get("pending_stage")
+        release = pending if pending and pending.get("release_hold") else None
+        action = reconcile.hold_recovery(item, store.segments(key), pending_hold=data.get("pending_hold"),
+                                         pending_release=release, owned=data.get("launcher_hold"),
+                                         pending_stage=None if release else pending)
+        if action == "restore":
+            _retry_restore(forge, store, key, at)
+            continue
+        if action == "drop_hold":
+            data.pop("pending_hold")
+            store.set_resume(key, data)
+            continue
+        if action == "replace":
+            # A stale release or drifted failed handoff needs a normal human hold.
+            data.pop("pending_stage")
+            data.pop("launcher_hold", None)
+            data["pending_hold"] = {"stage": item.stage, "attempt": 0, "retry": False}
+            store.set_resume(key, data)
+            _retry_restore(forge, store, key, at)
+            continue
+        if release:
+            if action == "drop_release":
+                data.pop("pending_stage")
+                data.pop("launcher_hold", None)
+                store.set_resume(key, data)
+            else:
+                # The mutation may have succeeded before verification failed. Keep the local gate
+                # through every sync, while planning still checks quota, slots and retry budgets.
+                store.set_human_review(key, True)
+            continue
+        if action == "drop_stage":
+            # A person moved the card while the forge was failing; the write can never apply.
+            data.pop("pending_stage")
+            store.set_resume(key, data)
+            continue
+        if action == "drop_owner":
+            data.pop("launcher_hold")
+            store.set_resume(key, data)
         if pending:
             try:
                 if item.stage == pending["stage"]:
-                    data = _resume(store, item.issue_key)
                     data.pop("pending_stage")
-                    store.set_resume(item.issue_key, data)
+                    store.set_resume(key, data)
                 else:
-                    _write_stage(forge, store, item.issue_key, pending["stage"], pending["expected"])
+                    _write_stage(forge, store, key, pending["stage"], pending["expected"])
             except Exception as exc:
                 message = f"stage write failed: {exc}"
-                logged = store.log(item.issue_key)
+                logged = store.log(key)
                 if not logged or logged[-1].message != message:  # retried every pass; log only a change
-                    store.add_log(item.issue_key, message, at)
+                    store.add_log(key, message, at)
 
-    items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
+    items = [item for item in store.items()
+             if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
+                             hold_stages=board.hold_stages if board is not None else (),
                              **_planning_inputs(store, items, forge, at, policies, architect_login))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
@@ -118,18 +279,60 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                     room=_resume(store, key).get("room")).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
-                slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
-                            max_concurrency=max_concurrency, clock=clock,
-                            launch=lambda: launch(key, stage, action.attempt, persona), runtime="claude",
-                            persona=persona, review_round=getattr(action, "review_round", None),
-                            finding_key=getattr(action, "finding_key", None))
+                launch_failed = False
+
+                def start():
+                    nonlocal launch_failed
+                    # slots.claim has already reserved this attempt before any hold is removed.
+                    if by_key[key].human_review:
+                        data = _resume(store, key)
+                        data["pending_stage"] = {"stage": stage, "expected": stages[key], "release_hold": True}
+                        store.set_resume(key, data)
+                        try:
+                            _write_stage(forge, store, key, stage, stages[key], release_hold=True)
+                        except Exception as exc:
+                            store.set_human_review(key, True)
+                            data = _resume(store, key)
+                            owned = dict(data["launcher_hold"])
+                            owned["release_failures"] = owned.get("release_failures", 0) + 1
+                            data["launcher_hold"] = owned
+                            store.set_resume(key, data)
+                            message = f"hold release failed: {exc}"
+                            logged = store.log(key)
+                            if not logged or logged[-1].message != message:
+                                store.add_log(key, message, at)
+                            raise HoldReleaseFailed(message) from exc
+                    try:
+                        return launch(key, stage, action.attempt, persona)
+                    except Exception as exc:
+                        # slots drops a failed reservation. Keep the actual failed start so its
+                        # attempt spends the retry budget, and replace the hold before returning.
+                        launch_failed = True
+                        _fail_start(forge, store, key, stage, stages[key], action.attempt, board is not None, exc)
+                        raise
+
+                try:
+                    slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
+                                max_concurrency=max_concurrency, clock=clock, launch=start,
+                                agent_type=persona, runtime="claude", persona=persona,
+                                review_round=getattr(action, "review_round", None),
+                                finding_key=getattr(action, "finding_key", None))
+                except Exception:
+                    # claim removes the reservation on failure; retain a real launch failure only.
+                    if launch_failed:
+                        store.record_segment(key, stage, action.attempt, at, at, "failed",
+                                             runtime="claude", agent_type=persona, persona=persona,
+                                             review_round=getattr(action, "review_round", None),
+                                             finding_key=getattr(action, "finding_key", None))
+                    raise
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
                     stage = "merge"
                 elif engine_merge.execute(action, forge, store, at, policies=policies,
                                          inputs=_planning_inputs(store, [by_key[key]], forge, at, policies,
-                                                                 architect_login)):
+                                                                 architect_login),
+                                         hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
             elif isinstance(action, reconcile.Consult):
                 request = forge.closing_request(key)
@@ -157,6 +360,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     store.add_log(key, f"{record['kind'].lower()}: {action.reason}", at)
                     data["interrupt"] = record  # M5/M6 delivers and resolves the interrupt.
                     store.set_resume(key, data)
+                if isinstance(action, reconcile.Escalate):
+                    # A permanent refusal or exhausted budget ends automatic release; removing the
+                    # hold later works without editing the engine's resume records.
+                    _retire_ownership(forge, store, key, stages[key], at)
             elif isinstance(action, reconcile.Wait):
                 message = f"wait: {action.reason}"
                 last = next((entry.message for entry in reversed(store.log(key)) if entry.message.startswith("wait: ")), None)
@@ -169,7 +376,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 _write_stage(forge, store, key, stage, stages[key])
                 stages[key] = stage
         except Exception as exc:
-            store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
+            if not isinstance(exc, HoldReleaseFailed):
+                store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions
@@ -197,6 +405,7 @@ def main(argv: list[str] | None = None) -> int:
             unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:
                 raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
+            dispatch_prompt.validate_worker_rules(root, config, policies)
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
             db = store_access.migrated_store(root, engine_owned=True)
@@ -209,13 +418,15 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("no [repos] clone matches the workspace backlog")
             launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
                              clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile)
+                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
+                             require_green=config.workers.require_green_tests)
             try:
                 while True:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, max_concurrency=config.workers.max_concurrency,
+                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
+                                 require_green=config.workers.require_green_tests,
                                  architect_login=config.architect_login)
                     except Exception as exc:
                         failed = True

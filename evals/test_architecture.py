@@ -44,6 +44,7 @@ DRAWS_NOTHING = (
     "trio_gate",
     "performance",
     "performance_report",
+    "limits", "limits_history", "limits_probe", "limits_cli",
     "supervisor",
     "startup",
     "guard_commands",  # Entities: pure shell command gate judgements.
@@ -135,9 +136,9 @@ READER_BANS = ({"one_shot", "backlog"}, frozenset({*HTTP, "urllib", "http"}))
 ADAPTER = ("scripts/claude_adapter.py", "scripts/runtimes.py")
 # The modules that named a host executable before the adapter. The list may only shrink; each entry must still name one.
 # session_exec execs the worker CLI for spawn_session, and process_status matches the executable to check liveness.
-# probe_health finds each rotation's executable for the health line.
+# evals/run.py remains exempt only for its non-Claude backends until 1.1.
 LEGACY_LAUNCHERS = ("scripts/one_shot.py", "scripts/spawn_session.py", "start_coordinator.py", "evals/run.py",
-                    "scripts/session_exec.py", "scripts/process_status.py", "scripts/probe_health.py")
+                    "scripts/session_exec.py", "scripts/process_status.py")
 HOST_EXECUTABLES = frozenset({"claude", "claude-as", "codex", "agent", "agy"})
 
 
@@ -203,7 +204,7 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
 CIRCLES: dict[str, frozenset[str]] = {
     "entities": frozenset({
         "tracker", "md", "clock", "runtimes", "policy", "findings", "ownership", "orphans",
-        "estimate", "tracker_log", "tree_state", "guard_commands",
+        "estimate", "tracker_log", "tree_state", "guard_commands", "limits",
     }),
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
@@ -214,13 +215,16 @@ CIRCLES: dict[str, frozenset[str]] = {
         "fragment", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
-        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots",
+        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",
         "migrations/versions/0002_segment_runner",
         "migrations/versions/0003_worker_channel",
-        "migrations/versions/0004_review_panel",
+        "migrations/limits_versions/0001_limits",
+        "migrations/versions/0004_report_suite",
+        "migrations/versions/0005_segment_human_review",
+        "migrations/versions/0006_review_panel",
     }),
     "drivers": frozenset({
         "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
@@ -229,7 +233,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }

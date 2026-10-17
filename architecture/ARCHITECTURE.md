@@ -42,13 +42,37 @@ Review is policy, as the 1.0 ledger settles (D7, F10, F12, F13; plan M4). Person
 The engine runs the review panel.
 - `reconcile.py` (Use Cases) plans one review launch for each persona the policy names for the stage, and they run in parallel.
 - It plans a fix for every open finding, so review burns down to none.
-- It routes findings to the architect when the policy says to: the architect disposes of each one as fix, file, keep or discard.
+- It routes findings to the architect when the policy says to: the engine posts a request and waits, and the architect disposes of each finding as fix, file, keep or discard.
 - It pings after three fix rounds.
 - `engine.py` executes the plan through the model port.
 
 A review is bound to the head it reviewed: the segment records the reviewed commit, and a merge happens only when that commit is the change's current head.
 
-What a reviewer does inside its own run is its persona's rules. The default reviewer persona runs the `extras:code-review` skill and does not fix. chief-of-stuff does not reimplement that skill's review. Findings come back in one review report shape (issue #563) and are kept as store records.
+The reviewer personas are the 22 personas of Zach's code-review skill (`extras` 1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (Zach, 2026-10-16).
+
+The panel for a change follows the skill's own selection rule, which ships as policy data in `assets/policy.toml`:
+- Every review gets Senior Architect (1) and Senior Staff Engineer (2).
+- Personas are added by the change's types, from the skill's table: shell, library, UI, concurrency, database, distributed state, migration under writes, network or security, observability, security-sensitive, public API, tests, performance, state machines and invariants.
+- Persona 11 is instantiated from the workspace's declared architecture style. For this repository that is "Uncle Bob", for Clean Architecture.
+- Persona 22 is used only when the full panel is asked for.
+
+Deciding which types a change has takes one model call through the port. The engine makes it and passes the types to the planner as a fact. Choosing the personas from the types and the table is pure, in `reconcile.py` and `policy.py`.
+
+Each reviewer reviews only within its lens and does not fix. Findings come back in one review report shape (issue #563) and are kept as store records.
+
+The architect and the architecture reviewers are different roles, and nothing treats one as the other.
+- **The architect is the `frank-lloyd-aight` agent.** It owns the canonical architecture document and the compliance record. It is consulted when the policy says so, after the panel. It disposes of findings as fix, file, keep or discard, and gives or withholds the architecture approval a merge needs. It never runs as a panel reviewer, never sits in the decision trio, and reports no review findings of its own.
+- **The architecture reviewers are panel personas:** Senior Architect (1) and the architectural-choice expert (11, "Uncle Bob" here). They review a change within their lens and report findings like any other reviewer. They cannot dispose of findings, approve a merge, or change the architecture documents.
+
+In policy, the name `architect` is reserved for the agent: `[personas.architect]`, with `agent = "frank-lloyd-aight"`, is what the consult and dispositions point at. Reviewer personas never use that name; they are `senior-architect` and `uncle-bob`. A finding from an architecture reviewer goes to the architect for disposition like any other finding.
+
+The engine never starts an architect run on its own (Zach, 2026-10-17). The architect is a standing session that keeps its context across consults.
+- **A consult is a request.** The engine posts it where the architect watches, on the change or its issue, in the form `Architect review requested: <sha>`, with the findings to dispose of. It then waits for the architect's reply on the same thread, and treats the issue as waiting on the architect until the reply comes.
+- **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding.
+- **The head is the forge's.** "The current head" is the change's head as the forge adapter reports it, never a worker's local `HEAD`.
+- **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request.
+- **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
+- **A new architect run happens only when Zach asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
 
 Until the engine path replaces it, the legacy one-shot path keeps its `Review:` line: `dispatch_prompt.compose` adds it to a Tasks row whose `stage` cell is `review`.
 
@@ -75,6 +99,13 @@ A module has one reason to change. `inbox.py` and `audit_tasks.py`, the two larg
 | `flow.py` | The tick orchestration and the command line | Frameworks and Drivers |
 
 Each module keeps re-exporting the names its callers import until they import from the new modules. Where the module boundaries and their names fall is decided when the work is assigned. On the engine path, `flow.py`'s ready-task judgement lands in `readiness.py`, and its stagnation judgement lands in `worker_health.py`, beside the silence signal it shares a rule with. The audit's done-on-main, read-only, unlanded and orphan judgements land in `completion.py`.
+
+On the engine path, file ownership is declared on the issue, because the forge is the source of truth and the store rebuilds from it.
+- **Where it is declared.** An issue states the paths it owns and their mode (write, or read-only) in a section of its body.
+- **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
+- **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
+- **Workers declare nothing.** They report what they changed, and the read-only rule judges that report. They never grant themselves a scope.
+- **An issue with no declared scope** is treated as owning its whole repository for writing. It conflicts with every running write in that repository until it declares a narrower scope.
 
 ## 9. Agent performance
 

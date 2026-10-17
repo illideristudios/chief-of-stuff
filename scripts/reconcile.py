@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Mapping, Protocol, Sequence
+from typing import Literal, Mapping, Protocol, Sequence
 
 from model_port import RETRYABLE
 from policy import DISPOSITIONS, Edge, Policies, Policy, SEVERITIES, Workflow
@@ -37,6 +37,37 @@ class Decision(Protocol):
     topic: str
     question: str
     answer: str | None
+
+
+def suite_holds(counts: Mapping[str, int | None], *, require_green: bool) -> bool:
+    """Hold unknown counts, zero passed, or nonzero failed/skipped/xfailed; opt-out never holds."""
+    if not require_green:
+        return False
+    keys = ("passed", "failed", "skipped", "xfailed")
+    if any(counts.get(key) is None for key in keys):
+        return True
+    return counts["passed"] == 0 or any(counts[key] for key in keys[1:])
+
+
+def suite_hold_action(item: WorkItem, hold: object, history: Sequence[Segment], *,
+                      observed: bool | None) -> str:
+    """Judge a persisted hold: retire closed work; accept only explicit removal after publication.
+
+    Invalid open holds raise so the driver can retain the local hold and isolate the item.
+    Missing observations never mean release.
+    """
+    if item.forge_state != "open":
+        return "retire"
+    if (not isinstance(hold, dict) or not isinstance(hold.get("stage"), str) or not hold["stage"]
+            or type(hold.get("attempt")) is not int or hold["attempt"] < 1
+            or type(hold.get("published")) is not bool):
+        raise ValueError("invalid suite hold record")
+    segment = next((s for s in history if s.stage == hold["stage"] and s.attempt == hold["attempt"]), None)
+    if segment is None or not segment.ended_at or segment.outcome != "human_review":
+        raise ValueError("suite hold must reference a completed human-review segment")
+    if not hold["published"]:
+        return "publish"
+    return "accept" if observed is False else "wait"
 
 
 def _panel_history(history: Sequence[Segment]) -> list[Segment]:
@@ -171,10 +202,15 @@ def _gate(key: str, edge: Edge, policies: Policies, room: str | None, now: datet
 
 def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
-    if stage == "review":
-        return Review(key, attempt)
     rounds = attempt - 1 - sum(s.stage == stage and s.outcome in RETRYABLE for s in history)
-    if any(e.target == stage for e in workflow.next("review")):
+    if stage == "review":
+        # Completed review rounds belong to the fix loop; only failures since the last completed review spend retries.
+        rounds = 0
+        for s in sorted((s for s in history if s.stage == stage), key=lambda s: s.attempt, reverse=True):
+            if s.outcome == "done":
+                break
+            rounds += s.outcome == "failed"
+    elif any(e.target == stage for e in workflow.next("review")):
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)
         if review is not None:
@@ -185,7 +221,7 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
                                              and _time(s.started_at) >= review for s in history)
     if rounds > _policy(policies, stage, room).retry_limit:
         return Escalate(key, f"retry limit reached for {stage}")
-    return Dispatch(key, stage, policies.stages[stage].persona, attempt)
+    return Review(key, attempt) if stage == "review" else Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
@@ -254,23 +290,31 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Sequence[dict] | None,
           decisions: Sequence[Decision], head: str | None, reply: ArchitectReply | None,
-          requested: Sequence[str]) -> Action | None:
+          requested: Sequence[str], hold_stages: Sequence[str], launcher_hold: Mapping[str, object]) -> Action | None:
     key = item.issue_key
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
-    if item.human_review:
-        return Wait(key, "human review")
     workflow = policies.workflow_for(issue_type)
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
-        return Wait(key, "stage is outside the workflow")
+        return Wait(key, "human review" if item.human_review else "stage is outside the workflow")
     # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
     completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
                       and (stage != "merge" or s.stage != "merge"))
     latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
     if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
-        return Wait(key, "segments tie at the latest start")
+        return Wait(key, "human review" if item.human_review else "segments tie at the latest start")
+    if item.human_review:
+        # Only a failed launch, whose hold the engine restored itself, can release an extra hold.
+        # Quota and unknown exits, human outcomes, completed work and stage-required holds need a human.
+        if (item.stage and stage not in hold_stages and latest and latest.stage == stage
+                and launcher_hold.get("stage") == stage and launcher_hold.get("attempt") == latest.attempt
+                and latest.outcome == "failed"):
+            if launcher_hold.get("release_failures", 0) > _policy(policies, stage, room).retry_limit:
+                return Escalate(key, f"hold release retry limit reached for {stage}")
+            return _work(key, stage, workflow, history, policies, room)
+        return Wait(key, "human review")
     return_edge = None
     if latest and latest.stage == "review":
         work = tuple(s for s in completed if s.stage not in ("review", "merge"))
@@ -419,6 +463,41 @@ def _unexplained(item: WorkItem, history: Sequence[Segment], panel: Sequence[Seg
                    and s.finding_key.split("/")[0] in prefixes for s in history)
 
 
+HoldRecovery = Literal["restore", "drop_hold", "drop_release", "replace", "keep", "drop_owner", "drop_stage", "none"]
+
+
+def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: Mapping[str, object] | None,
+                  pending_release: Mapping[str, object] | None, owned: Mapping[str, object] | None,
+                  pending_stage: Mapping[str, object] | None = None) -> HoldRecovery:
+    """What to do with an issue's saved hold records before planning.
+
+    restore: retry a pending hold restoration. drop_hold: forget one that no longer applies.
+    drop_release: forget a release the board has moved past. replace: a release without current
+    ownership or a drifted failed handoff returns to a normal human hold.
+    keep: leave a verified release to planning.
+    drop_owner: ownership the hold no longer backs. none: nothing saved applies.
+    drop_stage: an ordinary pending stage write whose card a person has since moved to a third stage.
+    """
+    if pending_hold:
+        return "restore" if item.forge_state == "open" and item.stage == pending_hold["stage"] else "drop_hold"
+    if pending_release:
+        if (item.forge_state != "open" or not item.stage or item.stage != pending_release["expected"]
+                or item.stage != pending_release["stage"]):
+            return "drop_release"
+        newest = max((s.attempt for s in history if s.stage == item.stage), default=0)
+        if not owned or owned.get("stage") != item.stage or owned.get("attempt") != newest:
+            # Older engines saved no provenance, and a kill inside a release can leave an older attempt.
+            return "replace"
+        return "keep"
+    if pending_stage and item.stage not in (pending_stage["expected"], pending_stage["stage"]):
+        if pending_stage.get("restore_hold") and item.forge_state == "open" and bool(item.stage):
+            return "replace"
+        return "drop_stage"
+    if owned and (not item.human_review or item.stage != owned.get("stage")):
+        return "drop_owner"
+    return "none"
+
+
 def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], policies: Policies,
          issue_types: Mapping[str, str | None], free_slots: int, now: datetime,
          open_findings: Mapping[str, Sequence[dict]], *, created_at: Mapping[str, datetime] | None = None,
@@ -427,7 +506,9 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          quota_resets: Mapping[str, datetime] | None = None,
          heads: Mapping[str, str | None] | None = None,
          architect_replies: Mapping[str, ArchitectReply] | None = None,
-         consult_requests: Mapping[str, Sequence[str]] | None = None) -> list[Action]:
+         consult_requests: Mapping[str, Sequence[str]] | None = None,
+         hold_stages: Sequence[str] = (),
+         launcher_holds: Mapping[str, Mapping[str, object]] | None = None) -> list[Action]:
     """Actions oldest issue first; each panel reviewer and each fix consumes one slot.
 
     Findings are structured records from the latest panel; an absent item is unknown.
@@ -436,6 +517,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
     Merge requires answered decisions and, where policy requires it, an architect approval for the current forge head.
     Without creation times, issue numbers order work within each forge namespace.
+    Attempt-owned extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
     """
     _time(now)
     if type(free_slots) is not int or free_slots < 0:
@@ -483,14 +565,18 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                 planned = _burn_down(item, history, counts, policies, room, head, workflow, now, verdict, requested)
         # A partly launched panel must keep filling available slots while its peers run.
         latest = {getattr(s, "persona", ""): s for s in panel}
+        action = None
+        legacy = bool(panel) and not any(getattr(s, "review_round", 0) for s in panel)
+        if planned is None:
+            action = _item(item, history, policies, issue_types.get(key), room, now, counts,
+                           (decisions or {}).get(key, ()), head, verdict, requested, hold_stages,
+                           (launcher_holds or {}).get(key, {}))
         if (planned is None and panel and item.stage == "review" and not item.human_review
-                and item.forge_state != "closed"
+                and item.forge_state != "closed" and not (legacy and isinstance(action, Escalate))  # pre-round reviews spend the old retry budget
                 and (not getattr(panel[0], "persona", "") or any(name not in latest or (latest[name].ended_at and latest[name].outcome != "done")
                         for name in _reviewers(policies, room)))):
             planned = _panel(key, history, policies, room, head)
         if planned is None:
-            action = _item(item, history, policies, issue_types.get(key), room, now, counts,
-                           (decisions or {}).get(key, ()), head, verdict, requested)
             if isinstance(action, Review):
                 complete = (panel and all(s.ended_at and s.outcome == "done" for s in panel)
                             and all(name in latest for name in _reviewers(policies, room)))

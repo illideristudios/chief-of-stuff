@@ -126,6 +126,7 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
             requested[key] = list(dict.fromkeys([*posted, *states[key].get("architect_requests", [])]))
     return {
         "segments": segments,
+        "launcher_holds": {key: state.get("launcher_hold", {}) for key, state in states.items()},
         "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
                         or getattr(item, "issue_type", None) for item in items},
         "open_findings": {key: value for key, value in findings.items() if value is not None},

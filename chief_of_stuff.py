@@ -46,12 +46,13 @@ COMMANDS = {
     "merge-approved": "scripts/merge_approved.py",
     "merge-ready": "scripts/merge_ready.py",
     "performance": "scripts/performance_report.py",
+    "limits": "scripts/limits_cli.py",
     "review-threads": "scripts/review_threads.py",
     "sources": "scripts/board_sources.py",
     "tick": "scripts/flow.py",
 }
 # Commands whose scripts import store (SQLAlchemy/Alembic). Add cleanup/engine when they join COMMANDS.
-STORE_BACKED = frozenset({"performance", "work"})
+STORE_BACKED = frozenset({"performance", "work", "limits"})
 
 
 def wrapper_text(current: Path) -> str:

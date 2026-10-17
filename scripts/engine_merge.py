@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import reconcile
@@ -9,11 +10,13 @@ from forge_port import ForgeError
 from policy import Policies, PolicyError
 
 
-def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies, inputs: dict) -> bool:
+def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies, inputs: dict,
+            hold_stages: Sequence[str]) -> bool:
     """Re-plan with shared store inputs and current policies, then log one attempt without retrying.
 
-    Structured reports hold findings; absent findings remain unknown.
-    `inputs` is the same issue context `engine._planning_inputs` builds for the pass.
+    Resume data holds issue_type, room and attempt-keyed review_findings; absent findings remain unknown.
+    `inputs` is the same issue context `engine._planning_inputs` builds for the pass; `hold_stages` is the
+    board's stages that wait for a human.
     """
     try:
         request = forge.closing_request(action.issue_key)
@@ -38,7 +41,7 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
         item.review_state = request.approval  # without an approver this is no approval, never a stale cached one
         inputs = {**inputs, "heads": {**inputs.get("heads", {}), action.issue_key: request.head}}
         planned = reconcile.plan([item], policies=policies, free_slots=1, now=store.clock(),  # not `at`: a gate may expire mid-pass
-                                 **inputs)
+                                 hold_stages=hold_stages, **inputs)
         if not planned or not isinstance(planned[0], reconcile.Merge):
             reason = (getattr(planned[0], "reason", f"{type(planned[0]).__name__.lower()} required")
                       if planned else "no eligible merge")

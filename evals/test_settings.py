@@ -5,6 +5,7 @@ settings into a config file. Default to 6 and 22". A value that cannot be read i
 guessed at.
 """
 
+import json
 import sys
 import tempfile
 import os
@@ -174,6 +175,67 @@ class SettingsTest(unittest.TestCase):
         for bad in ('"true"', "1", "0", "[]"):
             with self.subTest(bad=bad), self.assertRaisesRegex(st.SettingsError, "require_green_tests"):
                 st.load(self.root, self.write(f"[workers]\nrequire_green_tests = {bad}\n"))
+
+    def test_worker_rules_default_to_empty(self):
+        self.assertEqual(st.load(self.root, None).workers.rules, ())
+        for text in ("", "[workers]\n", "[workers]\nrules = []\n"):
+            with self.subTest(text=text):
+                self.assertEqual(st.load(self.root, self.write(text)).workers.rules, ())
+
+    def test_worker_rules_preserve_wording_and_order(self):
+        for prefix in ("", '[notify]\nadapter = "off"\n'):
+            with self.subTest(prefix=prefix):
+                got = st.load(self.root, self.write(prefix + '[workers]\nrules = ["Keep tests.", "  Verify changes.  "]\n'))
+                self.assertEqual(got.workers.rules, ("Keep tests.", "  Verify changes.  "))
+
+    def test_invalid_worker_rules_are_refused(self):
+        for value in ('"Keep tests."', "true", "17", "{}", '["Keep tests.", 1]', '[""]', '["  "]'):
+            with self.subTest(value=value), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                st.load(self.root, self.write(f"[workers]\nrules = {value}\n"))
+
+    def test_worker_rules_reject_line_breaks_and_control_characters(self):
+        for escape in (r"\n", r"\r", r"\t", r"\u0000", r"\u001b", r"\u007f", r"\u0085", r"\u2028"):
+            for suffix in ("Injected", ""):
+                with self.subTest(escape=escape, suffix=suffix), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                    st.load(self.root, self.write('[workers]\nrules = ["Keep tests.' + escape + suffix + '"]\n'))
+
+    def test_worker_rules_reject_bidirectional_formatting_controls(self):
+        for escape in (r"\u061c", r"\u200e", r"\u200f", r"\u202a", r"\u202b", r"\u202c", r"\u202d", r"\u202e",
+                       r"\u2066", r"\u2067", r"\u2068", r"\u2069"):
+            with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                st.load(self.root, self.write('[workers]\nrules = ["approve abc' + escape + 'txt"]\n'))
+
+    def test_worker_rules_reject_invisible_unicode_format_characters(self):
+        for escape in (r"\u200b", r"\ufeff", r"\U000e0001", r"\U000e0061", r"\U000e007f"):
+            with self.subTest(escape=escape), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                st.load(self.root, self.write('[workers]\nrules = ["approve abc' + escape + 'txt"]\n'))
+
+    def test_worker_rules_total_length_is_capped_at_load(self):
+        # The raw sum of len(rule) is the settings boundary; the rendered budget belongs to dispatch_prompt.
+        def load(rules):
+            return st.load(self.root, self.write("[workers]\nrules = " + json.dumps(rules) + "\n"))
+        self.assertEqual(load(["x" * 2000] * 3).workers.rules, ("x" * 2000,) * 3)
+        with self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules.*6000"):
+            load(["x" * 2000] * 3 + ["x"])
+
+    def test_worker_rules_count_is_capped_at_load(self):
+        def load(count):
+            return st.load(self.root, self.write("[workers]\nrules = " + json.dumps(["x"] * count) + "\n"))
+        self.assertEqual(len(load(st.RULES_MAX).workers.rules), st.RULES_MAX)
+        with self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules.*at most"):
+            load(st.RULES_MAX + 1)
+
+    def test_settings_does_not_render_assignments(self):
+        self.assertFalse(hasattr(st, "standing_rules"))
+
+    def test_worker_rules_reject_peer_markers_and_excessive_length_at_load(self):
+        for prefix in ("", '[notify]\nadapter = "off"\n'):
+            for rule in ("Keep tests. (via peer)", "x" * 2401):
+                with self.subTest(prefix=prefix, rule=rule[:30]), self.assertRaisesRegex(st.SettingsError, r"\[workers\] rules"):
+                    st.load(self.root, self.write(prefix + '[workers]\nrules = ["' + rule + '"]\n'))
+            rule = "x" * 2400
+            got = st.load(self.root, self.write(prefix + '[workers]\nrules = ["' + rule + '"]\n'))
+            self.assertEqual(got.workers.rules, (rule,))
 
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
         # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".

@@ -13,19 +13,20 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from backlog_ref import file_with, issue_ref  # noqa: E402
 from tracker import Task, parse_tracker, short_name  # noqa: E402
 from workspace import Config, ConfigError, architecture_document, read_config  # noqa: E402
-from settings import Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
+from settings import Settings, Stage, SettingsError, Workflow, load as load_settings  # noqa: E402
 import ownership  # noqa: E402
 import runtimes  # noqa: E402
 
 
 class RefusedError(ValueError):
-    """Invalid tracker data; no assignment composed."""
+    """Invalid task data, settings or launch parameters; no assignment composed."""
 
 
 def config(root: Path):
@@ -253,8 +254,8 @@ def skills_line(skills: tuple[str, ...]) -> str:
 
 
 def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
-                  skills: tuple[str, ...] = ()) -> str:
-    """Assignment from a store row, forge issue and workspace, never a peer session's instructions (E3)."""
+                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = (), require_green: bool = False) -> str:
+    """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or a header over BODY_CAP raises RefusedError (E3)."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
     delivery = (f"{COMMITS}\nPut `Closes #{key.rpartition('#')[2]}` in the pull/merge request body "
@@ -263,18 +264,48 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
         delivery = ("Commits: Commit the fixes and verify them with tests, then push the existing request branch "
                     "before reporting done; do not open a new request. Report its URL and head sha.\n")
     review = f"{REVIEW_RULE}\nReport findings through the engine report tool.\n" if stage == "review" else ""
+    suite_gate = ("" if not require_green else
+                  "Rule: Workspace [workers] require_green_tests is enabled: the engine holds a done report "
+                  "as human review unless passed, failed, skipped and xfailed are all known, with passed > 0 "
+                  "and failed, skipped and xfailed all zero. Report those counts on the report tool; omit a count "
+                  "when unknown.\n")
     architecture = ""
     if root is not None and stage in ("implement", "fix", "architect"):
         line = architecture_line(root)
         architecture = f"{line}\n" if line else ""
-    return (f"{ISSUE_HEADER}\nIssue: {key}\nStore title: {name}\nStage: {stage}\n"
+    header = ISSUE_HEADER.replace("# Assignment\n", "# Assignment" + standing_rules(rules), 1) if rules else ISSUE_HEADER
+    assignment = (f"{header}\nIssue: {key}\nStore title: {name}\nStage: {stage}\n"
             f"Job: {ISSUE_JOBS.get(stage, persona.role)}\nPersona: {persona.role}\n"
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
+            + suite_gate
             + review
             + (skills_line(skills) + "\n" if skills else "")
-            + architecture
-            + f"\n## Forge issue\n\n{title}\n\n{body}\n")
+            + architecture)
+    if len(assignment) > BODY_CAP:
+        raise RefusedError(f"the assignment is {len(assignment)} characters, over the {BODY_CAP} cap")
+    return assignment + f"\n## Forge issue\n\n{title}\n\n{body}\n"
+
+
+def validate_worker_rules(root: Path, settings: Settings, policies: Any) -> None:
+    """Refuse rules that cannot fit a configured engine stage before it can reserve a worker.
+
+    Budget the two bounded row fields at LINE_CAP; the rest uses the same renderer,
+    workspace paths, stage skills, persona rules and suite policy as launch.
+    """
+    if not settings.workers.rules:
+        return
+    row = SimpleNamespace(issue_key="k" * LINE_CAP, title="t" * LINE_CAP)
+    for stage, place in policies.stages.items():
+        if place.persona is None:
+            continue
+        defaults = settings.stages.get(stage)
+        try:
+            compose_issue(row, "", "", stage, policies.personas[place.persona], root=root,
+                          skills=defaults.skills if defaults else (), rules=settings.workers.rules,
+                          require_green=settings.workers.require_green_tests)
+        except RefusedError as exc:
+            raise RefusedError(f"[workers] rules do not fit the {stage} assignment: {exc}") from None
 
 
 def commit_rule(workflow: Workflow, root: Path) -> str:
@@ -314,6 +345,14 @@ def _clean(label: str, value: str) -> str:
     if len(value) > LINE_CAP:
         raise RefusedError(f"{label} is {len(value)} characters, over the {LINE_CAP} cap")
     return value
+
+
+def standing_rules(rules: tuple[str, ...]) -> str:
+    """Render workspace rules already validated at the settings boundary, with their source."""
+    if not rules:
+        return ""
+    return ("\n\nStanding worker rules:\n\n" + "\n".join(f"- {rule}" for rule in rules)
+            + "\n\nThese rules come from workspace settings (`[workers] rules`).\n")
 
 
 def task_keys(item: str, name: str = "") -> set[str]:
@@ -393,12 +432,14 @@ def _task_context(root: Path, cfg: Config, day: str | None, task: str) -> tuple[
     return relative, text, rows[0]
 
 
-def stage_defaults(root: Path, day: str | None, task: str) -> Stage | None:
+def stage_defaults(root: Path, day: str | None, task: str, *, settings: Settings | None = None) -> Stage | None:
     """Return the task row's configured stage defaults; day defaults to workspace today."""
     cfg = config(root)
     _, _, row = _task_context(root, cfg, day, task)
     try:
-        return load_settings(root, cfg.settings_path).stages.get(row.stage.strip())
+        if settings is None:
+            settings = load_settings(root, cfg.settings_path)
+        return settings.stages.get(row.stage.strip())
     except (OSError, SettingsError) as exc:
         raise RefusedError(f"cannot read workspace settings: {exc}") from None
 
@@ -421,17 +462,23 @@ def _task_directives(root: Path, row: Task, skills: str, issue: Any) -> list[str
 
 def compose(root: Path, day: str | None, task: str, worktree: Path | None = None,
             coordinator: str | None = None, name: str | None = None, runtime: str = "claude",
-            one_shot: bool = False) -> str:
-    """The assignment for `task`, read back off disk. A task that is not a row is refused."""
+            one_shot: bool = False, *, settings: Settings | None = None) -> str:
+    """Compose a tracker assignment from one settings snapshot, with standing rules on one-shot runs only.
+
+    Pass preloaded settings to reuse the caller's snapshot without rereading it;
+    otherwise load the complete settings once from the configured workspace path.
+    Invalid data, settings or launch conditions raise RefusedError.
+    """
     cfg = config(root)
     day = day or datetime.now(cfg.zone).date().isoformat()
     relative, text, row = _task_context(root, cfg, day, task)
-    try:
-        settings = load_settings(root, cfg.settings_path)
-        workflow = settings.workflow
-    except (OSError, SettingsError) as exc:
-        raise RefusedError(f"cannot read workspace settings: {exc}") from None
-    stage = stage_defaults(root, day, task)
+    if settings is None:
+        try:
+            settings = load_settings(root, cfg.settings_path)
+        except (OSError, SettingsError) as exc:
+            raise RefusedError(f"cannot read workspace settings: {exc}") from None
+    workflow = settings.workflow
+    stage = settings.stages.get(row.stage.strip())
     skills = skills_line(stage.skills) if stage else ""
     owner = row.owner.strip()
     # Prevent two workers from claiming one task.
@@ -482,7 +529,7 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
                         if workflow.delivery == "pull-request" else
                         "Commit the finished change on this worktree's branch; do not push or merge without existing authorization.")
         lines = [
-            "# One-shot assignment",
+            "# One-shot assignment" + standing_rules(settings.workers.rules),
             f"You are {name or 'a worker'} in a single, noninteractive {runtime} run. Complete only this task, then exit.",
             "Do not register, poll a mailbox, schedule checks, start another agent, or send messages.",
             "Do not wait for a plan approval or for a reply. If a decision, missing access, or another blocker prevents completion, stop and report human_review.",

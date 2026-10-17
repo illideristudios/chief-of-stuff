@@ -59,12 +59,14 @@ def exec_login(command: list[str]) -> None:
     os.execve(login_shell(), login_argv(command), clean_env())
 
 
-def login_argv(command: list[str]) -> list[str]:
+def login_argv(command: list[str], *, path_prefix: str = "") -> list[str]:
     """Pass worker arguments as shell positional values, never as shell source text."""
     shell = login_shell()
     kind = Path(shell).name
     if kind not in {"zsh", "bash", "sh", "dash", "ksh", "fish"}:
         raise ShellError(f"login shell {shell!r} is not supported for exact argv execution")
     if kind == "fish":
-        return [shell, "-lic", "exec $argv", *command]
-    return [shell, "-lic", 'exec "$@"', "chief-of-stuff", *command]
+        source = 'set -gx PATH $argv[1] $PATH; set -e argv[1]; exec $argv' if path_prefix else 'exec $argv'
+        return [shell, "-lic", source, *([path_prefix] if path_prefix else []), *command]
+    source = 'export PATH="$1:$PATH"; shift; exec "$@"' if path_prefix else 'exec "$@"'
+    return [shell, "-lic", source, "chief-of-stuff", *([path_prefix] if path_prefix else []), *command]

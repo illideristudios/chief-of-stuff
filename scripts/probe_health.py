@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Probe the `Health:` targets in a workspace `## Coordinator` block and print one line each, after
 one line for the file its `Settings:` line names, loaded through the settings loader, and one for the
-runtimes its `[models]` rotations name: each `ok` or `missing`, as the login shell finds its binary.
+Claude runtime when its `[models]` rotations name it: `ok` or `missing`, as the adapter finds it.
 
 The coordinator runs this on open and on resume instead of remembering what was up an hour ago.
 One invocation covers every target, so a restart costs one call rather than one per service.
@@ -9,11 +9,14 @@ One invocation covers every target, so a restart costs one call rather than one 
     python3 probe_health.py --config /path/to/CLAUDE.md
 
 Exit code is the number of failed checks: the targets that did not answer as expected, plus one when
-the settings file cannot be loaded, plus one for each missing runtime, or one when the login shell
+the settings file cannot be loaded, plus one for missing Claude, or one when the login shell
 could not be asked. A caller can branch on it without parsing. Every target gets a
 line even when it fails: a missing line would read as a healthy service. No `Settings:` line is no
 settings line, and a settings file that is not there is `absent, defaults`: not a fault, and not ok.
 Settings that name no runtime, or did not load, get no runtimes line.
+A missing or non-file settings path gets one `workspace file <name> missing (advice); <command>`
+(or `not a file`, or `unreadable`) line, printed after the runtimes line and before the targets, with or without a
+`Settings:` line. Model guidance is not advised. These lines are advice only and do not affect the exit code.
 A usage fault (no config at the path, a `Health:` line that is not a target) is stderr and exit 2.
 """
 
@@ -21,6 +24,8 @@ from __future__ import annotations
 
 import argparse
 import re
+import shlex
+import stat
 import sys
 import urllib.error
 import urllib.request
@@ -30,10 +35,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from md import section
-from runtimes import RUNTIMES
+import claude_adapter
 from settings import ModelEntry, SettingsError, load as load_settings
-from shell_setup import ShellError, resolve
-from workspace import settings_path
+from shell_setup import ShellError
+from workspace import WORKSPACE_FILES, settings_path
 
 HEALTH = re.compile(r"^\s*(?:[-*]\s*)?Health:\s*(.+?)\s*$", re.MULTILINE)
 SCHEMES = ("http", "https")
@@ -103,15 +108,48 @@ def check_settings(root: Path, name: str) -> tuple[str, int, dict[str, tuple[Mod
 
 
 def check_runtimes(models: dict[str, tuple[ModelEntry, ...]]) -> tuple[list[str], int]:
-    """The line and fault count for the runtimes the rotations name; no line when they name none."""
-    named = [r for r in RUNTIMES if any(entry.runtime == r.name for rotation in models.values() for entry in rotation)]
+    """Startup preflight for Claude when a rotation names it (ledger D11)."""
+    if not any(entry.runtime == "claude" for rotation in models.values() for entry in rotation):
+        return [], 0
     try:
-        missing = [r for r in named if not resolve(r.binary)]
+        found = claude_adapter.available()
     except ShellError as exc:
         return ["runtimes not checked: " + PATH_HEAD.sub(r"\1", str(exc))], 1
-    said = [f"{r.name} ok" if r not in missing else
-            f"{r.name} missing" + (f" (binary {r.binary})" if r.binary != r.name else "") for r in named]
-    return ["runtimes " + ", ".join(said)] if said else [], len(missing)
+    return ["runtimes claude " + ("ok" if found else "missing")], int(not found)
+
+
+def missing_workspace_files(config: Path, settings: str | None) -> list[str]:
+    """Advice lines for init's outputs that are not regular files; respects configured paths and installs nothing.
+
+    `config` and (with a `Settings:` line) `settings` take their configured paths; a malformed settings name
+    (ValueError) is left to `check_settings`.
+    """
+    root = config.parent
+    paths = {"config": config, "settings": root / settings} if settings else {"config": config}
+    lines = []
+    for key, item in WORKSPACE_FILES.items():
+        path = paths.get(key, root / item.name)
+        name = str(path.relative_to(root)) if path.is_relative_to(root) else str(path)
+        try:
+            try:
+                st = path.stat()
+            except (FileNotFoundError, NotADirectoryError):
+                st = path.lstat()
+        except ValueError:
+            continue
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
+        except OSError as exc:
+            why = " ".join((exc.strerror or str(exc)).split())
+            lines.append(f"workspace file {name} unreadable (advice); {why}")
+            continue
+        if st is not None and stat.S_ISREG(st.st_mode):
+            continue
+        exists = st is not None
+        command = item.command.replace("{root}", shlex.quote(str(root.resolve())))
+        fix = f"move it aside, then {command}" if exists else command
+        lines.append(f"workspace file {name} {'not a file' if exists else 'missing'} (advice); {fix}")
+    return lines
 
 
 def _safe(url: str) -> str:
@@ -150,7 +188,7 @@ def report(targets: list[Target], timeout: float = TIMEOUT) -> tuple[list[str], 
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Check the Settings: file and its runtimes, and probe the Health: targets in a ## Coordinator block.")
+    parser = argparse.ArgumentParser(description="Check settings, runtimes and Health: targets; advise about a missing settings file (exit code unaffected).")
     parser.add_argument("--config", default="CLAUDE.md", help="workspace CLAUDE.md holding the block")
     parser.add_argument("--timeout", type=float, default=TIMEOUT, help="seconds per target")
     args = parser.parse_args(argv)
@@ -170,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
         lines, missing = check_runtimes(models)
         print("\n".join([said, *lines]))
         bad += missing
+    for advice in missing_workspace_files(config, name):
+        print(advice)
     try:
         targets = _targets(text)
     except TargetError as exc:

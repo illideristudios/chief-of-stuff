@@ -3,7 +3,7 @@
 
 Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". Notification, lane, budget, and Kanban settings
-live here, along with suggested models and their rotations (#111) and stage launch defaults (#121).
+live here, along with suggested models and their rotations (#111), stage launch defaults (#121), and [limits].
 
 No `Settings:` line, no file, or no `[notify]` section is notify off, and nothing else changes. A value
 that is there and cannot be read is refused: a guessed day-open time is a notification at the wrong hour.
@@ -12,7 +12,9 @@ that is there and cannot be read is refused: a guessed day-open time is a notifi
 from __future__ import annotations
 
 import re
+import math
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -26,6 +28,8 @@ HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 OFFSET = re.compile(r"^(\d+)([hm])$")
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HERDR_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+RULES_MAX = 64  # rules; the rendered assignment budget is checked by dispatch_prompt.validate_worker_rules at engine start
+RULES_TOTAL_CAP = 6000  # sum of len(rule)
 CLAUDE_AS_PROFILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # claude-as's valid_profile_name
 DEFAULT_WARNINGS = ("24h", "3h", "1h")
 POLICY = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"  # the shipped policy and workflow
@@ -90,13 +94,15 @@ class Workflow:
 
 @dataclass(frozen=True)
 class Workers:
+    """Worker launch configuration and standing instructions for one-shot and engine tasks."""
     launcher: str = "ghostty"
     mode: str = "interactive"
     # #100: one-shots running at once across every session in the workspace; None is no cap.
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
-    require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
+    require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
+    rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
 
 
 @dataclass(frozen=True)
@@ -177,6 +183,20 @@ class Graph:
 
 
 @dataclass(frozen=True)
+class Limits:
+    warn_at: float = 0.8
+
+
+def _limits(table) -> Limits:
+    if not isinstance(table, dict):
+        raise SettingsError("[limits] is not a table")
+    value = table.get("warn_at", .8)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+        raise SettingsError("[limits] warn_at must be a fraction between 0 and 1")
+    return Limits(float(value))
+
+
+@dataclass(frozen=True)
 class Settings:
     notify: Notify = field(default_factory=Notify)
     lanes: dict[str, Lane] = field(default_factory=dict)
@@ -193,6 +213,7 @@ class Settings:
     repos: dict[str, str] = field(default_factory=dict)
     stages: dict[str, Stage] = field(default_factory=dict)
     architect_login: str | None = None  # forge login whose Architect: replies count; unset relies on the worker guard
+    limits: Limits = field(default_factory=Limits)
 
 
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
@@ -294,8 +315,20 @@ def _workers(table) -> Workers:
     if "claude_as_profile" in table and not (isinstance(profile, str) and CLAUDE_AS_PROFILE.fullmatch(profile)):
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
+    rules = table.get("rules", [])
+    # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
+    if not isinstance(rules, list) or not all(
+        isinstance(rule, str) and rule.strip() and len(rule.splitlines()) == 1
+        and "(via " not in rule and len(rule) <= 2400
+        and not any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in rule) for rule in rules
+    ):
+        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
+                            'or "(via " markers, each at most 2400 characters')
+    if len(rules) > RULES_MAX or sum(map(len, rules)) > RULES_TOTAL_CAP:
+        raise SettingsError(f"[workers] rules must be at most {RULES_MAX} rules and {RULES_TOTAL_CAP} characters in all")
+    # Preserve the user's wording, including surrounding spaces.
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green)
+                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))
 
 
 def _repos(table) -> dict[str, str]:
@@ -515,6 +548,7 @@ def load(root: Path, settings_path: str | None) -> Settings:
     graph = _graph(data["graph"]) if "graph" in data else None
     pages = _pages(data["pages"]) if "pages" in data else Pages()
     repos = _repos(data["repos"]) if "repos" in data else {}
+    limits = _limits(data["limits"]) if "limits" in data else Limits()
     budgets = data.get("budgets", {})
     if not isinstance(budgets, dict) or not set(budgets) <= {"S", "M", "L", "XL"}:
         raise SettingsError(f"{settings_path}: [budgets] is a table of S, M, L, XL")
@@ -522,13 +556,11 @@ def load(root: Path, settings_path: str | None) -> Settings:
     architect_login = _architect(data["architect"]) if "architect" in data else None
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages,
-                        models=models, graph=graph, repos=repos, stages=stages, architect_login=architect_login)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, architect_login=architect_login, limits=limits)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph,
-                    repos=repos, stages=stages, architect_login=architect_login)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, architect_login=architect_login, limits=limits)
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:

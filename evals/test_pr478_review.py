@@ -136,8 +136,7 @@ class PagesLifecycleTest(unittest.TestCase):
              patch.object(run, "start_fixture_pages", side_effect=start) as started, \
              patch.object(run, "stop_pages", side_effect=stop) as stopped, \
              patch.object(run.os, "kill", side_effect=kill) as signalled, \
-             patch.object(run, "command", return_value=["mock-runtime"]), \
-             patch.object(run, "drive_turns", side_effect=first_turn) as turns:
+             patch.object(run.claude_adapter, "call", side_effect=first_turn) as turns:
             sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
             import pages as pg  # noqa: E402
             with patch.object(pg, "is_pages_serve", return_value=True):
@@ -156,11 +155,11 @@ class PagesLifecycleTest(unittest.TestCase):
         snapshot = self.root / "snapshot"
         with patch.object(run.tempfile, "mkdtemp", return_value=str(self.work)), \
              patch.object(run, "start_fixture_pages"), \
-             patch.object(run, "command", return_value=["mock-runtime"]) as built, \
-             patch.object(run, "drive_turns", side_effect=RuntimeError("stop after the command")):
+             patch.object(run.claude_adapter, "call", side_effect=RuntimeError("stop after the command")) as built:
             with self.assertRaisesRegex(RuntimeError, "stop after the command"):
                 run.run_one(self.case, "agent", "sonnet", self.root / "out", root=snapshot, effort="high")
-        self.assertEqual((built.call_args.kwargs["root"], built.call_args.kwargs["effort"]), (snapshot, "high"))
+        request = built.call_args.args[0]
+        self.assertEqual((request.plugin_dirs, request.effort), ((str(snapshot),), "high"))
 
     def test_huge_pid_does_not_skip_the_rest_of_case_cleanup(self):
         """R9: stop_pages must not prevent rmtree or either stop_server call."""

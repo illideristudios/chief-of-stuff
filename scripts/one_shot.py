@@ -24,6 +24,7 @@ import runtimes
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
 from md import cells as _cells, is_separator as _is_separator
+from reconcile import suite_holds
 from model_port import quota_reset
 from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
@@ -380,9 +381,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
         status = "human_review"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
     # Git/worktree violations take precedence over the suite gate.
-    if status == "done" and settings.workers.require_green_tests and (
-            any(value is None for value in counts.values()) or counts["passed"] == 0
-            or any(counts[key] for key in ("failed", "skipped", "xfailed"))):
+    if status == "done" and suite_holds(counts, require_green=settings.workers.require_green_tests):
         status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     quota = ""
     if status == "human_review" and not changes and not actual and commits == NO_COMMITS:
@@ -513,9 +512,9 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
         timeout_minutes: int = 60) -> int:
     cfg = dispatch_prompt.config(root)
     chosen_day = day or datetime.now(cfg.zone).date().isoformat()
-    body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
-                                   runtime=runtime, one_shot=True)
     settings = load_settings(root, cfg.settings_path)
+    body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
+                                   runtime=runtime, one_shot=True, settings=settings)
     workers = settings.workers
     commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)

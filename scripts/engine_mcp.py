@@ -7,7 +7,7 @@ from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
 from guard_binding import Binding
-from policy import DISPOSITIONS, SEVERITIES
+from policy import SEVERITIES
 from store import Store
 
 
@@ -19,15 +19,6 @@ class Finding(BaseModel):
     path: str | None = None
     line: int | None = Field(default=None, ge=1)
     suggestion: str
-    finding_key: str | None = None  # an architect echoes the key and its disposition for each finding it was given
-    disposition: str | None = Field(default=None, json_schema_extra={"enum": list(DISPOSITIONS)})
-
-    @field_validator("disposition")
-    @classmethod
-    def disposition_known(cls, value: str | None) -> str | None:
-        if value is not None and value not in DISPOSITIONS:
-            raise ValueError(f"disposition must be one of {', '.join(DISPOSITIONS)}")
-        return value
 
     @field_validator("severity")
     @classmethod
@@ -42,6 +33,10 @@ class ReportInput(BaseModel):
     outcome: Literal["done", "failed", "blocked"]
     summary: str = Field(min_length=1)
     findings: list[Finding] = Field(default_factory=list)
+    passed: int | None = None
+    failed: int | None = None
+    skipped: int | None = None
+    xfailed: int | None = None
 
 
 class AskInput(BaseModel):
@@ -56,15 +51,20 @@ class EngineTools:
         self.binding, self.store = binding, store
 
     def report(self, outcome: Literal["done", "failed", "blocked"], summary: str,
-               findings: list[Finding] | None = None) -> dict:
-        """Record this run's result. Call before stopping, including when blocked or failed."""
-        data = ReportInput.model_validate({"outcome": outcome, "summary": summary,
-                                           "findings": [] if findings is None else findings})
+               findings: list[Finding] | None = None, passed: int | None = None, failed: int | None = None,
+               skipped: int | None = None, xfailed: int | None = None) -> dict:
+        """Record this run's result. Call before stopping, including when blocked or failed.
+
+        passed, failed, skipped and xfailed are the final suite run's counts. Omit a count when it is unknown.
+        """
+        data = ReportInput.model_validate({
+            "outcome": outcome, "summary": summary, "findings": [] if findings is None else findings,
+            "passed": passed, "failed": failed, "skipped": skipped, "xfailed": xfailed})
         b = self.binding
-        if b.stage != "architect" and any(f.disposition is not None for f in data.findings):
-            raise ValueError("only the architect may supply dispositions")
-        report_id = self.store.add_report(b.issue_key, b.stage, b.attempt, b.session_id, data.outcome, data.summary,
-                                          [f.model_dump(exclude_none=True) for f in data.findings])
+        report_id = self.store.add_report(
+            b.issue_key, b.stage, b.attempt, b.session_id, data.outcome, data.summary,
+            [f.model_dump(exclude_none=True) for f in data.findings],
+            suite={"passed": data.passed, "failed": data.failed, "skipped": data.skipped, "xfailed": data.xfailed})
         return {"report_id": report_id}
 
     def ask(self, question: str, options: list[str] | None = None, context: str = "") -> dict:

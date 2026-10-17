@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from pathlib import Path
 import sys
 import tempfile
@@ -91,17 +90,6 @@ class MCPTest(unittest.TestCase):
         from policy import SEVERITIES
         self.assertEqual(Finding.model_json_schema()["properties"]["severity"]["enum"], list(SEVERITIES))
 
-    def test_an_architect_report_carries_a_disposition_per_finding_key(self):
-        import engine_mcp
-        from dataclasses import replace
-        architect = engine_mcp.EngineTools(replace(self.tools.binding, stage="architect"), self.db)
-        architect.report("done", "Judged", [{**FINDING, "finding_key": "1/1/abc", "disposition": "keep"}])
-        self.assertEqual(self.db.reports(KEY)[0].findings[0]["disposition"], "keep")
-        with self.assertRaises(ValueError):
-            architect.report("done", "bad", [{**FINDING, "finding_key": "1/1/abc", "disposition": "ignore"}])
-        with self.assertRaises(ValueError):
-            self.tools.report("done", "forged disposition", [{**FINDING, "disposition": "keep"}])
-
     def test_stdio_sdk_round_trip(self):
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
@@ -148,10 +136,10 @@ class ChannelMigrationTest(unittest.TestCase):
             db = store.Store(path)
             try:
                 db.upsert_item(KEY, title="Before upgrade", stage="review")
-                # Seed revision 0002's schema, rather than writing it through today's Segment model.
-                with sqlite3.connect(path) as conn:
-                    conn.execute("INSERT INTO segment (issue_key, stage, attempt, started_at, runtime) "
-                                 "VALUES (?, 'review', 1, 'before', 'claude')", (KEY,))
+                # Seed the historical schema without asking today's ORM to write newer columns.
+                with db.engine.begin() as conn:
+                    conn.exec_driver_sql("INSERT INTO segment (issue_key, stage, attempt, started_at, runtime) "
+                                         "VALUES (?, 'review', 1, 'before', 'claude')", (KEY,))
                 store.migrate(path)
                 self.assertEqual(db.items()[0].title, "Before upgrade")
                 self.assertEqual(db.segments(KEY)[0].runtime, "claude")

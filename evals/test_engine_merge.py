@@ -333,7 +333,8 @@ class ExecutorTest(unittest.TestCase):
     def execute(self, *, forge_facts=False):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
         return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p,
-                                    inputs=engine._planning_inputs(self.db, [item], self.forge if forge_facts else None))
+                                    inputs=engine._planning_inputs(self.db, [item], self.forge if forge_facts else None),
+                                    hold_stages=getattr(self.forge.kanban, "hold_stages", ()))
 
     def message(self):
         entries = self.db.log(self.key)
