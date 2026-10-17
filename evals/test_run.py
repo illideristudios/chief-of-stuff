@@ -565,13 +565,14 @@ class GitWriteTest(unittest.TestCase):
 
             def graded(script: str) -> bool:
                 log.write_text("")
-                subprocess.run(["/bin/sh", "-c", script], cwd=clone, env=env, capture_output=True, check=True, timeout=30)
+                # `builtin command` needs Bash; CI's /bin/sh is Dash.
+                subprocess.run(["/bin/bash", "-c", script], cwd=clone, env=env, capture_output=True, check=True, timeout=30)
                 rec = record(at(16, 23), at(16, 25))
                 rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines()]
                 return run.grade({"type": "git_write", "subcommands": ["push"]}, rec)[0]
 
             self.assertFalse(graded("git push"))
-            self.assertFalse(graded("builtin command git push 2>/dev/null; true"))
+            self.assertFalse(graded("builtin command git push"))
             self.assertFalse(graded("env FOO+=bar git push >/dev/null 2>&1"))
             self.assertTrue(graded("command -v git"))
             self.assertTrue(graded("echo git push"))
