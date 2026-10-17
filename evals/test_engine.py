@@ -842,7 +842,35 @@ class MainTest(unittest.TestCase):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
-        self.assertEqual(passed.call_args.kwargs["launch"].keywords["rules"], ("Keep tests.",))
+        self.assertEqual(passed.call_args.kwargs["launch"].keywords["config"].workers.rules, ("Keep tests.",))
+
+    def test_each_pass_pins_rules_and_stage_defaults_and_refreshes_together(self):
+        path = self.root / "settings.toml"
+        original = path.read_text()
+
+        def write_settings(version):
+            path.write_text(original + f'rules = ["Rule {version}."]\n'
+                            f'[stages.implement]\nagent = "builder{version}"\nskills = ["skill{version}"]\n')
+
+        write_settings(1)
+        launches = []
+
+        def passed(**kwargs):
+            launches.append(kwargs["launch"])
+            write_settings(len(launches) + 1)
+            # A change on disk during a pass must not change its launch snapshot.
+            config = launches[-1].keywords["config"]
+            self.assertEqual(config.workers.rules, (f"Rule {len(launches)}.",))
+            self.assertEqual(config.stages["implement"].agent, f"builder{len(launches)}")
+            self.assertEqual(config.stages["implement"].skills, (f"skill{len(launches)}",))
+            self.assertIs(kwargs["workers"], config.workers)
+
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass", side_effect=passed) as run, \
+             mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(run.call_count, 2)
+        self.assertIsNot(launches[0].keywords["config"], launches[1].keywords["config"])
 
     def test_loaded_suite_policy_reaches_collect_and_launch(self):
         with (self.root / "settings.toml").open("a") as config:
