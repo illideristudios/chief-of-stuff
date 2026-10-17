@@ -153,7 +153,12 @@ def derive_scopes(title: str, body: str, sources: dict[str, str]) -> tuple[list[
     text = re.sub(r'(?ms)^\s*(```|~~~).*?^\s*\1[^\n]*$', '', text)
     # A broken declaration is not evidence for its own replacement.
     text = re.sub(r'(?ms)^## File ownership\s*\n.*?(?=^## |\Z)', '', text)
-    read_task = bool(re.search(r'(?im)\b(?:read-only (?:audit|review|task)|(?:audit|review|inspect)[^\n]*\bread-only\b)|^\s*(?:[-*]\s*(?:\[[ xX]\]\s*)?)?read-only\s*:', text))
+    read_task = bool(
+        re.match(r'(?i)^\s*read-only (?:audit|review|task)\b', title)
+        or (re.match(r'(?i)^\s*(?:audit|review|inspect)\b', title)
+            and re.search(r'(?i)\bread-only\b', text))
+        or re.search(r'(?im)^\s*(?:this task|this assignment|scope)\s*(?:is|:)\s*read-only\b', body)
+    )
     files = set(sources)
     symbols = {token.removesuffix('()') for token in re.findall(r'`([A-Za-z_]\w*\(\))`', text)}
     symbols -= {PurePosixPath(p).stem for p in files} | {PurePosixPath(p).name for p in files}
@@ -176,6 +181,7 @@ def derive_scopes(title: str, body: str, sources: dict[str, str]) -> tuple[list[
     prohibited: set[str] = set()
     for line in text.splitlines():
         reference = bool(re.match(r'(?i)^\s*(?:[-*]\s*)?(?:plan:|ledger:|reference:|see[ :]|read[ :])', line))
+        reference = reference or bool(re.search(r'(?i)\b(?:like|for example)\s+`', line))
         forbidden = bool(re.search(r"(?i)\b(?:do not|don't|must not|never) (?:edit|change|modify|write|touch)\b", line))
         mode = 'read' if read_task or reference or forbidden else 'write'
         tokens = set(re.findall(r'(?<![\w/])(?:[\w.-]+/)*[\w.-]+\.(?:py|md|json|toml|ya?ml|js|ts|css|html)\b', line))

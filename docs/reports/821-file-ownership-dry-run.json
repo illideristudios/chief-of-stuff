@@ -8,21 +8,15 @@
   "workspaces": [
     {
       "repo": "illideristudios/chief-of-stuff",
-      "code_sha256": "50d5a544aab91b28e9c525f3727891f4e2bf42f26c6383bda8edd74a07481db5",
+      "code_sha256": "3de049cbe97c7bace44d3bb2da33d78455fabcf7641686761b366830dc1c7ac9",
       "issues": [
         {
           "number": 75,
           "original": "042e455121b2c2d694d71a915b42709fdac055357f761b5b0b5b1bb76f7592f3",
-          "section": "## File ownership\n- read: `scripts/backlog.py`\n",
-          "scopes": [
-            [
-              "scripts/backlog.py",
-              "read"
-            ]
-          ],
-          "status": "derived",
-          "reason": "named tracked files/symbols and their existing companion tests",
-          "proposed": "899a150c3c304ad4dd4636cc3c485ea502eac6a979a0a01704d45526517f133c"
+          "section": "",
+          "scopes": [],
+          "status": "unresolved",
+          "reason": "no unambiguous implementation paths; the owner must supply the scope"
         },
         {
           "number": 92,
@@ -205,20 +199,28 @@
         {
           "number": 319,
           "original": "a21c396aa9aa48d6c83e6df2a371f6b3e5e79ad0cffba1ba8bf6ba8298ecf200",
-          "section": "## File ownership\n- read: `scripts/one_shot.py`\n- read: `scripts/reconcile.py`\n",
+          "section": "## File ownership\n- write: `evals/test_one_shot.py`\n- write: `evals/test_reconcile.py`\n- write: `scripts/one_shot.py`\n- write: `scripts/reconcile.py`\n",
           "scopes": [
             [
+              "evals/test_one_shot.py",
+              "write"
+            ],
+            [
+              "evals/test_reconcile.py",
+              "write"
+            ],
+            [
               "scripts/one_shot.py",
-              "read"
+              "write"
             ],
             [
               "scripts/reconcile.py",
-              "read"
+              "write"
             ]
           ],
           "status": "derived",
           "reason": "named tracked files/symbols and their existing companion tests",
-          "proposed": "723717a70dcd82aea63693d72f740e72804f9b46c7bd4a06a6afbe8bcf254953"
+          "proposed": "73adbed6d093f6cf7419fce76addeb882ec6e00bb1293af1fd60597d9732beb5"
         },
         {
           "number": 324,

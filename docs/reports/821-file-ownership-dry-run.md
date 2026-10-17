@@ -7,12 +7,13 @@ Plan citations alone do not establish implementation scope. All proposed section
 
 ## illideristudios/chief-of-stuff
 
-92 open issues: 42 derived, 0 existing, 50 unresolved.
+92 open issues: 41 derived, 0 existing, 51 unresolved.
 
-Code snapshot SHA256: `50d5a544aab91b28e9c525f3727891f4e2bf42f26c6383bda8edd74a07481db5`
+Code snapshot SHA256: `3de049cbe97c7bace44d3bb2da33d78455fabcf7641686761b366830dc1c7ac9`
 
 ### Needs the owner
 
+- [#75](https://github.com/illideristudios/chief-of-stuff/issues/75): no unambiguous implementation paths; the owner must supply the scope
 - [#143](https://github.com/illideristudios/chief-of-stuff/issues/143): no unambiguous implementation paths; the owner must supply the scope
 - [#173](https://github.com/illideristudios/chief-of-stuff/issues/173): no unambiguous implementation paths; the owner must supply the scope
 - [#203](https://github.com/illideristudios/chief-of-stuff/issues/203): no unambiguous implementation paths; the owner must supply the scope
@@ -66,15 +67,6 @@ Code snapshot SHA256: `50d5a544aab91b28e9c525f3727891f4e2bf42f26c6383bda8edd74a0
 
 ### Proposed or retained declarations
 
-#### [#75](https://github.com/illideristudios/chief-of-stuff/issues/75) — derived
-
-Original title/body SHA256: `042e455121b2c2d694d71a915b42709fdac055357f761b5b0b5b1bb76f7592f3`
-
-```markdown
-## File ownership
-- read: `scripts/backlog.py`
-```
-
 #### [#92](https://github.com/illideristudios/chief-of-stuff/issues/92) — derived
 
 Original title/body SHA256: `733e2427af1e29e0fdf2205882f36f13cb0304115576c18ad798419bb7466590`
@@ -110,8 +102,10 @@ Original title/body SHA256: `a21c396aa9aa48d6c83e6df2a371f6b3e5e79ad0cffba1ba8bf
 
 ```markdown
 ## File ownership
-- read: `scripts/one_shot.py`
-- read: `scripts/reconcile.py`
+- write: `evals/test_one_shot.py`
+- write: `evals/test_reconcile.py`
+- write: `scripts/one_shot.py`
+- write: `scripts/reconcile.py`
 ```
 
 #### [#324](https://github.com/illideristudios/chief-of-stuff/issues/324) — derived
