@@ -378,7 +378,7 @@ class CleanupTest(unittest.TestCase):
         tree = self.trees / "done"
         for method in ("teardown_attempt", "claim_teardown"):
             with self.subTest(method=method), \
-                    mock.patch.object(store.Store, method, side_effect=SQLAlchemyError("unreadable"), create=True), \
+                    mock.patch.object(store.Store, method, side_effect=SQLAlchemyError("unreadable")), \
                     mock.patch.object(cleanup, "owned_items", wraps=cleanup.owned_items) as owners, \
                     mock.patch.object(cleanup, "containers", return_value=[tree / "data"]) as containers, \
                     mock.patch.object(shell_setup, "teardown") as stop:

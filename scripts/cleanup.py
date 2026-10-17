@@ -262,7 +262,7 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
                             # Another cleanup may have recorded an attempt, or the tree may have been recreated,
                             # while this pass waited for the launch lock. The locked identity owns the decision.
                             needs_teardown = db.teardown_attempt(str(tree)) != teardown_identity(layout, teardown_command)
-                        except SQLAlchemyError as exc:
+                        except (SQLAlchemyError, OSError) as exc:
                             failed = True
                             kept.append(f"store teardown attempt cannot be checked ({type(exc).__name__})")
                     if not kept and needs_teardown:
