@@ -636,6 +636,23 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.launched[-1][1:3], ("review", 2))
         self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
 
+    def test_failed_handoff_is_dropped_when_a_person_moves_the_card(self):
+        self.forge.kanban = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        refused = SimpleNamespace(ok=False, error="forge offline")
+        with mock.patch.object(self.forge, "write_stage", return_value=refused):
+            with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
+                self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["pending_stage"]["stage"], "review")
+        self.forge.rows[0]["stage"] = "merge"  # moved while the forge was failing
+        self.forge.writes.clear()
+        self.run_pass()
+        self.assertEqual(self.forge.writes, [])
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.assertTrue(self.forge.rows[0]["human_review"])
+        self.assertNotIn("pending_hold", self.db.resume(KEY))
+
     def test_exhausted_launch_failures_leave_a_plain_human_hold(self):
         self.pending_release()
         self.p = replace(self.p, base=policy.Policy(retry_limit=1))
