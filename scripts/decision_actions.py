@@ -92,24 +92,66 @@ def latest(decisions: Sequence[Any]) -> dict[tuple[str, str, str], Any]:
 
 
 @dataclass(frozen=True)
-class NeedsZach:
+class NeedsOwner:
     decision_id: tuple[str, str, str]
     stage: str
     attempt: int
     reason: str
 
 
-def needs_zach(rows: Sequence[Any]) -> NeedsZach | None:
-    """The latest row of one decision attempt alone says whether it waits on Zach."""
+def needs_owner(rows: Sequence[Any]) -> NeedsOwner | None:
+    """The latest row of one decision alone says whether it waits on the owner."""
     if not rows:
         return None
     row = rows[-1]
-    if (row.answer or "").strip() or row.decided_by != "zach":
-        return None
     record = row.record if isinstance(row.record, dict) else {}
     decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
-    return NeedsZach(identity(row), decision.get("stage", ""), decision.get("attempt", 0),
+    # Older gate holds committed an answer before their separate interrupt write.
+    legacy_hold = (row.answer == "hold" and row.decided_by == "trio"
+                   and decision.get("gate", row.topic != "ask" and not decision.get("instance")
+                                    and tuple(decision.get("options") or ()) == ("approve", "hold")))
+    if not legacy_hold and ((row.answer or "").strip() or row.decided_by != "zach"):
+        return None
+    return NeedsOwner(identity(row), decision.get("stage", ""), decision.get("attempt", 0),
                      str(record.get("error") or row.question))
+
+
+def owner_waits(decisions: Sequence[Any], segments: Sequence[Any], asks: Sequence[Any],
+                start: str = "implement") -> list[NeedsOwner]:
+    """Active owner decisions, after settlements, newer attempts and reversal restarts."""
+    attempts = {}
+    for source in (*segments, *asks):
+        attempts[source.stage] = max(attempts.get(source.stage, 0), source.attempt)
+    restarts = []
+    for row in decisions:
+        record = row.record if isinstance(row.record, dict) else {}
+        if not (is_reversed(row) or record.get("restarted")):
+            continue
+        attempt = record.get("restart_attempt")
+        created = getattr(row, "created_at", None)
+        candidates = [s for s in segments if s.stage == start and s.started_at and (
+            s.attempt == attempt if attempt is not None else created and _time(s.started_at) >= _time(created))]
+        if candidates:
+            restarts.append(min(_time(s.started_at) for s in candidates))
+    cutoff = max(restarts, default=None)
+    result = []
+    # A later settlement applies to its identity even when it omits the old scope.
+    for row in latest(decisions).values():
+        pending = needs_owner([row])
+        if pending is None or pending.attempt < attempts.get(pending.stage, 0):
+            continue
+        source = next((s for s in segments if (s.stage, s.attempt) == (pending.stage, pending.attempt)), None)
+        started = source.started_at if source is not None else getattr(row, "created_at", None)
+        if cutoff is not None and started and _time(started) < cutoff:
+            continue
+        result.append(pending)
+    return result
+
+
+def pending_decisions(decisions: Sequence[Any], gates: Sequence[str]) -> bool:
+    """Ordinary decisions block merge; workflow gates are evaluated on their own edge."""
+    return any(not (row.answer or "").strip() and row.topic not in gates
+               for row in latest(decisions).values())
 
 
 def open_reversal(decisions: Sequence[Any], history: Sequence[Any] = (), start: str = "implement") -> bool:

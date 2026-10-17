@@ -24,8 +24,9 @@ class Decision:
     instance: str = ""
     stage: str = ""
     attempt: int = 0
+    gate: bool = False
 
-    def __post_init__(self):
+    def validate(self):
         if (len(self.options) < 2 or not all(isinstance(option, str) and option.strip() for option in self.options)
                 or len(set(self.options)) != len(self.options)):
             raise ValueError("decision options must be at least two distinct non-empty strings")
@@ -94,13 +95,14 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
     """Consult all three under a resolved policy, then record adoption or escalation on the existing issue.
 
     `failures` is the count of earlier outages; a retryable result carries the new count, and the cap, in its row."""
+    decision.validate()
     trio = select(policy, personas, decision.tags)
     described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
     verdicts = [_verdict(persona, model(_request(described, persona)), decision.options) for persona in trio]
     unanimous = (all(v["vote"] == "adopt" for v in verdicts)
                  and len({v["choice"] for v in verdicts}) == 1)
     recommendation = verdicts[0]["choice"] if unanimous else None
-    hold = unanimous and recommendation == "hold" and decision.options == ("approve", "hold")
+    hold = unanimous and recommendation == "hold" and decision.gate
     update = preserve_ask_link(store.decisions(decision.issue_key), DecisionUpdate(
         decision.topic, decision.question, recommendation if not hold else None,
         "trio" if unanimous and not hold else "zach",
@@ -141,10 +143,11 @@ def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
 def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas: Mapping[str, Persona],
            model: Model | None, store: Any, failures: int = 0) -> Outcome:
     """Reuse a settled decision for these options and context, or consult the trio once."""
-    settled = _settled(decision, earlier)
-    if settled is not None:
-        return settled
     try:
+        decision.validate()
+        settled = _settled(decision, earlier)
+        if settled is not None:
+            return settled
         if model is None:
             raise ValueError(decision.question)
         return consult(decision, policy, personas, model, store, failures)
@@ -152,6 +155,8 @@ def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas:
         described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
         update = preserve_ask_link(earlier, DecisionUpdate(
             decision.topic, decision.question, None, "zach",
-            {"decision": described, "error": str(exc), "unanimous": False}))
-        record(store, decision.issue_key, update)
+            {"decision": described, "error": f"{decision.question}: {exc}", "unanimous": False}))
+        prior = next((row for row in reversed(earlier) if identity(row) == identity(update)), None)
+        if prior is None or prior.record != update.record:
+            record(store, decision.issue_key, update)
         return Outcome(None, False, str(exc))

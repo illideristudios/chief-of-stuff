@@ -7,7 +7,6 @@ import argparse
 import json
 import sys
 import time
-from collections import defaultdict
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from functools import partial
@@ -119,19 +118,11 @@ def _clear_waived_gates(store: Any, key: str) -> None:
 def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str, ...],
             resolved: policy.Policy, personas, model, *, context: str = "", instance: str = "",
             stage: str = "", attempt: int = 0,
+            gate: bool = False,
             clock: engine_clock.Clock = engine_clock.system) -> str | None:
     """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
-    try:
-        decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
-                                      stage=stage, attempt=attempt)
-    except ValueError as exc:
-        update = decision_actions.DecisionUpdate(topic, question, None, "zach", {
-            "error": f"{question}: {exc}", "decision": {"instance": instance, "context": context,
-                "options": list(options), "stage": stage, "attempt": attempt}})
-        prior = decision_actions.latest(store.decisions(key)).get((topic, question, instance))
-        if prior is None or prior.record != update.record:
-            trio_gate.record(store, key, update)
-        return None
+    decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
+                                  stage=stage, attempt=attempt, gate=gate)
     earlier = store.decisions(key)
     retry_key = json.dumps([topic, question, instance, stage, attempt, context, options])
     retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
@@ -208,22 +199,13 @@ def _settle_asks(store: Any, key: str) -> None:
                                    settled.decided_by, settled.record)
 
 
-def _sync_decision_interrupts(store: Any, item: Any, at: str) -> None:
+def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "implement") -> None:
     """Derive one interrupt per decision attempt, changing only decision-scoped state."""
     key = item.issue_key
-    grouped = defaultdict(list)
-    attempts = {}
-    for source in (*store.segments(key), *store.asks(key)):
-        attempts[source.stage] = max(attempts.get(source.stage, 0), source.attempt)
-    for row in store.decisions(key):
-        record = row.record if isinstance(row.record, dict) else {}
-        decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
-        grouped[(decision_actions.identity(row), decision.get("stage", ""), decision.get("attempt", 0))].append(row)
     desired = {}
-    for rows in grouped.values():
-        pending = decision_actions.needs_zach(rows)
-        if pending is None or item.forge_state == "closed" or pending.attempt < attempts.get(pending.stage, 0):
-            continue
+    pending_rows = (decision_actions.owner_waits(store.decisions(key), store.segments(key), store.asks(key), start)
+                    if item.forge_state != "closed" else ())
+    for pending in pending_rows:
         scope = {"id": list(pending.decision_id), "stage": pending.stage, "attempt": pending.attempt}
         desired[json.dumps(scope, sort_keys=True)] = {"kind": "ambiguity", "reason": pending.reason, "decision": scope}
     data = _resume(store, key)
@@ -426,8 +408,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if _consultation_blocked(store, key, resolved, at, stage=action.source):
                     continue
                 choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
-                                 resolved, policies.personas, model, context=action.context, stage=action.source,
-                                 attempt=int(action.context.rpartition("-")[2]) if action.context else 0, clock=clock)
+                                 resolved, policies.personas, model, context=action.context, stage=action.stage,
+                                 attempt=action.attempt, gate=True, clock=clock)
                 if choice == "approve":
                     data = _resume(store, key)
                     data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
@@ -449,7 +431,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         except Exception as exc:
             store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
     for item in store.items():
-        _sync_decision_interrupts(store, item, at)
+        _sync_decision_interrupts(store, item, at, _workflow_for(policies, store, item).start)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions

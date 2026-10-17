@@ -76,6 +76,8 @@ class Ask:
     reason: str
     source: str = field(default="", compare=False)
     context: str = field(default="", compare=False)
+    stage: str = field(default="", compare=False)
+    attempt: int = field(default=0, compare=False)
 
 
 @dataclass(frozen=True)
@@ -138,7 +140,8 @@ def _gate(key: str, edge: Edge, policies: Policies, room: str | None, now: datet
                     prior is None or prior.get("context", "") == context):
                 if (getattr(row, "answer", None) or "").strip() != "approve":
                     return Wait(key, "decision pending")
-        return Ask(key, edge.gate, "gate requires Zach's approval", edge.source, context)
+        return Ask(key, edge.gate, "gate requires Zach's approval", edge.source, context,
+                   latest.stage if latest is not None else "", latest.attempt if latest is not None else 0)
     return None
 
 
@@ -172,12 +175,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
            latest_segment: Segment | None = None) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
-    # Decision rows are append-only, oldest first: the latest row for a question is its state.
-    latest = decision_actions.latest(decisions)
-    gate_topics = {e.gate for e in edges if e.gate}
-    if any((not d.answer or not d.answer.strip()) and not (
-            d.topic in gate_topics and (decision_actions.retryable_failure(getattr(d, "record", None))
-            or decision_actions.is_restarted(d, history, workflow.start))) for d in latest.values()):
+    if decision_actions.pending_decisions(decisions, tuple(e.gate for e in workflow.edges if e.gate)):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
