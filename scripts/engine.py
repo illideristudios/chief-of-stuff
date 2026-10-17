@@ -139,7 +139,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 **engine_facts.recovery(store, item.issue_key, trees=trees, repo=clone))
         except Exception as exc:
             store.add_log(item.issue_key, f"recovery facts failed: {exc}", at)
-            holds[item.issue_key] = None
+            holds[item.issue_key] = completion.held_stages(
+                [(d.topic, d.question, d.answer) for d in store.decisions(item.issue_key)],
+                conflict=None, readable=False)
 
     def recovery_held(key: str, stage: str) -> bool:
         stages = holds.get(key, set())

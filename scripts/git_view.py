@@ -37,6 +37,10 @@ class CacheError(Exception):
     """Launcher cache configuration failed; never turn this into a per-tree refusal."""
 
 
+class InvalidHead(Unviewable):
+    """HEAD was read successfully but contains neither a safe ref nor an object id."""
+
+
 @dataclass(frozen=True)
 class Layout:
     tree: Path | None
@@ -261,12 +265,13 @@ def _run(args: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
     return subprocess.CompletedProcess(out.args, out.returncode, stdout, stderr)
 
 
-def _head(layout: Layout) -> tuple[bytes, str | None]:
+def read_head(layout: Layout) -> tuple[bytes, str | None]:
+    """Read validated HEAD metadata; syntax failures are distinct from failed metadata reads."""
     data = _read(layout.gitdir / "HEAD", 1024)
     try:
         text = data.decode("utf-8").removesuffix("\n").removesuffix("\r")
     except UnicodeDecodeError:
-        raise Unviewable("HEAD is not UTF-8") from None
+        raise InvalidHead("HEAD is not UTF-8") from None
     if re.fullmatch(_OID, text):
         return data, None
     if text.startswith("ref: refs/"):
@@ -278,7 +283,7 @@ def _head(layout: Layout) -> tuple[bytes, str | None]:
                 and not ref.endswith(("/", ".")) and not ref.startswith("refs/heads/-")):
             branch = ref.removeprefix("refs/heads/") if ref.startswith("refs/heads/") else None
             return data, branch
-    raise Unviewable("HEAD is neither a safe symbolic ref nor an object id")
+    raise InvalidHead("HEAD is neither a safe symbolic ref nor an object id")
 
 
 def _config(layout: Layout, branch: str | None, env: dict[str, str], timeout: float, directory: Path) -> str:
@@ -418,7 +423,7 @@ def _opened(path: Path, env: dict[str, str], base: Path | None, deadline: float,
         raise CacheError(f"cannot allocate a view in cache base {str(cache)!r}") from None
     try:
         directory.chmod(0o700)
-        head, branch = _head(layout)
+        head, branch = read_head(layout)
         (directory / "HEAD").write_bytes(head)
         (directory / "refs").symlink_to(layout.common / "refs", target_is_directory=True)
         if os.path.lexists(layout.common / "packed-refs"):

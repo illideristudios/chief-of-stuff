@@ -98,7 +98,13 @@ class StartTest(unittest.TestCase):
                 self.assertGreater(record["start_time"], 0)
                 return 0
             process.wait.side_effect = wait
-            with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process):
+            write = claude_adapter._write
+            def record(name_dir, name, data):
+                if name == "started.json":
+                    self.assertTrue((run / "spawn.json").is_file())
+                write(name_dir, name, data)
+            with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process), \
+                 mock.patch.object(claude_adapter, "_write", side_effect=record):
                 claude_adapter._worker(run)
             self.assertTrue((run / "spawn.json").is_file())
             self.assertTrue((run / "started.json").is_file())
@@ -117,6 +123,30 @@ class StartTest(unittest.TestCase):
 
 
 class CancelTest(unittest.TestCase):
+    def test_cancel_kills_a_child_that_outlives_its_group_leader(self):
+        import os
+        import sys
+        import time
+        with tempfile.TemporaryDirectory() as tmp:
+            ready = Path(tmp) / "ready"
+            child = "import signal,time,pathlib; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(" + repr(str(ready)) + ").touch(); time.sleep(60)"
+            leader = "import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', " + repr(child) + "]); time.sleep(60)"
+            process = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+            try:
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists())
+                claude_adapter.cancel(process)
+                self.assertIsNotNone(process.poll())
+                self.assertFalse(claude_adapter.group_alive(process.pid))
+            finally:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+
     def test_exited_runner_does_not_hide_a_surviving_group(self):
         process = mock.Mock(pid=4242)
         process.wait.return_value = 0
@@ -128,7 +158,8 @@ class CancelTest(unittest.TestCase):
     def test_a_host_that_ignores_sigterm_is_killed_and_reaped(self):
         process = mock.Mock(pid=4242)
         process.wait.side_effect = [subprocess.TimeoutExpired("host", 5), 0]
-        with mock.patch.object(claude_adapter.os, "killpg") as killpg:
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg, \
+             mock.patch.object(claude_adapter, "group_alive", return_value=False):
             claude_adapter.cancel(process)
         self.assertEqual([c.args for c in killpg.call_args_list],
                          [(4242, signal.SIGTERM), (4242, signal.SIGKILL)])
@@ -144,7 +175,8 @@ class CancelTest(unittest.TestCase):
     def test_a_host_that_exits_on_sigterm_is_not_killed(self):
         process = mock.Mock(pid=4242)
         process.wait.return_value = 0
-        with mock.patch.object(claude_adapter.os, "killpg") as killpg:
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg, \
+             mock.patch.object(claude_adapter, "group_alive", return_value=False):
             claude_adapter.cancel(process)
         killpg.assert_called_once_with(4242, signal.SIGTERM)
 

@@ -144,6 +144,52 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "live|unverified"):
                 worker._abort_workers_gone(self.root, 1)
 
+    def test_expired_missing_spawn_record_checks_for_a_live_runner_before_freeing(self):
+        run = self.stranded(canceled=True, age=10)
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", str(run)], start_new_session=True)
+        try:
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+            self.assertEqual(slots.running(self.db), 1)
+            with self.assertRaisesRegex(RuntimeError, "live|unverified"):
+                worker._abort_workers_gone(self.root, 1)
+        finally:
+            proc.kill()
+            proc.wait()
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(slots.running(self.db), 0)
+        self.assertFalse(run.exists())
+
+    def test_marker_and_resume_write_failures_keep_the_slot_on_ordinary_launch_errors(self):
+        for failed_write in ("marker", "resume"):
+            with self.subTest(failed_write=failed_write):
+                def spawn(request, run, **kwargs):
+                    result = self.start(request, run)
+                    if failed_write == "marker":
+                        (run / "canceled").mkdir()
+                    return result
+                set_resume = self.db.set_resume
+                def persist(key, data):
+                    if failed_write == "resume" and data.get("canceling"):
+                        raise OSError("resume unavailable")
+                    set_resume(key, data)
+                with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+                     mock.patch.object(worker.claude_adapter, "start", side_effect=spawn), \
+                     mock.patch.object(worker.claude_adapter, "cancel") as cancel, \
+                     mock.patch.object(worker.process_status, "identity", side_effect=RuntimeError("launch verification failed")), \
+                     mock.patch.object(self.db, "set_resume", side_effect=persist):
+                    with self.assertRaises(RuntimeError):
+                        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                                    max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+                cancel.assert_called_once()
+                self.assertEqual(slots.running(self.db), 1)
+                with mock.patch.object(worker.process_status, "identity", return_value="live"):
+                    worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+                self.assertEqual(slots.running(self.db), 1)
+                self.db.drop_segment(KEY, "implement", 1)
+                self.db.set_resume(KEY, {})
+                import shutil
+                shutil.rmtree(worker._run_dir(self.root, KEY, "implement", 1))
+
     def test_cancel_or_marker_failure_keeps_reservation_until_verified_stopped(self):
         def start(request, run, **kwargs):
             result = self.start(request, run)
@@ -915,6 +961,10 @@ class WorkerTest(unittest.TestCase):
                             max_concurrency=1, clock=lambda: NOW, launch=self.launch)
         cancel.assert_called_once()
         worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(slots.running(self.db), 1)
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        (run / "command.json").write_text(json.dumps({"start_deadline": 0}))
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
         self.assertEqual(self.db.segments(), [])
         self.assertEqual(slots.running(self.db), 0)
 
@@ -1285,6 +1335,44 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(fresh.name, saved["fresh"])
             self.assertFalse(make_repo.git(["for-each-ref", "--format=%(refname)", rejected[0]["refs"][0]], clone))
 
+    def test_saved_unborn_and_empty_heads_reach_quarantine_without_a_decision(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone = self.orphans([{"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "dirty": True}])
+            old = self.trees / "issue-1-implement-1"
+            layout = worker.git_view.locate(old)
+            original = (layout.gitdir / "HEAD").read_text()
+            for contents in ("ref: refs/heads/missing\n", ""):
+                (layout.gitdir / "HEAD").write_text(contents)
+                self.db.set_resume(KEY, {"worktree": str(old), "work_branch": "work/issue-1-implement-1"})
+                # Interrupt at the action boundary: the lock-free scan must have planned quarantine.
+                with mock.patch.object(worker, "_finish_quarantine", side_effect=RuntimeError("planned quarantine")):
+                    with self.assertRaisesRegex(RuntimeError, "planned quarantine"):
+                        self.launch_in(clone)
+                self.assertIn(str(old), self.db.resume(KEY)["abort_quarantine"]["paths"])
+                self.assertEqual(self.db.decisions(KEY), [])
+                (layout.gitdir / "HEAD").write_text(original)
+
+    def test_failed_replacement_head_read_rotates_before_quarantining(self):
+        from evals import git_taint as taint
+        with taint.private_git_views(self.root / "private-views"):
+            clone, heads = self.abort_fixture()
+            git = worker.make_worktree.git
+            failed = []
+            def fail_head(args, cwd, **kwargs):
+                if args == ["rev-parse", "HEAD"] and "issue-1-implement-3-" in Path(cwd).name and not failed:
+                    failed.append(Path(cwd))
+                    return 1, "temporary read failure"
+                return git(args, cwd, **kwargs)
+            with mock.patch.object(worker.make_worktree, "git", side_effect=fail_head):
+                with self.assertRaisesRegex(RuntimeError, "base is unreadable"):
+                    self.launch_in(clone, attempt=3)
+            saved = self.db.resume(KEY)["abort_quarantine"]
+            self.assertNotEqual(saved["fresh"], failed[0].name)
+            self.assertIn(str(failed[0]), saved["pending"][-1]["paths"])
+            fresh = Path(self.launch_in(clone, attempt=3).cwd)
+            self.assertEqual(fresh.name, saved["fresh"])
+
     def test_broken_head_is_quarantined_but_missing_main_still_reuses_dirty_tree(self):
         from evals import git_taint as taint, make_repo
         with taint.private_git_views(self.root / "private-views"):
@@ -1405,13 +1493,13 @@ class WorkerTest(unittest.TestCase):
             self.assertEqual(self.db.asks(KEY), [])
             self.assertEqual(self.db.decisions(KEY), [])
 
-    def test_a_canceled_pre_start_without_started_json_is_quarantined_and_abort_continues(self):
+    def test_an_expired_canceled_pre_start_is_quarantined_and_abort_continues(self):
         from evals import git_taint as taint
         with taint.private_git_views(self.root / "private-views"):
             clone, heads = self.abort_fixture()
             run = worker._run_dir(self.root, KEY, "implement", 1)
             run.mkdir(parents=True)
-            (run / "command.json").write_text("{}")
+            (run / "command.json").write_text(json.dumps({"start_deadline": 0}))
             (run / "canceled").write_text("canceled\n")
             fresh = Path(self.launch_in(clone, attempt=3).cwd)
             self.assertTrue(fresh.is_dir())

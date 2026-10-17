@@ -13,6 +13,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from model_port import Failure, Reply, Request, quota_reset
 from shell_setup import ShellError, clean_env, login_argv, resolve
 
 RUNTIME = runtimes.get("claude")
+LAUNCH_TIMEOUT = 5
 
 
 def command(request: Request, claude_as_profile: str = "") -> list[str]:
@@ -41,13 +43,20 @@ def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
     prepared = command(request, claude_as_profile)
     (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
                                                     "session_id": request.session_id,
-                                                    "env": env or {}}))
+                                                    "env": env or {}, "start_deadline": time.time() + LAUNCH_TIMEOUT}))
+    process = None
     try:
         with (run_dir / "runner.stderr").open("w") as errors:
-            return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
+            process = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
                                      request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=errors, env=clean_env(), start_new_session=True)
+            _write(run_dir, "runner-spawn.json", {"pid": process.pid, "pgid": process.pid, "start_time": time.time()})
+            return process
     except Exception:
+        if process is not None:
+            # The spawn may have succeeded even when persisting its record failed. Keep all evidence.
+            cancel(process)
+            raise
         # No runner exists to produce started/exit evidence; allow this attempt to be retried.
         (run_dir / "command.json").unlink(missing_ok=True)
         (run_dir / "runner.stderr").unlink(missing_ok=True)
@@ -63,10 +72,64 @@ def cancel(process: subprocess.Popen) -> None:
             pass
         try:
             process.wait(timeout=5)
-            return
+            deadline = time.monotonic() + 5
+            while group_alive(process.pid):
+                if sig == signal.SIGTERM or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.01)
+            else:
+                return
         except subprocess.TimeoutExpired:
             pass
     raise RuntimeError(f"runner {process.pid} survived SIGKILL; not cancelled")
+
+
+def group_alive(pgid: int) -> bool:
+    """Every member counts, even when the runner has exited. Zombies cannot touch the tree."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    try:
+        probe = subprocess.run(["ps", "-axo", "pgid=,stat="], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("cannot verify worker process group") from exc
+    if probe.returncode:
+        raise RuntimeError("cannot verify worker process group")
+    return any(fields[0] == str(pgid) and not fields[1].startswith("Z")
+               for line in probe.stdout.splitlines() if len(fields := line.split()) == 2)
+
+
+def spawn_alive(run_dir: Path) -> bool:
+    """Check both spawn windows. With no record, find the detached runner by its unique run path."""
+    recorded = False
+    for name in ("runner-spawn.json", "spawn.json"):
+        path = run_dir / name
+        if not path.exists():
+            continue
+        record = json.loads(path.read_text())
+        if (any(type(record.get(field)) is not int or record[field] <= 0 for field in ("pid", "pgid"))
+                or not isinstance(record.get("start_time"), (int, float)) or record["start_time"] <= 0):
+            raise RuntimeError("invalid spawn identity")
+        recorded = True
+        if group_alive(record["pgid"]):
+            return True
+    if recorded:
+        return False
+    # Legacy/crashed parent: no durable pid yet. A live runner's argv still names this directory.
+    prepared = json.loads((run_dir / "command.json").read_text())
+    session = prepared.get("session_id", "")
+    try:
+        probe = subprocess.run(["ps", "-axww", "-o", "stat=,command="], capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise RuntimeError("cannot verify unrecorded spawn") from exc
+    if probe.returncode:
+        raise RuntimeError("cannot verify unrecorded spawn")
+    for line in probe.stdout.splitlines():
+        fields = line.split()
+        if fields and not fields[0].startswith("Z") and (str(run_dir) in fields[1:] or session and session in fields[1:]):
+            return True
+    return False
 
 
 def _write(run_dir: Path, name: str, record: dict) -> None:
@@ -82,6 +145,7 @@ def _worker(run_dir: Path) -> None:
         try:
             process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"], env={**clean_env(), **prepared.get("env", {})},
                                        stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr)
+            _write(run_dir, "spawn.json", {"pid": process.pid, "pgid": os.getpgrp(), "start_time": time.time()})
             _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
                                              "session_id": prepared["session_id"]})
             code = process.wait()

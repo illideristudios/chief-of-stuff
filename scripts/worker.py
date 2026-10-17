@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
 import re
@@ -23,6 +22,7 @@ import guard_binding
 import make_worktree
 import process_status
 import supervisor
+import slots
 from settings import load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
@@ -78,14 +78,19 @@ def _inferred_exit_code(run_dir: Path, store: Any = None, key: str = "",
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                   trees: Path, clock: engine_clock.Clock, *, store: Any = None, key: str = "") -> dict | None:
     """Recover a detached start before changing its tree or moving its exit evidence."""
-    if not run_dir.exists() or (run_dir / "canceled").is_file():
+    if not run_dir.exists():
+        return None
+    if (run_dir / "canceled").is_file():
+        _assert_stopped(run_dir)
         return None  # a canceled start is never adopted: launch archives it as refused
     record = data.get("runs", {}).get(f"{stage}-{attempt}")
     if record is None:
         started = run_dir / "started.json"
         if not started.exists():
             if (run_dir / "command.json").exists() and not (run_dir / "exit.json").exists():
-                raise RuntimeError("existing worker start is unverified; preserving its evidence")
+                if not _unstarted_dead(run_dir):
+                    raise RuntimeError("existing worker start is unverified; preserving its evidence")
+                run_dir.rename(run_dir.with_name(f"{run_dir.name}-quarantine-{uuid.uuid4().hex}"))
             return None
         record = json.loads(started.read_text())
         if (run_dir / "actor.json").is_file():
@@ -187,8 +192,7 @@ def recovery_conflict(store: Any, key: str, *, trees: Path, repo: Path) -> str |
     common = _common(repo)
     if common is None:
         raise RuntimeError("no repository to recover from")
-    with make_worktree.clone_lock(repo):
-        found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
+    found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
     preferred = str(Path(data["worktree"])) if data.get("worktree") else None
     chosen = completion.recovery(found, preferred=preferred)
     return chosen.reason if isinstance(chosen, completion.Conflict) else None
@@ -227,16 +231,29 @@ def _status(tree: Path, common: Path) -> tuple[bool, bool]:
 
 
 def _read_tree(path: Path, common: Path) -> completion.OrphanTree:
+    layout = git_view.locate(path, expected_common=common)
+    try:
+        git_view.read_head(layout)
+    except git_view.InvalidHead:
+        return completion.OrphanTree(str(path), "", "", unreadable=True)
+    except git_view.Unviewable as exc:
+        raise RuntimeError("cannot read orphan HEAD; retrying recovery") from exc
     branch_code, branch = make_worktree.git(["rev-parse", "--abbrev-ref", "HEAD"], path, expected_common=common)
     head_code, head = make_worktree.git(["rev-parse", "HEAD"], path, expected_common=common)
-    status = _status(path, common)
-    if branch_code or head_code or not branch or not head:
+    if branch_code == 1 or head_code == 1:
         raise RuntimeError("cannot read orphan HEAD; retrying recovery")
+    if branch_code or head_code or not branch or not head:
+        return completion.OrphanTree(str(path), "", "", unreadable=True)
+    status = _status(path, common)
     if branch == "HEAD":
         return completion.OrphanTree(str(path), "", "", unreadable=True)
     # Private Git views intentionally omit merge state; read only the validated metadata entry.
-    layout = git_view.locate(path, expected_common=common)
     merging = (layout.gitdir / "MERGE_HEAD").exists()
+    base_result = git_trees.git(["rev-parse", "--verify", "--quiet", git_trees.REF], path, expected_common=common)
+    if isinstance(base_result, git_trees.ReadFailure) or base_result[0] not in (0, 1):
+        raise RuntimeError("cannot read orphan base; retrying recovery")
+    if base_result[0] == 1:
+        return completion.OrphanTree(str(path), branch, head, dirty=status[0], conflicted=status[1] or merging, ahead=None)
     code, count = make_worktree.git(["rev-list", "--count", f"{git_trees.REF}..HEAD"], path, expected_common=common)
     if code or not count.isdecimal():
         raise RuntimeError("cannot read orphan history; retrying recovery")
@@ -446,8 +463,29 @@ def _quarantine_plan(found: list[completion.OrphanTree], tree_name: str) -> dict
             "paths": [c.path for c in found if c.path], "refs": refs}
 
 
+def _start_expired(run: Path) -> bool:
+    path = run / "command.json"
+    prepared = json.loads(path.read_text())
+    deadline = prepared.get("start_deadline", path.stat().st_mtime + claude_adapter.LAUNCH_TIMEOUT)
+    return time.time() >= deadline
+
+
+def _unstarted_dead(run: Path) -> bool:
+    if not _start_expired(run):
+        return False
+    return not claude_adapter.spawn_alive(run)
+
+
 def _assert_stopped(run: Path) -> None:
-    """Raise unless the host and runner recorded in run/started.json are both gone."""
+    """Require the spawned group and every recorded process to be gone; unknown starts wait."""
+    if (run / "command.json").is_file() or (run / "spawn.json").is_file() or (run / "runner-spawn.json").is_file():
+        if not (run / "started.json").is_file() and not (run / "exit.json").is_file():
+            if not _unstarted_dead(run):
+                raise RuntimeError("worker start is live or unverified; preserving its evidence")
+        elif claude_adapter.spawn_alive(run):
+            raise RuntimeError("worker process group is still live")
+    if not (run / "started.json").is_file():
+        return
     started = json.loads((run / "started.json").read_text())
     session = started["session_id"]
     if not isinstance(session, str) or not session:
@@ -462,19 +500,16 @@ def _assert_stopped(run: Path) -> None:
 
 
 def _abort_workers_gone(root: Path, number: int) -> None:
-    """A released slot or a cancellation marker is not proof that its worker stopped.
-    Only a canceled pre-start is known not to have an untracked host."""
+    """A released slot, archive name or cancellation marker is no proof that a worker stopped."""
     runs = supervisor.state_dir(root) / "runs"
     for run in runs.glob(f"{number}-*"):
         try:
             if (run / "started.json").is_file():
                 _assert_stopped(run)
-            elif any(mark in run.name for mark in ("-canceled-", "-quarantine-", "-refused-")):
-                continue
-            elif (run / "command.json").is_file() and not (run / "exit.json").is_file():
-                if not (run / "canceled").is_file():
-                    raise RuntimeError("worker start is unverified; preserving its evidence")
-                run.rename(run.with_name(f"{run.name}-quarantine-{uuid.uuid4().hex}"))
+            elif (run / "command.json").is_file():
+                _assert_stopped(run)
+                if not any(mark in run.name for mark in ("-canceled-", "-quarantine-", "-refused-")):
+                    run.rename(run.with_name(f"{run.name}-quarantine-{uuid.uuid4().hex}"))
         except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
             raise RuntimeError(f"cannot quarantine orphaned work with live or unverified worker {run.name}: {exc}") from exc
 
@@ -497,27 +532,28 @@ def _finish_quarantine(issue_key: str, number: int, agent: str, data: dict, stor
     plan = data["abort_quarantine"]
     _abort_workers_gone(root, number)
     with make_worktree.clone_lock(repo) as common:
+        for pending in plan.get("pending", []):
+            _apply_quarantine(repo, trees, number, pending, common)
         _apply_quarantine(repo, trees, number, plan, common)
     fresh, branch = trees / plan["fresh"], plan["branch"]
     if not fresh.is_dir():
         fresh = make_worktree.build(root, repo, str(trees), plan["fresh"], branch, agent).path
     common = _common(repo)
-    code, head = make_worktree.git(["rev-parse", "HEAD"], fresh, expected_common=common)
-    if code or not head:
-        raise RuntimeError("abort replacement base is unreadable")
     try:
+        code, head = make_worktree.git(["rev-parse", "HEAD"], fresh, expected_common=common)
+        if code or not head:
+            raise RuntimeError("abort replacement base is unreadable")
         _verify_replacement(fresh, branch, head, trees, common)
     except RuntimeError:
-        if fresh.is_dir():
-            with make_worktree.clone_lock(repo) as common:
-                rejected = {"stamp": f"{plan['stamp']}-rejected", "paths": [str(fresh)],
-                            "refs": [f"refs/heads/{branch}"]}
-                _apply_quarantine(repo, trees, number, rejected, common)
-        # Keep the old plan until the rejected tree and refs are safe; then persist a unique replacement.
+        rejected = {"stamp": f"{plan['stamp']}-rejected", "paths": [str(fresh)],
+                    "refs": [f"refs/heads/{branch}"]}
         stamp = uuid.uuid4().hex
         plan.update(stamp=stamp, fresh=f"issue-{number}-replacement-{stamp}",
-                    branch=f"work/issue-{number}-replacement-{stamp}")
+                    branch=f"work/issue-{number}-replacement-{stamp}",
+                    pending=[*plan.get("pending", []), rejected])
         store.set_resume(issue_key, data)
+        with make_worktree.clone_lock(repo) as common:
+            _apply_quarantine(repo, trees, number, rejected, common)
         raise
     store.set_ownership(issue_key, str(fresh))
     data.update(worktree=str(fresh), work_branch=branch)
@@ -539,47 +575,60 @@ def _resolve_worktree(issue_key: str, number: int, stage: str, attempt: int, tre
     if data.get("abort_quarantine"):
         return _finish_quarantine(issue_key, number, agent, data, store, root, trees, repo)
 
-    if data.get("worktree") and Path(data["worktree"]).exists():
-        tree = Path(data["worktree"])
-        code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
-        if code or (data.get("work_branch") and actual != data["work_branch"]) or not tree.resolve().is_relative_to(trees.resolve()):
-            raise RuntimeError("existing worktree is missing or no longer on the work branch")
+    if data.get("worktree") and not Path(data["worktree"]).resolve().is_relative_to(trees.resolve()):
+        raise RuntimeError("existing worktree is outside the worktrees directory")
 
-    # The facts, the tip they name and the fast-forward or re-cut must not change between reading and acting.
+    found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
+    saved = next((c for c in found if c.path == data.get("worktree") and not c.unreadable), None)
+    if saved and data.get("work_branch") and saved.branch != data["work_branch"]:
+        raise RuntimeError("existing worktree is no longer on the work branch")
+    preferred = str(Path(data["worktree"])) if data.get("worktree") else None
+    chosen = completion.recovery(found, preferred=preferred)
     abort = False
-    with make_worktree.clone_lock(repo):
-        found = _read_orphans(candidates, review_paths, number, data, trees, repo, common)
-        preferred = str(Path(data["worktree"])) if data.get("worktree") else None
-        chosen = completion.recovery(found, preferred=preferred)
-        if isinstance(chosen, completion.Quarantine):
-            abort, chosen = True, None
-        elif isinstance(chosen, completion.Conflict):
-            choice = _conflict_choice(store, issue_key, stage, attempt, chosen.reason, clock)
-            if choice == "hold":
-                raise RuntimeError(f"orphan recovery held: {chosen.reason}")
-            abort, chosen = True, None
-        if chosen is not None and chosen.path is not None:
-            tree = Path(chosen.path)
-            if next(c.head for c in found if c.path == chosen.path) != chosen.head:
-                code, detail = make_worktree.git_trusted(["merge", "--ff-only", chosen.head], tree)
+    if isinstance(chosen, completion.Conflict):
+        choice = _conflict_choice(store, issue_key, stage, attempt, chosen.reason, clock)
+        if choice == "hold":
+            raise RuntimeError(f"orphan recovery held: {chosen.reason}")
+        abort, chosen = True, None
+    if isinstance(chosen, completion.Quarantine):
+        abort, chosen = True, None
+    if chosen is not None or abort:
+        with make_worktree.clone_lock(repo):
+            # The scan is lock-free. Validate only the source being reused inside the mutation lock.
+            if chosen is not None:
+                if chosen.path:
+                    source = next(c for c in found if c.path == chosen.path)
+                    code, head = make_worktree.git(["rev-parse", "HEAD"], Path(chosen.path), expected_common=common)
+                    if code or head != source.head:
+                        raise RuntimeError("orphan state changed; retrying recovery")
+                else:
+                    heads = {c.head for c in found if c.branch == chosen.branch}
+                    for ref in (f"refs/heads/{chosen.branch}", f"refs/remotes/origin/{chosen.branch}"):
+                        head = _ref_sha(repo, common, ref)
+                        if head is not None and head not in heads:
+                            raise RuntimeError("orphan ref changed; retrying recovery")
+            if chosen is not None and chosen.path is not None:
+                tree = Path(chosen.path)
+                if next(c.head for c in found if c.path == chosen.path) != chosen.head:
+                    code, detail = make_worktree.git_trusted(["merge", "--ff-only", chosen.head], tree)
+                    if code != 0:
+                        abort, chosen = True, None
+            elif chosen is not None:
+                make_worktree.git_trusted(["worktree", "prune"], repo)
+                if (data.get("worktree") and not Path(data["worktree"]).exists()
+                        and Path(data["worktree"]).resolve().is_relative_to(trees.resolve())):
+                    tree = Path(data["worktree"]).resolve()
+                else:
+                    tree = make_worktree.resolve(root, str(trees), tree_name)
+                tree.parent.mkdir(parents=True, exist_ok=True)
+                code, detail = make_worktree.git_trusted(
+                    ["worktree", "add", "--no-track", "-B", chosen.branch, "--", str(tree), chosen.head], repo)
                 if code != 0:
-                    abort, chosen = True, None
-        elif chosen is not None:
-            make_worktree.git_trusted(["worktree", "prune"], repo)
-            if (data.get("worktree") and not Path(data["worktree"]).exists()
-                    and Path(data["worktree"]).resolve().is_relative_to(trees.resolve())):
-                tree = Path(data["worktree"]).resolve()
-            else:
-                tree = make_worktree.resolve(root, str(trees), tree_name)
-            tree.parent.mkdir(parents=True, exist_ok=True)
-            code, detail = make_worktree.git_trusted(
-                ["worktree", "add", "--no-track", "-B", chosen.branch, "--", str(tree), chosen.head], repo)
-            if code != 0:
-                raise RuntimeError(f"git worktree add failed: {detail}")
-        if abort:
-            _abort_workers_gone(root, number)
-            data["abort_quarantine"] = _quarantine_plan(found, tree_name)
-            store.set_resume(issue_key, data)
+                    raise RuntimeError(f"git worktree add failed: {detail}")
+            if abort:
+                _abort_workers_gone(root, number)
+                data["abort_quarantine"] = _quarantine_plan(found, tree_name)
+                store.set_resume(issue_key, data)
     if abort:
         return _finish_quarantine(issue_key, number, agent, data, store, root, trees, repo)
     if chosen is not None:
@@ -686,9 +735,14 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
     (run_dir / "actor.json").write_text(json.dumps({"model": actor.model, "effort": actor.effort or ""}))
-    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
     try:
-        deadline = time.monotonic() + 5
+        runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
+    except Exception as exc:
+        if (run_dir / "command.json").exists():
+            raise slots.KeepReservation(str(exc)) from exc
+        raise
+    try:
+        deadline = time.monotonic() + claude_adapter.LAUNCH_TIMEOUT
         while not (run_dir / "started.json").exists():
             if runner.poll() is not None or time.monotonic() >= deadline:
                 raise RuntimeError("could not verify worker start: adapter did not start a host")
@@ -709,30 +763,35 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record)
-    except BaseException as exc:  # an interrupt too: a start that was never verified must not leave a runner behind
-        # Cancel first. Archive only once the host is confirmed stopped, or when the run never started.
-        claude_adapter.cancel(runner)
+    except BaseException as exc:
+        # The reservation survives all persistence and cancellation failures.
         try:
-            (run_dir / "canceled").write_text("canceled\n")
-        except OSError:
-            raise exc
-        saved = _resume(store, issue_key)
-        saved.get("runs", {}).pop(f"{stage}-{attempt}", None)
-        saved["canceling"] = f"{stage}-{attempt}"
-        store.set_resume(issue_key, saved)
-        deadline = time.monotonic() + 1
-        while (run_dir / "started.json").is_file():
             try:
-                _assert_stopped(run_dir)
-                break
-            except (OSError, ValueError, KeyError, TypeError, RuntimeError):
-                if time.monotonic() >= deadline:
-                    raise exc
-                time.sleep(0.01)
-        with contextlib.suppress(OSError):
+                saved = _resume(store, issue_key)
+                saved.get("runs", {}).pop(f"{stage}-{attempt}", None)
+                saved["canceling"] = f"{stage}-{attempt}"
+                store.set_resume(issue_key, saved)
+            finally:
+                claude_adapter.cancel(runner)
+            (run_dir / "canceled").write_text("canceled\n")
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    _assert_stopped(run_dir)
+                    break
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError):
+                    if time.monotonic() >= deadline:
+                        raise exc
+                    time.sleep(0.01)
             run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
-        saved.pop("canceling", None)
-        store.set_resume(issue_key, saved)
+            saved.pop("canceling", None)
+            store.set_resume(issue_key, saved)
+        except BaseException as cleanup_error:
+            if isinstance(cleanup_error, OSError) and isinstance(exc, KeyboardInterrupt):
+                raise exc
+            if isinstance(cleanup_error, Exception):
+                raise slots.KeepReservation(str(cleanup_error)) from cleanup_error
+            raise
         raise
     _runners[str(run_dir)] = runner
     return actor.model, actor.effort or ""
@@ -754,14 +813,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 raise ValueError("unreadable run records")
             record = runs.get(f"{segment.stage}-{segment.attempt}")
             run_dir = _run_dir(root, key, segment.stage, segment.attempt)
-            if (run_dir / "canceled").is_file():
+            if (run_dir / "canceled").is_file() or data.get("canceling") == f"{segment.stage}-{segment.attempt}":
                 # Only a start the cancel path marked. A dead host with no mark is a failed attempt.
-                if (run_dir / "started.json").is_file():
-                    try:
-                        _assert_stopped(run_dir)
-                    except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
-                        store.add_log(key, f"canceled worker not verified stopped: {exc}", now.isoformat())
-                        continue
+                try:
+                    _assert_stopped(run_dir)
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError) as exc:
+                    store.add_log(key, f"canceled worker not verified stopped: {exc}", now.isoformat())
+                    continue
                 run_dir.rename(run_dir.with_name(f"{run_dir.name}-canceled-{uuid.uuid4()}"))
                 store.drop_segment(key, segment.stage, segment.attempt)
                 data.pop("canceling", None)
@@ -771,6 +829,17 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     store.set_resume(key, data)
                 store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: dropped, nothing had started",
                               now.isoformat())
+                continue
+            if ((run_dir / "command.json").is_file() and not (run_dir / "started.json").exists()
+                    and not (run_dir / "exit.json").exists()):
+                try:
+                    if not _unstarted_dead(run_dir):
+                        continue
+                except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+                    continue
+                run_dir.rename(run_dir.with_name(f"{run_dir.name}-quarantine-{uuid.uuid4().hex}"))
+                store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), "failed")
+                store.add_log(key, "worker never started before launch deadline; quarantined", now.isoformat())
                 continue
             if record is None and trees is not None:
                 # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.

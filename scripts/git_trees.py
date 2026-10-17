@@ -307,7 +307,7 @@ def _is_git_dir(common: Path) -> bool:
     check plus its HEAD check (an empty or garbage HEAD is no repository to git)."""
     try:
         lay = git_view.locate(common, expected_common=common)
-        git_view._head(lay)
+        git_view.read_head(lay)
     except git_view.Unviewable:
         return False
     return lay.tree is None

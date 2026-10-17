@@ -22,6 +22,10 @@ import clock
 UNBOUNDED = 10**9
 
 
+class KeepReservation(RuntimeError):
+    """Launch could not prove termination; collection must settle the open reservation."""
+
+
 def free_slots(max_concurrency: int | None, running: int) -> int:
     """How many workers may still start. No cap means UNBOUNDED; never negative."""
     cap = UNBOUNDED if max_concurrency is None else max_concurrency
@@ -64,10 +68,10 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
                              runtime=runtime, model=model, effort=effort, agent_type=agent_type)
     try:
         used = launch()
+    except KeepReservation:
+        raise
     except Exception:
-        data = store.resume(issue_key)
-        if not isinstance(data, dict) or data.get("canceling") != f"{stage}-{attempt}":
-            store.drop_segment(issue_key, stage, attempt)
+        store.drop_segment(issue_key, stage, attempt)
         raise
     if used is not None:
         model, effort = used
