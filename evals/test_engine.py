@@ -59,7 +59,7 @@ class FakeForge:
     def mark_for_stage(self, stage):
         return None
 
-    def write_stage(self, number, stage, expected=None, commit=False, initialize=False):
+    def write_stage(self, number, stage, expected=None, commit=False, initialize=False, release_hold=False):
         self.writes.append((number, stage, expected, commit))
         next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))["stage"] = stage
         return SimpleNamespace(ok=True, done=True, error="")

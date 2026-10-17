@@ -194,23 +194,28 @@ def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
 
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
-          decisions: Sequence[Decision]) -> Action | None:
+          decisions: Sequence[Decision], hold_stages: Sequence[str]) -> Action | None:
     key = item.issue_key
     if item.forge_state == "closed" or any(s.started_at and not s.ended_at for s in history):
         return None
-    if item.human_review:
-        return Wait(key, "human review")
     workflow = policies.workflow_for(issue_type)
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
-        return Wait(key, "stage is outside the workflow")
+        return Wait(key, "human review" if item.human_review else "stage is outside the workflow")
     # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
     completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
                       and (stage != "merge" or s.stage != "merge"))
     latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
     if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
-        return Wait(key, "segments tie at the latest start")
+        return Wait(key, "human review" if item.human_review else "segments tie at the latest start")
+    if item.human_review:
+        # Only an interrupted/failed run at this stage can release an extra launcher hold.
+        # Human outcomes, completed work and stage-required holds still need a human's release.
+        if (stage not in hold_stages and latest and latest.stage == stage
+                and latest.outcome in (*RETRYABLE, "failed")):
+            return _work(key, stage, workflow, history, policies, room)
+        return Wait(key, "human review")
     return_edge = None
     if latest and latest.stage == "review":
         work = tuple(s for s in completed if s.stage not in ("review", "merge"))
@@ -251,13 +256,15 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          open_findings: Mapping[str, Mapping[str, int]], *, created_at: Mapping[str, datetime] | None = None,
          rooms: Mapping[str, str] | None = None,
          decisions: Mapping[str, Sequence[Decision]] | None = None,
-         quota_resets: Mapping[str, datetime] | None = None) -> list[Action]:
+         quota_resets: Mapping[str, datetime] | None = None,
+         hold_stages: Sequence[str] = ()) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
     Gates use their source stage's policy; rework limits use the destination stage's policy, excluding reviews.
     Merge requires answered decisions and, where policy requires it, a done architect segment for the current work.
     Without creation times, issue numbers order work within each forge namespace.
+    Extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
     """
     _time(now)
     if type(free_slots) is not int or free_slots < 0:
@@ -270,7 +277,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             continue
         action = _item(item, segments.get(item.issue_key, ()), policies, issue_types.get(item.issue_key),
                        (rooms or {}).get(item.issue_key), now, open_findings.get(item.issue_key),
-                       (decisions or {}).get(item.issue_key, ()))
+                       (decisions or {}).get(item.issue_key, ()), hold_stages)
         if isinstance(action, (Dispatch, Review)):
             if free_slots:
                 free_slots -= 1

@@ -55,9 +55,10 @@ def _planning_inputs(store: Any, items: list) -> dict:
     }
 
 
-def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) -> None:
+def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
+                *, release_hold: bool = False) -> None:
     result = forge.write_stage(int(key.rpartition("#")[2]), stage, expected=expected or None,
-                               initialize=not expected, commit=True)
+                               initialize=not expected, commit=True, release_hold=release_hold)
     if not result.ok:
         raise ForgeError(result.error)
     fields: dict[str, Any] = {"stage": stage}
@@ -65,6 +66,8 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str) ->
     if board is not None and board.holds(stage):
         # A retried write runs before planning, so cache its new hold immediately.
         fields["human_review"] = True
+    elif release_hold:
+        fields["human_review"] = False
     store.upsert_item(key, **fields)
     data = _resume(store, key)
     data.pop("pending_stage", None)
@@ -117,14 +120,18 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         pending = _resume(store, item.issue_key).get("pending_stage")
         if pending:
             try:
-                if item.stage == pending["stage"]:
+                if item.stage == pending["stage"] and not pending.get("release_hold"):
                     data = _resume(store, item.issue_key)
                     data.pop("pending_stage")
                     store.set_resume(item.issue_key, data)
                 else:
-                    _write_stage(forge, store, item.issue_key, pending["stage"], pending["expected"])
+                    _write_stage(forge, store, item.issue_key, pending["stage"], pending["expected"],
+                                 release_hold=pending.get("release_hold", False))
             except Exception as exc:
-                message = f"stage write failed: {exc}"
+                if pending.get("release_hold"):
+                    store.set_human_review(item.issue_key, True)
+                operation = "hold release" if pending.get("release_hold") else "stage write"
+                message = f"{operation} failed: {exc}"
                 logged = store.log(item.issue_key)
                 if not logged or logged[-1].message != message:  # retried every pass; log only a change
                     store.add_log(item.issue_key, message, at)
@@ -132,6 +139,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items() if not _resume(store, item.issue_key).get("pending_stage")]
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
+                             hold_stages=board.hold_stages if board is not None else (),
                              **_planning_inputs(store, items))
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
@@ -145,6 +153,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
+                if by_key[key].human_review:
+                    data = _resume(store, key)
+                    # Persist before writing: the label can be removed even when verification fails.
+                    data["pending_stage"] = {"stage": stage, "expected": stages[key], "release_hold": True}
+                    store.set_resume(key, data)
+                    try:
+                        _write_stage(forge, store, key, stage, stages[key], release_hold=True)
+                    except Exception as exc:
+                        store.set_human_review(key, True)
+                        raise ForgeError(f"hold release failed: {exc}") from exc
                 slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                             max_concurrency=max_concurrency, clock=clock,
                             launch=lambda: launch(key, stage, action.attempt, persona), agent_type=persona, runtime="claude")
