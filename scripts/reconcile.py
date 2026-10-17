@@ -461,8 +461,10 @@ def _burn_down(item: WorkItem, history: Sequence[Segment], findings: Sequence[di
         # later dispositions never rename the request that already asked about them.
         undisposed = [f for f in findings if "disposition" not in f]
         answered = request_records(requested).get(reply.request_token, []) if reply else []
-        reply_covers = bool(reply) and (not reply.request_token or {
-            f["finding_key"] for f in undisposed} <= {f["finding_key"] for f in answered})
+        reply_covers = bool(reply and reply.status in ("APPROVED", "CHANGES")
+                            and reply.reviewed_head == head and reply.request_token in requested
+                            and reply.request_token.split("@", 1)[0] == head
+                            and {f["finding_key"] for f in undisposed} <= {f["finding_key"] for f in answered})
         if reply is None or (undisposed and not reply_covers):
             return [_consult(item.issue_key, head, undisposed, requested)]
     finding = pending[0]
@@ -503,7 +505,8 @@ def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: M
     drop_stage: an ordinary pending stage write whose card a person has since moved to a third stage.
     """
     if pending_hold:
-        return "restore" if item.forge_state == "open" and item.stage == pending_hold["stage"] else "drop_hold"
+        return "restore" if item.forge_state == "open" and (
+            item.stage == pending_hold["stage"] or pending_hold.get("retry") is False) else "drop_hold"
     if pending_release:
         if (item.forge_state != "open" or not item.stage or item.stage != pending_release["expected"]
                 or item.stage != pending_release["stage"]):

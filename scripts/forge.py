@@ -30,17 +30,14 @@ _LOCAL_CLOSE = re.compile(r"#\d+")  # a closing ref for this repository; anythin
 
 
 def _retryable(error: object) -> bool:
-    """Translate the transports' error strings at the adapter boundary, never in a caller."""
-    message = str(error).lower()
-    return bool(re.search(r"\b(?:429|5\d\d)\b|rate.?limit|timed? ?out|timeout|connection|network|"
-                          r"temporary|temporarily|urlerror|remote end closed|no such host|name resolution|"
-                          r"tls|eof", message))
+    """Read classification supplied by the transport, never infer it from contextual messages."""
+    return bool(getattr(error, "retryable", False))
 
 
 def _gh_json(gh, args: list[str]):
     code, stdout, stderr = gh(args)
     if code:
-        return None, stderr.strip() or f"gh exited {code}"
+        return None, stderr if stderr.strip() else f"gh exited {code}"
     try:
         return json.loads(stdout), ""
     except ValueError:
@@ -520,9 +517,21 @@ class Forge:
 
     def requests(self) -> list[merge_ready.Request]:
         """Open pull or merge requests with their merge verdict (#419) and the approver's approval."""
+        def gh(args):
+            code, out, error = self.gh(args)
+            if code:
+                raise ForgeError(error.strip() or f"gh exited {code}", retryable=_retryable(error))
+            return code, out, error
+
+        def call(*args, **kwargs):
+            row, headers, error = backlog._call(*args, **kwargs)
+            if error:
+                raise ForgeError(str(error), retryable=_retryable(error))
+            return row, headers, error
+
         try:
-            return (merge_ready.github_ready(self.home.repo, self.gh, self.approver) if self.github else
-                    merge_ready.gitlab_ready(self.home, self.home.project, self._token(), backlog._call, self.approver))
+            return (merge_ready.github_ready(self.home.repo, gh, self.approver) if self.github else
+                    merge_ready.gitlab_ready(self.home, self.home.project, self._token(), call, self.approver))
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}", retryable=_retryable(exc)) from exc
 

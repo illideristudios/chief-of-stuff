@@ -38,6 +38,32 @@ GH_FIELDS = "number,title,state,labels,url,updatedAt,closedAt"
 GH_STATE = {OPEN: "open", CLOSED: "closed", "all": "all"}
 
 
+class TransportError(str):
+    """String-compatible transport failure carrying classification across legacy result tuples."""
+
+    def __new__(cls, message: str, *, status: int | None = None, transport: bool = False,
+                rate_limited: bool = False):
+        error = super().__new__(cls, message)
+        error.status = status
+        error.retryable = transport or status == 429 or (status is not None and 500 <= status < 600) or rate_limited
+        return error
+
+
+def _gh_error(stderr: str) -> TransportError:
+    """Decode gh's protocol diagnostics once, before callers add resource names and context."""
+    lines = stderr.strip().splitlines()
+    status = next((int(m[1]) for line in lines
+                   if (m := re.fullmatch(r"gh: .* \(HTTP ([0-9]{3})\)", line)
+                       or re.fullmatch(r"HTTP ([0-9]{3}): .* \(https?://[^\s]+\)", line))), None)
+    # gh is a subprocess: its Go HTTP client's method/URL diagnostic identifies a transport failure.
+    transport = any(re.match(r'^(?:Get|Post|Put|Patch|Delete|Head) "https?://[^"\s]+": ', line)
+                    or re.fullmatch(r"error connecting to [^\s]+", line) for line in lines)
+    limited = status == 403 and any(re.match(
+        r"^(?:gh: |HTTP 403: )(?:(?:API |secondary )?rate limit exceeded|"
+        r"You have exceeded a secondary rate limit)\b", line, re.I) for line in lines)
+    return TransportError(stderr, status=status, transport=transport, rate_limited=limited)
+
+
 def run_gh(args: list[str], input_text: str | None = None) -> tuple[int, str, str]:
     """Run `gh`, allowing an absolute-path eval override."""
     binary = os.environ.get("CHIEF_OF_STUFF_GH", "gh")
@@ -47,7 +73,7 @@ def run_gh(args: list[str], input_text: str | None = None) -> tuple[int, str, st
         done = subprocess.run([binary, *args], input=input_text, capture_output=True, text=True, check=False)
     except FileNotFoundError:
         return 127, "", "gh not found"
-    return done.returncode, done.stdout, done.stderr
+    return done.returncode, done.stdout, _gh_error(done.stderr) if done.returncode else done.stderr
 
 
 @dataclass(frozen=True)
@@ -174,9 +200,11 @@ def _call(method: str, url: str, private_token: str, timeout: float,
             raw = response.read()
             got = {k.lower(): v for k, v in response.headers.items()}
     except urllib.error.HTTPError as exc:
-        return None, {}, f"HTTP {exc.code} from GitLab"
+        return None, {}, TransportError(f"HTTP {exc.code} from GitLab", status=exc.code,
+                                        rate_limited=exc.code == 403 and bool(exc.headers.get("Retry-After")))
     except Exception as exc:  # timeout, refused, DNS, TLS
-        return None, {}, f"{type(exc).__name__}: {exc}"
+        return None, {}, TransportError(f"{type(exc).__name__}: {exc}",
+                                        transport=isinstance(exc, (urllib.error.URLError, OSError)))
     try:
         return json.loads(raw.decode("utf-8", "replace")), got, ""
     except ValueError:
@@ -313,7 +341,8 @@ def comments(cfg: Backlog | GitHubBacklog, iid: int, token: str | None = None,
         rc, out, err = (gh or run_gh)(["api", "--paginate", "--slurp",
                                        f"repos/{cfg.repo}/issues/{iid}/comments?per_page={PER_PAGE}"])
         if rc != 0:
-            return Notes(error=f"gh: {(err.strip().splitlines() or [f'exit {rc}'])[-1]}")
+            return Notes(error=TransportError(f"gh: {(err.strip().splitlines() or [f'exit {rc}'])[-1]}",
+                                              transport=getattr(err, "retryable", False)))
         try:
             rows = json.loads(out)
         except ValueError:

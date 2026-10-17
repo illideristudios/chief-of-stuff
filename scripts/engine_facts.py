@@ -23,7 +23,8 @@ def architect_comments(comments: list, *, head: str | None = None, author: str |
     """Read only authorized comments, matching replies to locally recorded requests by commit prefix.
 
     Dispositions fold oldest first and are limited to findings the engine actually asked about.
-    Comment text alone never creates posting evidence. The digest is an internal key, not a reply SHA.
+    Only authenticated comments with the recorded token and findings confirm posting intent.
+    The digest is an internal key, not a reply SHA.
     """
     records = reconcile.request_records(requests or {})
     replies, requested, postings = [], [], []
@@ -41,7 +42,12 @@ def architect_comments(comments: list, *, head: str | None = None, author: str |
             internal = re.search(r"(?m)^Request: (\S+)$", body)
             if internal:
                 token = internal[1]
-            if token in records:
+            payload = re.search(r"```(?:json)?\s*(.*?)```", body, re.S)
+            try:
+                findings = json.loads(payload[1]).get("findings") if payload else None
+            except (ValueError, TypeError, AttributeError):
+                findings = None
+            if token in records and findings == records[token]:
                 requested.append(token)
                 try:
                     posted_at = datetime.fromisoformat(note.time)
@@ -90,7 +96,8 @@ def architect_comments(comments: list, *, head: str | None = None, author: str |
         return reconcile.ArchitectReply(head or "", "", "", dict(dispositions)), requested
     when, index, sha, status, created_at, _ = matched[-1]
     prior = [row for row in postings if row[:2] <= (when, index) and row[2].split("@", 1)[0] == sha]
-    token = max(prior)[2] if prior else ""
+    # A successful local post remains trusted even when the independent login read is unavailable.
+    token = max(prior)[2] if prior else next((t for t in reversed(records) if t.split("@", 1)[0] == sha), "")
     return reconcile.ArchitectReply(sha, status, created_at, dict(dispositions), token), requested
 
 
@@ -104,6 +111,7 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
     findings = {}
     heads, replies, requested = {}, {}, {}
     requests, listing = None, None
+    engine_author, identity_read = None, False
     if forge is not None:
         try:
             requests = forge.requests()  # one list per pass, shared by every item's closing request
@@ -131,16 +139,38 @@ def gather(store: Any, items: list, forge: Any = None, at: str = "", policies: A
                     policies, segments[key], issue_types[key], states[key].get("room"))):
                 continue
             known = reconcile.request_records(states[key].get("architect_requests") or {})
-            requested[key] = known
+            pending = reconcile.request_records(states[key].get("architect_pending_requests") or {})
+            # Uncertain delivery waits until both the identity and comments can be verified.
+            requested[key] = {**known, **pending}
+            if not identity_read:
+                identity_read = True
+                try:
+                    engine_author = forge.login() if hasattr(forge, "login") else None
+                except ForgeError as exc:
+                    if at:
+                        store.add_log(key, f"engine identity unreadable: {exc}", at)
             try:
                 comments = forge.change_comments(request.number)
-                engine_author = forge.login() if hasattr(forge, "login") else None
             except ForgeError as exc:
                 message = f"architect comments unreadable: {exc}"
                 logged = store.log(key)
                 if at and (not logged or logged[-1].message != message):
                     store.add_log(key, message, at)
                 continue
+            if pending and engine_author:
+                _, posted = architect_comments(comments, head=heads[key], author=architect_login or None,
+                                                engine_author=engine_author, requests={**known, **pending})
+                for token in posted:
+                    if token in pending:
+                        known[token] = pending.pop(token)
+                data = states[key]
+                data["architect_requests"] = known
+                if pending:
+                    data["architect_pending_requests"] = pending
+                else:
+                    data.pop("architect_pending_requests", None)
+                store.set_resume(key, data)
+                requested[key] = known  # a verified absent post can be attempted again
             reply, _ = architect_comments(comments, head=heads[key], author=architect_login or None,
                                            engine_author=engine_author, requests=known)
             if reply is not None:

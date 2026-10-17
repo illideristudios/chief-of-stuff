@@ -455,7 +455,8 @@ class ArchitectCommentsTest(unittest.TestCase):
         head = "a" * 40
         token = reconcile.request_token(head, [])
         def note(author, token):
-            return SimpleNamespace(author=author, body="Architect review requested: " + token, time=NOW.isoformat())
+            return SimpleNamespace(author=author, body="Architect review requested: " + token +
+                                   '\n```json\n{"findings": []}\n```', time=NOW.isoformat())
         _, posted = engine_facts.architect_comments([note("worker", token), note("engine", "forged")],
             head=head, author="frank", engine_author="engine", requests={token: []})
         self.assertEqual(posted, [])

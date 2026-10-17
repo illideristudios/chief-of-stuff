@@ -163,7 +163,7 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
                 if action in ("retire", "accept"):
                     store.finish_suite_hold(key, accept=action == "accept", hold_key=token)
                     if action == "accept":
-                        store.add_log(key, "suite hold released: accepted completion", at)
+                        store.add_log(key, f"suite hold released: accepted {records[token]['stage']} attempt {records[token]['attempt']} completion", at)
                     continue
                 store.set_human_review(key, True)
                 if action == "publish":
@@ -358,8 +358,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                             "`Architect: CHANGES <sha>`. Include a JSON block with a `dispositions` object "
                             "mapping each finding_key to fix, file, keep or discard.\n\n"
                             + "```json\n" + json.dumps({"findings": list(action.findings)}, indent=2) + "\n```")
+                    pending = reconcile.request_records(data.get("architect_pending_requests", {}))
+                    pending[token] = list(action.findings)
+                    data["architect_pending_requests"] = pending
+                    store.set_resume(key, data)  # durable intent precedes the external write
                     forge.comment_change(request.number, body)
-                    known[token] = list(action.findings)
+                    known[token] = pending.pop(token)
+                    if pending:
+                        data["architect_pending_requests"] = pending
+                    else:
+                        data.pop("architect_pending_requests", None)
                 data["architect_requests"] = known
                 store.set_resume(key, data)
             elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
