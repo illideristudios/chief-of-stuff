@@ -85,6 +85,50 @@ class ArgvTest(unittest.TestCase):
         self.assertNotIn("--session-id", got)
 
 
+class AvailabilityTest(unittest.TestCase):
+    def test_availability_uses_the_same_login_resolution_as_command(self):
+        with mock.patch.object(claude_adapter, "resolve", return_value="/login/claude") as resolve:
+            self.assertEqual(claude_adapter.available(), "/login/claude")
+        resolve.assert_called_once_with("claude")
+        with mock.patch.object(claude_adapter, "resolve", return_value=None):
+            self.assertIsNone(claude_adapter.available())
+
+
+class EventsTest(unittest.TestCase):
+    def test_events_are_opt_in_and_preserve_tool_calls_and_denials(self):
+        events = [
+            {"type": "system", "subtype": "init", "model": "sonnet"},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "date"}}]}},
+            {"type": "result", "is_error": False, "result": "done", "session_id": SID,
+             "structured_output": {"answer": 1}, "num_turns": 2, "total_cost_usd": 0.01,
+             "permission_denials": [{"tool_use_id": "t1"}]},
+        ]
+        request = Request(prompt="-hello", keep_events=True)
+        cmd = claude_adapter.argv(request, "/host", [])
+        self.assertEqual(cmd[cmd.index("--output-format") + 1], "stream-json")
+        self.assertIn("--verbose", cmd)
+        raw = "\n".join(json.dumps(e) for e in events)
+        with mock.patch.object(claude_adapter, "command", return_value=["/host"]), \
+             mock.patch.object(claude_adapter.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, raw, "")):
+            got = claude_adapter.call(request)
+        self.assertEqual(got.events, events)
+        self.assertEqual((got.text, got.data, got.session_id, got.num_turns, got.cost_usd),
+                         ("done", {"answer": 1}, SID, 2, 0.01))
+        self.assertIsNone(claude_adapter.classify(0, json.dumps(events[-1]), "").events)
+
+    def test_stream_failures_use_the_same_failure_boundary(self):
+        for raw, code, stderr, kind in (
+            ('{"type":"system"}', 0, "", "unknown"),
+            ('not json', 0, "", "unknown"),
+            ('{"type":"result","is_error":true,"result":"Not logged in"}', 0, "", "auth"),
+            ('{"type":"result","is_error":false}', 1, "429 quota exceeded", "quota"),
+        ):
+            with self.subTest(kind=kind), mock.patch.object(claude_adapter, "command", return_value=["/host"]), \
+                 mock.patch.object(claude_adapter.subprocess, "run", return_value=subprocess.CompletedProcess([], code, raw, stderr)):
+                self.assertEqual(claude_adapter.call(Request(prompt="p", keep_events=True)).kind, kind)
+
+
 class StartTest(unittest.TestCase):
     def test_runner_spawn_failure_removes_launch_evidence_and_reraises(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -138,20 +138,15 @@ class SandboxGuardTest(unittest.TestCase):
             env = run.eval_environment(Path(d), Path(d) / "calls.jsonl", "America/Chicago")
             self.assertNotIn("CHIEF_OF_STUFF_SHELL", env)
 
-    def test_a_case_s_runtimes_present_reaches_the_environment_its_run_is_launched_in(self) -> None:
-        """`eval_environment` builds the stand-in; this is `run_one` handing it the case's key. The host CLI is the one
-        `subprocess.run` call a case with no `repo` makes: it is stopped there, and the env it was given is asked."""
-        sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
-        import runtimes
+    def test_a_case_s_runtimes_present_reaches_the_adapter_environment(self) -> None:
         import shell_setup
         for present in (["claude"], ["codex", "cursor"], []):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as d:
                 case = run.Case("wired", Path(d) / "case", {"prompt": "hello", "graders": [], "runtimes_present": present})
-                stop = subprocess.TimeoutExpired("host", 1)
-                with unittest.mock.patch.object(run.subprocess, "run", side_effect=stop) as launched:
-                    self.assertEqual(run.run_one(case, "baseline", "sonnet", Path(d) / "out")[:2], ([], "timeout"))
+                with unittest.mock.patch.object(run.claude_adapter, "call", return_value=run.Failure("unknown", "timeout")) as launched:
+                    self.assertIn("timeout", run.run_one(case, "baseline", "sonnet", Path(d) / "out")[1])
                 env = launched.call_args.kwargs["env"]
-                found = {r.name for r in runtimes.RUNTIMES if shell_setup.resolve(r.binary, source=env)}
+                found = {r.name for r in run.runtimes.RUNTIMES if shell_setup.resolve(r.binary, source=env)}
                 self.assertEqual(found, set(present))
 
     def test_eval_entry_point_uses_its_snapshot_and_exact_arguments(self) -> None:
@@ -806,99 +801,71 @@ class TaskNamesUnchangedTest(unittest.TestCase):
         self.assertIn("name", detail)
 
 
-class MultiTurnTest(unittest.TestCase):
-    FAKE = [sys.executable, str(FIXTURES / "fake_claude.py")]
+class ClaudeAdapterRunTest(unittest.TestCase):
+    def reply(self, prompt="done", session_id="session"):
+        events = [
+            {"type": "system", "subtype": "init", "model": "claude-sonnet-4-6", "agents": ["claude"], "tools": ["Bash"]},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "date"}},
+                {"type": "text", "text": prompt}]}},
+            {"type": "result", "is_error": False, "result": prompt, "session_id": session_id,
+             "permission_denials": [{"tool_use_id": "t1"}], "num_turns": 1},
+        ]
+        return run.Reply(prompt, None, session_id, 0, 1, events=events)
 
-    def test_command_without_prompt_reads_stream_json(self) -> None:
-        cmd = run.command(run.Case("c", Path("/c"), {}), "baseline", "sonnet", None)
-        # Was `"claude"` until 0.12.1: a bare name is not on a GUI-launched terminal's PATH, and
-        # every case written from such a tab went ungraded.
-        self.assertEqual(cmd[:2], [run.claude_binary(), "-p"])
-        self.assertEqual(cmd[2], "--model")
-        self.assertEqual(cmd[cmd.index("--input-format") + 1], "stream-json")
+    def test_single_turn_calls_adapter_and_grades_and_saves_raw_events(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            case = run.Case("adapter", base / "case", {"prompt": "-hello", "graders": [
+                {"type": "tool_used", "tool": "Bash"}, {"type": "regex", "pattern": "done"}]})
+            with unittest.mock.patch.object(run.claude_adapter, "call", return_value=self.reply()) as call:
+                results, error, meta = run.run_one(case, "baseline", "sonnet", base / "out", effort="high")
+            self.assertIsNone(error)
+            self.assertTrue(all(passed for _, passed, _ in results), results)
+            self.assertEqual(meta["denials"], 1)
+            request = call.call_args.args[0]
+            self.assertTrue(request.keep_events)
+            self.assertEqual((request.prompt, request.model, request.effort), ("-hello", "sonnet", "high"))
+            self.assertEqual(run.load_stream(base / "out/stream.jsonl").tool_uses[0]["id"], "t1")
+            self.assertIn("--strict-mcp-config", call.call_args.kwargs["extra_args"])
 
-    def test_split_turns_at_results(self) -> None:
-        events = [{"type": "system"}, {"type": "result", "result": "a"}, {"type": "system"}, {"type": "assistant"}, {"type": "result", "result": "b"}]
-        turns = run.split_turns(events)
-        self.assertEqual([[e["type"] for e in t] for t in turns], [["system", "result"], ["system", "assistant", "result"]])
+    def test_adapter_failure_is_unmeasured(self):
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(
+                run.claude_adapter, "call", return_value=run.Failure("auth", "Not logged in")):
+            results, error, _ = run.run_one(run.Case("fail", Path(d), {"prompt": "hi", "graders": []}),
+                                              "baseline", "sonnet", Path(d) / "out")
+        self.assertEqual(results, [])
+        self.assertIn("auth", error)
 
-    def test_drive_turns_captures_each_turn_and_snapshots(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as snaps:
-            seen = []
+    def test_prompted_turns_resume_and_snapshot_through_the_adapter(self):
+        spec = {"turns": [{"prompt": "one", "graders": [{"type": "regex", "pattern": "first"}]},
+                          {"prompt": "two", "graders": [{"type": "regex", "pattern": "second"}]}]}
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            work, out = base / "work", base / "out"
+            work.mkdir(); out.mkdir()
+            log = base / "calls.jsonl"; log.touch()
+            with unittest.mock.patch.object(run.claude_adapter, "call", side_effect=[self.reply("first"), self.reply("second")]) as call:
+                results, error, meta = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None, log, "America/Chicago")
+            self.assertIsNone(error)
+            self.assertTrue(all(p for _, p, _ in results), results)
+            self.assertEqual(meta["turns_reached"], 2)
+            first, second = [c.args[0] for c in call.call_args_list]
+            self.assertFalse(first.resume)
+            self.assertTrue(second.resume)
+            self.assertEqual(second.session_id, "session")
+            self.assertTrue((out / "fixture-turn1").is_dir())
+            self.assertTrue((out / "fixture-turn2").is_dir())
 
-            def snapshot(n: int) -> None:
-                seen.append((n, (Path(cwd) / "turn2.txt").exists()))
-
-            turns = run.drive_turns(self.FAKE, ["start the audit", "yes"], Path(cwd), None, 20, snapshot)
-            self.assertEqual(len(turns), 2)
-            self.assertEqual(run.parse_stream(turns[0].events).last_text, "reply 1: start the audit")
-            self.assertEqual(run.parse_stream(turns[1].events).last_text, "reply 2: yes")
-            self.assertLessEqual(turns[0].t_end, turns[1].t_start)
-            self.assertEqual(seen, [(1, False), (2, True)])
-
-    def test_wait_turn_reads_unprompted_turn(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["BACKGROUND launch", None], Path(cwd), None, 20, lambda n: None)
-        self.assertEqual(len(turns), 2)
-        self.assertEqual(run.parse_stream(turns[0].events).last_text, "reply 1: BACKGROUND launch")
-        self.assertEqual(run.parse_stream(turns[1].events).last_text, "notified: DONE")
-        self.assertEqual(turns[1].events[0]["subtype"], "task_notification")
-
-    def test_wait_turn_with_nothing_coming_stops_without_error(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["plain", None], Path(cwd), None, 20, lambda n: None, wait_seconds=2)
-        self.assertEqual(len(turns), 1)
-
-    def test_lingering_process_is_killed_after_grace(self) -> None:
-        import time
-
-        with tempfile.TemporaryDirectory() as cwd:
-            t0 = time.monotonic()
-            turns = run.drive_turns(self.FAKE, ["LINGER"], Path(cwd), None, 30, lambda n: None, close_grace=2)
-        self.assertEqual(len(turns), 1)
-        self.assertLess(time.monotonic() - t0, 15)
-
-    def test_inline_notification_skips_the_wait_and_grades_on_that_turn(self) -> None:
-        import time
-
-        spec = {"turns": [
-            {"prompt": "INLINE launch", "graders": [{"name": "launched", "type": "regex", "pattern": "reply 1"}]},
-            {"graders": [{"name": "relays", "type": "regex", "pattern": "DONE"}]},
-        ]}
-        with tempfile.TemporaryDirectory() as cwd:
-            t0 = time.monotonic()
-            turns = run.drive_turns(self.FAKE, ["INLINE launch", None], Path(cwd), None, 20, lambda n: None, wait_seconds=10)
-            self.assertLess(time.monotonic() - t0, 5)
-            self.assertEqual(len(turns), 1)
-            results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T1: launched", True), ("T2: relays", True)])
-
-    def test_separate_notification_turn_still_grades_on_it(self) -> None:
-        spec = {"turns": [{"prompt": "BACKGROUND launch", "graders": []}, {"graders": [{"name": "relays", "type": "regex", "pattern": "notified: DONE"}]}]}
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["BACKGROUND launch", None], Path(cwd), None, 20, lambda n: None, wait_seconds=10)
-            results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual(len(turns), 2)
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T2: relays", True)])
-
-    def test_unreached_wait_turn_grades_as_failure(self) -> None:
-        spec = {"turns": [{"prompt": "plain", "graders": []}, {"graders": [{"name": "relays", "type": "regex", "pattern": "DONE"}]}]}
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["plain", None], Path(cwd), None, 20, lambda n: None, wait_seconds=2)
-        results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T2: ran", False)])
-
-    def test_drive_turns_times_out(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd:
-            with self.assertRaises(TimeoutError):
-                run.drive_turns(self.FAKE, ["SLEEP"], Path(cwd), None, 2, lambda n: None)
-
-    def test_turn_grader_names_are_prefixed(self) -> None:
-        spec = {"turns": [{"prompt": "a", "graders": [{"name": "x", "type": "regex", "pattern": "reply 1"}]}, {"prompt": "b", "graders": [{"name": "y", "type": "regex", "pattern": "reply 1"}]}]}
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, [t["prompt"] for t in spec["turns"]], Path(cwd), None, 20, lambda n: None)
-        results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T1: x", True), ("T2: y", False)])
+    def test_wait_turn_is_unmeasured_without_launching_a_stream(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            with unittest.mock.patch.object(run.claude_adapter, "call") as call:
+                results, error, _ = run.run_turns({"turns": [{"prompt": "go"}, {"graders": []}]},
+                    "baseline", "sonnet", base, base, {}, None, base / "calls", "America/Chicago")
+            call.assert_not_called()
+            self.assertEqual(results, [])
+            self.assertIn("wait turn", error)
 
 
 class UnknownGraderTest(unittest.TestCase):
@@ -1288,23 +1255,6 @@ class UnmeasuredVerdictTest(unittest.TestCase):
         self.assertEqual(code, 0)
 
 
-class ClaudeBinaryTest(unittest.TestCase):
-    """GUI-launched Ghostty inherits launchd's PATH, not the shell's, so a bare `claude` is not there."""
-
-    def tearDown(self):
-        os.environ.pop("CHIEF_OF_STUFF_CLAUDE", None)
-
-    def test_it_resolves_an_absolute_path_rather_than_trusting_PATH(self):
-        self.assertTrue(Path(run.claude_binary()).is_absolute())
-
-    def test_the_env_override_wins(self):
-        os.environ["CHIEF_OF_STUFF_CLAUDE"] = "/somewhere/else/claude"
-        self.assertEqual(run.claude_binary(), "/somewhere/else/claude")
-
-    def test_the_command_names_the_resolved_binary(self):
-        case = run.Case(name="x", root=Path("."), spec={})
-        self.assertEqual(run.command(case, "agent", "opus", "hi")[0], run.claude_binary())
-
 
 class VerdictOnDiskTest(unittest.TestCase):
     """Finding 114b, `board-ux-improvements`: the harness prints verdicts and stores none.
@@ -1344,20 +1294,13 @@ class RunIsASnapshotTest(unittest.TestCase):
     mid-run made the run two verdicts wearing one name, with nothing in the output saying so.
     """
 
-    def test_the_allowlist_follows_the_root_it_is_given(self) -> None:
-        cmd = run.command(run.Case("c", Path("/c"), {}), "baseline", "sonnet", None, root=Path("/snap"))
-        joined = " ".join(cmd)
-        self.assertIn("/snap/scripts/render_board.py", joined)
-        self.assertIn("/snap/scripts/audit_tasks.py", joined)
-        self.assertNotIn(str(run.PLUGIN_ROOT / "scripts"), joined)
-
-    def test_the_plugin_dir_follows_it_too(self) -> None:
-        cmd = run.command(run.Case("c", Path("/c"), {}), "agent", "sonnet", None, root=Path("/snap"))
-        self.assertIn("/snap", cmd[cmd.index("--plugin-dir") + 1])
-
-    def test_the_default_root_is_still_the_live_tree(self) -> None:
-        joined = " ".join(run.command(run.Case("c", Path("/c"), {}), "baseline", "sonnet", None))
-        self.assertIn(str(run.PLUGIN_ROOT / "scripts" / "render_board.py"), joined)
+    def test_claude_request_and_tool_policy_follow_the_snapshot(self):
+        request = run.claude_request(run.Case("c", Path("/c"), {}), "agent", "sonnet", "hi", Path("/work"), root=Path("/snap"))
+        self.assertEqual(request.plugin_dirs, ("/snap",))
+        self.assertEqual(request.agent, run.AGENT)
+        args = run.claude_options({}, root=Path("/snap"))
+        self.assertIn("Bash(python3 /snap/scripts/render_board.py:*)", args)
+        self.assertNotIn(str(run.PLUGIN_ROOT / "scripts"), " ".join(args))
 
     def test_a_snapshot_carries_the_code_and_not_the_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
