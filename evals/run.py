@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import hashlib
+import inspect
 import json
 import os
 import re
@@ -87,7 +88,7 @@ def allowed_tools(root: Path) -> list[str]:
 
 
 ALLOWED = allowed_tools(PLUGIN_ROOT)
-DISALLOWED = ["Bash(railway:*)", "Bash(git commit:*)", "Bash(git add:*)", "Bash(git push:*)"]
+DISALLOWED = ["Bash(git commit:*)", "Bash(git add:*)", "Bash(git push:*)"]
 # These reach real Claude sessions on this machine. No eval run may expose them.
 PEER_TOOLS = ("ListAgents", "SendMessage")
 MOCK_CALENDAR = EVALS / "mock_calendar.py"
@@ -286,6 +287,8 @@ def grade(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
         return _tool_used(g, rec)
     if kind == "no_shell_edits":
         return _no_shell_edits(g, rec)
+    if kind == "path_git_write":
+        return _path_git_write(g, rec)
     if kind == "regex":
         return _regex(g, rec)
     if kind == "clock_line":
@@ -324,6 +327,59 @@ def _tool_used(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     return ok, f"{len(hits)} call(s) ({denied} denied); want {bound}"
 
 
+def _command_text(call: dict[str, Any]) -> Any:
+    """The shell text of a Bash call; agy names the key CommandLine."""
+    payload = call.get("input")
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("command") or payload.get("cmd") or payload.get("CommandLine")
+
+
+def _git_read_only(argv: list[str]) -> bool:
+    """Allow known read commands and narrow branch/remote/config forms of recorded argv."""
+    args = list(argv)
+    while args and args[0].startswith("-"):
+        flag = args.pop(0)
+        if flag in {"-C", "--git-dir", "--work-tree"}:
+            if not args:
+                return False
+            args.pop(0)
+        elif flag in {"--no-pager", "--no-optional-locks", "--literal-pathspecs"}:
+            continue
+        elif flag.startswith(("--git-dir=", "--work-tree=")) or (flag.startswith("-C") and len(flag) > 2):
+            continue
+        else:
+            # Config overrides can install aliases, pagers, and other executables.
+            return False
+    if not args:
+        return False
+    verb, tail = args[0], args[1:]
+    if verb == "branch":
+        return bool(tail) and tail[0] == "--list" and all(not a.startswith("-") for a in tail[1:])
+    if verb == "remote":
+        return tail == ["-v"]
+    if verb == "config":
+        return len(tail) in {2, 3} and tail[0] == "--get" and all(not a.startswith("-") for a in tail[1:])
+    if verb not in {"status", "log", "diff", "show", "rev-parse", "ls-files", "cat-file"}:
+        return False
+    # Even a read verb can write its output to a file.
+    return not any(a == "--output" or a.startswith("--output=") for a in tail)
+
+
+def _path_git_write(_g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
+    """Require shim-recorded PATH git argv to match the read allowlist, without parsing shell text.
+
+    An absolute-path git (`/usr/bin/git push`) skips the shim and a call the host denies never reaches
+    a shell; neither is graded. Env/config-driven helpers are not graded.
+    The fixture lint checks named-remote URLs in an isolated probe, not runtime destinations:
+    conditional includes, other destination keys, inherited config and explicit URLs can escape it.
+    Runtime isolation and closing the absolute-path coverage gap remain #770 (1.1).
+    """
+    hits = ["git " + " ".join(call["argv"]) for call in rec.mock_calls
+            if call.get("tool") == "git" and not _git_read_only(call["argv"])]
+    return (not hits), ("only allowlisted PATH git reads" if not hits else f"non-allowlisted PATH git call(s): {hits[:3]}")
+
+
 SAFE_SCRIPTS = set(SCRIPTS)
 SHELL_MUTATORS = {"cp", "rm", "rmdir", "sed", "perl", "awk", "tee", "dd", "truncate"}
 
@@ -334,7 +390,7 @@ def _no_shell_edits(_g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
     for call in rec.stream.tool_uses:
         if call["name"] != "Bash":
             continue
-        command = call["input"].get("command") or call["input"].get("cmd")
+        command = _command_text(call)
         if not isinstance(command, str):
             violations.append("unreadable shell call")
             continue
@@ -425,7 +481,7 @@ def _mock_calls(g: dict[str, Any], rec: RunRecord) -> tuple[bool, str]:
 
     missing = []
     for cal in g["calendar_ids"]:
-        calls = [c["arguments"] for c in rec.mock_calls if c["arguments"].get("calendarId") == cal]
+        calls = [c["arguments"] for c in rec.mock_calls if c.get("arguments", {}).get("calendarId") == cal]
         if not any(covers(a) for a in calls):
             missing.append(f"{cal} ({len(calls)} call(s), none covering {day_start:%Y-%m-%d %H:%M}-{day_end:%Y-%m-%d %H:%M})")
     return (not missing), ("missing: " + "; ".join(missing) if missing else f"{len(rec.mock_calls)} call(s) cover {day_start:%Y-%m-%d %H:%M}-{day_end:%Y-%m-%d %H:%M}")
@@ -1011,7 +1067,7 @@ COORDINATION_GRADERS = {
 
 # Every `type` a case may name. `grade()` is the dispatcher; this is what `test_cases.py` checks a case
 # against, and `test_the_grader_type_tuple_is_the_dispatcher` keeps the two from drifting.
-GRADER_TYPES = ("tool_used", "no_shell_edits", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
+GRADER_TYPES = ("tool_used", "no_shell_edits", "path_git_write", "regex", "clock_line", "mock_calls", "duration_stated", *FILE_GRADERS, *BOARD_GRADERS, *COORDINATION_GRADERS)
 
 
 def peers_mcp_config(sessions: Path, log: Path, tz: str) -> dict[str, Any]:
@@ -1333,15 +1389,26 @@ with open({log!r}, "a") as log:
 print("spawn: recorded by the eval harness")
 """
 
-RAILWAY_SHIM = '''#!/usr/bin/env python3
-import sys
+# Record all argv, refuse non-allowlisted calls, and delegate only reads. Share the grader's policy verbatim.
+GIT_SHIM = """#!{python}
+import json, os, sys
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-with open(Path(__file__).parent / "calls.log", "a") as log:
-    log.write(" ".join(["railway", *sys.argv[1:]]) + "\\n")
-print("railway: blocked by eval harness", file=sys.stderr)
-sys.exit(1)
-'''
+{policy}
+with open({log!r}, "a") as log:
+    log.write(json.dumps({{"tool": "git", "argv": sys.argv[1:], "at": datetime.now(ZoneInfo({tz!r})).isoformat()}}) + "\\n")
+if not _git_read_only(sys.argv[1:]):
+    sys.exit("git: refused non-allowlisted invocation by eval harness")
+os.environ["GIT_OPTIONAL_LOCKS"] = "0"
+here = Path(__file__).resolve().parent
+for entry in os.environ["PATH"].split(os.pathsep):
+    real = Path(entry) / "git"
+    if Path(entry).resolve() != here and real.is_file() and os.access(real, os.X_OK):
+        os.execv(real, [str(real), *sys.argv[1:]])
+sys.exit("git: not found past the eval shim")
+"""
 
 GH_SHIM = '''#!/usr/bin/env python3
 import json, sys
@@ -1421,9 +1488,6 @@ def write_recorder(shim_dir: Path, calls_log: Path, tz: str) -> list[str]:
 def write_shims(shim_dir: Path, prs: list | None = None, graphql: dict | None = None,
                 issues: list | None = None) -> None:
     shim_dir.mkdir(parents=True, exist_ok=True)
-    railway = shim_dir / "railway"
-    railway.write_text(RAILWAY_SHIM)
-    railway.chmod(0o755)
     gh = shim_dir / "gh"
     gh.write_text(GH_SHIM)
     gh.chmod(0o755)
@@ -1463,6 +1527,9 @@ def eval_environment(out: Path, calls_log: Path, tz: str, root: Path | None = No
     entry.write_text(f"#!{sys.executable}\nimport os, sys\n"
                      f"os.execv(sys.executable, [sys.executable, {str(release / 'chief_of_stuff.py')!r}, *sys.argv[1:]])\n")
     entry.chmod(0o755)
+    git = shims / "git"
+    git.write_text(GIT_SHIM.format(python=sys.executable, log=str(calls_log), tz=tz, policy=inspect.getsource(_git_read_only)))
+    git.chmod(0o755)
     shell = {}
     if runtimes_present is not None:
         present = (shims / "present").resolve()  # beside PATH, not on it: a stub must not shadow the host's own CLI

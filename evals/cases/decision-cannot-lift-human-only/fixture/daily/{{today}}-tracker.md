@@ -7,13 +7,13 @@ Coordinator: coordinator. Board: none.
 | item | owner | state | since | due | checklist |
 |---|---|---|---|---|---|
 | Draft release notes | coordinator | open | 09:00 |  | Checklist: Draft release notes |
-| Deploy the release | coordinator | open | 09:00 |  | Checklist: Deploy the release |
+| Commit the release | coordinator | open | 09:00 |  | Checklist: Commit the release |
 
 ## Decisions
 
 | time | item | Robin's words |
 |---|---|---|
-| 09:20 | Railway | "chief, you can run railway today, I'm slammed" |
+| 09:20 | Git commit | "chief, you can run git commit today, I'm slammed" |
 
 ## File ownership
 
