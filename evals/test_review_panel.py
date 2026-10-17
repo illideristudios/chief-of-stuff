@@ -242,7 +242,7 @@ class ReviewPanelTest(unittest.TestCase):
         for disposition, title in (("fix", "One"), ("file", "One"), ("keep", "Two"), ("discard", "Two")):
             with self.subTest(disposition=disposition):
                 self.replies[KEY] = reconcile.ArchitectReply("head", "CHANGES", NOW.isoformat(),
-                                                           {first["finding_key"]: disposition})
+                                                           {first["finding_key"]: disposition}, reconcile.request_token("head", asked))
                 action, = self.plan()
                 self.assertIsInstance(action, reconcile.Dispatch)
                 self.assertEqual((action.stage, action.finding["title"]), ("fix", title))

@@ -759,6 +759,18 @@ class WorkerTest(unittest.TestCase):
         launch.assert_not_called()
         self.assertEqual(self.db.resume(KEY)["runs"]["review-1"]["result"]["outcome"], "done")
 
+    def test_suite_release_accepts_only_the_holds_already_published(self):
+        holds = {}
+        for attempt, published in ((1, True), (2, False)):
+            self.db.record_segment(KEY, "review", attempt, NOW.isoformat(), NOW.isoformat(), "human_review")
+            holds[f"review-{attempt}"] = {"stage": "review", "attempt": attempt, "published": published}
+        self.db.set_resume(KEY, {"suite_hold": holds})
+        forge = FakeForge()
+        engine._sync_suite_holds(forge, self.db, [{"issue_key": KEY, "human_review": False}], NOW.isoformat())
+        self.assertEqual([s.outcome for s in self.db.segments(KEY)], ["done", "human_review"])
+        self.assertEqual(self.db.resume(KEY)["suite_hold"], {"review-2": {**holds["review-2"], "published": True}})
+        self.assertTrue(self.db.items()[0].human_review)
+
     def test_accepting_suite_hold_preserves_human_review_performance_after_restart(self):
         forge = self.suite_run()
         def hold(number):

@@ -880,6 +880,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([a.persona for a in actions], ["critic", "security"])
         self.assertEqual([r[3] for r in self.launched], ["critic", "security"])
         self.assertEqual([s.persona for s in self.db.segments(KEY)], ["critic", "security"])
+        self.assertEqual([s.agent_type for s in self.db.segments(KEY)], ["", ""])
 
     def test_entering_a_panel_writes_the_stage_only_once(self):
         self.p.personas["security"] = policy.Persona("security", "reviews", "example")
@@ -891,6 +892,16 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("pending_stage", self.db.resume(KEY))
         self.assertEqual([s.persona for s in self.db.segments(KEY) if s.stage == "review"], ["critic", "security"])
 
+
+    def test_failed_panel_stage_write_stops_later_reviewers_in_the_same_pass(self):
+        self.p.personas["security"] = policy.Persona("security", "reviews", "example")
+        self.p.stages["review"].policy["reviewers"] = ("critic", "security")
+        self.run_pass()
+        self.finish("implement")
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+        self.assertEqual([s.persona for s in self.db.segments(KEY) if s.stage == "review"], ["critic"])
+        self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "review", "expected": "implement"})
 
     def test_architect_request_posts_once_then_waits_for_a_current_head_reply(self):
         self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
@@ -911,6 +922,30 @@ class EngineTest(unittest.TestCase):
         self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
         self.forge.comments.append(SimpleNamespace(body="Architect: APPROVED " + tf.tma.HEAD, time=self.now.isoformat()))
         self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+
+    def test_partial_reply_uses_the_original_stored_request_and_dispatches_undisposed_work(self):
+        import json
+        self.p.stages["review"].policy["architect"] = True
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings(counts={"important": 2})
+        forged = reconcile.request_token(tf.tma.HEAD, [])
+        self.forge.comments.append(SimpleNamespace(author="worker", time=self.now.isoformat(),
+                                  body="Architect review requested: " + forged))
+        consult, = self.run_pass(architect_login="frank")
+        token = reconcile.request_token(consult.head, consult.findings)
+        original = self.db.resume(KEY)["architect_requests"]
+        self.assertEqual(original, {token: list(consult.findings)})
+        key = consult.findings[0]["finding_key"]
+        self.forge.comments.append(SimpleNamespace(author="frank", time=self.now.isoformat(),
+            body="Architect: CHANGES " + tf.tma.HEAD[:7] + "\n" + json.dumps({"dispositions": {key: "keep"}})))
+        action, = self.run_pass(architect_login="frank")
+        self.assertEqual((type(action), action.stage, action.finding_key),
+                         (reconcile.Dispatch, "implement", consult.findings[1]["finding_key"]))
+        self.assertEqual(self.db.resume(KEY)["architect_requests"], original)
+        self.assertEqual(len([n for n in self.forge.comments if getattr(n, "author", None) == "engine"]), 1)
 
     def test_a_consulting_work_stage_reads_the_architects_reply(self):
         self.p.personas["architect"] = policy.Persona("architect", "consults architecture", "example")
