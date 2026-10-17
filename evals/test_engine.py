@@ -105,7 +105,7 @@ class EngineTest(unittest.TestCase):
         limits.start()
         self.addCleanup(limits.stop)
 
-    def launch(self, key, stage, attempt, persona, agent_type=None):
+    def launch(self, key, stage, attempt, persona):
         self.launched.append((key, stage, attempt, persona))
         # A live fake worker must supply the run record the production Launch port now promises.
         data = self.db.resume(key) or {}
@@ -133,31 +133,37 @@ class EngineTest(unittest.TestCase):
         self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}),
                                  "review_findings": {"attempt": attempt, "counts": counts or {}}})
 
-    def test_an_undeclared_persona_records_no_agent_type(self):
+    def declare(self, text="- Agent: specialist task\n"):
         self.p.personas["builder"] = replace(self.p.personas["builder"], agent="specialist")
-        (self.root / "CLAUDE.md").write_text("## Coordinator\n- User: Robin\n- Agent: implementer task\n")
-        self.run_pass()
-        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
-        self.db.drop_segment(KEY, "implement", 1)
-        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
-        self.run_pass()
-        failed = self.db.segments(KEY)[0]
-        self.assertEqual(failed.outcome, "failed")
-        self.assertEqual(failed.agent_type, "")
+        (self.root / "CLAUDE.md").write_text(f"## Coordinator\n- User: Robin\n{text}")
 
-    def test_a_declared_agent_type_is_what_the_segment_records(self):
-        self.p.personas["builder"] = replace(self.p.personas["builder"], agent="specialist")
-        (self.root / "CLAUDE.md").write_text("## Coordinator\n- User: Robin\n- Agent: specialist task\n")
+    def test_the_segment_records_the_agent_type_the_launch_reports(self):
+        self.launch = mock.Mock(return_value=("used-model", "high", "specialist"))
         self.run_pass()
         self.assertEqual(self.db.segments(KEY)[0].agent_type, "specialist")
-        self.finish("implement")
-        (self.root / "CLAUDE.md").write_text(
-            "## Coordinator\n- User: Robin\n- Settings: `chief-of-stuff.toml`\n- Agent: reviewer task\n")
-        (self.root / "chief-of-stuff.toml").write_text(
-            '[lanes.code]\nstages = ["review"]\n[stages.review]\nagent = "reviewer"\n')
+        # A launch that reports no type (the default agent) leaves the segment's type empty.
+        self.db.drop_segment(KEY, "implement", 1)
+        self.launch = mock.Mock(return_value=("used-model", "high", None))
         self.run_pass()
-        review = next(s for s in self.db.segments(KEY) if s.stage == "review")
-        self.assertEqual(review.agent_type, "reviewer")
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
+
+    def test_a_failed_start_records_only_a_declared_agent_type(self):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.declare()
+        self.run_pass()
+        self.assertEqual((self.db.segments(KEY)[0].outcome, self.db.segments(KEY)[0].agent_type), ("failed", "specialist"))
+        self.db.drop_segment(KEY, "implement", 1)
+        self.declare("- Agent: implementer task\n")
+        self.run_pass()
+        self.assertEqual((self.db.segments(KEY)[0].outcome, self.db.segments(KEY)[0].agent_type), ("failed", ""))
+
+    def test_a_failed_start_with_an_unreadable_workspace_file_still_records_the_failure(self):
+        self.launch = mock.Mock(side_effect=RuntimeError("spawn failed"))
+        self.declare()
+        (self.root / "CLAUDE.md").write_bytes(b"\xff")
+        self.run_pass()
+        failed = self.db.segments(KEY)[0]
+        self.assertEqual((failed.outcome, failed.agent_type), ("failed", ""))
 
     def test_dispatch_review_merge_end_to_end(self):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
@@ -414,10 +420,10 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": stage, "attempt": 1})
         self.assertIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
 
-        def launch(key, launched_stage, attempt, persona, agent_type=None):
+        def launch(key, launched_stage, attempt, persona):
             self.assertNotIn("needs human", [x["name"] for x in gh.issues[1]["labels"]])
             self.assertFalse(self.db.items()[0].human_review)
-            return self.launch(key, launched_stage, attempt, persona, agent_type=agent_type)
+            return self.launch(key, launched_stage, attempt, persona)
 
         with mock.patch.object(self.forge.__class__, "write_stage",
                                side_effect=self.forge.write_stage) as write:
