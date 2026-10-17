@@ -727,7 +727,7 @@ class MainTest(unittest.TestCase):
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
         path = self.root / "settings.toml"
-        path.write_text(path.read_text() + '\n[workers]\nrules = ["Keep tests."]\n')
+        path.write_text(path.read_text() + 'rules = ["Keep tests."]\n')
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
