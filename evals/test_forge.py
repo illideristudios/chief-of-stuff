@@ -702,6 +702,18 @@ class StageWriteBackTest(unittest.TestCase):
                          [("github:example/app#3", "closed", "review", "merged"),
                           ("github:example/app#4", "open", "doing", "")])
 
+    def test_a_merged_snapshot_records_the_newest_main_landing_commit(self):
+        older = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "old",
+                 "mergeCommit": {"oid": "older"}}
+        newer = {"number": 22, "body": "Closes #3", "baseRefName": "main", "headRefOid": "new",
+                 "mergeCommit": {"oid": "squashed"}}
+        side = {"number": 30, "body": "Closes #3", "baseRefName": "release", "headRefOid": "side",
+                "mergeCommit": {"oid": "side"}}
+        gh = FakeGh(issues=[gh_issue(3, "Fix the parser", ["stage: review"], state="CLOSED")],
+                    prs=[], merged=[older, side, newer])
+        got = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
+        self.assertEqual(got[0].get("landing_sha"), "squashed")
+
     def test_a_closed_issue_stays_merged_when_an_open_follow_up_cites_it(self):
         gh = FakeGh(issues=[gh_issue(3, "Fix the parser", ["stage: review"], state="CLOSED")],
                     prs=[tma.pr(22, [])], merged=[tma.pr(21, [])], bodies={21: "Closes #3", 22: "Closes #3"})
