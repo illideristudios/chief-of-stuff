@@ -512,6 +512,9 @@ GIT_READS = {"status", "diff", "log", "show", "rev-parse", "ls-files", "ls-tree"
              "describe", "shortlog", "show-ref", "merge-base", "name-rev", "rev-list", "for-each-ref", "branch", "remote"}
 FORGE_READS = {"view", "list", "diff", "checks", "status", "item-list", "field-list", "trace"}
 RTK_READS = {"ls", "read", "grep", "find", "tree", "wc", "diff", "json", "deps", "env", "summary"}
+# #890: `sed -n` with a script of line-range prints only (`N`, `N,M`, `N,$`, then `p`): sed's w, e and r write, run
+# and read, and -i edits in place, so nothing else of sed is a read.
+SED_PRINTS = re.compile(r"\s*\d+(?:,(?:\d+|\$))?p(?:\s*;\s*\d+(?:,(?:\d+|\$))?p)*\s*;?\s*")
 
 
 def _segments(command: str) -> list[tuple[list[str], list[str]]]:
@@ -574,6 +577,9 @@ def _reads_only(words: list[str]) -> bool:
         if args[0] == "remote" and args[1:] and args[1] not in {"-v", "--verbose", "show", "get-url"}:
             return False
         return True
+    if name == "sed":
+        return len(args) >= 2 and args[0] == "-n" and bool(SED_PRINTS.fullmatch(args[1])) and not any(
+            a.startswith("-") for a in args[2:])
     if name in {"gh", "glab"}:
         return len(args) >= 2 and args[1] in FORGE_READS
     if name not in READERS:
@@ -584,6 +590,67 @@ def _reads_only(words: list[str]) -> bool:
     if name in {"rg", "ag"} and any(a.split("=", 1)[0] in {"--pre", "--pre-glob"} for a in args):
         return False  # --pre runs a preprocessor command on every file
     return True
+
+
+# #890: a match pattern names what to skip or select, not a path the command reads or writes.
+FIND_PATTERNS = {"-path", "-ipath", "-name", "-iname", "-wholename", "-iwholename", "-regex", "-iregex", "-lname", "-ilname"}
+GREP_PATTERNS = ("--exclude", "--exclude-dir", "--include", "--glob", "--iglob")
+
+
+def _patterns(words: list[str]) -> set[int]:
+    """The indexes of `words` that are find or grep match patterns, which the path check leaves alone."""
+    args = words[1:] if PurePosixPath(words[0]).name != "rtk" else words[2:]
+    offset = len(words) - len(args)
+    name = PurePosixPath(words[offset - 1]).name if offset else ""
+    hits = set()
+    for i, arg in enumerate(args, offset):
+        if name == "find" and i > offset and words[i - 1] in FIND_PATTERNS:
+            hits.add(i)
+        elif name in {"grep", "egrep", "fgrep", "rg", "ag"} and arg.startswith(GREP_PATTERNS):
+            hits.add(i)
+        elif name in {"rg", "ag"} and i > offset and words[i - 1] in {"-g", "--glob", "--iglob"}:
+            hits.add(i)
+    if name in {"grep", "egrep", "fgrep", "rg", "ag"} and not any(a in {"-e", "-f", "--regexp", "--file"}
+                                                                   or a.startswith(("--regexp=", "--file=")) for a in args):
+        # Without -e or -f, the first operand is the pattern; the rest are paths.
+        first = next((i for i, a in enumerate(args, offset) if not a.startswith("-") and i not in hits), None)
+        if first is not None:
+            hits.add(first)
+    return hits
+
+
+def _tree_write(words: list[str]) -> bool:
+    """#890: git writes confined to the worker's own tree and branch: `add` (its paths are checked in-tree after),
+    `commit` without --amend or --no-verify, and `switch -c` / `checkout -b` creating a new branch. The gate's denials
+    (protected branches, force, history rewrites) are checked before this."""
+    if PurePosixPath(words[0]).name != "git":
+        return False
+    args = words[1:]
+    leading = args[:next((i for i, a in enumerate(args) if not a.startswith("-")), len(args))]  # git's own options
+    if any(a.startswith(("-c", "--config-env", "--exec-path")) for a in leading) or any(
+            a in {"--ext-diff", "--textconv"} for a in args):
+        return False  # a configured program would run, as for reads
+    if any(a in {"-C", "--git-dir", "--work-tree"} or a.startswith(("--git-dir=", "--work-tree=")) for a in leading):
+        return False  # a write aimed at another repository or tree
+    try:
+        args = _global_args(args, set(), {"--no-pager"})
+    except Unparsed:
+        return False
+    if not args:
+        return False
+    verb, rest = args[0], args[1:]
+    if verb == "add":
+        return not any(a in {"--interactive", "-i", "--patch", "-p", "--edit", "-e"} for a in rest)
+    if verb == "commit":
+        # -n is --no-verify, also inside a cluster such as -an; a message may follow -m.
+        flags = [a for i, a in enumerate(rest) if a.startswith("-") and not (i and rest[i - 1] in {"-m", "--message"})]
+        return not any(a in {"--amend", "--no-verify", "--fixup", "--squash"} or a.startswith(("--amend", "--fixup=", "--squash="))
+                       or (not a.startswith("--") and "n" in a[1:]) for a in flags)
+    if verb in {"switch", "checkout"}:
+        return len(rest) == 2 and rest[0] == ("-c" if verb == "switch" else "-b") and not rest[1].startswith("-")
+    if verb == "worktree":
+        return rest[:1] == ["list"] and all(a in {"--porcelain", "-v", "--verbose", "-z"} for a in rest[1:])
+    return False
 
 
 def judgement(command: str, protected_branches: tuple[str, ...], cwd: str | None) -> tuple[str, str]:
@@ -605,9 +672,12 @@ def judgement(command: str, protected_branches: tuple[str, ...], cwd: str | None
         # Brace expansion builds paths the lexical check never sees: cat {.,/etc}/passwd (hole 3).
         if any("{" in word for word in [*raw, *targets]):
             return "trio", "a brace expansion can name a path outside the worktree"
-        if words and not _reads_only(words):
+        if words and not (_reads_only(words) or _tree_write(words)):
             return "trio", f"{PurePosixPath(words[0]).name} is not a known read-only command"
-        for arg in words[1:]:
+        patterns = _patterns(words) if words else set()
+        for i, arg in enumerate(words[1:], 1):
+            if i in patterns:
+                continue
             value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
             if not inside(value, cwd) or _in_git_dir(value):
                 return "trio", f"{value} is outside the worktree or in its .git"
