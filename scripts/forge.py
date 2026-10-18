@@ -953,6 +953,22 @@ class Forge:
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
 
+    def merge_commit(self, number: int) -> str | None:
+        """The commit a merged request landed as on its target, for §13 (c)'s record of engine merges; None when the
+        forge does not say (the check then cannot vouch for that commit, which holds)."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                code, out, _ = self.gh(["pr", "view", str(number), "-R", repo, "--json", "mergeCommit"])
+                return None if code else ((json.loads(out).get("mergeCommit") or {}).get("oid") or None)
+            got, _, err = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}", self._token(), backlog.TIMEOUT)
+            if err or not isinstance(got, dict) or got.get("state") != "merged":
+                return None
+            # A merge commit, else a squash commit, else a fast-forward that landed the request's own head.
+            return got.get("merge_commit_sha") or got.get("squash_commit_sha") or got.get("sha") or None
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:
         return backlog.create(self.home, title, body=body, labels=labels, token=self.token, commit=commit, gh=self.gh,

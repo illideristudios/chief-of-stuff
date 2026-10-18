@@ -146,24 +146,40 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIsInstance(unknown, Failure)
         self.assertEqual(unknown.kind, "unknown")
 
-    def test_a_default_branch_moved_outside_the_engine_holds_for_review(self):
-        record = {"tree": str(self.dir), "runtime": "codex", "default_branch": "main", "default_head": "a" * 40,
-                  "started_at": "2026-10-17T10:00:00+00:00"}
-        now = "2026-10-17T11:00:00+00:00"
+    def check(self, *, after, commits=(), recorded=(), fetch=0, rev_list=0):
+        """§13 (c) against a fake git: (fetch, ls-remote, rev-list) answers and the engine's recorded merges."""
+        record = {"tree": str(self.dir), "runtime": "codex", "default_branch": "main", "default_head": "a" * 40}
+        store = SimpleNamespace(items=lambda: [SimpleNamespace(issue_key="k"), SimpleNamespace(issue_key="other")],
+                                resume=lambda key: {"merges": [{"request": 2, "sha": s, "at": "t"} for s in recorded]}
+                                if key == "other" else {"review_findings": {}})
 
-        def store(*messages):
-            return SimpleNamespace(items=lambda: [SimpleNamespace(issue_key="k")],
-                                   log=lambda key: [SimpleNamespace(message=m, at=at) for m, at in messages])
-        with mock.patch.object(host_adapter, "default_head", return_value="a" * 40):
-            self.assertEqual(host_adapter.moved_outside_engine(store(), record, now), "")
-        with mock.patch.object(host_adapter, "default_head", return_value="b" * 40):
-            self.assertIn("moved", host_adapter.moved_outside_engine(store(), record, now))
-            self.assertEqual(host_adapter.moved_outside_engine(
-                store(("merged #2 at bbb", "2026-10-17T10:30:00+00:00")), record, now), "")
-            self.assertIn("moved", host_adapter.moved_outside_engine(
-                store(("merged #2 at bbb", "2026-10-17T09:00:00+00:00")), record, now))
-        with mock.patch.object(host_adapter, "default_head", return_value=""):
-            self.assertIn("cannot verify", host_adapter.moved_outside_engine(store(), record, now))
+        def git(args, cwd):
+            if args[0] == "fetch":
+                return fetch, ""
+            if args[0] == "ls-remote":
+                return (0, f"{after}\trefs/heads/main") if after else (0, "")
+            if args[0] == "rev-list":
+                return rev_list, "\n".join(commits)
+            raise AssertionError(args)
+        with mock.patch.object(host_adapter.make_worktree, "git_trusted", side_effect=git):
+            return host_adapter.moved_outside_engine(store, record, "now")
+
+    def test_an_unmoved_default_branch_or_only_engine_merges_pass(self):
+        self.assertEqual(self.check(after="a" * 40), "")
+        # Another issue's engine merge during the run is the engine's, and is excused by its recorded commit.
+        self.assertEqual(self.check(after="m" * 40, commits=["m" * 40], recorded=["m" * 40]), "")
+
+    def test_any_commit_the_engine_did_not_record_holds_and_is_named(self):
+        # A worker's own merge or push beside an engine merge of another issue must not be masked by it.
+        held = self.check(after="w" * 40, commits=["w" * 40, "m" * 40], recorded=["m" * 40])
+        self.assertIn("w" * 12, held)
+        self.assertNotIn("m" * 12, held)
+        self.assertIn("holding for human review", self.check(after="p" * 40, commits=["p" * 40]))
+
+    def test_an_unreadable_branch_or_range_holds(self):
+        self.assertIn("cannot verify", self.check(after="b" * 40, fetch=1))
+        self.assertIn("cannot verify", self.check(after=""))
+        self.assertIn("cannot list", self.check(after="b" * 40, rev_list=128))
 
     def test_an_unknown_host_has_no_adapter(self):
         with self.assertRaisesRegex(ValueError, "no host adapter"):

@@ -51,4 +51,11 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
         store.add_log(action.issue_key, f"merge refused: {exc}", at)
         return False
     store.add_log(action.issue_key, message, at)
-    return message.startswith("merged ")
+    merged = message.startswith("merged ")
+    if merged:
+        # §13 (c): a structured record of what the engine merged, so a non-Claude run's check can tell it apart.
+        sha = getattr(forge, "merge_commit", lambda number: None)(request.number)
+        data = dict(store.resume(action.issue_key) or {})
+        data["merges"] = [*data.get("merges", []), {"request": request.number, "sha": sha, "at": at}]
+        store.set_resume(action.issue_key, data)
+    return merged
