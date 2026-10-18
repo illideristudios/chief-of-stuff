@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 import tomllib
 from datetime import date
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
 from forge import project_option_ids  # noqa: E402
 import issue_gate  # noqa: E402
+from shell_setup import clean_env  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import WORKSPACE_FILES, ConfigError, parse_coordinator
@@ -37,6 +39,38 @@ def relative_dir(value: str) -> str:
     if not re.fullmatch(r"[A-Za-z0-9._/-]+", value):
         raise InitError(f"directory {value!r} contains unsupported characters")
     return value.rstrip("/") + "/"
+
+
+# What the engine writes under a workspace root once it runs, beside init's own files (#870).
+ENGINE_STATE = (".chief-of-stuff/", "store.db", "store.db-wal", "store.db-shm")
+
+
+def ignore_in_git(root: Path, names: list[str], dry: bool) -> str:
+    """#870 (Zach, 2026-10-18: "the init files should be gitignored in any repo"): add each name under `root` to its
+    repository's info/exclude, which git honours with no tracked change; "" outside a work tree or when all are there."""
+    def read(*args: str) -> str:
+        # Two path reads need no credentials, so git runs without the write env's (CodeQL: nothing secret reaches print).
+        try:
+            done = subprocess.run(["git", "-C", str(root), *args], env=clean_env(), capture_output=True, text=True,
+                                  timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return done.stdout.strip() if done.returncode == 0 else ""
+    top, path = read("rev-parse", "--show-toplevel"), read("rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    if not top or not path:
+        return ""
+    prefix = root.resolve().relative_to(Path(top).resolve()).as_posix()
+    entries = ["/" + (f"{prefix}/" if prefix != "." else "") + name for name in names]
+    exclude = Path(path)
+    lines = exclude.read_text().splitlines() if exclude.exists() else []
+    new = [entry for entry in dict.fromkeys(entries) if entry not in lines]
+    if not new:
+        return ""
+    if dry:
+        return f"would ignore in {exclude}: {', '.join(new)}"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text("\n".join([*lines, *new]) + "\n")
+    return f"ignored in {exclude}: {', '.join(new)}"
 
 
 def coordinator_block(*, user: str, timezone: str, daily_dir: str, worktrees: str,
@@ -210,7 +244,12 @@ def main(argv: list[str] | None = None) -> int:
                  backlog.Backlog(args.gitlab_host, args.gitlab_project, args.gitlab_token_env)
                  if args.gitlab_host else None)
         label_out, label_err = provision_kanban(forge, board, args.dry_run)
+        # A tracked CLAUDE.md cannot be ignored, so it is listed only when init creates it.
+        ignored = [settings.name, guidance.relative_to(root).as_posix(), relative_dir(args.daily_dir),
+                   relative_dir(args.worktrees), *ENGINE_STATE, *([] if claude.exists() else [claude.name])]
         if args.dry_run:
+            if note := ignore_in_git(root, ignored, dry=True):
+                print(note)
             print(f"would {'append to' if claude.exists() else 'create'}: {claude}\n{block}")
             print(f"would {'keep existing' if settings.exists() else 'create'}: {settings}")
             if not settings.exists():
@@ -228,6 +267,8 @@ def main(argv: list[str] | None = None) -> int:
             with claude.open("x") as fh:
                 fh.write("# Workspace\n\n" + block)
         install_guidance(root)
+        if note := ignore_in_git(root, ignored, dry=False):
+            print(note)
         if label_out:
             print(label_out)
         if label_err:

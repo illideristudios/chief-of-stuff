@@ -5,6 +5,7 @@ import io
 import json
 import os
 import shlex
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -52,6 +53,55 @@ class InitWorkspaceTest(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = init.main([*self.args, *forge_args, *extra])
         return code, out.getvalue(), err.getvalue()
+
+    def git(self, *args, cwd=None):
+        return subprocess.run(["git", *args], cwd=cwd or self.root, capture_output=True, text=True, check=True).stdout
+
+    def excluded(self):
+        return self.git("rev-parse", "--path-format=absolute", "--git-path", "info/exclude").strip()
+
+    def test_in_a_repository_init_ignores_its_files_and_the_engines(self):
+        # #870, Zach 2026-10-18: "the init files should be gitignored in any repo".
+        self.git("init", "-q")
+        (self.root / "README.md").write_text("mine\n")
+        code, out, err = self.run_init()
+        self.assertEqual(code, 0, err)
+        lines = Path(self.excluded()).read_text().splitlines()
+        for entry in ("/chief-of-stuff.toml", f"/{guidance.NAME}", "/daily/", "/worktrees/", "/.chief-of-stuff/",
+                      "/store.db", "/store.db-wal", "/store.db-shm", "/CLAUDE.md"):
+            self.assertIn(entry, lines)
+        (self.root / "store.db").write_text("")
+        self.assertEqual(self.git("status", "--porcelain").strip(), "?? README.md")
+        self.assertIn("ignored in", out)
+        self.assertEqual(init.ignore_in_git(self.root, ["chief-of-stuff.toml"], dry=False), "")  # added once
+
+    def test_a_tracked_claude_md_is_never_listed(self):
+        self.git("init", "-q")
+        (self.root / "CLAUDE.md").write_text("# Project\n")
+        self.git("add", "CLAUDE.md")
+        self.git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "c")
+        self.assertEqual(self.run_init()[0], 0)
+        self.assertNotIn("/CLAUDE.md", Path(self.excluded()).read_text().splitlines())
+        self.assertEqual(self.git("status", "--porcelain").strip(), "M CLAUDE.md")
+
+    def test_a_workspace_below_the_repository_root_is_anchored_at_its_path(self):
+        self.git("init", "-q")
+        sub = self.root / "projects" / "app"
+        sub.mkdir(parents=True)
+        self.assertIn("/projects/app/chief-of-stuff.toml",
+                      init.ignore_in_git(sub, ["chief-of-stuff.toml"], dry=False))
+        self.assertIn("/projects/app/chief-of-stuff.toml", Path(self.excluded()).read_text().splitlines())
+
+    def test_dry_run_names_what_it_would_ignore_and_writes_nothing(self):
+        self.git("init", "-q")
+        before = Path(self.excluded()).read_text() if Path(self.excluded()).exists() else ""
+        code, out, _ = self.run_init("--dry-run")
+        self.assertEqual(code, 0)
+        self.assertIn("would ignore in", out)
+        self.assertEqual(Path(self.excluded()).read_text() if Path(self.excluded()).exists() else "", before)
+
+    def test_outside_git_nothing_is_ignored(self):
+        self.assertEqual(init.ignore_in_git(self.root, ["chief-of-stuff.toml"], dry=False), "")
 
     def test_no_forge_choice_refuses_with_setup_and_writes_nothing(self):
         err = io.StringIO()
