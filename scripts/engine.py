@@ -59,6 +59,8 @@ def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
         if data.get("verified_landing") is True:
             continue
         data["verified_landing"] = True
+        if head := dict(facts.landing_heads).get(key):
+            data["verified_landing_head"] = head
         store.set_resume(key, data)
 
 

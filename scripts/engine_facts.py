@@ -188,6 +188,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     tree_claims: list[tuple[str, tuple]] = []
     progress: list[tuple[str, datetime | None]] = []
     suite_on_main: list[tuple[str, bool | None]] = []
+    recorded_trees: dict[str, Path] = {}
     pipeline = None
     try:
         if callable(getattr(forge, "branch_head", None)):
@@ -208,6 +209,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
         if state is None or state.dirty is None:
             unreadable.append(segment.issue_key)
         if state is not None:
+            recorded_trees[segment.issue_key] = tree
             tree_rows.append((segment.issue_key, state))
             names.append((segment.issue_key, tree.name))
             tree_claims.append((segment.issue_key, (Claim(segment.issue_key, flag is not False,
@@ -229,19 +231,23 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     merged = [item.issue_key for item in store.items()
               if item.forge_state == "closed" and item.merge_state == "merged"]
     pending, remembered = [], []
+    landing_heads = {}
     for key in merged:
         data = store.resume(key)
         if isinstance(data, dict) and data.get("verified_landing") is True:
             remembered.append(key)
+            if head := data.get("verified_landing_head"):
+                landing_heads[key] = head
         else:
             pending.append(key)
     landings = {}
     landing_errors = {}
     if pending and pipeline is not None and callable(getattr(forge, "landings", None)):
         try:
-            landings = forge.landings(pipeline, pending, errors=landing_errors)
+            landings = forge.landings(pipeline, pending, errors=landing_errors, heads=landing_heads)
         except (ForgeError, OSError, ValueError, TypeError) as exc:
             landing_errors.update((key, str(exc)) for key in pending)
+    local_on_main = dict(on_main)
     for key in pending:
         landed, suite = landings.get(key, (None, None))
         on_main.append((key, landed))
@@ -249,6 +255,11 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     for key in remembered:
         on_main.append((key, True))
         suite_on_main.append((key, True))
+    landed_trees = []
+    for key, head in landing_heads.items():
+        if key in recorded_trees:
+            code, local_head = git_trees.git(["rev-parse", "HEAD"], recorded_trees[key])
+            landed_trees.append((key, code == 0 and (local_head == head or local_on_main.get(key) is True)))
     # Read after liveness, using the same recorded-session selector as worker.collect.
     suites = []
     for item in store.items():
@@ -264,6 +275,7 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
                  asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
                  changed=tuple(changed), unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
+                 landing_heads=tuple(landing_heads.items()), landed_trees=tuple(landed_trees),
                  trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),
                  suites=tuple(suites), require_green=require_green)
