@@ -1,5 +1,7 @@
-"""Escaping and validation shared by the HTML-fragment charts (gantt.py, columns.py) and the pages' links and tab bar.
-It imports nothing from the plugin, so each chart lifts out with this file and no other."""
+"""Shared HTML escaping, links, theme and tab bar.
+
+Charts use this helper without importing page, workspace or third-party modules.
+"""
 
 from __future__ import annotations
 
@@ -61,11 +63,23 @@ nav.tabs .badge{font:700 11.5px ui-monospace,SFMono-Regular,Menlo,monospace;lett
 """
 
 
+PROSE_CSS = """
+.prose{min-width:0;overflow-wrap:anywhere}
+.prose>:first-child{margin-top:0}.prose>:last-child{margin-bottom:0}
+.prose p+p{margin-top:6px}
+.prose pre{overflow-x:auto;padding:10px;background:var(--bg);border-radius:4px}
+.prose pre code{white-space:pre;background:none;padding:0}
+.prose table{display:block;overflow-x:auto;border-collapse:collapse;max-width:100%}
+.prose th,.prose td{border:1px solid var(--line);padding:4px 8px}
+.prose img{max-width:100%}
+"""
+
+
 def theme() -> str:
     """The vendored theme's CSS, to sit at the top of a page's own `<style>` block, ahead of the page's rules —
     cascade order (theme first, page rules second) is all that decides what wins while the pages keep their own look.
     One block per page, as the tests that slice the pages' CSS expect; the comment marks where the theme ends."""
-    return THEME_PATH.read_text() + "\n/* the canonical theme ends here; the page's own rules follow */\n"
+    return THEME_PATH.read_text() + PROSE_CSS + "\n/* the canonical theme ends here; the page's own rules follow */\n"
 
 
 def tab_bar(tab: str, pending: int, parent: bool = False, since: tuple[int, str] = (0, ""),

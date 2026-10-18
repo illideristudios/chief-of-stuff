@@ -24,6 +24,7 @@ from task_forge import PageData, source_key
 from fragment import issue_href, issue_page_name
 from decision_page import HEAD
 from fragment import href, tab_bar
+from page_common import markdown_blocks
 from issue_page import _paths, _shared, anchor, inputs, put
 from tracker import TRAILING_NUMBER, parse_tracker
 from settings import Graph
@@ -64,7 +65,7 @@ table.split .lno,table.split .rno{width:40px;color:var(--muted);text-align:right
 table.split .rno{border-left:1px solid var(--line)} table.split .left,table.split .right{white-space:pre;overflow:hidden;text-overflow:ellipsis}
 td.left.del{background:color-mix(in srgb,var(--dl) 12%,transparent)} td.right.add{background:color-mix(in srgb,var(--stage-review) 12%,transparent)}
 td.empty{background:repeating-linear-gradient(135deg,var(--ref-bg) 0 4px,var(--surface) 4px 8px)}
-tr.note td{padding:4px 14px 8px 100px;font-family:"Alegreya Sans",system-ui,sans-serif}
+tr.note>td{padding:4px 14px 8px 100px;font-family:"Alegreya Sans",system-ui,sans-serif}
 .nt{background:var(--surface);border:1px solid var(--line);border-top:3px solid var(--stage-pr);border-radius:5px;padding:7px 12px;margin:4px 0;font-size:13px;line-height:1.45;white-space:normal}
 .nt.resolved{border-top-color:var(--stage-review)} .nt p{color:var(--fg)}
 @media (max-width:760px){.src{grid-template-columns:minmax(0,1fr)} ul.files{position:static}}
@@ -127,11 +128,11 @@ def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._c
         return [], f"{type(e).__name__}: {e}"
 
 
-def _note(n: Note, now: datetime) -> str:
+def _note(n: Note, now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> str:
     t = n.thread
     when = f" · {t.at.astimezone(now.tzinfo):%H:%M}" if t.at else ""
     return (f'<div class="nt{" resolved" if t.resolved else ""}"><span><b>{"Resolved" if t.resolved else "Open"} thread · '
-            f'{escape(t.author)}{when}</b> · <a {href(t.url)}>thread</a></span><p>{escape(t.body)}</p></div>')
+            f'{escape(t.author)}{when}</b> · <a {href(t.url)}>thread</a></span><div class="prose">{markdown_blocks(t.body, linker.resolve)}</div></div>')
 
 
 class File:
@@ -193,7 +194,7 @@ def _count(a: int, d: int) -> str:
                                   f'<span class="minus">−{d}</span>' if d else ""))) or "+0"
 
 
-def _rows(f: File, mine: list[Note], now: datetime) -> tuple[str, list[Note]]:
+def _rows(f: File, mine: list[Note], now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> tuple[str, list[Note]]:
     """The file's diff rows, each line followed by the notes on it; and the notes on no shown line."""
     out, left = [], list(mine)
     for kind, o, n, tx in f.rows:
@@ -204,7 +205,7 @@ def _rows(f: File, mine: list[Note], now: datetime) -> tuple[str, list[Note]]:
         out.append(f'<tr class="{kind}"><td class="o">{o}</td><td class="n">{n}</td><td class="sign">{sign}</td>'
                    f'<td class="tx">{escape(tx)}</td></tr>')
         on = [x for x in left if x.line is not None and (x.line == n if x.side == "new" else x.line == o)]
-        out += [f'<tr class="note"><td colspan="4">{_note(x, now)}</td></tr>' for x in on]
+        out += [f'<tr class="note"><td colspan="4">{_note(x, now, linker)}</td></tr>' for x in on]
         left = [x for x in left if x not in on]
     return "\n".join(out), left
 
@@ -215,7 +216,7 @@ def _change(ref: str, sources: board_sources.Sources) -> board_sources.Change | 
     return min((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2), default=None)
 
 
-def _split(f: File, mine: list[Note], now: datetime) -> str:
+def _split(f: File, mine: list[Note], now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> str:
     """The old side left, the new side right; within a change, removed and added lines pair row by row. A note follows
     the row holding its line."""
     def side(row, cls: str) -> str:
@@ -228,7 +229,7 @@ def _split(f: File, mine: list[Note], now: datetime) -> str:
 
     def row(left, right) -> None:
         out.append("<tr>" + side(left, "left") + side(right, "right") + "</tr>")
-        out.extend(f'<tr class="note"><td colspan="4">{_note(x, now)}</td></tr>' for x in mine if x.line is not None and (
+        out.extend(f'<tr class="note"><td colspan="4">{_note(x, now, linker)}</td></tr>' for x in mine if x.line is not None and (
             (x.side == "old" and left and x.line == left[1]) or (x.side == "new" and right and x.line == right[2])))
 
     def flush():
@@ -261,8 +262,10 @@ LAYOUT = ('  <div class="seg" role="group" aria-label="Diff layout">'
 def render(number: int | str, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            graph: Graph | None = None, pages: Path | None = None, root: Path | None = None,
            notes: list[Note] | None = None, notes_error: str = "", pending: int = 0,
-           navigation: dict | None = None, db: PageData | None = None) -> str | None:
+           navigation: dict | None = None, db: PageData | None = None,
+           forge: backlog.Backlog | backlog.GitHubBacklog | None = None) -> str | None:
     """The page, or None when no task in `trackers` or the store names issue `number`. `notes` are the change's review threads."""
+    linker = decision_page.Linker(forge, root)
     identity = str(number)
     full_key = identity if "#" in identity else None
     numeric = int(identity.rpartition("#")[2]) if full_key else int(identity)
@@ -319,13 +322,13 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
         if not f.rows:
             continue
         on = [x for x in notes if x.path == f.path]
-        rows, off = _rows(f, on, now)
+        rows, off = _rows(f, on, now, linker)
         notes = [x for x in notes if x.path != f.path]
-        tables.append(f'    <div class="card"><h3>{escape(f.path)}</h3>\n' + "".join(_note(x, now) for x in off)
+        tables.append(f'    <div class="card"><h3>{escape(f.path)}</h3>\n' + "".join(_note(x, now, linker) for x in off)
                       + f'    <table class="diff" id="{escape(anchor(f.path))}" data-path="{escape(f.path)}">\n{rows}\n    </table>\n'
-                      f'    <table class="split" data-split-path="{escape(f.path)}">\n{_split(f, [x for x in on if x not in off], now)}\n    </table></div>')
+                      f'    <table class="split" data-split-path="{escape(f.path)}">\n{_split(f, [x for x in on if x not in off], now, linker)}\n    </table></div>')
     if notes:  # threads on files the page shows no diff of
-        tables.insert(0, '    <div class="card">' + "".join(_note(x, now) for x in notes) + "</div>")
+        tables.insert(0, '    <div class="card">' + "".join(_note(x, now, linker) for x in notes) + "</div>")
     if notes_error:
         tables.insert(0, f'    <p class="card">Review notes unavailable: {escape(notes_error)}</p>')
     if not change:
@@ -356,5 +359,5 @@ def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None
     found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")
     ctx = decision_page.context(root, now.date().isoformat())
     page = render(number, trackers, sources, now, settings.graph, pages_dir, root, found, error,
-                  decision_page.pending_count(pages_dir, ctx), navigation, db=db)
+                  decision_page.pending_count(pages_dir, ctx), navigation, db=db, forge=cfg.backlog)
     return put(pages_dir / issue_page_name(number, source=True), page)

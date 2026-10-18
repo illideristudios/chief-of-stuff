@@ -20,8 +20,9 @@ import flow_chart
 from clock import parse_stamp
 from task_forge import PageData, source_key
 import tracker_log
-from decision_page import HEAD, _md, _section, context, entries, held_refs, span, write_if_changed
+from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, write_if_changed
 from fragment import href, tab_bar, issue_href, issue_page_name
+from page_common import markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
@@ -49,7 +50,7 @@ header .chip.needs-input{color:var(--dl);border-color:var(--dl)}
 .fl .path{font-family:ui-monospace,monospace;overflow-wrap:anywhere} .fl .d{font-variant-numeric:tabular-nums;color:var(--muted)}
 .fl.total{border-top:1px solid var(--line);margin-top:4px;padding-top:6px}
 .rv{display:grid;grid-template-columns:74px minmax(0,1fr);gap:2px 10px;padding:6px 0;font-size:13px}
-.rv+.rv{border-top:1px dotted var(--line)} .rv p{grid-column:2;margin:0}
+.rv+.rv{border-top:1px dotted var(--line)} .rv>.prose{grid-column:2;margin:0}
 </style>
 """
 ACCEPTANCE = re.compile(r"(?im)^#{1,6}[ \t]*acceptance\b.*$")
@@ -142,7 +143,7 @@ def _files(c: board_sources.Change, changes, number: int) -> str:
     return _section(f"Files changed · {len(rows) - 1 - bool(c.stats)}", '    <div class="card">\n' + "\n".join(rows) + "\n    </div>")
 
 
-def _review(c: board_sources.Change, now: datetime) -> str:
+def _review(c: board_sources.Change, now: datetime, linker: Linker = Linker()) -> str:
     """REVIEW: open threads, then resolved, each newest first."""
     if not c.threads:
         return _section("Review", f'    <div class="card"><p>No review threads on {escape(c.ref)}.</p></div>')
@@ -152,13 +153,13 @@ def _review(c: board_sources.Change, now: datetime) -> str:
         when = f" · {_clock(t.at.astimezone(now.tzinfo), now)}" if t.at else ""
         link = f' · <a {href(t.url)}>thread</a>' if t.url else ""
         rows.append(f'      <div class="rv"><span class="mk{" passed" if t.resolved else ""}">{"Resolved" if t.resolved else "Open"}</span>'
-                    f"<span><b>{escape(t.author)}</b>{when}{link}</span><p>{escape(t.body)}</p></div>")
+                    f"<span><b>{escape(t.author)}</b>{when}{link}</span><div class=\"prose\">{markdown_blocks(t.body, linker.resolve)}</div></div>")
     resolved = sum(t.resolved for t in c.threads)
     return _section(f"Review · {len(c.threads) - resolved} open · {resolved} resolved",
                     '    <div class="card">\n' + "\n".join(rows) + "\n    </div>")
 
 
-def _acceptance(issue: board_sources.Issue | None) -> str:
+def _acceptance(issue: board_sources.Issue | None, linker: Linker = Linker()) -> str:
     """ACCEPTANCE: the bullets under the body's "Acceptance" heading, up to the next heading; `[x]` is met."""
     m = ACCEPTANCE.search(issue.body) if issue else None
     met = []
@@ -170,7 +171,7 @@ def _acceptance(issue: board_sources.Issue | None) -> str:
     if not met:
         return _section("Acceptance", '    <div class="card"><p>No acceptance criteria in the issue.</p></div>')
     rows = "\n".join(f'      <div class="chk"><span class="mk{" passed" if ok else ""}">{"met" if ok else "not met"}</span>'
-                     f"<span>{_md(what)}</span></div>" for ok, what in met)
+                     f"<span>{markdown_inline(what, linker.resolve)}</span></div>" for ok, what in met)
     return _section(f"Acceptance · {sum(ok for ok, _ in met)} of {len(met)} met", f'    <div class="card">\n{rows}\n    </div>')
 
 
@@ -226,6 +227,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
+    linker = Linker(cfg.backlog, root)
     today_tasks = parse_tracker(trackers[-1][1]).tasks if trackers else known
     ends = {t.item: end for t in today_tasks
             if t.kind != "done" and (end := _resolve_due(t.due, cfg, now.date()))}
@@ -273,7 +275,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             runs[-1][2] = m
             what[m] = f"ended {escape(ENDED.get(m.stage, 'ended'))} · {escape(w[3])} · {escape(runs[-1][1][4])}"
     steps = "\n".join(f'      <div class="step"><span class="when">{_clock(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'
-                      f"</span><span>{what.get(m) or _md(m.line.split(' ', 2)[2])}</span></div>" for m in log)
+                      f"</span><span>{what.get(m) or markdown_inline(m.line.split(' ', 2)[2], linker.resolve)}</span></div>" for m in log)
     # (#200, #220) the same clipped rows end both a still-running worker's span and elapsed, below
     end = max((g.end for _, r in rows for g in r.segments if g.kind == "done"), default=now)
     lines, spans = [], []
@@ -341,11 +343,12 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
             f'    <span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>\n  </header>\n\n'
+            + (_section("Issue", f'<div class="card prose">{markdown_blocks(issue.body, linker.resolve)}</div>') if issue and issue.body else "")
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'
             + _section("How it got here", f'    <div class="card timeline">\n{steps}\n    </div>' if steps else '    <div class="card"><p>No Log lines yet.</p></div>')
-            + (_review(change, now) if change else "")
-            + '  </div>\n  <div class="col">\n' + _acceptance(issue)
+            + (_review(change, now, linker) if change else "")
+            + '  </div>\n  <div class="col">\n' + _acceptance(issue, linker)
             + workers_html
             + _section("References", f'    <div class="card refs">\n{refs_html}\n    </div>')
             + "  </div>\n  </div>\n</main>\n</body>\n</html>\n")

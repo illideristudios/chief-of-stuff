@@ -31,6 +31,7 @@ from workspace import (Config, ConfigError, daily_trackers, looked_before, read_
 import board_sources  # noqa: E402
 import columns  # noqa: E402
 import decision_page  # noqa: E402
+from page_common import markdown_inline  # noqa: E402
 from decision_page import write_if_changed  # noqa: E402
 from fragment import FONTS, TAB_CSS, tab_bar, theme, issue_href  # noqa: E402
 import flow_chart  # noqa: E402
@@ -390,8 +391,10 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops)
     decisions_html = _render_store_decisions(store_decisions)
+    inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
-                  f'{columns.render(build_cols)}{decisions_html}</section>\n')
+                  f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
+                  f'{decisions_html}</section>\n')
     known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
