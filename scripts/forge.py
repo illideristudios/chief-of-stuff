@@ -664,10 +664,35 @@ class Forge:
                 forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
         return [ref for ref in refs if _LOCAL_CLOSE.fullmatch(ref)]
 
-    def _merged_closes(self) -> set[int]:
-        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+    def _merged_index(self) -> tuple[set[int], dict[int, str]]:
+        """Issue numbers closed by a recent merge, and each issue's newest main merge commit.
+
+        The commit is the same one `landings` proves. A merge onto another base stays in the
+        closed set and has no landing commit.
+        """
         try:
-            return {int(ref[1:]) for row in self._merged_requests() for ref in self._closed_refs(row)}
+            closed: set[int] = set()
+            newest: dict[int, tuple[int, str]] = {}
+            for row in self._merged_requests():
+                refs = self._closed_refs(row)
+                for ref in refs:
+                    closed.add(int(ref[1:]))
+                if row.get("baseRefName" if self.github else "target_branch") != "main":
+                    continue
+                number = row.get("number" if self.github else "iid")
+                if type(number) is not int:
+                    continue
+                commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
+                          row.get("squash_commit_sha") or row.get("merge_commit_sha") or row.get("sha"))
+                if not isinstance(commit, str) or not commit:
+                    continue
+                for ref in refs:
+                    iid = int(ref[1:])
+                    if iid not in newest or number >= newest[iid][0]:
+                        newest[iid] = (number, commit)
+            return closed, {iid: sha for iid, (_, sha) in newest.items()}
+        except ForgeError:
+            raise
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
 
@@ -802,7 +827,7 @@ class Forge:
         if not got.ok:
             raise ForgeError(f"issues: {got.error}")
         # shortcut: only the REQUEST_LIMIT most recently updated closed issues join the open operational set,
-        # matching _merged_closes's bounded window. Page closed history if a rebuild needs every completed issue.
+        # matching _merged_index's bounded window. Page closed history if a rebuild needs every completed issue.
         closed = self.issues(state=backlog.CLOSED, limit=forge_review.REQUEST_LIMIT)
         if not closed.ok:
             raise ForgeError(f"closed issues: {closed.error}")
@@ -812,7 +837,7 @@ class Forge:
             for ref in r.closes:
                 if _LOCAL_CLOSE.fullmatch(ref):
                     latest[int(ref[1:])] = r
-        merged = self._merged_closes()
+        merged, landing_shas = self._merged_index()
         statuses: dict[str, str | None] = {}
         if self.kanban is not None and self.kanban.github_project is not None and self.github:
             statuses, error = project_items(self.gh, self.kanban.github_project)
@@ -831,6 +856,9 @@ class Forge:
                 snap["review_state"] = r.approval if r else ""
             if one.state == backlog.CLOSED and one.iid in merged:  # an open follow-up does not undo a merge
                 snap["merge_state"] = "merged"
+                sha = landing_shas.get(one.iid)
+                if sha:
+                    snap["landing_sha"] = sha
             elif r:
                 snap["merge_state"] = r.verdict
             else:

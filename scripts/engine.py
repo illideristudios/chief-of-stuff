@@ -45,7 +45,26 @@ def _resume(store: Any, key: str) -> dict:
     return dict(data) if isinstance(data, dict) else {}
 
 
-def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
+def _landing_shas(snapshots: list) -> dict[str, str]:
+    return {row["issue_key"]: sha for row in snapshots
+            if isinstance(sha := row.get("landing_sha"), str) and sha}
+
+
+def _invalidate_landing(store: Any, shas: dict[str, str]) -> None:
+    """A memo names the merge commit it proved. Reopen or a different commit drops it."""
+    for item in store.items():
+        data = _resume(store, item.issue_key)
+        memo = data.get("verified_landing")
+        if memo is None:
+            continue
+        closed = item.forge_state == "closed" and item.merge_state == "merged"
+        sha = shas.get(item.issue_key)
+        if not closed or (isinstance(sha, str) and memo != sha):
+            data.pop("verified_landing", None)
+            store.set_resume(item.issue_key, data)
+
+
+def _remember_verified(store: Any, facts: reconcile.Facts, shas: dict[str, str]) -> None:
     """A closed merge proved on main with green CI is not re-read on later gathers."""
     on_main = dict(facts.on_main)
     suite = dict(facts.suite_on_main)
@@ -56,9 +75,11 @@ def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
         if on_main.get(key) is not True or suite.get(key) is not True:
             continue
         data = _resume(store, key)
-        if data.get("verified_landing") is True:
+        memo = data.get("verified_landing")
+        if memo is True or (isinstance(memo, str) and memo):
             continue
-        data["verified_landing"] = True
+        sha = shas.get(key)
+        data["verified_landing"] = sha if isinstance(sha, str) and sha else True
         store.set_resume(key, data)
 
 
@@ -293,6 +314,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
+    landing = _landing_shas(snapshots)
+    _invalidate_landing(store, landing)
 
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
@@ -360,7 +383,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
-    _remember_verified(store, facts)
+    _remember_verified(store, facts, landing)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),

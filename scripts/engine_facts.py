@@ -231,7 +231,8 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     pending, remembered = [], []
     for key in merged:
         data = store.resume(key)
-        if isinstance(data, dict) and data.get("verified_landing") is True:
+        memo = data.get("verified_landing") if isinstance(data, dict) else None
+        if memo is True or (isinstance(memo, str) and memo):
             remembered.append(key)
         else:
             pending.append(key)

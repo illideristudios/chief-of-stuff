@@ -256,6 +256,41 @@ class EngineTest(unittest.TestCase):
         self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
         self.assertIn(OTHER, self.cleanup.call_args.kwargs["completed"])
 
+    def test_reopen_clears_a_verified_landing(self):
+        self.forge.rows[0].update(forge_state="open", merge_state="")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        self.db.set_resume(KEY, {"verified_landing": True, "keep": 1})
+        self.run_pass()
+        self.assertEqual(self.db.resume(KEY).get("keep"), 1)
+        self.assertNotIn("verified_landing", self.db.resume(KEY))
+
+    def test_a_new_merge_commit_is_not_covered_by_an_old_landing_memo(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="new-sha")
+        self.db.upsert_item(KEY, stage="merge", forge_state="closed", merge_state="merged")
+        self.db.set_resume(KEY, {"verified_landing": True})
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="failed", ref="main")
+        seen = []
+
+        def landings(pipeline, keys, **kwargs):
+            seen.append(tuple(keys))
+            return {key: (False, False) for key in keys}
+
+        self.forge.landings = landings
+        self.run_pass()
+        self.assertEqual(seen, [(KEY,)])
+        self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
+        self.assertNotIn("verified_landing", self.db.resume(KEY) or {})
+
+    def test_a_proved_landing_is_remembered_as_its_merge_commit(self):
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged", landing_sha="squashed")
+        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed", ref="main")
+        self.forge.landings = lambda pipeline, keys, **kwargs: {key: (True, True) for key in keys}
+        self.run_pass()
+        self.assertEqual(self.db.resume(KEY)["verified_landing"], "squashed")
+        self.forge.landings = lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("reread"))
+        self.run_pass()
+        self.assertIn(KEY, self.cleanup.call_args.kwargs["completed"])
+
     def test_landing_comparison_failures_reach_the_deduplicated_wait_log(self):
         self.forge.rows[0].update(forge_state="closed", merge_state="merged")
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
