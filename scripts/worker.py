@@ -101,23 +101,25 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
 
 
 def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
-           models: dict[str, tuple[ModelEntry, ...]], at: str) -> ModelEntry:
-    """The entry this start launches: the stage rotation's first Claude entry, or the next one after a quota stop
-    (ledger D10); the persona's model without a Claude entry. 1.0 launches Claude only, so other hosts are logged
-    as skipped, never a failure, until 1.1 (#701)."""
+           models: dict[str, tuple[ModelEntry, ...]], at: str,
+           launchable: Callable[[str], bool] = lambda runtime: runtime == "claude") -> ModelEntry:
+    """The entry this start launches: the stage rotation's first launchable entry, or the next one after a quota
+    stop, across runtimes (ledger D10, #701); the persona's model when none is launchable. An entry this engine
+    cannot launch here is logged as skipped, never a failure."""
     rotation = models.get(TASK_CLASS.get(stage, stage), ())
-    claude = tuple(entry for entry in rotation if entry.runtime == "claude")
-    chosen = claude[0] if claude else ModelEntry("claude", actor.model, actor.effort or None)
+    usable = tuple(entry for entry in rotation if launchable(entry.runtime))
+    chosen = usable[0] if usable else ModelEntry("claude", actor.model, actor.effort or None)
     previous = data.get("model", {}).get(stage)
-    if claude and "quota" in data and previous:
+    if usable and "quota" in data and previous:
         try:
-            chosen = pick(claude, after=previous)
+            chosen = pick(usable, after=previous)
         except SettingsError:
-            pass  # every Claude entry has stopped; the quota wait is over, so start from the first again
+            pass  # every launchable entry has stopped; the quota wait is over, so start from the first again
     skipped = [str(entry) for entry in (rotation[:rotation.index(chosen)] if chosen in rotation else rotation)
-               if entry.runtime != "claude"]
+               if entry not in usable]
     if skipped:
-        store.add_log(key, f"skipped {', '.join(skipped)}: the engine launches Claude only until 1.1 (#701)", at)
+        store.add_log(key, f"skipped {', '.join(skipped)}: not launchable here; a non-Claude host needs its CLI on "
+                           "PATH and a forge-protected default branch (§13, #701)", at)
     return chosen
 
 
@@ -253,7 +255,22 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
            "CHIEF_OF_STUFF_WORKER": tree.name,
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
-    chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat())
+    protects: list[bool] = []  # the forge is asked once, and only when a non-Claude entry is considered
+
+    def launchable(runtime: str) -> bool:
+        if runtime == "claude":
+            return True
+        if not host_adapter.available(runtime):
+            return False
+        if not protects:
+            try:
+                # A forge port without the read cannot vouch for protection; unknown is never safe (ledger F3).
+                protects.append(bool(getattr(forge, "default_branch_protected", lambda: False)()))
+            except ForgeError:
+                protects.append(False)
+        return protects[0]
+
+    chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat(), launchable)
     request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)

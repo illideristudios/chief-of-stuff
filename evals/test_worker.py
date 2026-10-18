@@ -315,6 +315,53 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
         self.assertIn("trunk moved", " ".join(entry.message for entry in self.db.log(KEY)))
 
+    ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
+                '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
+
+    def launch_rotation(self, on_path=("codex", "agent", "agy"), protected=True, data=None):
+        """#701: a launch from the owner's mixed rotation; returns (used, the host the start went to)."""
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(self.ROTATION)
+        if data is not None:
+            self.db.set_resume(KEY, data)
+        self.forge.default_branch_protected = lambda: protected
+        went = []
+
+        def host(runtime, request, run_dir, env):
+            went.append(runtime)
+            return self.start(request, run_dir), ""
+
+        def claude(request, run_dir, **kwargs):
+            went.append("claude")
+            return self.start(request, run_dir)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "resolve", side_effect=lambda b: f"/bin/{b}" if b in on_path else None), \
+             mock.patch.object(worker.host_adapter, "default_head", return_value="d" * 40), \
+             mock.patch.object(worker.host_adapter, "start", side_effect=host), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=claude), \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            used = self.launch()
+        return used, went[0]
+
+    def test_the_first_launchable_entry_of_any_runtime_launches(self):
+        used, went = self.launch_rotation()
+        self.assertEqual((used, went), (("gpt-6.1-sol", "high", "codex"), "codex"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "codex:gpt-6.1-sol@high"})
+
+    def test_a_host_whose_cli_is_missing_is_skipped_for_the_next_entry(self):
+        used, went = self.launch_rotation(on_path=("agent", "agy"))
+        self.assertEqual((used, went), (("auto", "", "cursor"), "cursor"))
+        self.assertIn("codex:gpt-6.1-sol@high", " ".join(e.message for e in self.db.log(KEY)))
+
+    def test_without_a_protected_default_branch_only_claude_launches(self):
+        used, went = self.launch_rotation(protected=False)
+        self.assertEqual((used, went), (("sonnet", "high"), "claude"))
+
+    def test_a_quota_stop_advances_across_runtimes(self):
+        used, went = self.launch_rotation(data={"quota": {"reset": "later", "retry_at": NOW.isoformat()},
+                                                "model": {"implement": "codex:gpt-6.1-sol@high"}})
+        self.assertEqual(went, "cursor")
+
     def test_a_successful_launch_clears_the_quota_wait(self):
         self.db.set_resume(KEY, {"quota": {"reset": "later", "retry_at": NOW.isoformat()}})
         self.launched()

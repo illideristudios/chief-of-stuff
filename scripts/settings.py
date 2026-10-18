@@ -246,6 +246,8 @@ def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, S
 
 
 def _entry(where: str, text) -> ModelEntry:
+    if isinstance(text, str) and ":" not in text and text.strip():
+        text = f"claude:{text}"  # #701: an entry with no runtime prefix still means Claude, as 1.0 configs wrote it
     runtime, sep, rest = text.partition(":") if isinstance(text, str) else ("", "", "")
     if not sep or runtime not in RUNTIMES:
         raise SettingsError(f"{where}: {text!r} is not runtime:model-id with runtime one of {', '.join(RUNTIMES)}")

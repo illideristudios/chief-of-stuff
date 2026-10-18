@@ -43,6 +43,11 @@ sys.exit("chief-of-stuff guard: no {name} on PATH")
 '''
 
 
+def available(runtime: str) -> bool:
+    """Whether this engine can launch `runtime` here: an adapter exists and its CLI is on the login shell's PATH."""
+    return runtime in HOSTS and resolve(runtimes.binary(runtime)) is not None
+
+
 def shim_dir(run_dir: Path, python: str = sys.executable) -> Path:
     """Write the git/gh/glab shims for one run; the launch puts this directory first on the host's PATH."""
     folder = run_dir / "bin"
