@@ -159,10 +159,16 @@ def classify(runtime: str, exit_code: int, stdout: str, stderr: str) -> Reply | 
     return Failure("unknown", f"{runtime} exited {exit_code}: {(stderr or stdout).strip()[-300:]}")
 
 
-def default_head(tree: Path, branch: str) -> str:
-    """The forge's current head of `branch`, read from the tree's origin; empty when unreadable."""
-    code, out = make_worktree.git_trusted(["ls-remote", "origin", f"refs/heads/{branch}"], tree)
-    return out.split()[0] if not code and out.split() else ""
+def branch_heads(tree: Path, branches) -> dict[str, str]:
+    """Each branch's current head on the tree's origin, in one read; "" for a branch that is unreadable or absent."""
+    branches = list(dict.fromkeys(branches))
+    code, out = make_worktree.git_trusted(["ls-remote", "origin", *(f"refs/heads/{b}" for b in branches)], tree)
+    found = {}
+    for line in ([] if code else out.splitlines()):
+        sha, _, ref = line.partition("\t")
+        if ref.startswith("refs/heads/") and sha:
+            found[ref[len("refs/heads/"):]] = sha
+    return {branch: found.get(branch, "") for branch in branches}
 
 
 def engine_merges(store) -> set[str]:
@@ -177,25 +183,30 @@ def engine_merges(store) -> set[str]:
 
 
 def moved_outside_engine(store, record: dict, now: str) -> str:
-    """§13 (c): why a non-Claude run holds for human review, or "" when every first-parent commit the default branch
-    gained during the run is a merge the engine recorded. A direct push, a merge outside the engine, or an unreadable
-    range holds (ledger F3: unknown is never safe), naming each commit it cannot vouch for."""
-    branch, before = record.get("default_branch", ""), record.get("default_head", "")
-    if not branch:
-        return ""
+    """§13: why a non-Claude run holds for human review, or "" when every first-parent commit each protected branch
+    gained during the run is a merge the engine recorded (#860). A direct push, a merge outside the engine, or an
+    unreadable branch or range holds (ledger F3: unknown is never safe), naming each commit and its branch."""
+    heads = record.get("branch_heads")
+    if not isinstance(heads, dict):  # a run started before #860 recorded the default branch alone
+        heads = {record["default_branch"]: record.get("default_head", "")} if record.get("default_branch") else {}
     runtime, tree = record.get("runtime"), Path(record["tree"])
-    fetched, _ = make_worktree.git_trusted(["fetch", "-q", "origin", f"refs/heads/{branch}"], tree)
-    after = default_head(tree, branch)
-    if fetched or not before or not after:
-        return f"cannot verify {branch} after a {runtime} run; holding for human review"
-    if before == after:
+    problems, recorded = [], None
+    for branch, before in sorted(heads.items()):
+        fetched, _ = make_worktree.git_trusted(["fetch", "-q", "origin", f"refs/heads/{branch}"], tree)
+        after = branch_heads(tree, [branch])[branch]
+        if fetched or not before or not after:
+            problems.append(f"cannot verify {branch}")
+            continue
+        if before == after:
+            continue
+        code, out = make_worktree.git_trusted(["rev-list", "--first-parent", f"{before}..{after}"], tree)
+        if code:
+            problems.append(f"cannot list {branch} from {before[:12]} to {after[:12]}")
+            continue
+        recorded = engine_merges(store) if recorded is None else recorded
+        unknown = [commit for commit in out.split() if commit not in recorded]
+        if unknown:
+            problems.append(f"{branch} gained commits the engine did not merge: {', '.join(c[:12] for c in unknown)}")
+    if not problems:
         return ""
-    code, out = make_worktree.git_trusted(["rev-list", "--first-parent", f"{before}..{after}"], tree)
-    if code:
-        return f"cannot list {branch} from {before[:12]} to {after[:12]} after a {runtime} run; holding for human review"
-    recorded = engine_merges(store)
-    unknown = [commit for commit in out.split() if commit not in recorded]
-    if not unknown:
-        return ""
-    return (f"{branch} gained commits the engine did not merge during a {runtime} run: "
-            f"{', '.join(commit[:12] for commit in unknown)}; holding for human review")
+    return f"{'; '.join(problems)} during a {runtime} run; holding for human review"
