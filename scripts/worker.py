@@ -168,8 +168,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if existing is not None:
         store.set_ownership(issue_key, existing["tree"], "tree")
         _save_run(store, issue_key, stage, attempt, existing)
-        ran = data.get("model", {}).get(stage, "").partition(":")[2]  # adopt what the start launched, not today's rotation
-        return (ran.rpartition("@")[0], ran.rpartition("@")[2]) if "@" in ran else (ran or actor.model, "" if ran else actor.effort or "")
+        # Adopt what the start launched, not today's rotation.
+        runtime, _, ran = data.get("model", {}).get(stage, "").partition(":")
+        model, _, effort = ran.rpartition("@") if "@" in ran else (ran, "", "")
+        used = (model, effort) if model else (actor.model, actor.effort or "")
+        return (*used, runtime) if runtime not in ("", "claude") else used
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     loaded = load_settings(root, settings_path(text))
     defaults = loaded.stages.get(stage)
@@ -306,6 +309,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                     pass
         raise start_error
     _runners[str(run_dir)] = runner
+    if chosen.runtime != "claude":
+        return chosen.model, chosen.effort or "", chosen.runtime  # slots records who actually ran it (§9)
     return chosen.model, chosen.effort or ""
 
 

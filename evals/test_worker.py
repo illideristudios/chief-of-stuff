@@ -294,7 +294,8 @@ class WorkerTest(unittest.TestCase):
         used, host, claude = self.host_launched()
         claude.assert_not_called()
         self.assertEqual(host.call_args.args[0], "codex")
-        self.assertEqual(used, ("gpt-6.1-sol", "high"))
+        self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
+        self.assertEqual(self.db.segments(KEY)[0].runtime, "codex")
         record = self.db.resume(KEY)["runs"]["implement-1"]
         self.assertEqual((record["runtime"], record["default_branch"], record["default_head"]), ("codex", "trunk", "d" * 40))
 
