@@ -310,6 +310,15 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(actions, [reconcile.Merge(KEY)] if answer and answer.strip() else
                                  [reconcile.Wait(KEY, "decision pending")])
 
+    def test_a_pending_permission_decision_holds_the_next_launch(self):
+        # #874: a worker's unjudgeable permission request waits for the trio and shows as NEEDS INPUT, never relaunching.
+        launch = self.plan()
+        self.assertIsInstance(launch[0], (reconcile.Dispatch, reconcile.Review))
+        asked = Decision(None, topic="permission", question="Permission requested for Bash")
+        self.assertEqual(self.plan(decisions={KEY: [asked]}), [reconcile.Wait(KEY, "permission decision pending")])
+        answered = [asked, Decision("allow", topic="permission", question="Permission requested for Bash")]
+        self.assertEqual(type(self.plan(decisions={KEY: answered})[0]), type(launch[0]))
+
     def test_a_later_answer_resolves_an_earlier_pending_row_for_the_same_question(self):
         item = replace(Item(), stage="merge", merge_state="ready")
         answered = [Decision(None), Decision("Split it")]

@@ -462,6 +462,12 @@ def _running_keys(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Seg
     return found
 
 
+def _permission_pending(decisions: Sequence[Decision]) -> bool:
+    """A worker's permission decision (#874) still waiting for its answer; the latest row per question is its state."""
+    latest = {(d.topic, d.question): d for d in decisions}
+    return any(d.topic == "permission" and not (d.answer or "").strip() for d in latest.values())
+
+
 def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment], facts: Facts,
                 running: Sequence[str]) -> Action | None:
     # Completion writes a forge hold before closure. A human's release must survive retained tree evidence.
@@ -508,6 +514,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                        (launcher_holds or {}).get(item.issue_key, {}), facts)
         if facts is not None and action is not None:
             action = _with_facts(action, item, history, facts, (*running, *accepted))
+        if isinstance(action, (Dispatch, Review)) and _permission_pending((decisions or {}).get(item.issue_key, ())):
+            action = Wait(item.issue_key, "permission decision pending")  # #874: NEEDS INPUT until the trio answers
         if isinstance(action, (Dispatch, Review)):
             reset = (quota_resets or {}).get(item.issue_key)  # quota holds launches only; merges and gates go on
             if reset is not None and _time(reset) > now:
