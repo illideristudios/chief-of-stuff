@@ -18,7 +18,6 @@ import host_adapter
 import make_worktree
 import process_status
 import reconcile
-import runtimes
 import supervisor
 from settings import ModelEntry, SettingsError, pick, load as load_settings
 from workspace import settings_path
@@ -261,7 +260,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     def launchable(runtime: str) -> bool:
         if runtime == "claude":
             return True
-        if runtime not in host_adapter.HOSTS or not host_adapter.resolve(runtimes.binary(runtime)):
+        if not host_adapter.available(runtime):
             return False
         if not protects:
             try:
