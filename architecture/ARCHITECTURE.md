@@ -74,11 +74,31 @@ The engine never starts an architect run on its own (owner, 2026-10-17). The arc
 - **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
 - **A new architect run happens only when the owner asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
 
+The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its three personas keep their roles and judgement lenses from the policy, but each consult draws its models the way workers do.
+- **A rotation class.** The workspace's `[models.trio]` rotation, with its `pick` (`first` or `random`), supplies the model for each trio member. A persona's own `model` is only the fallback when no rotation is set.
+- **Three different models.** A consult draws three distinct launchable entries, preferring different runtimes or model families, so a unanimous verdict means three independent judgements, not one model asked three times. If fewer than three distinct entries can launch, it uses what it has and records that the trio was not fully diverse.
+- **Every judgement is recorded.** Each member's vote names the runtime and model that cast it, so trio accuracy can be compared across models over time, as for workers (section 9).
+- **Consults are read-only on every host.** A trio consult is a judgement call through the model port. It runs in each host's read-only or no-tools mode (Claude's `--safe-mode`, a read-only sandbox elsewhere), never with write access. A host that offers no read-only mode is not launchable for the trio.
+- **Quota.** A quota stop moves that member to the next distinct entry. When no entry can run, the decision falls back to the owner as an exhausted retry.
+
+```
+Mt := the trio's models come from [models.trio] (persona model only as fallback)
+D := the three members use distinct entries, preferring different runtimes or families
+U := a unanimous verdict reflects independent judgements      R := each vote records its runtime and model
+O := every consult runs read-only on its host
+
+Mt ∧ D → U          [owner 2026-10-18: "trio shouldn't be fixed models"]
+R → trio accuracy is measurable per model (section 9)
+O                   [a judgement call never writes]
+∴ the trio rotates like workers, stays diverse, and stays read-only
+```
+
 A person's actions on the board (answer, reverse, re-route) are intents, and the engine is their only executor.
 - **The page server records, never acts.** It validates an intent through `decision_actions` and appends it to the store. It never writes to the forge, never moves a card, and never pops, blocks or supersedes another intent.
 - **One current intent per issue.** Each pass, a pure function in `decision_actions` picks the newest pending intent for an issue and returns updates that mark every older pending intent superseded. A reverse is an intent like a re-route, so it supersedes too.
 - **The engine applies it.** It checks that the intent is still current, and only then writes the stage to the forge and records the outcome. A failed write leaves the intent pending for the next pass. Only a permanent failure blocks the intent's own decision.
 - **A pending intent holds its own issue only.** While it waits, the planner waits on that issue. It never marks sibling decisions blocked.
+- **Decisions are append-only.** A decision's identity is its topic, question and instance, and the newest row for that identity is its state. Every answer, trio verdict, reversal, intent phase (write, run, done), supersession, block and unblock is a new row. No row is ever updated in place. `store.add_decision` is the only writer, reached through `trio_gate.record` for trio verdicts. A trio verdict never appends over an identity whose newest row is the owner's answer: the human answer wins. A reversal is an intent whose done phase is the `restarted` row the engine already writes.
 
 ```
 I := an intent      C(I) := I is its issue's newest pending intent
