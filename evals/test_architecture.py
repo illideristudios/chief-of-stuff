@@ -36,14 +36,17 @@ DRAWS_NOTHING = (
     "one_shot_report", "flow", "sync_page_theme", "store", "store_access",
     "model_port",
     "claude_adapter",
+    "host_adapter",
     "policy",
     "forge",
     "forge_port",
     "engine_merge",
     "issue_gate",
     "trio_gate",
+    "decision_actions",
     "performance",
     "performance_report",
+    "limits", "limits_history", "limits_probe", "limits_cli", "session_logs",
     "supervisor",
     "startup",
     "guard_commands",  # Entities: pure shell command gate judgements.
@@ -54,8 +57,12 @@ DRAWS_NOTHING = (
 
     "slots",
     "reconcile",
+    "readiness",
+    "completion",
+    "worker_health",
     "cleanup",
     "engine",
+    "engine_facts",
     "worker",
     "guard_commands",  # Entities: pure shell command gate judgements.
     "guard_rules",  # Use Cases: pure Stop, permission-ask and resume judgements.
@@ -63,6 +70,7 @@ DRAWS_NOTHING = (
     "worker_guard",  # Frameworks and Drivers: command hook JSON and store access.
     "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
     "work",
+    "decision_actions",  # Use Cases: pure decision lifecycle transitions.
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
@@ -130,13 +138,13 @@ def forbidden_reach(scripts: Path, start: str, banned_scripts: set[str], banned_
 # `http` is `from urllib import request`; `urllib.parse` is not on the list.
 READER_BANS = ({"one_shot", "backlog"}, frozenset({*HTTP, "urllib", "http"}))
 
-# Design 7a: only the model adapter launches a host CLI, and the registry is where it learns the executable.
-ADAPTER = ("scripts/claude_adapter.py", "scripts/runtimes.py")
+# Design 7a and §4/§13: only the host adapters launch a host CLI, and the registry is where they learn the executable.
+ADAPTER = ("scripts/claude_adapter.py", "scripts/host_adapter.py", "scripts/runtimes.py")
 # The modules that named a host executable before the adapter. The list may only shrink; each entry must still name one.
 # session_exec execs the worker CLI for spawn_session, and process_status matches the executable to check liveness.
-# probe_health finds each rotation's executable for the health line.
+# evals/run.py remains exempt only for its non-Claude backends until 1.1.
 LEGACY_LAUNCHERS = ("scripts/one_shot.py", "scripts/spawn_session.py", "start_coordinator.py", "evals/run.py",
-                    "scripts/session_exec.py", "scripts/process_status.py", "scripts/probe_health.py")
+                    "scripts/session_exec.py", "scripts/process_status.py")
 HOST_EXECUTABLES = frozenset({"claude", "claude-as", "codex", "agent", "agy"})
 
 
@@ -202,32 +210,36 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
 CIRCLES: dict[str, frozenset[str]] = {
     "entities": frozenset({
         "tracker", "md", "clock", "runtimes", "policy", "findings", "ownership", "orphans",
-        "estimate", "tracker_log", "tree_state", "guard_commands",
+        "estimate", "tracker_log", "tree_state", "guard_commands", "limits",
     }),
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
-        "task_forge", "model_port", "issue_gate", "trio_gate", "engine_merge", "forge_port",
-        "reconcile", "guard_rules", "performance",
+        "task_forge", "model_port", "issue_gate", "trio_gate", "decision_actions", "engine_merge", "forge_port",
+        "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance",
     }),
     "adapters": frozenset({
         "fragment", "page_common", "columns", "panels", "gantt", "flow_chart", "render_board", "decision_page",
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
-        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots",
+        "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",
         "migrations/versions/0002_segment_runner",
         "migrations/versions/0003_worker_channel",
+        "migrations/limits_versions/0001_limits",
+        "migrations/versions/0004_report_suite",
+        "migrations/versions/0005_segment_human_review",
+        "migrations/versions/0006_log_operation",
     }),
     "drivers": frozenset({
-        "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
+        "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
-        "one_shot_result", "shell_setup", "cleanup", "engine", "work", "worker", "worker_guard",
+        "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }
@@ -410,6 +422,11 @@ class DependencyRuleTest(unittest.TestCase):
     def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:
         self.assertEqual(forbidden_reach(SCRIPTS, "reconcile",
                          {"store", "forge", "claude_adapter", "settings", "trio_gate"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
+
+    def test_decision_actions_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_actions",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages"},
                          frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
 
     def test_every_script_is_classified(self) -> None:

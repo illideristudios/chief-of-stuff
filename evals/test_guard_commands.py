@@ -263,8 +263,8 @@ class CommandTest(unittest.TestCase):
                         'git-push -u origin HEAD:feat/widget', 'git-push origin feat/widget'):
             with self.subTest(command=command):
                 self.assertIsNone(denial_reason(command, ("main", "develop")))
-        for command in ('git-custom-merge-alias', 'docker exec container git-merge topic',
-                        'docker exec container /usr/lib/git-core/git-push origin HEAD:main'):
+        for command in ('git-custom-merge-alias', 'runner exec box git-merge topic',
+                        'runner exec box /usr/lib/git-core/git-push origin HEAD:main'):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 
@@ -408,7 +408,7 @@ class CommandTest(unittest.TestCase):
                         'curl https://labs.example.test:8443/api/v4?query=issues',
                         'env FLAG=yes /usr/bin/curl https://uploads.github.com/repos/o/r/releases',
                         'true && curl https://api.github.com/repos/o/r/issues/12',
-                        'docker exec container curl https://labs.example.test/api/v4/projects/12'):
+                        'runner exec box curl https://labs.example.test/api/v4/projects/12'):
             with self.subTest(command=command):
                 self.assertIsNotNone(denial_reason(command, ("main", "develop")))
 
@@ -452,7 +452,7 @@ class CommandTest(unittest.TestCase):
     def test_unparsed_execution_and_comments_cannot_hide_writes(self):
         for command in ("true # a comment\ngh pr merge 12", "time gh pr merge 12", "timeout 5 gh pr merge 12",
                         "nice -n 10 glab mr merge 12", "setsid git merge topic",
-                        "docker exec container gh pr merge 12", "gh custom-merge-alias 12",
+                        "runner exec box gh pr merge 12", "gh custom-merge-alias 12",
                         "true;\n\ngh pr merge 12", "true &&\n gh pr merge 12",
                         "git custom-merge-alias", "git pull origin main",
                         "env -S 'gh pr merge 12'", "git -c alias.m='merge topic' m",

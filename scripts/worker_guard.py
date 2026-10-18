@@ -5,7 +5,7 @@ import json
 import sys
 
 from guard_binding import Binding
-from guard_commands import denial_reason
+from guard_commands import denial_reason, permission_judgement
 from guard_rules import permission_ask, resume_state, stop_allowed
 from store import Store
 
@@ -38,12 +38,20 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
     db = Store(binding.store_path)
     try:
         if event_name == "PermissionRequest":
+            # #874: judged as the PreToolUse gate judges, so routine reads never stop a worker or reach the owner.
+            verdict, why = permission_judgement(event, binding.protected_branches)
+            if verdict == "allow":
+                return {"hookSpecificOutput": {"hookEventName": event_name, "decision": {"behavior": "allow"}}}
+            if verdict == "deny":
+                return _deny(event_name, why)
             question, context = permission_ask(event)
+            # #750 ruling: the unjudged become an allow/deny ask that the trio is consulted on first.
+            context = json.dumps({**json.loads(context), "why": why})
             ask_id = db.add_ask(binding.issue_key, binding.stage, binding.attempt, binding.session_id,
-                                question, [], context)
+                                question, ["allow", "deny"], context)
             # Already recorded: asking again through the MCP tool would duplicate it.
-            return _deny(event_name, f"Recorded permission ask {ask_id}. An ask is not an approval. "
-                                     "Report blocked, then stop and wait.")
+            return _deny(event_name, f"{why}: recorded permission ask {ask_id}; the trio is consulted first. "
+                                     "An ask is not an approval. Report blocked, then stop and wait.")
         if event_name == "Stop":
             reports = db.reports(binding.issue_key, stage=binding.stage, attempt=binding.attempt,
                                  session_id=binding.session_id)

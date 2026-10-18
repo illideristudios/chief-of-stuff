@@ -20,6 +20,7 @@ import urllib.error
 from unittest import mock
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -426,6 +427,56 @@ class EnsureTest(unittest.TestCase):
         with self.assertRaisesRegex(pg.PagesError, f"{self.port}.*not the pages server"):
             pg.ensure(self.dir, self.port, self.log)
 
+    def test_cancelled_start_reaps_its_detached_child_before_returning(self):
+        stop = threading.Event()
+        real_popen = subprocess.Popen
+        children = []
+
+        def start(*_a, **_k):
+            proc = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            children.append(proc)
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            stop.set()  # shutdown arrived while Popen was starting the child
+            return proc
+
+        with mock.patch.object(pg.subprocess, "Popen", side_effect=start), \
+             mock.patch.object(pg, "_who", return_value=None):
+            self.assertEqual(pg.ensure(self.dir, self.port, self.log, stop=stop), "pages: stopped")
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode, "cancelled startup must reap its child before returning")
+        self.assertFalse((self.dir / ".pid").exists())
+
+    def test_cancellation_interrupts_waiting_for_the_ensure_lock(self):
+        stop = threading.Event()
+        finished = threading.Event()
+        attempted = threading.Event()
+        errors = []
+        real_lock = pg.supervisor.lock
+
+        def lock(*args, **kwargs):
+            attempted.set()
+            return real_lock(*args, **kwargs)
+
+        def ensure():
+            try:
+                pg.ensure(self.dir, self.port, self.log, stop=stop)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        with real_lock(self.dir / ".ensure.lock"), \
+             mock.patch.object(pg.supervisor, "lock", side_effect=lock), \
+             mock.patch.object(pg.subprocess, "Popen") as popen:
+            thread = threading.Thread(target=ensure, daemon=True)
+            thread.start()
+            self.assertTrue(attempted.wait(2), "ensure never tried to acquire the held lock")
+            stop.set()
+            self.assertTrue(finished.wait(2), "shutdown stayed blocked on the ensure lock")
+            thread.join(timeout=2)
+        self.assertEqual(errors, [])
+        popen.assert_not_called()
+
     def test_an_older_server_is_restarted(self):
         # A server started before `--root` existed never renders; `--ensure` replaces it, by its pid file.
         self.addCleanup(self.stop)
@@ -446,6 +497,30 @@ class EnsureTest(unittest.TestCase):
             pg.ensure(self.dir, self.port, self.log)
         self.assertIsNone(other.poll())
         self.assertIsNone(old.poll())
+
+    def test_concurrent_ensures_start_one_server(self):
+        self.addCleanup(self.stop)
+        barrier = threading.Barrier(4)
+        results: list[str] = []
+        errors: list[Exception] = []
+
+        def run():
+            barrier.wait(timeout=5)
+            try:
+                results.append(pg.ensure(self.dir, self.port, self.log))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), ["pages: serving", "pages: serving", "pages: serving", "pages: started"])
+        pid = int((self.dir / ".pid").read_text())
+        self.assertTrue(pg.is_pages_serve(pid, self.port))
+        self.assertEqual(get(self.port, "/").status, 200)
 
 
 OLD_SERVER = """import functools, http.server, sys
@@ -1177,9 +1252,9 @@ class _Renders:
         import render_board
         self.cond, self.gate = threading.Condition(), threading.Semaphore(0)
         self.inside, self.entered, self.most = [], [], {}
-        for target, fake in ((render_board, lambda root, day=None: self.render(f"{day}-board.html")),
+        for target, fake in ((render_board, lambda root, day=None, **inputs: self.render(f"{day}-board.html")),
                              (decision_page, lambda root, pages_dir, slug, day, source=None: self.render(f"decision-{slug}.html")),
-                             (issue_page, lambda root, pages_dir, n: self.render(f"issue-{n}.html"))):
+                             (issue_page, lambda root, pages_dir, n, **inputs: self.render(f"issue-{n}.html"))):
             patcher = mock.patch.object(target, "write", fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1326,6 +1401,135 @@ class ConfiguredWorkersTest(_Renders, unittest.TestCase):
     def test_pages_workers_sets_how_many_render_at_once(self):
         # Rule: "N comes from the workspace settings TOML `[pages] workers`, a positive whole number".
         self.assert_up_to(2)
+
+
+class SuperviseTest(unittest.TestCase):
+    """#735 (folded into #634): the engine's supervisor keeps the board's page server alive (H4), with backoff on
+    failed starts, and there is no second LaunchAgent."""
+
+    def setUp(self):
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
+        self.port = free_port()
+        self.pages = self.root / "pages"
+        self.pages.mkdir()
+        (self.pages / f"{datetime.now().date().isoformat()}-board.html").write_text("<p>board</p>")
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:{self.port}/; dir `pages/`\n")
+
+    def stop_server(self):
+        pid_file = self.pages / ".pid"
+        if pid_file.is_file():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+
+    def test_restarts_a_killed_page_server_without_an_agent_or_second_launch_agent(self):
+        self.addCleanup(self.stop_server)
+        stop = threading.Event()
+        with mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg, "RETRY_MIN", 0.05):
+            thread = threading.Thread(target=pg.supervise, args=(self.root, stop), daemon=True)
+            thread.start()
+            self.addCleanup(lambda: thread.join(timeout=5))
+            self.addCleanup(stop.set)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline and pg._who(self.port) is None:
+                time.sleep(0.05)
+            self.assertEqual(get(self.port, "/").status, 200)
+            first_pid = int((self.pages / ".pid").read_text())
+            os.kill(first_pid, signal.SIGTERM)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline and pg.is_pages_serve(first_pid, self.port):
+                time.sleep(0.05)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline:
+                if (self.pages / ".pid").is_file() and int((self.pages / ".pid").read_text()) != first_pid:
+                    if pg._who(self.port) is not None:
+                        break
+                time.sleep(0.05)
+            second_pid = int((self.pages / ".pid").read_text())
+            self.assertNotEqual(second_pid, first_pid)
+            self.assertEqual(get(self.port, "/").status, 200)
+            stop.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+    def test_backs_off_failed_and_flapping_starts_up_to_sixty_seconds_then_resets_when_serving(self):
+        waits: list[float] = []
+        stop = threading.Event()
+        outcomes = iter([
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            "pages: started",
+            "pages: restarted",
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            "pages: serving",
+            pg.PagesError("port busy"),
+        ])
+
+        def fake_ensure(*_a, **_k):
+            item = next(outcomes)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def fake_wait(seconds: float) -> bool:
+            waits.append(seconds)
+            if len(waits) >= 9:
+                stop.set()
+                return True
+            return False
+
+        with mock.patch.object(pg, "ensure", side_effect=fake_ensure), \
+             mock.patch.object(stop, "wait", side_effect=fake_wait):
+            pg.supervise(self.root, stop)
+        self.assertEqual(waits, [1, 2, 4, 8, 16, 32, 60, pg.POLL, 1])
+
+    def test_does_nothing_when_board_is_disabled_or_supervisor_lock_is_held(self):
+        import supervisor
+        stop = threading.Event()
+        with supervisor.lock(supervisor.state_dir(self.root) / "pages-supervisor.lock"), \
+             mock.patch.object(pg, "ensure") as ensured:
+            pg.supervise(self.root, stop)
+        ensured.assert_not_called()
+
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: none\n")
+        stop2 = threading.Event()
+        with mock.patch.object(pg, "ensure") as ensured, \
+             mock.patch.object(stop2, "wait", side_effect=lambda _s: (stop2.set(), True)[1]):
+            pg.supervise(self.root, stop2)
+        ensured.assert_not_called()
+
+    def test_keeps_supervising_through_an_unreadable_config_and_a_board_added_later(self):
+        stop, waits = threading.Event(), []
+        configs = iter([KeyError("America/Nowhere"), SimpleNamespace(pages_dir=None, board_url=None),
+                        SimpleNamespace(pages_dir="pages/", board_url="http://127.0.0.1:1/")])
+
+        def read(_root):
+            item = next(configs)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def fake_wait(seconds):
+            waits.append(seconds)
+            return len(waits) == 3 and (stop.set() or True)
+
+        with mock.patch.object(pg, "read_config", side_effect=read), \
+             mock.patch.object(pg, "from_config", return_value=(self.pages, self.port)), \
+             mock.patch.object(pg, "ensure", return_value="pages: serving") as ensured, \
+             mock.patch.object(stop, "wait", side_effect=fake_wait):
+            pg.supervise(self.root, stop)
+        self.assertEqual(len(waits), 3)
+        ensured.assert_called_once()
 
 
 if __name__ == "__main__":

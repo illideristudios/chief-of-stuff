@@ -47,16 +47,21 @@ from stat import S_ISREG
 from html import escape
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+import forge
 import page_reload
+import supervisor
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
 CACHE = ".sources.json"
 REFRESH = 60  # seconds between forge reads
-RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-\d+(?:-source)?\.html")
+POLL = 5  # seconds between healthy server checks
+RETRY_MIN = 1
+RETRY_MAX = 60
+RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
-ISSUE = re.compile(r"/issues/(\d+)(/source)?")
+ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
@@ -105,7 +110,8 @@ class PagesError(RuntimeError):
 
 def _sources(root: Path, cfg, pages_dir: Path, day: str) -> list[Path]:
     return [root / "CLAUDE.md", *([root / cfg.settings_path] if cfg.settings_path else []), root / cfg.log_path(day),
-            *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"), pages_dir / CACHE]
+            root / "store.db", root / "store.db-wal", *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
+            pages_dir / CACHE]
 
 
 def _digest(sources: list[Path]) -> str:
@@ -119,10 +125,42 @@ def _digest(sources: list[Path]) -> str:
 
 
 def today_board(root: Path) -> str | None:
-    """Today's board name once today's tracker exists, else None."""
+    """Today's board name once today's tracker or store exists, else None."""
     cfg = read_config(root)
     day = datetime.now(cfg.zone).date().isoformat()
-    return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() else None
+    return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() or (root / "store.db").is_file() else None
+
+
+def _page_data(root: Path):
+    """The driver opens under the migrate lock; use cases hand detached rows to presenters."""
+    import store_access
+    import task_forge
+    if not (root / "store.db").is_file():
+        return None
+    db = store_access.migrated_store(root)
+    try:
+        with db.transaction(write=False):
+            return task_forge.page_data(db)
+    finally:
+        db.engine.dispose()
+
+
+def write_board(root: Path, day: str | None = None, *, now: datetime | None = None):
+    """The board command's driver, shared with request rendering."""
+    import render_board
+    return render_board.write(root, day, now=now, db=_page_data(root))
+
+
+def _navigation(root: Path, pages_dir: Path, data):
+    import decision_actions
+    if data is None:
+        return {}
+    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+
+
+def _issue_identity(name: str, source: bool = False):
+    token = name[len("issue-"):-len("-source.html") if source else -5]
+    return bytes.fromhex(token[1:]).decode() if token.startswith("k") else int(token)
 
 
 def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()) -> str:
@@ -160,7 +198,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             day = today if today in days or not days else days[-1]
         else:
             day = name[:10]
-            if not (root / cfg.tracker_path(day)).is_file():
+            if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
         with page_lock(key):  # checked under the lock: a request that waited finds the page already rendered
             sources = [*_sources(root, cfg, pages_dir, day),
@@ -181,16 +219,21 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                     return ""
             started = time.time_ns()
             with slots:
-                if name == "workers.html":
-                    workers_page.write(root, pages_dir)
-                elif name.startswith("decision-"):
+                if name.startswith("decision-"):
                     decision_page.write(root, pages_dir, name[len("decision-"):-5], day)
-                elif name.endswith("-source.html"):
-                    source_page.write(root, pages_dir, int(name[len("issue-"):-len("-source.html")]))
-                elif name.startswith("issue-"):
-                    issue_page.write(root, pages_dir, int(name[len("issue-"):-5]))
                 else:
-                    render_board.write(root, day)
+                    data = _page_data(root)
+                    if name == "workers.html" or name.startswith("issue-"):
+                        navigation = _navigation(root, pages_dir, data)
+                        if name == "workers.html":
+                            workers_page.write(root, pages_dir, db=data, navigation=navigation)
+                        elif name.endswith("-source.html"):
+                            source_page.write(root, pages_dir, _issue_identity(name, source=True),
+                                              db=data, navigation=navigation)
+                        else:
+                            issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
+                    else:
+                        render_board.write(root, day, db=data)
             RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
         return ""
     except Exception as e:  # any renderer failure: the server keeps serving the last good page
@@ -264,12 +307,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(404, "no such decision")
                 return False
             self.path = f"/decision-{m[1]}.html"
-        elif path.startswith("/issues/"):
-            m = ISSUE.fullmatch(path)
+        elif decoded.startswith("/issues/"):
+            m = ISSUE.fullmatch(decoded)
             if not m:
                 self.send_error(404, "no such issue")
                 return False
-            self.path = f"/issue-{int(m[1])}{'-source' if m[2] else ''}.html"
+            self.path = "/" + fragment.issue_page_name(m[1], bool(m[2]))
         elif RENDERED.fullmatch(Path(self.translate_path(path)).name.casefold()):
             # A rendered page is a route only. casefold: long s and a case-insensitive disk reach it too (#335).
             self.send_error(404)
@@ -354,6 +397,73 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self._allowed():
             self._send_html(True) if self._is_html() else super().do_GET()
 
+    def _post_store_decision(self, form: dict[str, list[str]]):
+        """Record a person's answer, reversal or re-route. A reversal or re-route is an intent on its own row, and
+        the engine alone applies it: this request never touches the forge, a card, or another intent."""
+        import decision_actions
+        import sqlite3
+        import store_access
+        import trio_gate
+        from dataclasses import replace
+        from settings import load_policy
+        from sqlalchemy.exc import OperationalError
+        from supervisor import ServiceError
+
+        root = getattr(self.server, "root", None)
+        dec_id = form.get("decision_id", [""])[0].strip()
+        if root is None or not dec_id.isdigit():
+            return self.send_error(404, "no such decision")
+        action = form.get("action", ["answer"])[0].strip()
+        text = form.get("answer", [""])[0].strip()
+        target_stage = form.get("target_stage", [""])[0].strip()
+        now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+
+        db = None
+        try:
+            db = store_access.migrated_store(root)
+
+            def record():
+                """Append the person's row, with any comment for the engine to post, in one short write transaction."""
+                dec = db.decision(int(dec_id))
+                if dec is None:
+                    return (404, "no such decision")
+                # Rows are append-only: the form names the row it was rendered from, and a newer one refuses it.
+                if decision_actions.latest(db.decisions(dec.issue_key)).get(decision_actions.identity(dec)).id != dec.id:
+                    return (409, "the decision changed since this page was rendered")
+                item = db.item(dec.issue_key)
+                data = db.resume(dec.issue_key) or {}
+                tr = decision_actions.respond(
+                    dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
+                    history=db.segments(dec.issue_key), policies=load_policy(), issue_type=data.get("issue_type"),
+                    answered_at=now_iso)
+                bodies = [a.body for a in tr.actions]
+                if tr.update is not None:  # the engine posts the comment, so no forge call waits on this request
+                    trio_gate.record(db, dec.issue_key, replace(tr.update, record={**tr.update.record, "comment": "\n\n".join(bodies)})
+                                     if bodies else tr.update)
+                return None
+
+            try:
+                with db.transaction():
+                    error = record()
+            except decision_actions.BadRequest as exc:
+                return self.send_error(400, str(exc))
+            except ValueError as exc:
+                return self.send_error(409, str(exc))
+            if error is not None:
+                return self.send_error(*error)
+        except (ServiceError, sqlite3.OperationalError, OperationalError) as exc:
+            return self.send_error(503, f"store unavailable: {exc}")
+        finally:
+            if db is not None:
+                db.engine.dispose()
+        for page in Path(self.directory).iterdir():
+            if RENDERED.fullmatch(page.name):
+                RENDERED_AT[str(page)] = 0, None, ""
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def do_POST(self):
         """Save the user's answer beside the decision. Only this machine's own pages may post: the Host and, when a
         browser sends one, the Origin must be this server's."""
@@ -362,7 +472,18 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         origin = self.headers.get("Origin")
         if self.headers.get("Host", "") not in own or (origin is not None and origin not in [f"http://{h}" for h in own]):
             return self.send_error(403, "not a page of this server")
-        m = ROUTE.fullmatch(re.split(r"[?#]", self.path, maxsplit=1)[0])
+        route_path = re.split(r"[?#]", self.path, maxsplit=1)[0]
+        if route_path == "/":
+            try:
+                size = int(self.headers["Content-Length"])
+            except (TypeError, ValueError):
+                return self.send_error(411)
+            if size > MAX_BODY:
+                self.close_connection = True
+                return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
+            form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
+            return self._post_store_decision(form)
+        m = ROUTE.fullmatch(route_path)
         source = Path(self.directory) / f"decision-{m[1]}.json" if m else None
         if source is None or not source.is_file():
             return self.send_error(404, "no such decision")
@@ -472,15 +593,15 @@ def _who(port: int) -> str | None:
 def is_pages_serve(pid: int, port: int | None = None) -> bool:
     """True when `pid`'s command line is `pages.py serve`, and on `port` when given. A reused pid is someone else's."""
     try:
-        command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-    except OSError:
+        command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=1).stdout
+    except (OSError, subprocess.TimeoutExpired):
         return False  # cannot verify identity: do not signal
     if "pages.py serve" not in command:
         return False
     return port is None or bool(re.search(rf"--port {port}(\s|$)", command))
 
 
-def _stop(pages_dir: Path, port: int) -> None:
+def _stop(pages_dir: Path, port: int, stop: threading.Event | None = None) -> None:
     """Stop the older pages server on the port. Only the pid file's process, and only when it runs
     `pages.py serve` on this port: a reused pid is someone else's."""
     try:
@@ -491,15 +612,39 @@ def _stop(pages_dir: Path, port: int) -> None:
         raise PagesError(f"an older pages server answers on port {port}, but pid {pid} is not it; stop it by hand")
     os.kill(pid, signal.SIGTERM)
     for _ in range(30):
+        if stop is not None and stop.is_set():
+            return
         if _who(port) is None:
             return
-        time.sleep(0.1)
+        if stop is None:
+            time.sleep(0.1)
+        else:
+            stop.wait(0.1)
     raise PagesError(f"the older pages server (pid {pid}) is still answering on port {port}")
 
 
-def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> str:
+def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, stop: threading.Event | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
-    moves to another port: the URL is the board's address, and a board that wanders is a board nobody has open."""
+    moves to another port. Returns `pages: serving`, `pages: started`, `pages: restarted` or `pages: stopped`; raises PagesError."""
+    with contextlib.ExitStack() as stack:
+        while True:
+            if stop is not None and stop.is_set():
+                return "pages: stopped"
+            try:
+                stack.enter_context(supervisor.lock(pages_dir / ".ensure.lock", wait=stop is None))
+                break
+            except supervisor.ServiceError:
+                if stop is None:
+                    raise
+                stop.wait(0.1)
+        return _ensure(pages_dir, port, log, root, stop)
+
+
+def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
+    """Probe, replace and start under the same lock, including concurrent CLI ensures.
+
+    Returns "pages: serving", "pages: started", "pages: restarted" or "pages: stopped"; raises PagesError when the port is not ours
+    or the server does not come up."""
     who = _who(port)
     restart = False
     if who is not None:
@@ -507,30 +652,42 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> s
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
         if _version(who) >= _version(f"{SERVER}/{VERSION}"):
             return "pages: serving"
-        _stop(pages_dir, port)
+        _stop(pages_dir, port, stop)
         restart = True
+    if stop is not None and stop.is_set():
+        return "pages: stopped"
     pages_dir.mkdir(parents=True, exist_ok=True)
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [sys.executable, str(Path(__file__).resolve()), "serve", "--dir", str(pages_dir), "--port", str(port)]
     with log.open("a") as out:
         proc = subprocess.Popen(argv + (["--root", str(root.resolve())] if root is not None else []),
                                 stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
-    for _ in range(30):
-        if (_who(port) or "").startswith(SERVER):
-            (pages_dir / PID).write_text(str(proc.pid))  # .pid names only a server that answered (#248)
-            return "pages: restarted" if restart else "pages: started"
-        if proc.poll() is not None:
-            break
-        time.sleep(0.1)
-    if proc.poll() is None:  # failed start must not leave a detached server with no pid file (#493)
-        with contextlib.suppress(OSError):
-            proc.terminate()
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+    recorded = False
+    try:
+        for _ in range(30):
+            if stop is not None and stop.is_set():
+                return "pages: stopped"
+            if (_who(port) or "").startswith(SERVER):
+                (pages_dir / PID).write_text(str(proc.pid))  # .pid names only a server that answered (#248)
+                recorded = True
+                return "pages: restarted" if restart else "pages: started"
+            if proc.poll() is not None:
+                break
+            if stop is None:
+                time.sleep(0.1)
+            else:
+                stop.wait(0.1)
+        raise PagesError(f"the pages server did not come up on port {port}; see {log}")
+    finally:
+        if not recorded and proc.poll() is None:  # failed or cancelled start owns its unrecorded child
             with contextlib.suppress(OSError):
-                proc.kill()
-    raise PagesError(f"the pages server did not come up on port {port}; see {log}")
+                proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                proc.wait(timeout=1)
 
 
 def from_config(root: Path) -> tuple[Path, int]:
@@ -541,14 +698,52 @@ def from_config(root: Path) -> tuple[Path, int]:
         raise PagesError(str(e)) from None
 
 
+def supervise(root: Path, stop: threading.Event) -> None:
+    """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts.
+
+    A workspace with no board is polled again, so one added later is served. Returns when `stop` is set or
+    another engine already holds `pages-supervisor.lock`; an unexpected error is logged and retried."""
+    try:
+        with supervisor.lock(supervisor.state_dir(root) / "pages-supervisor.lock"):
+            retry, last_error = RETRY_MIN, None
+            while not stop.is_set():
+                try:
+                    cfg = read_config(root)
+                    if cfg.pages_dir or cfg.board_url:
+                        pages_dir, port = from_config(root)
+                        status = ensure(pages_dir, port, supervisor.state_dir(root) / "pages.log", root, stop=stop)
+                    else:
+                        status = "pages: serving"  # nothing to serve; poll for a board added later
+                    last_error = None
+                except Exception as exc:  # a thread that dies silently leaves the board unserved until restart
+                    status = None
+                    if str(exc) != last_error:
+                        print(f"pages: {exc}", file=sys.stderr, flush=True)
+                        last_error = str(exc)
+                if status == "pages: serving":
+                    delay, retry = POLL, RETRY_MIN
+                else:
+                    # A start is only healthy once a later probe still finds it serving.
+                    delay, retry = retry, min(RETRY_MAX, retry * 2)
+                if stop.wait(delay):
+                    return
+    except supervisor.ServiceError:
+        print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
+    args_list = list(sys.argv[1:] if argv is None else argv)
+    if args_list[:1] == ["--board"]:
+        import render_board
+        render_board.main(args_list[1:], writer=write_board)
+        return 0
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
     ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
     ap.add_argument("command", nargs="?", choices=("serve",))
     ap.add_argument("--dir")
     ap.add_argument("--port", type=int)
-    args = ap.parse_args(argv)
+    args = ap.parse_args(args_list)
     if args.command == "serve":
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
         return 0

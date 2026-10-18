@@ -596,7 +596,7 @@ class GitHubReadTest(unittest.TestCase):
         got = bl.issues(GH, gh=gh)
         self.assertTrue(got.ok, got.error)
         self.assertEqual(gh.calls, [["issue", "list", "-R", REPO, "--state", "open", "--json",
-                                     "number,title,state,labels,url,updatedAt,closedAt", "--limit", "5000"]])
+                                     "number,title,state,labels,url,updatedAt,closedAt,body", "--limit", "5000"]])
         self.assertEqual(got.issues, (bl.Issue(iid=3, title="inbox.py", state=bl.OPEN, labels=("bug",),
                                                 web_url=f"https://github.com/{REPO}/issues/3",
                                                 updated_at="2026-09-22T19:24:55Z",
@@ -779,6 +779,14 @@ class IssueStatesTest(unittest.TestCase):
 
 
 class GitHubWriteTest(unittest.TestCase):
+    def test_run_gh_gives_up_on_a_stalled_gh(self):
+        import subprocess
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 1)) as run:
+            code, out, err = bl.run_gh(["issue", "list"])
+        self.assertEqual((code, out), (124, ""))
+        self.assertIn("timed out", err)
+        self.assertEqual(run.call_args.kwargs["timeout"], bl.GH_TIMEOUT)
+
     def test_eval_binary_override_is_absolute_and_does_not_depend_on_path(self):
         with tempfile.TemporaryDirectory() as d:
             fake = Path(d) / "fake-gh"

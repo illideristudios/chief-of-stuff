@@ -1814,6 +1814,39 @@ class WorkerModeTest(unittest.TestCase):
                      "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
         return tree, args
 
+    def test_check_keeps_rules_and_stage_skills_from_preloaded_settings(self):
+        tree, args = self.review_workspace()
+        settings = tree.parent.parent / "chief-of-stuff.toml"
+        settings.write_text(settings.read_text().replace('[workers]\n', '[workers]\nrules = ["Keep tests."]\n'))
+        snapshot = ss.load_settings(tree.parent.parent, "chief-of-stuff.toml")
+        with unittest.mock.patch.object(ss, "load_settings", return_value=snapshot) as load, \
+             unittest.mock.patch.object(ss.dispatch_prompt, "compose", wraps=ss.dispatch_prompt.compose) as compose, \
+             unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
+                                        side_effect=AssertionError("duplicate read")), \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ss.main(args + ["--check"]), 0)
+        self.assertIn("- Keep tests.\n", out.getvalue())
+        self.assertIn("Skills: load and follow security-review.", out.getvalue())
+        load.assert_called_once()
+        self.assertIs(compose.call_args.kwargs["settings"], snapshot)
+
+    def test_interactive_launch_uses_already_loaded_workspace_policy(self):
+        tree, args = self.review_workspace()
+        snapshot = ss.load_settings(tree.parent.parent, "chief-of-stuff.toml")
+        for agent_flags in (["--type", "reviewer"], []):
+            with self.subTest(agent_flags=agent_flags), \
+                 unittest.mock.patch.object(ss, "load_settings", return_value=snapshot) as load, \
+                 unittest.mock.patch.object(ss.dispatch_prompt, "compose", wraps=ss.dispatch_prompt.compose) as compose, \
+                 unittest.mock.patch.object(ss.dispatch_prompt, "load_settings",
+                                            side_effect=AssertionError("duplicate read")), \
+                 unittest.mock.patch.object(ss, "resolve", return_value="/bin/fake"), \
+                 unittest.mock.patch.dict(os.environ, {ss.ENV: ""}), \
+                 contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ss.main(args + ["--interactive", "--launcher", "tmux"] + agent_flags), 0)
+                load.assert_called_once()
+                self.assertIs(compose.call_args.kwargs["settings"], snapshot)
+                self.assertIn("--agent reviewer", out.getvalue())
+
     def test_review_stage_launches_configured_agent_and_names_skills_in_brief(self):
         tree, args = self.review_workspace()
         argv = self.dry_run_argv(args)
@@ -2086,6 +2119,13 @@ class CheckTest(unittest.TestCase):
             self.composed(root, task, **kw)
         return f"refused: {expected.exception}"
 
+    def test_check_uses_already_loaded_workspace_policy(self):
+        root = self.workspace(toml='[workers]\nrules = ["Keep tests."]\n')
+        with unittest.mock.patch.object(ss.dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")):
+            code, out, err = self.check(root, "--one-shot")
+        self.assertEqual(code, 0, err)
+        self.assertIn("- Keep tests.\n", out)
+
     def test_a_complete_row_prints_the_assignment_with_no_cwd_and_no_name(self):
         root = self.workspace()
         code, out, err = self.check(root)
@@ -2309,8 +2349,14 @@ class CheckTest(unittest.TestCase):
         """The real CLI: `chief-of-stuff worker --check` from a directory that is not the workspace."""
         root = self.workspace(TRACKER.replace("| Security audit | `src/a/` |\n", ""))
         entry = Path(ss.__file__).resolve().parent.parent / "chief_of_stuff.py"
+        # The suite already runs with the pinned dependencies. Reuse that interpreter for the
+        # CLI's bootstrap; provisioning a venv is covered by test_cli and needs network access.
+        bootstrap = ("import runpy, sys; from pathlib import Path; "
+                     "entry = sys.argv.pop(1); sys.path[:0] = [str(Path(entry).parent), str(Path(entry).parent / 'scripts')]; "
+                     "import supervisor; supervisor.ensure_venv = lambda data: Path(sys.executable); "
+                     "sys.argv[0] = entry; runpy.run_path(entry, run_name='__main__')")
         with tempfile.TemporaryDirectory() as elsewhere:
-            run = subprocess.run([sys.executable, str(entry), "worker", "--check", "--root", str(root),
+            run = subprocess.run([sys.executable, "-c", bootstrap, str(entry), "worker", "--check", "--root", str(root),
                                   "--date", "2026-09-18", "--task", "Security audit"],
                                  capture_output=True, text=True, timeout=30, cwd=elsewhere)
             self.assertEqual(os.listdir(elsewhere), [])

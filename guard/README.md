@@ -31,6 +31,6 @@ The hooks implement these gates:
 
 The MCP server runs over stdio and exports only `report` and `ask`:
 
-- `report(outcome, summary, findings=[])` accepts `done`, `failed` or `blocked`. Findings require severity from `policy.SEVERITIES`, title, evidence and suggestion; path and a positive line number are optional. Findings reject unknown fields. Reports append with the bound identity; late older attempts cannot overwrite newer reports. Queries order attempts oldest to newest and can filter the exact run.
+- `report(outcome, summary, findings=[], passed=None, failed=None, skipped=None, xfailed=None)` accepts `done`, `failed` or `blocked`. The four counts are the final suite run, non-negative integers, omitted when unknown. Findings require severity from `policy.SEVERITIES`, title, evidence and suggestion; path and a positive line number are optional. Findings reject unknown fields. Reports append with the bound identity; late older attempts cannot overwrite newer reports. Queries order attempts oldest to newest and can filter the exact run.
 
 - `ask(question, options=[], context="")` immediately returns an ask id and tells the worker to report blocked, stop and wait. The answer starts as null. Decision delivery and answer resolution belong to M5's trio gate. The channel never grants permission.

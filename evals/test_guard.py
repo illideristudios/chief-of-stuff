@@ -134,15 +134,66 @@ class GuardTest(unittest.TestCase):
     def test_unrelated_tools_are_ignored(self):
         self.assertEqual(self.hook("PreToolUse", tool_name="Read", tool_input={"file_path": "README.md"}), {})
 
-    def test_permission_is_an_ask_and_never_an_approval(self):
-        result = self.hook("PermissionRequest", tool_name="Bash", tool_input={"command": "touch /outside/file"})
-        self.assertEqual(result["hookSpecificOutput"]["decision"]["behavior"], "deny")
-        asks = self.db.asks(KEY)
-        self.assertEqual(len(asks), 1)
-        self.assertEqual((asks[0].stage, asks[0].attempt, asks[0].session_id, asks[0].answer),
-                         ("implement", 2, "session-two", None))
-        self.assertIn("touch /outside/file", asks[0].context)
-        self.assertNotIn("ask tool", json.dumps(result))  # already recorded; a second ask would duplicate it
+    def permission(self, tool="Bash", **given):
+        result = self.hook("PermissionRequest", tool_name=tool, tool_input=given, cwd=str(self.root))
+        return result["hookSpecificOutput"]["decision"]
+
+    def test_an_unjudgeable_permission_is_an_ask_the_trio_is_consulted_on_first(self):
+        # #874, then the #750 ruling (rule 11: it names the separate permission decision wrong): an outside write is an
+        # allow/deny ask that the engine's trio consult answers before any owner sees it; never an approval.
+        decision = self.permission(command="touch /outside/file")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("trio", decision["message"])
+        self.assertEqual(self.db.decisions(KEY), [])
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.stage, ask.attempt, ask.session_id, ask.answer, ask.options),
+                         ("implement", 2, "session-two", None, ["allow", "deny"]))
+        self.assertIn("touch /outside/file", ask.context)
+        self.assertIn("not a known read-only command", ask.context)  # #874's why travels with the ask
+
+    def test_the_143_read_is_allowed_without_anyone(self):
+        command = ('rtk ls && git log --oneline -3 && rtk ls docs 2>/dev/null | head -50 && grep -rln "implement" '
+                   '--include=*.py --include=*.go --include=*.rs --include=*.ts . 2>/dev/null | grep -v _vendor | head -40')
+        self.assertEqual(self.permission(command=command), {"behavior": "allow"})
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_a_merge_chained_after_a_read_is_denied_with_the_reason(self):
+        decision = self.permission(command="git status && gh pr merge 12 --merge")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("engine owns merges", decision["message"])
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_unparseable_commands_and_secret_reads_go_to_the_trio(self):
+        for command in ("cat $(whoami)", "cat ~/.ssh/id_ed25519", "echo x > /etc/hosts", "rm -rf build",
+                        "sed 'e touch /tmp/x' notes.txt", "rg --pre ./run pattern .", "find . -exec rm {} +"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertEqual((len(self.db.asks(KEY)), self.db.decisions(KEY)), (7, []))
+
+    def test_the_audits_four_holes_never_auto_allow(self):
+        # Architect audit on #875: each of these runs a program or reaches outside while looking like a read.
+        holes = {
+            "assignment prefix": "GIT_EXTERNAL_DIFF=./x git diff",
+            "pager prefix": "GH_PAGER=./x gh pr view 1",
+            "git executes": "git log --ext-diff",
+            "git textconv": "git diff --textconv",
+            "brace expansion": "cat {.,/etc}/passwd",
+            "redirect into .git": "ls > .git/config",
+        }
+        for hole, command in holes.items():
+            with self.subTest(hole=hole):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertEqual(self.permission("Write", file_path=".git/hooks/pre-commit")["behavior"], "deny")
+        self.assertEqual(self.permission("Read", file_path=".git/HEAD"), {"behavior": "allow"})  # reading .git is fine
+        self.assertEqual((len(self.db.asks(KEY)), self.db.decisions(KEY)), (7, []))  # each hole is an ask, never an allow
+
+    def test_reads_and_edits_are_allowed_inside_the_worktree_only(self):
+        self.assertEqual(self.permission("Read", file_path=str(self.root / "README.md")), {"behavior": "allow"})
+        self.assertEqual(self.permission("Edit", file_path="scripts/x.py"), {"behavior": "allow"})
+        self.assertEqual(self.permission("Read", file_path="/Users/someone/.ssh/id_ed25519")["behavior"], "deny")
+        self.assertEqual(self.permission("Write", file_path="/etc/hosts")["behavior"], "deny")
+        self.assertEqual(self.permission("WebFetch", url="https://example.com")["behavior"], "deny")
+        self.assertEqual((len(self.db.asks(KEY)), len(self.db.decisions(KEY))), (3, 0))
 
     def test_stop_requires_this_exact_run_report_and_cannot_loop(self):
         self.assertEqual(self.hook("Stop")["decision"], "block")

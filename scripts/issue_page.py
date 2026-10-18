@@ -17,25 +17,28 @@ from pathlib import Path
 
 import board_sources
 import flow_chart
+from clock import parse_stamp
+from task_forge import PageData, source_key
 import tracker_log
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, write_if_changed
-from fragment import href, tab_bar
+from fragment import href, tab_bar, issue_href, issue_page_name
 from page_common import markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
-from tracker import TRAILING_NUMBER, issue_number, parse_tracker, resolve_due as _resolve_due
+from tracker import TRAILING_NUMBER, Task, issue_number, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, daily_trackers, read_config
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
 # A worker's outcome by its last launcher move's stage (tracker_log.moves: completed → pr, HUMAN REVIEW → review).
-ENDED = {"pr": "completed", "review": "human review"}
+ENDED = {"pr": "completed", "review": "needs input"}
 # The Flow chart's colours on HEAD's tokens in the dark scheme, as the board sets them (render_board.render).
 CSS = """<style>
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}}
 :root[data-theme="dark"] :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}
 .meta{color:var(--muted);font-size:12px}
 header .chip.running{color:var(--surface);background:var(--stage-implement);border-color:var(--stage-implement)}
+header .chip.needs-input{color:var(--dl);border-color:var(--dl)}
 .chk,.wk{display:grid;grid-template-columns:96px 74px minmax(0,1fr);gap:0 10px;align-items:baseline;padding:6px 0;font-size:13px}
 .wk{grid-template-columns:minmax(0,1fr) 64px auto;padding:5px 0}
 .chk+.chk,.wk+.wk{border-top:1px dotted var(--line)}
@@ -185,16 +188,39 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
     return _section("What happens next", '    <div class="card">\n' + "\n".join(f"      <p>{x}</p>" for x in lines) + "\n    </div>")
 
 
-def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
+def render(number: int | str, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
-           pending_refs: Container[str] = frozenset()) -> str | None:
-    """The page, or None when no task in `trackers` names issue `number`. `cfg` resolves a task's due (the board's
-    deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
-    ref = f"#{number}"
+           pending_refs: Container[str] = frozenset(), navigation: dict | None = None, db: PageData | None = None) -> str | None:
+    """The page, or None when no task in `trackers` or the store names issue `number`. `cfg` resolves a task's due (the
+    board's deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
+    identity = str(number)
+    full_key = identity if "#" in identity else None
+    numeric = issue_number(identity) if full_key else int(identity)
+    ref = f"#{numeric}"
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
-    mine = [t for t in known if issue_number(t.issue) == number]
+    mine = [t for t in known if (t.issue == full_key if full_key else issue_number(t.issue) == numeric)]
+    store_rows = None
+    item = None
+    if db is not None:
+        matches = [i for i in db.items() if (i.issue_key == full_key if full_key else issue_number(i.issue_key) == numeric)]
+        item = matches[0] if len(matches) == 1 else None
+        if full_key and item is None:
+            return None
+        if not full_key and len(matches) > 1:
+            return None
+        if item is not None:
+            title = item.title or (sources.issues[ref].title if ref in sources.issues else ref)
+            task = Task(item=title, owner="",
+                        state="waiting" if item.human_review else "open",
+                        since=now.date().isoformat(), due="", checklist="",
+                        name=title, lane=item.workflow or "build",
+                        stage=item.stage, issue=item.issue_key)
+            known = [task]
+            mine = [task]
+            store_rows = [(s, r) for s, r in flow_chart.build_from_store(db, now, include_hold_bars=True)
+                          if r.href == issue_href(item.issue_key)]
     if not mine:
         return None
     keys = set().union(*map(names, mine))
@@ -202,29 +228,35 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
     linker = Linker(cfg.backlog, root)
-    ends = {t.item: end for t in parse_tracker(trackers[-1][1]).tasks
+    today_tasks = parse_tracker(trackers[-1][1]).tasks if trackers else known
+    ends = {t.item: end for t in today_tasks
             if t.kind != "done" and (end := _resolve_due(t.due, cfg, now.date()))}
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
-    today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
-    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
-    rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                                ended=forge_ends(known, sources, now.tzinfo))
-            if issue_number(r.ref) == number]
+    today = [t for t in today_tasks if not t.standing]
+    holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
+    held = held_names(holds)
+    rows = store_rows if store_rows is not None else [
+        (s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
+                                            ended=forge_ends(known, sources, now.tzinfo))
+        if issue_number(r.ref) == numeric
+    ]
     log = [m for m in log if m.name.strip().casefold() in keys]
-    issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
-    status = rows[0][0] if rows else mine[-1].kind
-    name = rows[0][1].name if rows else mine[0].label
+    issue_keys = {full_key, source_key(full_key, sources.home)} if full_key else {ref, *(t.issue for t in mine if t.issue)}
+    issue = next((sources.issues[k] for k in issue_keys if k in sources.issues), None)
+    latest = {k: t for t in known for k in names(t)}  # later trackers win
+    status = "needs input" if any(t in holds for t in mine) else (rows[0][0] if rows else mine[-1].kind)
+    name = rows[0][1].name if rows else (issue.title if issue else mine[0].label)
 
     order = {"open": 0, "merged": 1}
-    changes = sorted((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2))
+    changes = sorted((c for c in sources.changes.values() if issue_keys & set(c.issues)), key=lambda c: order.get(c.state, 2))
     every = list(sources.changes.values())
     cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {ref} yet.</p></div>')
     change = changes[0] if changes else None
     current = {t.name.strip().casefold(): t for t in mine}.values()
     why_not = ("the issue is closed" if issue and issue.state == "closed" else
                "the task is done" if status == "merged" or all(t.kind == "done" for t in current) else "")
-    ahead = _next(rows, change, every, why_not, now) + (_files(change, every, number) if change and _paths(change) else "")
+    ahead = _next(rows, change, every, why_not, now) + (_files(change, every, issue_href(identity)[len("/issues/"):]) if change and _paths(change) else "")
     ahead += _graph(change, graph, pages, root, "Architecture", f"No change names {ref} to graph.")
 
     task_of = lambda m: (t.name.strip() if (t := latest.get(m.name.strip().casefold())) else m.name).casefold()  # noqa: E731
@@ -259,6 +291,29 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
         lines.append((took, f'      <div class="wk"><span><b>{escape(who)}</b> · one-shot{f" ×{len(runs)}" if len(runs) > 1 else ""} · '
                             f'{escape(runs[-1][1][3])} · {escape(stages)}</span><span class="when">{_dur(took)}</span>'
                             f'<span class="st{" running" if live else ""}">{escape(state)}</span></div>'))
+    if item is not None and db is not None:
+        steps_list = []
+        lines, spans = [], []
+        for seg in db.segments():
+            if seg.issue_key != item.issue_key:
+                continue
+            start = parse_stamp(seg.started_at, now)
+            stop = parse_stamp(seg.ended_at, now) if seg.ended_at else now
+            who = seg.runner or f"{seg.stage}-{seg.attempt}"
+            took = max(timedelta(), stop - start)
+            spans.append((start, max(start, stop)))
+            steps_list.append((start, f'{escape(seg.stage)} started · {escape(who)}'))
+            if seg.ended_at:
+                steps_list.append((stop, f'{escape(seg.stage)} {escape(seg.outcome or "ended")} · {escape(who)}'))
+            lines.append((took, f'<div class="wk"><b>{escape(who)}</b><span>{escape(seg.runtime)} '
+                               f'{escape(seg.model)} · {escape(seg.stage)} · attempt {seg.attempt}</span>'
+                               f'<span>{escape(seg.outcome or "running")} · {_dur(took)}</span></div>'))
+        steps_list.extend((parse_stamp(entry.at, now), escape(entry.message))
+                          for entry in db.log(item.issue_key))
+        steps = "\n".join(f'<div class="step"><span class="when">{_clock(at, now)}</span>'
+                          f'<span class="dot"></span><span>{text}</span></div>'
+                          for at, text in sorted(steps_list))
+        end = max((e for _, e in spans), default=now)
     # Worked: the union of every launch's interval, so overlapping workers count once.
     first = min((s for s, _ in spans), default=now)
     worked, reach = timedelta(), first
@@ -285,9 +340,9 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>{ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
-            f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True)}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
+            f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
-            f'    <span class="chip {escape(status)}">{escape(status.upper())}</span>\n  </header>\n\n'
+            f'    <span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>\n  </header>\n\n'
             + (_section("Issue", f'<div class="card prose">{markdown_blocks(issue.body, linker.resolve)}</div>') if issue and issue.body else "")
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'
@@ -321,12 +376,13 @@ def put(out: Path, page: str | None) -> Path | None:
     return out
 
 
-def write(root: Path, pages_dir: Path, number: int) -> Path | None:
+def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None = None, navigation: dict | None = None) -> Path | None:
     """Render `issue-<number>.html`; with no page, remove the file and return None. The page server calls this in
     process."""
     cfg, now, trackers, settings = inputs(root)
     ctx = context(root, now.date().isoformat())
     pending = entries(pages_dir, ctx) if ctx else []
     page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
-                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx))
-    return put(pages_dir / f"issue-{number}.html", page)
+                  sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx),
+                  navigation, db=db)
+    return put(pages_dir / issue_page_name(number), page)

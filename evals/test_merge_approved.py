@@ -45,12 +45,17 @@ PRS = [
 ]
 
 
+SQUASH_ONLY = json.dumps({"allow_merge_commit": False, "allow_squash_merge": True, "allow_rebase_merge": False})
+
+
 class FakeGh:
-    def __init__(self, prs):
-        self.prs, self.calls = prs, []
+    def __init__(self, prs, settings=SQUASH_ONLY):
+        self.prs, self.calls, self.settings = prs, [], settings  # #864: the repository's allowed merge methods
 
     def __call__(self, args, input_text=None):
         self.calls.append(args)
+        if len(args) == 2 and args[0] == "api" and args[1].startswith("repos/"):
+            return 0, self.settings, ""
         if args[:2] == ["pr", "list"]:
             return 0, json.dumps(self.prs), ""
         if args[:2] == ["pr", "merge"]:
@@ -241,10 +246,34 @@ class MergeHeadTest(unittest.TestCase):
                             ((2, "", ""), "gh pr view exited 2"),
                             ((0, "{}", ""), str(KeyError("state")))):
             with self.subTest(read=read):
-                gh = mock.Mock(side_effect=[(0, "", ""), read])
+                gh = mock.Mock(side_effect=[(0, SQUASH_ONLY, ""), (0, "", ""), read])  # #864: settings, merge, state
                 self.assertEqual(ma.merge_head(request(), None, True, "o/app", gh=gh),
                                  (0, f"unknown: {error}"))
-                self.assertEqual(gh.call_count, 2)
+                self.assertEqual(gh.call_count, 3)
+
+    def test_github_merges_with_a_method_the_repository_allows_never_a_preferred_one(self):
+        # Zach, 2026-10-18: "we shouldn't prefer a merge strategy" (#864). Several allowed: GitHub's own order.
+        for allowed, flag in (({"allow_merge_commit": True}, "--merge"), ({"allow_squash_merge": True}, "--squash"),
+                              ({"allow_rebase_merge": True}, "--rebase"),
+                              ({"allow_merge_commit": True, "allow_squash_merge": True, "allow_rebase_merge": True}, "--merge"),
+                              ({"allow_squash_merge": True, "allow_rebase_merge": True}, "--squash")):
+            with self.subTest(allowed=allowed):
+                gh = FakeGh([], settings=json.dumps(allowed))
+                self.assertEqual(ma.merge_head(request(), None, True, "o/app", gh=gh)[0], 0)
+                merge, = gh.merges
+                self.assertIn(flag, merge)
+                self.assertEqual(sum(f in merge for f in ("--merge", "--squash", "--rebase")), 1)
+
+    def test_no_allowed_or_unreadable_merge_settings_refuse_without_a_merge_call(self):
+        for gh, why in ((FakeGh([], settings=json.dumps({"allow_merge_commit": False})), "allows no merge method"),
+                        (FakeGh([], settings="not json"), "repository merge settings"),
+                        (mock.Mock(return_value=(1, "", "rate limited")), "rate limited")):
+            with self.subTest(why=why):
+                code, result = ma.merge_head(request(), None, True, "o/app", gh=gh)
+                self.assertEqual(code, 1)
+                self.assertIn(why, result)
+                calls = gh.calls if isinstance(gh, FakeGh) else [c.args[0] for c in gh.call_args_list]
+                self.assertFalse(any(c[:2] == ["pr", "merge"] for c in calls))
 
 
 class RequestVerdictTest(unittest.TestCase):

@@ -533,20 +533,7 @@ class CodexAddDirArgsTest(unittest.TestCase):
             (base / ".git/worktrees/tree/gitdir").write_text(f"{sub / '.git'}\n")
             self.assertEqual(git_trees.codex_add_dir_args(sub), [])
 
-    def test_a_relative_paths_worktree_still_gets_its_two_dirs(self):
-        # `git worktree add --relative-paths` writes the back-pointer relative to the gitdir; it is resolved before comparing.
-        with tempfile.TemporaryDirectory() as tmp:
-            base, tree = Path(tmp) / "base", Path(tmp) / "tree"
-            subprocess.run(["git", "init", "-q", str(base)], check=True)
-            self._git("-C", str(base), "commit", "-q", "--allow-empty", "-m", "init")
-            made = subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", "--relative-paths", str(tree)],
-                                  capture_output=True, text=True)
-            if made.returncode:
-                self.skipTest(f"this git has no `worktree add --relative-paths`: {made.stderr.strip()}")
-            pointer = (base / ".git/worktrees/tree/gitdir").read_text().strip()
-            self.assertFalse(Path(pointer).is_absolute(), pointer)  # the fixture is the relative form
-            self.assertEqual(git_trees.codex_add_dir_args(tree),
-                             self.pairs((base / ".git").resolve(), (base / ".git/worktrees/tree").resolve()))
+    # The `worktree add --relative-paths` case is removed until the CI image's git supports it (#855).
 
     def test_no_git_process_is_spawned_for_any_grant_or_refusal(self):
         # #443: the tree is what a previous codex run could write to, so its git control files are read as files
@@ -656,6 +643,23 @@ class RunTest(unittest.TestCase):
             return one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=tree or self.tree, name="worker01", runtime=runtime, agent_type=None,
                                 model=model, effort=effort, dry_run=False)
+
+    def test_run_composes_with_already_loaded_workspace_policy(self):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")
+        (self.root / "cos.toml").write_text(
+            '[workers]\nrules = ["Keep tests."]\nrequire_green_tests = true\n[lanes.code]\nstages = ["review"]\n'
+            '[stages.review]\nskills = ["security-review"]\n')
+        settings = one_shot.load_settings(self.root, "cos.toml")
+        with mock.patch.object(one_shot, "load_settings", return_value=settings) as load, \
+             mock.patch.object(dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")), \
+             mock.patch.object(dispatch_prompt, "compose", wraps=dispatch_prompt.compose) as compose, \
+             mock.patch.object(one_shot, "resolve", return_value="/fake/agent"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree,
+                                name="worker01", runtime="claude", agent_type=None, model="example", effort="", dry_run=True)
+        self.assertEqual(code, 0)
+        load.assert_called_once_with(self.root, "cos.toml")
+        self.assertIs(compose.call_args.kwargs["settings"], settings)
 
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',

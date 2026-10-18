@@ -64,7 +64,7 @@ def _link(text: str, url: str, cls: str = "", tag: str = "span", prose: bool = F
 
 
 def _card(c: Card, inline: Callable[[str], str] = _esc, linked_inline: Callable[[str], str] | None = None) -> str:
-    chip = _tag("chip", c.kind, c.state) if c.state else ""
+    chip = _tag("chip", c.kind, c.state) if c.state and not (c.flag and c.flag.text.casefold() == c.state.casefold()) else ""
     marks = f'<div class="columns-marks">{"".join(_tag("mark", m.category, m.text) for m in c.marks)}</div>' if c.marks else ""
     head = f'<div class="columns-card columns-flagged" data-cat="{_esc(c.flag.category)}">' if c.flag else '<div class="columns-card">'
     flag = f'<div class="columns-tag columns-flag" data-cat="{_esc(c.flag.category)}">{_esc(c.flag.text)}</div>' if c.flag else ""

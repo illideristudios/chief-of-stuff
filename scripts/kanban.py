@@ -86,8 +86,20 @@ def drift(config: Kanban, labels: tuple[str, ...], stage: str,
     return "; ".join(problems)
 
 
+def release_error(stage: str, expected_stage: str | None, initialize: bool, release_hold: bool) -> str:
+    """An extra hold can only be released at an explicitly guarded, unchanged stage."""
+    if release_hold and (not expected_stage or stage != expected_stage or initialize):
+        return "hold release needs the same current and expected stage, without initialize"
+    return ""
+
+
+def keep_hold(config: Kanban, current, expected_stage: str | None, release_hold: bool) -> bool:
+    """Preserve a review hold the recorded stage did not set, unless this write explicitly releases it."""
+    return not release_hold and extra_hold(config, current, expected_stage)
+
+
 def extra_hold(config: Kanban, current, expected_stage: str | None) -> bool:
-    """A review hold the recorded stage did not set: the launcher's, which only the user clears."""
+    """A review hold the recorded stage did not set."""
     return config.human_review_label in current and not (expected_stage and config.holds(expected_stage))
 
 

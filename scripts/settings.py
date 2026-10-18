@@ -3,7 +3,7 @@
 
 Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". Notification, lane, budget, and Kanban settings
-live here, along with suggested models and their rotations (#111) and stage launch defaults (#121).
+live here, along with suggested models and their rotations (#111), stage launch defaults (#121), and [limits].
 
 No `Settings:` line, no file, or no `[notify]` section is notify off, and nothing else changes. A value
 that is there and cannot be read is refused: a guessed day-open time is a notification at the wrong hour.
@@ -12,7 +12,9 @@ that is there and cannot be read is refused: a guessed day-open time is a notifi
 from __future__ import annotations
 
 import re
+import math
 import tomllib
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
@@ -26,6 +28,8 @@ HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 OFFSET = re.compile(r"^(\d+)([hm])$")
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HERDR_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+RULES_MAX = 64  # rules; the rendered assignment budget is checked by dispatch_prompt.validate_worker_rules at engine start
+RULES_TOTAL_CAP = 6000  # sum of len(rule)
 CLAUDE_AS_PROFILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # claude-as's valid_profile_name
 DEFAULT_WARNINGS = ("24h", "3h", "1h")
 POLICY = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"  # the shipped policy and workflow
@@ -90,13 +94,17 @@ class Workflow:
 
 @dataclass(frozen=True)
 class Workers:
+    """Worker launch configuration and standing instructions for one-shot and engine tasks."""
     launcher: str = "ghostty"
     mode: str = "interactive"
     # #100: one-shots running at once across every session in the workspace; None is no cap.
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
-    require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
+    require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
+    rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
+    teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
+    teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
 
 
 @dataclass(frozen=True)
@@ -177,6 +185,20 @@ class Graph:
 
 
 @dataclass(frozen=True)
+class Limits:
+    warn_at: float = 0.8
+
+
+def _limits(table) -> Limits:
+    if not isinstance(table, dict):
+        raise SettingsError("[limits] is not a table")
+    value = table.get("warn_at", .8)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 <= value <= 1:
+        raise SettingsError("[limits] warn_at must be a fraction between 0 and 1")
+    return Limits(float(value))
+
+
+@dataclass(frozen=True)
 class Settings:
     notify: Notify = field(default_factory=Notify)
     lanes: dict[str, Lane] = field(default_factory=dict)
@@ -188,10 +210,13 @@ class Settings:
     pages: Pages = field(default_factory=Pages)
     # #111: task class -> rotation; the first entry is the suggested model, the rest the fallback order.
     models: dict[str, tuple[ModelEntry, ...]] = field(default_factory=dict)
+    # #877: task class -> "first" or "random", how a fresh start chooses among the launchable entries.
+    model_picks: dict[str, str] = field(default_factory=dict)
     graph: Graph | None = None
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
     repos: dict[str, str] = field(default_factory=dict)
     stages: dict[str, Stage] = field(default_factory=dict)
+    limits: Limits = field(default_factory=Limits)
 
 
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
@@ -223,6 +248,8 @@ def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, S
 
 
 def _entry(where: str, text) -> ModelEntry:
+    if isinstance(text, str) and ":" not in text and text.strip():
+        text = f"claude:{text}"  # #701: an entry with no runtime prefix still means Claude, as 1.0 configs wrote it
     runtime, sep, rest = text.partition(":") if isinstance(text, str) else ("", "", "")
     if not sep or runtime not in RUNTIMES:
         raise SettingsError(f"{where}: {text!r} is not runtime:model-id with runtime one of {', '.join(RUNTIMES)}")
@@ -236,14 +263,29 @@ def _entry(where: str, text) -> ModelEntry:
     return ModelEntry(runtime, model, effort)
 
 
+PICKS = ("first", "random")  # #877: how a fresh start chooses among a class's launchable entries
+
+
+def _picks(table) -> dict[str, str]:
+    """Each class's `pick`, "first" when absent; Zach, 2026-10-18: "can we make it so they randomly select"."""
+    picks = {}
+    for name, t in table.items():
+        value = t.get("pick", "first") if isinstance(t, dict) else "first"
+        if value not in PICKS:
+            raise SettingsError(f"[models.{name}]: pick must be one of {', '.join(PICKS)}")
+        picks[name] = value
+    return picks
+
+
 def _models(table) -> dict[str, tuple[ModelEntry, ...]]:
     if not isinstance(table, dict):
         raise SettingsError("[models] must be a table of task classes")
     models = {}
     for name, t in table.items():
         where = f"[models.{name}]"
-        if not isinstance(t, dict) or set(t) != {"rotation"}:
-            raise SettingsError(f"{where}: a table with only rotation, like {{ rotation = [\"claude:opus@high\"] }}")
+        if not isinstance(t, dict) or "rotation" not in t or not set(t) <= {"rotation", "pick"}:
+            raise SettingsError(f"{where}: a table with a rotation and an optional pick, like "
+                                f"{{ rotation = [\"claude:opus@high\"], pick = \"random\" }}")
         rotation = t["rotation"]
         if not isinstance(rotation, list) or not rotation:
             raise SettingsError(f"{where}: rotation is a non-empty list of runtime:model-id@effort entries")
@@ -293,8 +335,27 @@ def _workers(table) -> Workers:
     if "claude_as_profile" in table and not (isinstance(profile, str) and CLAUDE_AS_PROFILE.fullmatch(profile)):
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
+    rules = table.get("rules", [])
+    # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
+    if not isinstance(rules, list) or not all(
+        isinstance(rule, str) and rule.strip() and len(rule.splitlines()) == 1
+        and "(via " not in rule and len(rule) <= 2400
+        and not any(unicodedata.category(c) in {"Cc", "Cf", "Zl", "Zp"} for c in rule) for rule in rules
+    ):
+        raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
+                            'or "(via " markers, each at most 2400 characters')
+    if len(rules) > RULES_MAX or sum(map(len, rules)) > RULES_TOTAL_CAP:
+        raise SettingsError(f"[workers] rules must be at most {RULES_MAX} rules and {RULES_TOTAL_CAP} characters in all")
+    # Preserve the user's wording, including surrounding spaces.
+    commands = {}
+    for key in ("teardown", "teardown_list"):
+        value = table.get(key, "")
+        if key in table and (not isinstance(value, str) or not value.strip()
+                             or re.search(r"[\x00-\x1f\x7f-\x9f]", value)):
+            raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
+        commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green)
+                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules), **commands)
 
 
 def _repos(table) -> dict[str, str]:
@@ -500,20 +561,22 @@ def load(root: Path, settings_path: str | None) -> Settings:
     workflow = _workflow(data["workflow"]) if "workflow" in data else Workflow()
     workers = _workers(data["workers"]) if "workers" in data else Workers()
     models = _models(data["models"]) if "models" in data else {}
+    model_picks = _picks(data["models"]) if "models" in data else {}
     graph = _graph(data["graph"]) if "graph" in data else None
     pages = _pages(data["pages"]) if "pages" in data else Pages()
     repos = _repos(data["repos"]) if "repos" in data else {}
+    limits = _limits(data["limits"]) if "limits" in data else Limits()
     budgets = data.get("budgets", {})
     if not isinstance(budgets, dict) or not set(budgets) <= {"S", "M", "L", "XL"}:
         raise SettingsError(f"{settings_path}: [budgets] is a table of S, M, L, XL")
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits)
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:

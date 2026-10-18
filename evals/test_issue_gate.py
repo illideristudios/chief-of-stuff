@@ -57,6 +57,18 @@ class GateTest(unittest.TestCase):
         self.assertEqual(got.issue_key, "github:example/app#3")
         self.assertEqual([(i.issue_key, i.title) for i in self.store.items()], [("github:example/app#3", "Fix the parser")])
 
+    def test_new_and_existing_issues_supply_ownership_from_their_body(self):
+        body = "## File ownership\n- read-only: `src/`"
+        f = forge.Forge(tf.GH, gh=tf.FakeGh(issues=[{**tf.gh_issue(3, "Parser"), "body": body}]))
+        for number in (None, 3):
+            with self.subTest(number=number):
+                got = issue_gate.start(f, self.store, "Parser", body=body if number is None else "ignored", issue=number, commit=True)
+                self.assertEqual([(r.path, r.mode) for r in self.store.ownership(got.issue_key)], [("src", "read")])
+
+    def test_intake_without_a_scope_owns_the_repository(self):
+        got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Parser", commit=True)
+        self.assertEqual([(r.path, r.mode) for r in self.store.ownership(got.issue_key)], [(".", "write")])
+
     def test_a_supplied_issue_the_forge_does_not_confirm_is_refused_and_writes_no_row(self):
         got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Add a flag", issue=999999, commit=True)
         self.assertIn("#999999", got.refused)
@@ -171,6 +183,31 @@ class WorkMainTest(unittest.TestCase):
         state = supervisor.state_dir(self.root)
         self.assertEqual((self.root / "store.db").exists() or (state / "migrate.lock").exists(), False,
                          "a preview must not create, migrate or lock the store")
+
+    def test_work_records_an_answer_for_the_named_issues_ask(self):
+        self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Parser"), tf.gh_issue(4, "Other")])
+        store.migrate(self.root / "store.db")
+        db = store.Store(self.root / "store.db")
+        self.addCleanup(db.engine.dispose)
+        key = "github:example/app#3"
+        db.upsert_item(key)
+        ask = db.add_ask(key, "implement", 1, "session", "Continue?", ["yes"], "")
+        db.add_report(key, "implement", 1, "session", "blocked", "waiting", [])
+        self.assertEqual(self.run_work("--issue", "3", "--answer-ask", str(ask), "--answer", "yes")[0], 0)
+        self.assertIsNone(db.asks(key)[0].answer, "preview writes nothing")
+        self.assertEqual(self.run_work("--issue", "4", "--answer-ask", str(ask), "--answer", "yes", "--commit")[0], 1)
+        self.assertIsNone(db.asks(key)[0].answer, "another issue cannot answer this ask")
+        code, _, err = self.run_work("--issue", "3", "--answer-ask", str(ask), "--answer", "yes", "--commit")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(db.asks(key)[0].answer, "yes")
+        import engine_facts
+        import readiness
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+        facts = engine_facts.gather(forge=SimpleNamespace(blocked_by=lambda: {}), store=db,
+                                    root=self.root, trees=self.root / "trees", now=datetime.now(timezone.utc))
+        self.assertIsNone(readiness.why_not(key, claims=facts.claims, running=(), blockers=(),
+                                          asks=facts.asks, reports=facts.reports))
 
     def test_existing_issue_preview_does_not_open_the_store(self):
         self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])

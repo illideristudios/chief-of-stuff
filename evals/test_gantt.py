@@ -114,6 +114,11 @@ class Render(unittest.TestCase):
         self.assertEqual(label, "fix 02:10–03:40 · worker-04 · forecast")
         self.assertIn(f'title="{label}"', bar)
 
+    def test_a_hold_bar_uses_needs_input_in_its_accessible_label(self):
+        html = gantt.render([row(seg(0, 1, kind="hold"))], DAY)
+        self.assertIn('aria-label="implement 02:10–03:10 · worker-01 · needs input"', html)
+        self.assertIn('class="gantt-bar gantt-hold"', html)
+
     def test_the_week_names_the_day_in_a_bar_time(self) -> None:
         html = gantt.render([row(seg(0, 30))], WEEK)
         self.assertIn('aria-label="implement Sat 02:10–Sun 08:10 · worker-01 · done"', html)
@@ -235,7 +240,7 @@ class Palette(unittest.TestCase):
 
     def test_the_legend_lists_categories_then_kinds(self) -> None:
         html = gantt.legend({"alpha": "#123456", "beta": "#654321"})
-        self.assertEqual(re.findall(r"</span>([^<]+)</span>", html), ["alpha", "beta", "forecast", "hold"])
+        self.assertEqual(re.findall(r"</span>([^<]+)</span>", html), ["alpha", "beta", "forecast", "needs input"])
         self.assertIn('data-cat="alpha"', html)
         self.assertIn('class="gantt-bar gantt-hold"', html)
 
