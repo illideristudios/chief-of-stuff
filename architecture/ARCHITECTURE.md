@@ -226,3 +226,27 @@ chief-of-stuff is independent of any deployment technology, hosting provider, co
 What a workspace builds, deploys or runs, and how, reaches chief-of-stuff only through that workspace's own configuration: the `## Coordinator` block (its human-only actions, `Health:` lines and the rest) and the Settings TOML (such as `[workers] teardown` and `teardown_list`). chief-of-stuff runs those commands as given and never interprets them. A rule or a fixture that needs an example of a workspace-specific action uses an invented name, never a real product.
 
 Two things are chief-of-stuff's subject, not a stack, and stay named: the host CLIs it coordinates (claude, codex, cursor and agy, in `runtimes.py`), and the forges it integrates with (GitHub and GitLab, behind `forge.py`). The repository's own CI tooling under `.github/` is how this project is tested, not something chief-of-stuff runs, and is outside this section.
+
+## 12. Parent and child workspaces
+
+One engine can work several workspaces at once (owner, 2026-10-17). A parent workspace lists child workspaces, and one engine runs them all. Issue #825.
+- **Children are unchanged.** Each child is a full workspace: its own `CLAUDE.md` (Coordinator and Architecture blocks), backlog and forge, store, review policy, settings and file-ownership rules. Everything sections 4 to 11 say of a workspace holds for each child on its own.
+- **The parent adds one table.** `[workspaces]` in the parent's settings maps a child's name to its path, relative to the parent root. A parent with its own Backlog is a workspace too, and is worked alongside its children. A child that cannot be read is reported and skipped, never fatal.
+- **One engine, one pass per child.** `chief-of-stuff engine --root <parent>` runs the per-workspace pass once for each child in every loop. The pass is reused unchanged. A failure in one child is logged in that child's store and never stops another.
+- **One slot pool.** The parent owns a slot pool that caps running workers across all children at its `[workers] max_concurrency`. Each child's own `max_concurrency` still caps that child. Runtime limits are already per account (section 10), so a near-cap judgement covers every child on that account.
+- **One engine per workspace still holds.** The parent engine takes each child's singleton lock. A child already run by its own engine is skipped with a warning. Installing a child's own supervisor while a parent runs it is refused. The parent has one supervisor service.
+- **One board index.** The parent board lists each child's board. Each child keeps its own board.
+- **Not covered here:** dependencies between issues in different children. They wait for a need.
+
+```
+Ch := a child is an unchanged full workspace      P := one engine runs the per-workspace pass for each child
+G := one parent slot pool caps workers across children      A := limits are per account (§10)
+X := a child's failure is contained to that child      O := each workspace has at most one engine
+S := several workspaces are worked at once without overrunning the machine or the account
+
+Ch ∧ P            [the existing pass is reused; owner 2026-10-17]
+G ∧ A → no overrun of the machine or the account
+X ∧ O             [per-child error boundary; child locks taken by the parent]
+Ch ∧ P ∧ G ∧ A ∧ X ∧ O → S
+∴ add [workspaces], the per-child loop and the parent slot pool; nothing in a child changes
+```
