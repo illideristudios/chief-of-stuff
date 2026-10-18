@@ -363,6 +363,49 @@ class SettingsTest(unittest.TestCase):
                 st.load(self.root, self.write(text))
 
 
+
+class PolicyOverlayTest(unittest.TestCase):
+    """#827: `[policy] overlay` names a workspace policy TOML merged over the shipped policy."""
+
+    def workspace(self, settings_text, overlay_text=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "settings.toml").write_text(settings_text)
+        if overlay_text is not None:
+            (root / "policy.toml").write_text(overlay_text)
+        return root
+
+    def test_architect_false_in_an_overlay_stops_architect_requests_for_that_workspace_only(self):
+        mine = self.workspace('[policy]\noverlay = "policy.toml"\n', "[stages.review.policy]\narchitect = false\n")
+        other = self.workspace("")
+        overlay = st.load(mine, "settings.toml").policy_overlay
+        self.assertEqual(overlay, "policy.toml")
+        self.assertFalse(st.workspace_policy(mine, overlay).resolve(stage="review").architect)
+        self.assertTrue(st.workspace_policy(other, st.load(other, "settings.toml").policy_overlay).resolve(stage="review").architect)
+
+    def test_no_overlay_is_the_shipped_policy(self):
+        root = self.workspace("")
+        self.assertEqual(st.load(root, "settings.toml").policy_overlay, "")
+        self.assertEqual(st.workspace_policy(root), st.load_policy())
+
+    def test_a_missing_overlay_file_is_refused_never_a_silent_fallback(self):
+        root = self.workspace('[policy]\noverlay = "policy.toml"\n')
+        with self.assertRaisesRegex(st.policy.PolicyError, "policy.toml"):
+            st.workspace_policy(root, st.load(root, "settings.toml").policy_overlay)
+
+    def test_an_unknown_key_in_the_overlay_is_refused(self):
+        root = self.workspace('[policy]\noverlay = "policy.toml"\n', "[stages.review.policy]\narchitekt = false\n")
+        with self.assertRaisesRegex(st.policy.PolicyError, "architekt"):
+            st.workspace_policy(root, "policy.toml")
+
+    def test_the_policy_table_takes_only_an_overlay_inside_the_workspace(self):
+        for text, words in (('[policy]\noverlay = "policy.toml"\narchitect = false\n', "architect"),
+                            ('[policy]\noverlay = "../elsewhere.toml"\n', "outside"),
+                            ('[policy]\noverlay = ""\n', "overlay")):
+            with self.subTest(text=text), self.assertRaisesRegex(st.SettingsError, words):
+                st.load(self.workspace(text), "settings.toml")
+
 if __name__ == "__main__":
     unittest.main()
 
