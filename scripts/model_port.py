@@ -6,8 +6,9 @@ Every model call goes through one adapter that takes a `Request` and returns a `
 
 from __future__ import annotations
 
+import random
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from typing import Any, Callable, Sequence
 
@@ -27,6 +28,7 @@ class Request:
     worker: bool = False  # workers have tools and workspace context even before the guard plugin is installed
     agent: str = ""
     keep_events: bool = False  # retain the completed call's raw events for eval graders
+    runtime: str = ""  # #879: the host that answers a judgement call; empty is Claude
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,35 @@ def retry_at(reset: str, now: datetime, stops: int = 1) -> datetime:
                            minute=int(at[2] or 0), second=0, microsecond=0)
         return when if when > now else when + timedelta(days=1)
     return now + timedelta(seconds=min(3600, 60 * 2 ** min(stops - 1, 6)))
+
+
+def draw(rotation: Sequence[Any], n: int, *, launchable: Callable[[str], bool] = lambda runtime: True,
+         how: str = "first", shuffle: Callable[[list], list] | None = None, used: Sequence[Any] = ()) -> tuple[Any, ...]:
+    """Up to `n` distinct launchable entries of a `[models.<class>]` rotation (§6, #879): a runtime not yet drawn
+    first, so the trio's judgements are independent, then any other entry. `how` "random" draws in a random order;
+    `used` entries are never drawn again and count as drawn runtimes, so a quota stop advances to a new host."""
+    usable = [entry for entry in rotation if entry not in used and launchable(entry.runtime)]
+    if how == "random":
+        usable = (shuffle or (lambda xs: random.sample(xs, len(xs))))(usable)
+    chosen, hosts = [], {entry.runtime for entry in used}
+    for entry in usable:
+        if len(chosen) < n and entry.runtime not in hosts:
+            chosen.append(entry)
+            hosts.add(entry.runtime)
+    chosen += [entry for entry in usable if entry not in chosen][:n - len(chosen)]
+    return tuple(chosen)
+
+
+@dataclass(frozen=True)
+class Port:
+    """A model port carrying the `[models.trio]` rotation it draws from (#879); calling it asks the model."""
+    call: Model
+    rotation: tuple[Any, ...] = ()
+    pick: str = "first"
+    launchable: Callable[[str], bool] = field(default=lambda runtime: True)
+
+    def __call__(self, request: Request) -> "Reply | Failure":
+        return self.call(request)
 
 
 def rotate(call: Model, request: Request, models: Sequence[tuple[str, str]]) -> Reply | Failure:

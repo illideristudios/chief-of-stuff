@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable, Collection
 from dataclasses import is_dataclass, replace
 from datetime import datetime, timedelta
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +25,7 @@ import dispatch_prompt
 import engine_facts
 import engine_merge
 import forge
+import host_adapter
 import issue_gate
 import limits_history
 import limits_probe
@@ -34,6 +35,7 @@ import ownership
 import policy
 import readiness
 import reconcile
+import runtimes
 import settings
 import shell_setup
 import slots
@@ -132,12 +134,14 @@ def _add_spend(store: Any, key: str, amount: float) -> None:
 
 
 def _metered(store: Any, key: str, model: model_port.Model):
+    inner = model.call if isinstance(model, model_port.Port) else model
+
     def call(request: model_port.Request):
-        got = model(request)
+        got = inner(request)
         if isinstance(got, (model_port.Reply, model_port.Failure)):
             _add_spend(store, key, got.cost_usd)
         return got
-    return call
+    return replace(model, call=call) if isinstance(model, model_port.Port) else call  # keep the trio's rotation
 
 
 def _resolved(policies: policy.Policies, store: Any, key: str, stage: str) -> policy.Policy:
@@ -878,6 +882,20 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     return actions
 
 
+def _judge(request: model_port.Request, *, claude_as_profile: str = "") -> "model_port.Reply | model_port.Failure":
+    """The trio's model port (§6, #879): Claude through claude_adapter, the other hosts read-only through host_adapter."""
+    if request.runtime in ("", "claude"):
+        return claude_adapter.call(request, claude_as_profile=claude_as_profile)
+    return host_adapter.judge(request)
+
+
+@cache  # whether a CLI is installed does not change while the engine runs
+def _judges(runtime: str) -> bool:
+    """A host can sit in the trio only if it has a read-only judgement mode and its CLI is installed here."""
+    return runtime == "claude" or (runtime in runtimes.NAMES and bool(runtimes.get(runtime).judge_argv)
+                                   and host_adapter.available(runtime))
+
+
 def _note_policy(root: Path, data: dict, overlay: str) -> None:
     """Log the merged policy's fingerprint when it differs from the one this workspace last ran (#827)."""
     fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:12]
@@ -990,7 +1008,9 @@ def main(argv: list[str] | None = None) -> int:
                              clone=root / selected if selected else root,
                              claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
                              require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
-            model = partial(claude_adapter.call, claude_as_profile=config.workers.claude_as_profile)
+            model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
+                                    rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
+                                    launchable=_judges)
             stop_pages = threading.Event()
             page_thread = None
             try:

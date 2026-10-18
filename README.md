@@ -109,6 +109,19 @@ rotation = ["codex:<model-id>@high", "claude:opus@high"]
 
 `chief-of-stuff models --root . --class implement` prints the suggested entry. `--after <entry>` prints the next one, or exits nonzero when the rotation is exhausted. `--not-family <runtime>` skips that runtime's entries, for an independent review. `chief-of-stuff worker --class implement` launches the suggested entry when no `--runtime` or `--model` is given; explicit flags win. Effort is passed to Claude, Codex and Antigravity workers; Cursor takes none, so an entry or `--effort` that sets one for Cursor is refused. A bad runtime, an empty or duplicate rotation, or a bad effort is refused. Without `[models]`, the coordinator follows `chief-of-stuff-models.md`. The engine launches each stage from its class's rotation (plan from `deep`, implement and fix from `implement`, review from `review`). It takes the first entry it can launch, of any runtime, and after a quota stop moves to the next one (#701). A Codex, Cursor or Antigravity entry is launchable only when its CLI is on the login PATH and the forge protects the default branch (§13); others are logged as skipped. With no launchable entry it uses the persona's model. An entry without a runtime prefix means Claude. Add `pick = "random"` to a class to launch a uniformly random launchable entry on each fresh start instead of the first, so every model gets a comparable sample of work (`chief-of-stuff performance` reports runs and outcomes per runtime and model); a quota stop still advances in rotation order.
 
+The decision trio draws its models from a `[models.trio]` rotation, with the same `pick`. A consult takes three distinct launchable entries, on three different runtimes when the rotation has them, so a unanimous verdict is three independent judgements. With fewer, it reuses what it has and records `diverse: false` on the decision. Each vote records the runtime and model that cast it. Every consult is read-only: Claude runs with no tools under `--safe-mode`, Codex in its `read-only` sandbox, Cursor in `--mode ask` and Antigravity in `--mode plan`, each in a fresh empty directory. A host with no read-only mode cannot sit in the trio. A quota stop moves that member to an entry no other member holds; when every entry has stopped, the owner decides. Without `[models.trio]`, each trio persona uses its own `model` from the policy.
+
+```
+R := a [models.trio] rotation is set      D := three distinct entries on three runtimes can launch
+W := a consult can write      Q := every entry stopped on quota      O := the owner decides
+
+R ∧ D → diverse: true; R ∧ ¬D → diverse: false          [#879]
+¬W                                                     [every host runs read-only, §6]
+Q → O                                                  [§6: an exhausted retry]
+¬R → each persona's own model
+∴ the trio rotates like workers, stays read-only, and falls back to the owner
+```
+
 Stage launch defaults live beside the model tables in the settings TOML:
 
 ```toml
