@@ -51,7 +51,11 @@ def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
           env: dict[str, str] | None = None) -> subprocess.Popen:
     """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
-    prepared = command(request, claude_as_profile)
+    return spawn(command(request, claude_as_profile), request, run_dir, env)
+
+
+def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
+    """The detached runner for any host's prepared login argv (#700: shared by every host adapter)."""
     (run_dir / "command.json").write_text(json.dumps({"argv": prepared, "cwd": request.cwd,
                                                     "session_id": request.session_id,
                                                     "env": env or {}}))

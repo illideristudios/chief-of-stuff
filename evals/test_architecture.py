@@ -36,6 +36,7 @@ DRAWS_NOTHING = (
     "one_shot_report", "flow", "sync_page_theme", "store", "store_access",
     "model_port",
     "claude_adapter",
+    "host_adapter",
     "policy",
     "forge",
     "forge_port",
@@ -135,8 +136,8 @@ def forbidden_reach(scripts: Path, start: str, banned_scripts: set[str], banned_
 # `http` is `from urllib import request`; `urllib.parse` is not on the list.
 READER_BANS = ({"one_shot", "backlog"}, frozenset({*HTTP, "urllib", "http"}))
 
-# Design 7a: only the model adapter launches a host CLI, and the registry is where it learns the executable.
-ADAPTER = ("scripts/claude_adapter.py", "scripts/runtimes.py")
+# Design 7a and §4/§13: only the host adapters launch a host CLI, and the registry is where they learn the executable.
+ADAPTER = ("scripts/claude_adapter.py", "scripts/host_adapter.py", "scripts/runtimes.py")
 # The modules that named a host executable before the adapter. The list may only shrink; each entry must still name one.
 # session_exec execs the worker CLI for spawn_session, and process_status matches the executable to check liveness.
 # evals/run.py remains exempt only for its non-Claude backends until 1.1.
@@ -229,7 +230,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0005_segment_human_review",
     }),
     "drivers": frozenset({
-        "claude_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
+        "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
         "startup", "store_access", "kanban_cli", "pipeline_cli", "process_status", "session_exec", "spawn_session",
         "probe_health", "pages", "chief_of_stuff", "start_coordinator", "board_guard",
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",

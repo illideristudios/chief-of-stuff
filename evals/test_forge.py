@@ -1255,6 +1255,22 @@ class ProtectedBranchesTest(unittest.TestCase):
         with mock.patch.object(backlog, "_call", call):
             self.assertEqual(forge.Forge(GL, token="t").protected_branches(), ("trunk", "release"))
 
+    def test_default_branch_protected_reads_whether_the_forge_protects_the_default(self):
+        # §13 (b): a non-Claude worker launches only where the default branch itself is protected.
+        def gh(protected):
+            def answer(args, input_text=None):
+                if args[:2] == ["api", f"repos/{REPO}"]:
+                    return 0, "trunk\n", ""
+                if args[:2] == ["api", f"repos/{REPO}/branches?protected=true&per_page=100"]:
+                    return 0, protected, ""
+                return 1, "", "unexpected"
+            return answer
+        self.assertTrue(forge.Forge(GH, gh=gh("release\ntrunk\n")).default_branch_protected())
+        self.assertFalse(forge.Forge(GH, gh=gh("release\n")).default_branch_protected())
+        self.assertEqual(forge.Forge(GH, gh=gh("release\n")).protected_branches(), ("trunk", "release"))
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).default_branch_protected()
+
     def test_an_unreadable_answer_is_an_error_never_an_empty_list(self):
         with self.assertRaises(forge.ForgeError):
             forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).protected_branches()
