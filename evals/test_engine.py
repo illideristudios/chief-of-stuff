@@ -2947,7 +2947,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine, "run_pass") as passed, \
              mock.patch.object(engine.claude_adapter, "call") as call:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
-            request = object()
+            request = engine.model_port.Request("q")  # #879: a request names its runtime; empty is Claude
             passed.call_args.kwargs["model"](request)
         self.assertEqual(call.call_args.args, (request,))
 
