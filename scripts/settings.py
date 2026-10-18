@@ -210,6 +210,8 @@ class Settings:
     pages: Pages = field(default_factory=Pages)
     # #111: task class -> rotation; the first entry is the suggested model, the rest the fallback order.
     models: dict[str, tuple[ModelEntry, ...]] = field(default_factory=dict)
+    # #877: task class -> "first" or "random", how a fresh start chooses among the launchable entries.
+    model_picks: dict[str, str] = field(default_factory=dict)
     graph: Graph | None = None
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
     repos: dict[str, str] = field(default_factory=dict)
@@ -261,14 +263,29 @@ def _entry(where: str, text) -> ModelEntry:
     return ModelEntry(runtime, model, effort)
 
 
+PICKS = ("first", "random")  # #877: how a fresh start chooses among a class's launchable entries
+
+
+def _picks(table) -> dict[str, str]:
+    """Each class's `pick`, "first" when absent; Zach, 2026-10-18: "can we make it so they randomly select"."""
+    picks = {}
+    for name, t in table.items():
+        value = t.get("pick", "first") if isinstance(t, dict) else "first"
+        if value not in PICKS:
+            raise SettingsError(f"[models.{name}]: pick must be one of {', '.join(PICKS)}")
+        picks[name] = value
+    return picks
+
+
 def _models(table) -> dict[str, tuple[ModelEntry, ...]]:
     if not isinstance(table, dict):
         raise SettingsError("[models] must be a table of task classes")
     models = {}
     for name, t in table.items():
         where = f"[models.{name}]"
-        if not isinstance(t, dict) or set(t) != {"rotation"}:
-            raise SettingsError(f"{where}: a table with only rotation, like {{ rotation = [\"claude:opus@high\"] }}")
+        if not isinstance(t, dict) or "rotation" not in t or not set(t) <= {"rotation", "pick"}:
+            raise SettingsError(f"{where}: a table with a rotation and an optional pick, like "
+                                f"{{ rotation = [\"claude:opus@high\"], pick = \"random\" }}")
         rotation = t["rotation"]
         if not isinstance(rotation, list) or not rotation:
             raise SettingsError(f"{where}: rotation is a non-empty list of runtime:model-id@effort entries")
@@ -544,6 +561,7 @@ def load(root: Path, settings_path: str | None) -> Settings:
     workflow = _workflow(data["workflow"]) if "workflow" in data else Workflow()
     workers = _workers(data["workers"]) if "workers" in data else Workers()
     models = _models(data["models"]) if "models" in data else {}
+    model_picks = _picks(data["models"]) if "models" in data else {}
     graph = _graph(data["graph"]) if "graph" in data else None
     pages = _pages(data["pages"]) if "pages" in data else Pages()
     repos = _repos(data["repos"]) if "repos" in data else {}
@@ -554,11 +572,11 @@ def load(root: Path, settings_path: str | None) -> Settings:
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, limits=limits)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, graph=graph, repos=repos, stages=stages, limits=limits)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits)
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:
