@@ -8,6 +8,37 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import ownership  # noqa: E402
 
 
+class IssueScopesTest(unittest.TestCase):
+    def test_issue_section_uses_the_shared_table_and_bullet_reader(self):
+        body = "## File ownership\n| Mode | Paths |\n| --- | --- |\n| write | `src/`, `tests/` |\n- read-only: `docs/`\n## Other\n- write: `secrets/`"
+        self.assertEqual(ownership.issue_scopes(body), [("src", "write"), ("tests", "write"), ("docs", "read")])
+
+    def test_absent_empty_or_invalid_scope_defaults_to_whole_repository_write(self):
+        for body in ("", "## File ownership\n", "## File ownership\n- typo: `src/`",
+                     "## File ownership\n- write: `../outside`", "## File ownership\n- write: `/absolute`"):
+            with self.subTest(body=body):
+                self.assertEqual(ownership.issue_scopes(body), [(".", "write")])
+
+    def test_a_malformed_line_cannot_silently_drop_a_write_scope(self):
+        for bad in ("write src/", "- write src/", "| write |", "some prose", "| write | src/ | extra |", "| Mode | src/ |", "- mode: src/"):
+            with self.subTest(bad=bad):
+                self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n" + bad), [(".", "write")])
+
+    def test_noncanonical_path_segments_cannot_bypass_overlap(self):
+        for path in ("src//a.py", "src/./a.py", "src/../a.py"):
+            with self.subTest(path=path):
+                self.assertEqual(ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + path), [(".", "write")])
+
+    def test_cells_that_cannot_round_trip_through_overlap_default_to_repository_write(self):
+        for paths in ("`none`", "`none, src`", "`src,a.py`", "`src/a; worktree hidden`",
+                      "`src/a` src/b", "src/a, `src/b`", "`src/a` and `src/b`", "`src/a` `src/b`",
+                      "`src/a", "`src/a` trailing", "` src/a `"):
+            with self.subTest(paths=paths):
+                scopes = ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + paths)
+                self.assertEqual(scopes, [(".", "write")])
+                self.assertTrue(ownership.overlaps(scopes[0][0], "src/anything"))
+
+
 class ReadOnlyTest(unittest.TestCase):
     def test_a_cell_that_starts_with_the_word_none_is_read_only(self):
         for cell in ("none", "None; read-only review", "  NONE; read-only", "none; worktree `t` (b)",

@@ -162,10 +162,14 @@ def owned_items(root: Path, db: Store) -> list[tuple[Path, WorkItem]]:
     return [((root / row.path).resolve(), item) for item in db.items() for row in db.ownership(item.issue_key)]
 
 
-def owner_guards(tree: Path, owned: list[tuple[Path, WorkItem]]) -> tuple[list[WorkItem], list[str]]:
+def owner_guards(tree: Path, owned: list[tuple[Path, WorkItem]],
+                 completed: set[str] | frozenset[str] = frozenset()) -> tuple[list[WorkItem], list[str]]:
     items = list({item.issue_key: item for path, item in owned if inside(path, tree)}.values())
     kept = [] if items else ["no store item owns it"]
-    return items, kept + [f"{item.issue_key} is not finished" for item in items if item.forge_state != FINISHED]
+    kept += [f"{item.issue_key} is not finished" for item in items if item.forge_state != FINISHED]
+    kept += [f"{item.issue_key}: merged, awaiting main CI" for item in items
+             if item.merge_state == "merged" and item.issue_key not in completed]
+    return items, kept
 
 
 def layout_guards(tree: Path, expected_common: Path | None = None) -> tuple[git_view.Layout | None, list[str]]:
@@ -194,8 +198,12 @@ def layout_guards(tree: Path, expected_common: Path | None = None) -> tuple[git_
     return layout, []
 
 
-def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) -> int:
-    """Clean with the engine's open store, using exactly the CLI's guards and removal. None means no Worktrees dir."""
+def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
+            completed: set[str] | frozenset[str] = frozenset()) -> int:
+    """Clean using all safety guards; merged owners also need this pass's verified completions.
+
+    Without completion evidence (including the CLI), merged trees are retained. None means no Worktrees dir.
+    """
     trees_dir = str(trees) if trees is not None else ""
     trees = trees if trees is not None else root
     settings = load_settings(root, settings_path((root / "CLAUDE.md").read_text()))
@@ -207,7 +215,7 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
         common = commons.get(tree)
         layout, kept = layout_guards(tree, common)
         partial: list[str] = []
-        items, owners_kept = owner_guards(tree, owned)
+        items, owners_kept = owner_guards(tree, owned, completed)
         kept += owners_kept
         kept += claims(root, trees, tree)
         if mounts is None:
@@ -230,7 +238,7 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False) 
                     elif any(inside(mount.resolve(), tree) for mount in current_mounts):
                         kept.append("a container binds a path in it")
                     try:
-                        items, owners_kept = owner_guards(tree, owned_items(root, db))
+                        items, owners_kept = owner_guards(tree, owned_items(root, db), completed)
                         kept += owners_kept
                     except SQLAlchemyError as exc:
                         failed = True

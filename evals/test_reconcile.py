@@ -61,6 +61,33 @@ class ReconcileTest(unittest.TestCase):
     def setUp(self):
         self.p = policies()
 
+    def test_drifted_pending_stage_replaces_a_hold_only_on_an_open_card_with_a_stage(self):
+        for stage in ("merge", ""):
+            for state in ("open", "closed"):
+                for restore in (False, True):
+                    with self.subTest(stage=stage, state=state, restore=restore):
+                        item = replace(Item(), stage=stage, forge_state=state)
+                        pending = {"stage": "review", "expected": "implement", "restore_hold": restore}
+                        action = reconcile.hold_recovery(item, (), pending_hold=None, pending_release=None,
+                                                         owned=None, pending_stage=pending)
+                        expected = "replace" if restore and state == "open" and stage else "drop_stage"
+                        self.assertEqual(action, expected)
+
+    def test_suite_hold_lifecycle_is_decided_from_facts(self):
+        hold = {"stage": "implement", "attempt": 1, "published": True}
+        history = [Segment("implement", outcome="human_review")]
+        decide = reconcile.suite_hold_action
+        self.assertEqual(decide(Item(), hold, history, observed=False), "accept")
+        for observed in (True, None):
+            self.assertEqual(decide(Item(), hold, history, observed=observed), "wait")
+        self.assertEqual(decide(Item(), {**hold, "published": False}, history, observed=False), "publish")
+        self.assertEqual(decide(Item(forge_state="closed"), hold, history, observed=False), "retire")
+        for invalid_history in ([], [Segment("implement", ended_at=None, outcome="human_review")],
+                                [Segment("implement", outcome="done")]):
+            with self.subTest(history=invalid_history):
+                with self.assertRaisesRegex(ValueError, "completed human-review segment"):
+                    decide(Item(), hold, invalid_history, observed=False)
+
     def plan(self, item=Item(), history=(), findings=None, slots=4, **kwargs):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
                               {} if findings is None else {item.issue_key: findings}, **kwargs)
@@ -144,6 +171,21 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(outcome=outcome, rework=False):
                 self.assertEqual(self.plan(history=[Segment("implement", outcome=outcome)]),
                                  [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+
+    def test_a_quota_reset_holds_launches_but_not_the_gate_or_merge_actions(self):
+        later = NOW + timedelta(hours=1)
+        self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
+                         [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.plan(quota_resets={KEY: later}), [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.plan(replace(Item(), stage="review", review_state="approved", merge_state="ready"),
+                                   [Segment("review")], {}, quota_resets={KEY: later}),
+                         [reconcile.Merge(KEY)])
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        # #750 ruling 1 (rule 11): a gate Ask is a trio consult that spends model quota, so a reset holds it too.
+        self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
+                         [reconcile.Wait(KEY, "quota reset pending")])
+        self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: NOW}),
+                         [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
 
     def test_work_starting_at_first_review_end_counts_as_rework(self):
         item = replace(Item(), stage="review", review_state="changes_requested")
@@ -610,6 +652,63 @@ class ReconcileTest(unittest.TestCase):
     def test_human_review_items_wait_without_consuming_a_slot(self):
         self.assertEqual(self.plan(replace(Item(), human_review=True)), [reconcile.Wait(KEY, "human review")])
 
+    def test_retry_releases_an_extra_hold_only_for_the_current_failed_stage(self):
+        for stage, action in (("implement", reconcile.Dispatch(KEY, "implement", "builder", 2)),
+                              ("review", reconcile.Review(KEY, 2))):
+            # The engine owns a hold only after a failed launch, which records `failed`; a quota or
+            # unknown exit never carries that ownership, so a person's hold after one is theirs.
+            for outcome in ("quota", "unknown"):
+                with self.subTest(stage=stage, outcome=outcome):
+                    item = replace(Item(), stage=stage, human_review=True)
+                    self.assertEqual(self.plan(item, [Segment(stage, outcome=outcome)],
+                                               launcher_holds={KEY: {"stage": stage, "attempt": 1}}),
+                                     [reconcile.Wait(KEY, "human review")])
+            for outcome in ("failed",):
+                with self.subTest(stage=stage, outcome=outcome):
+                    item = replace(Item(), stage=stage, human_review=True)
+                    history = [Segment(stage, outcome=outcome)]
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}), [action])
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, hold_stages=(stage,)),
+                                     [reconcile.Wait(KEY, "human review")])
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, slots=0),
+                                     [reconcile.Wait(KEY, "no free worker slots")])
+                    self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": stage, "attempt": 1}}, quota_resets={KEY: NOW + timedelta(hours=1)}),
+                                     [reconcile.Wait(KEY, "quota reset pending")])
+
+    def test_unowned_blank_and_stale_holds_wait_for_a_human(self):
+        history = [Segment("implement", outcome="quota")]
+        for stage, holds in (("implement", {}), ("", {KEY: {"stage": "implement", "attempt": 1}}),
+                             ("implement", {KEY: {"stage": "implement", "attempt": 0}})):
+            with self.subTest(stage=stage, holds=holds):
+                self.assertEqual(self.plan(replace(Item(), stage=stage, human_review=True), history,
+                                           launcher_holds=holds), [reconcile.Wait(KEY, "human review")])
+
+    def test_failed_reviews_obey_retry_limit_but_completed_rounds_do_not_spend_it(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        item = replace(Item(), stage="review", human_review=True)
+        history = [Segment("review", attempt=n, outcome="failed") for n in (1, 2)]
+        self.assertEqual(self.plan(item, history, launcher_holds={KEY: {"stage": "review", "attempt": 2}}),
+                         [reconcile.Escalate(KEY, "retry limit reached for review")])
+        history = [Segment("review", attempt=n) for n in (1, 2)] + [Segment("review", attempt=3, outcome="failed")]
+        self.assertEqual(self.plan(replace(item, human_review=False), history), [reconcile.Review(KEY, 4)])
+
+    def test_a_failed_review_followed_by_a_completed_one_does_not_spend_a_later_allowance(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        item = replace(Item(), stage="review")
+        history = [Segment("review", attempt=1, outcome="failed"), Segment("review", attempt=2),
+                   Segment("review", attempt=3, outcome="failed")]
+        self.assertEqual(self.plan(item, history), [reconcile.Review(KEY, 4)])
+        history.append(Segment("review", attempt=4, outcome="failed"))
+        self.assertEqual(self.plan(item, history), [reconcile.Escalate(KEY, "retry limit reached for review")])
+
+    def test_extra_holds_remain_for_completion_human_outcomes_and_other_stages(self):
+        item = replace(Item(), human_review=True)
+        for history in ([Segment("implement", outcome=outcome)]
+                        for outcome in ("done", "human_review", "blocked", None)):
+            self.assertEqual(self.plan(item, history), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.plan(item, [Segment("review", outcome="failed")]),
+                         [reconcile.Wait(KEY, "human review")])
+
     def test_dispatches_and_parallel_reviews_share_free_slots(self):
         items = [replace(Item(), issue_key=f"github:example/project#{n}", stage=stage)
                  for n, stage in ((1, "review"), (2, "review"), (3, "implement"))]
@@ -693,6 +792,103 @@ class ReconcileTest(unittest.TestCase):
         for slots, now in ((-1, NOW), (1, NOW.replace(tzinfo=None))):
             with self.subTest(slots=slots, now=now), self.assertRaises(ValueError):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
+
+    def test_an_item_that_waits_for_a_slot_claims_nothing_for_the_next(self):
+        import readiness
+        keys = [f"github:example/project#{n}" for n in (1, 2, 3)]
+        items = [replace(Item(), issue_key=key) for key in keys]
+        claims = (readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
+        got = reconcile.plan(items, {}, self.p, {}, 1, NOW, {}, facts=reconcile.Facts(claims=claims, blockers=()))
+        self.assertEqual([type(a).__name__ for a in got], ["Dispatch", "Wait", "Wait"])
+        self.assertEqual([a.reason for a in got[1:]], ["no free worker slots"] * 2)
+
+    def test_unknown_blockers_wait_with_their_reason(self):
+        facts = reconcile.Facts(blockers=None, blockers_error="auth required")
+        self.assertEqual(self.plan(facts=facts),
+                         [reconcile.Wait(KEY, "dependency blockers unknown: auth required")])
+
+    def test_a_running_segment_whose_worker_is_gone_is_closed_instead_of_suppressed(self):
+        import readiness
+        other = "github:example/project#2"
+        open_seg = Segment("implement", ended_at=None, outcome=None)
+        gone = reconcile.Facts(alive=(((KEY, "implement", 1), False),))
+        self.assertEqual(self.plan(history=[open_seg], facts=gone),
+                         [reconcile.Close(KEY, "implement", 1, "failed", "worker gone")])
+        live = reconcile.Facts(alive=(((KEY, "implement", 1), True),))
+        self.assertEqual(self.plan(history=[open_seg], facts=live), [])
+        stalled = reconcile.Facts(alive=(((KEY, "implement", 1), True),),
+                                  progress=((KEY, NOW - timedelta(hours=2)),),
+                                  stall_after=timedelta(minutes=45))
+        self.assertEqual(self.plan(history=[replace(open_seg, started_at=NOW - timedelta(hours=2))], facts=stalled),
+                         [reconcile.Wait(KEY, "stalled")])
+        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(other, "src/a.py"))
+        conflict = reconcile.Facts(claims=claims, blockers=(), alive=(((other, "implement", 1), True),))
+        actions = reconcile.plan([Item(), replace(Item(), issue_key=other)],
+                                 {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=conflict)
+        self.assertEqual(actions, [reconcile.Wait(KEY, f"file ownership conflict with {other}")])
+
+    def test_released_read_only_hold_is_not_reinstated_from_a_retained_tree(self):
+        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, True),), blockers=())
+        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan(item=replace(Item(), human_review=True), history=[Segment("implement")], facts=facts),
+                         [reconcile.Wait(KEY, "human review")])
+
+    def test_unknown_finished_tree_does_not_reinstate_a_released_read_only_hold(self):
+        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, None),), blockers=())
+        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
+
+    def test_workflow_terminal_worker_requires_landing_when_it_disappears(self):
+        import readiness
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement")
+        facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),),
+                                reports=(readiness.Report(KEY, "done", "implement", 1),),
+                                on_main=((KEY, False),), changed=((KEY, False),))
+        action = self.plan(history=[Segment("implement", ended_at=None)], facts=facts)[0]
+        self.assertEqual(action, reconcile.Close(KEY, "implement", 1, "done", "not on main", True))
+
+    def test_a_red_suite_holds_only_when_completion_did_not(self):
+        import readiness
+        from tree_state import TreeState
+        red = {"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0}
+        suite = (((KEY, "implement", 1), (red, "reported done")),)
+        report = (readiness.Report(KEY, "done", "implement", 1),)
+        open_seg = [Segment("implement", ended_at=None)]
+        held = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
+                               trees=((KEY, TreeState("work", 3, 0, 0)),), changed=((KEY, True),),
+                               suites=suite, require_green=True)
+        action = self.plan(history=open_seg, facts=held)[0]
+        self.assertEqual(action.outcome, "done")
+        self.assertTrue(action.human_review)
+        self.assertFalse(action.suite_hold)
+        self.assertIn("uncommitted", action.reason)
+        clean = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
+                                changed=((KEY, False),), suites=suite, require_green=True)
+        action = self.plan(history=open_seg, facts=clean)[0]
+        self.assertEqual(action, reconcile.Close(
+            KEY, "implement", 1, "human_review",
+            "suite is not green; Suite: passed=0, failed=1, skipped=0, xfailed=0; worker said: reported done",
+            True, True))
+        missing = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report, changed=((KEY, False),),
+                                  suites=(((KEY, "implement", 1),
+                                           ({"passed": None, "failed": None, "skipped": None, "xfailed": None},
+                                            "reported done")),),
+                                  require_green=True)
+        self.assertTrue(self.plan(history=open_seg, facts=missing)[0].suite_hold)
+        absent = replace(missing, suites=())
+        self.assertTrue(self.plan(history=open_seg, facts=absent)[0].suite_hold)
+        self.assertFalse(self.plan(history=open_seg, facts=replace(absent, require_green=False))[0].suite_hold)
+
+
+class SuiteHoldTest(unittest.TestCase):
+    def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):
+        green = {"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0}
+        self.assertFalse(reconcile.suite_holds(green, require_green=True))
+        self.assertFalse(reconcile.suite_holds({**green, "passed": 0}, require_green=False))
+        self.assertFalse(reconcile.suite_holds({}, require_green=False))
+        for counts in ({**green, "passed": 0}, {**green, "failed": 1}, {**green, "skipped": 2},
+                       {**green, "xfailed": 1}, {**green, "passed": None}, {}):
+            with self.subTest(counts=counts):
+                self.assertTrue(reconcile.suite_holds(counts, require_green=True))
 
 
 if __name__ == "__main__":

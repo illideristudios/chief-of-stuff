@@ -533,20 +533,7 @@ class CodexAddDirArgsTest(unittest.TestCase):
             (base / ".git/worktrees/tree/gitdir").write_text(f"{sub / '.git'}\n")
             self.assertEqual(git_trees.codex_add_dir_args(sub), [])
 
-    def test_a_relative_paths_worktree_still_gets_its_two_dirs(self):
-        # `git worktree add --relative-paths` writes the back-pointer relative to the gitdir; it is resolved before comparing.
-        with tempfile.TemporaryDirectory() as tmp:
-            base, tree = Path(tmp) / "base", Path(tmp) / "tree"
-            subprocess.run(["git", "init", "-q", str(base)], check=True)
-            self._git("-C", str(base), "commit", "-q", "--allow-empty", "-m", "init")
-            made = subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", "--relative-paths", str(tree)],
-                                  capture_output=True, text=True)
-            if made.returncode:
-                self.skipTest(f"this git has no `worktree add --relative-paths`: {made.stderr.strip()}")
-            pointer = (base / ".git/worktrees/tree/gitdir").read_text().strip()
-            self.assertFalse(Path(pointer).is_absolute(), pointer)  # the fixture is the relative form
-            self.assertEqual(git_trees.codex_add_dir_args(tree),
-                             self.pairs((base / ".git").resolve(), (base / ".git/worktrees/tree").resolve()))
+    # The `worktree add --relative-paths` case is removed until the CI image's git supports it (#855).
 
     def test_no_git_process_is_spawned_for_any_grant_or_refusal(self):
         # #443: the tree is what a previous codex run could write to, so its git control files are read as files

@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from unittest.mock import patch
 
@@ -104,28 +104,27 @@ class Sources(unittest.TestCase):
         self.assertTrue(limits_probe.read("claude", "missing")[0].unknown)
         self.assertTrue(limits_probe.read("claude", "../secondary")[0].unknown)
 
-    def test_an_unchanged_transcript_is_not_mapped_again(self):
+    def test_an_unchanged_transcript_is_not_decoded_again(self):
         event = {"type": "rate_limit_event", "timestamp": NOW.isoformat(), "rate_limit_info": {
             "rateLimitType": "five_hour", "utilization": .85,
             "resetsAt": (NOW + timedelta(hours=2)).timestamp()}}
         self.write(".claude/projects/work/session.jsonl", [event])
-        import mmap
         with patch("limits_probe._now", return_value=NOW), \
-                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
+                patch("session_logs.json.loads", wraps=json.loads) as decoded:
             first = limits_probe.read("claude", "")
-            scans = mapped.call_count
+            scans = decoded.call_count
             second = limits_probe.read("claude", "")
             self.assertEqual(scans, 1)
-            self.assertEqual(mapped.call_count, scans)
+            self.assertEqual(decoded.call_count, scans)
         self.assertEqual(first[0].used, second[0].used)
         later = dict(event, rate_limit_info={
             "rateLimitType": "five_hour", "utilization": .1,
             "resetsAt": (NOW + timedelta(hours=2)).timestamp()})
         self.write(".claude/projects/work/session.jsonl", [later])
         with patch("limits_probe._now", return_value=NOW), \
-                patch("limits_probe.mmap.mmap", wraps=mmap.mmap) as mapped:
+                patch("session_logs.json.loads", wraps=json.loads) as decoded:
             third = limits_probe.read("claude", "")
-            self.assertEqual(mapped.call_count, 1)
+            self.assertEqual(decoded.call_count, 1)
         self.assertEqual(third[0].used, 10)
 
     def test_unknown_event_keeps_an_unexpired_numeric_limit(self):
@@ -175,6 +174,41 @@ class Sources(unittest.TestCase):
             r = limits_probe.read("claude", "")[0]
         self.assertIsNone(r.used)
         self.assertTrue(r.unknown)
+
+    def test_invalid_reset_candidates_do_not_hide_other_limit_events(self):
+        class InvalidClock(tzinfo):
+            def utcoffset(self, dt):
+                if dt is not None and dt.hour == 2:
+                    raise ValueError("invalid civil reset time")
+                return timedelta(0)
+
+            def dst(self, dt):
+                return timedelta(0)
+
+            def fromutc(self, dt):
+                return dt
+
+        stamp = NOW.replace(hour=1)
+        native = {"type": "assistant", "isApiErrorMessage": True, "error": "rate_limit",
+                  "timestamp": stamp.isoformat(), "message": {"content": [{"type": "text",
+                      "text": "You've hit your session limit · resets 2am (Invalid/Clock)"}]}}
+        numeric = {"type": "rate_limit_event", "timestamp": stamp.isoformat(), "rate_limit_info": {
+            "rateLimitType": "weekly", "utilization": .4, "resetsAt": (stamp + timedelta(days=2)).timestamp()}}
+        self.write(".claude/projects/work/session.jsonl", [native, numeric])
+        with patch("limits_probe._now", return_value=stamp), patch("limits_probe.ZoneInfo", return_value=InvalidClock()):
+            rows = {r.limit: r for r in limits_probe.read("claude", "")}
+        self.assertEqual(rows["weekly"].used, 40)
+        self.assertIn("supported reset clock", rows["session"].unknown)
+
+    def test_spring_gap_clock_skips_nonexistent_civil_time(self):
+        stamp = datetime(2026, 3, 8, 7, tzinfo=timezone.utc)
+        event = {"type": "assistant", "isApiErrorMessage": True, "error": "rate_limit",
+                 "timestamp": stamp.isoformat(), "message": {"content": [{"type": "text",
+                     "text": "You've hit your session limit · resets 2:30am (America/Chicago)"}]}}
+        self.write(".claude/projects/work/session.jsonl", [event])
+        with patch("limits_probe._now", return_value=stamp):
+            row = limits_probe.read("claude", "")[0]
+        self.assertEqual(row.resets_at, datetime(2026, 3, 9, 7, 30, tzinfo=timezone.utc))
 
     def test_read_all_uses_one_account_and_keeps_going_after_a_failed_runtime(self):
         workers = settings.Workers(claude_as_profile="secondary")

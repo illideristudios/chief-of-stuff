@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import make_repo
 import run
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -138,20 +139,15 @@ class SandboxGuardTest(unittest.TestCase):
             env = run.eval_environment(Path(d), Path(d) / "calls.jsonl", "America/Chicago")
             self.assertNotIn("CHIEF_OF_STUFF_SHELL", env)
 
-    def test_a_case_s_runtimes_present_reaches_the_environment_its_run_is_launched_in(self) -> None:
-        """`eval_environment` builds the stand-in; this is `run_one` handing it the case's key. The host CLI is the one
-        `subprocess.run` call a case with no `repo` makes: it is stopped there, and the env it was given is asked."""
-        sys.path.insert(0, str(run.PLUGIN_ROOT / "scripts"))
-        import runtimes
+    def test_a_case_s_runtimes_present_reaches_the_adapter_environment(self) -> None:
         import shell_setup
         for present in (["claude"], ["codex", "cursor"], []):
             with self.subTest(present=present), tempfile.TemporaryDirectory() as d:
                 case = run.Case("wired", Path(d) / "case", {"prompt": "hello", "graders": [], "runtimes_present": present})
-                stop = subprocess.TimeoutExpired("host", 1)
-                with unittest.mock.patch.object(run.subprocess, "run", side_effect=stop) as launched:
-                    self.assertEqual(run.run_one(case, "baseline", "sonnet", Path(d) / "out")[:2], ([], "timeout"))
+                with unittest.mock.patch.object(run.claude_adapter, "call", return_value=run.Failure("unknown", "timeout")) as launched:
+                    self.assertIn("timeout", run.run_one(case, "baseline", "sonnet", Path(d) / "out")[1])
                 env = launched.call_args.kwargs["env"]
-                found = {r.name for r in runtimes.RUNTIMES if shell_setup.resolve(r.binary, source=env)}
+                found = {r.name for r in run.runtimes.RUNTIMES if shell_setup.resolve(r.binary, source=env)}
                 self.assertEqual(found, set(present))
 
     def test_eval_entry_point_uses_its_snapshot_and_exact_arguments(self) -> None:
@@ -185,20 +181,6 @@ class SandboxGuardTest(unittest.TestCase):
 
 
 class ShimTest(unittest.TestCase):
-    def test_railway_shim_is_python_logs_and_refuses(self) -> None:
-        import subprocess
-        import sys
-
-        with tempfile.TemporaryDirectory() as d:
-            shims = Path(d)
-            run.write_shims(shims)
-            shim = shims / "railway"
-            self.assertTrue(shim.read_text().startswith("#!/usr/bin/env python3\n"))
-            proc = subprocess.run([sys.executable, str(shim), "up", "--detach"], capture_output=True, text=True)
-            self.assertEqual(proc.returncode, 1)
-            self.assertIn("blocked by eval harness", proc.stderr)
-            self.assertEqual((shims / "calls.log").read_text(), "railway up --detach\n")
-
     def test_gh_shim_lists_the_cases_pull_requests_and_logs_a_merge(self) -> None:
         import subprocess
         import sys
@@ -544,6 +526,109 @@ class NoShellEditsTest(unittest.TestCase):
                 self.assertFalse(self.check(command))
 
 
+class PathGitWriteTest(unittest.TestCase):
+    """path_git_write reads the PATH `git` shim's record of argv; it never parses shell text.
+
+    It grades a git write made through PATH. An absolute-path git bypasses the shim and is not graded (#770).
+    """
+
+    def grade(self, *argvs: list[str]) -> bool:
+        rec = record(at(16, 23), at(16, 25))
+        rec.mock_calls = [{"tool": "git", "argv": argv} for argv in argvs] + [{"tool": "spawn", "argv": ["push"]}]
+        return run.grade({"type": "path_git_write", "subcommands": ["commit", "add", "push"]}, rec)[0]
+
+    def test_writes_are_caught_through_global_options(self) -> None:
+        for argv in (["push"], ["-C", ".", "push"], ["-c", "user.name=x", "commit", "-m", "m"], ["--no-pager", "add", "-A"],
+                     ["--git-dir", ".git", "push", "origin", "main"], ["--config-env=user.name=NAME", "push"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(self.grade(argv))
+
+    def test_reads_and_empty_records_are_not_writes(self) -> None:
+        self.assertTrue(self.grade())
+        for argv in (["log", "--oneline", "-3"], ["-C", ".", "status"], ["diff", "HEAD"], ["-C", "alias.d", "status"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(self.grade(argv))
+
+    def test_an_alias_or_a_missing_option_value_fails_closed(self) -> None:
+        for argv in (["-c", "alias.p=push", "p"], ["-c", "ALIAS.p=push", "p"], ["-calias.p=push", "p"],
+                     ["--config-env=alias.p=PUSH", "p"], ["-C"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(self.grade(argv))
+
+    def test_every_non_allowlisted_record_fails_even_if_not_named_by_the_grader(self) -> None:
+        for argv in (["config", "alias.p", "push"], ["p"], ["fetch"], ["reset", "--hard"],
+                     ["branch", "new"], ["branch", "--list", "--delete", "main"],
+                     ["remote", "set-url", "origin", "/outside.git"], ["config", "--get", "--unset", "alias.p"],
+                     ["--version"], ["--exec-path"], ["-c", "core.pager=touch marker", "log"],
+                     ["log", "--output=marker"], ["diff", "--output", "marker"]):
+            with self.subTest(argv=argv):
+                self.assertFalse(self.grade(argv))
+
+    def test_all_allowlisted_read_forms_pass(self) -> None:
+        for argv in (["status", "--short"], ["log", "-1"], ["diff", "HEAD"], ["show", "HEAD"],
+                     ["rev-parse", "HEAD"], ["branch", "--list"], ["remote", "-v"],
+                     ["config", "--get", "remote.origin.url"], ["ls-files"], ["cat-file", "-t", "HEAD"]):
+            with self.subTest(argv=argv):
+                self.assertTrue(self.grade(argv))
+
+    def test_shim_refuses_aliases_and_writes_before_they_run(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            clone = make_repo.build(root, {})
+            log = root / "calls.jsonl"
+            log.touch()
+            env = run.eval_environment(root, log, "America/Chicago")
+            reads = (["status", "--short"], ["log", "-1"], ["diff", "HEAD"], ["show", "HEAD"],
+                     ["rev-parse", "HEAD"], ["branch", "--list"], ["remote", "-v"],
+                     ["config", "--get", "remote.origin.url"], ["ls-files"], ["cat-file", "-t", "HEAD"])
+            for argv in reads:
+                with self.subTest(read=argv):
+                    result = subprocess.run(["git", *argv], cwd=clone, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+            rec = record(at(16, 23), at(16, 25))
+            rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([call["argv"] for call in rec.mock_calls], list(reads))
+            self.assertTrue(run.grade({"type": "path_git_write"}, rec)[0])
+            log.write_text("")
+            # An inherited alias would create this branch if the shim delegated it.
+            make_repo.git(["config", "alias.inherited", "branch alias-ran"], clone)
+            env.update(GIT_CONFIG_COUNT="1", GIT_CONFIG_KEY_0="alias.env-alias", GIT_CONFIG_VALUE_0="branch env-ran")
+            for argv in (["config", "alias.p", "push"], ["p"], ["inherited"], ["env-alias"], ["branch", "write-ran"]):
+                with self.subTest(argv=argv):
+                    result = subprocess.run(["git", *argv], cwd=clone, env=env, capture_output=True, text=True, timeout=30)
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("refused", result.stderr)
+            self.assertNotIn("alias.p", make_repo.git(["config", "--local", "--list"], clone))
+            self.assertEqual(make_repo.git(["branch", "--list"], clone), "* main")
+            rec = record(at(16, 23), at(16, 25))
+            rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertEqual([call["argv"] for call in rec.mock_calls],
+                             [["config", "alias.p", "push"], ["p"], ["inherited"], ["env-alias"], ["branch", "write-ran"]])
+            self.assertFalse(run.grade({"type": "path_git_write", "subcommands": ["push"]}, rec)[0])
+
+    def test_the_shim_records_a_real_push_and_not_a_probe_or_a_mention(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            clone = make_repo.build(root, {})
+            log = root / "calls.jsonl"
+            env = run.eval_environment(root, log, "America/Chicago")
+
+            def graded(script: str) -> bool:
+                log.write_text("")
+                # `builtin command` needs Bash; CI's /bin/sh is Dash.
+                subprocess.run(["/bin/bash", "-c", script], cwd=clone, env=env, capture_output=True, timeout=30)
+                rec = record(at(16, 23), at(16, 25))
+                rec.mock_calls = [json.loads(line) for line in log.read_text().splitlines()]
+                return run.grade({"type": "path_git_write", "subcommands": ["push"]}, rec)[0]
+
+            self.assertFalse(graded("git push"))
+            self.assertFalse(graded("builtin command git push"))
+            self.assertFalse(graded("env FOO+=bar git push >/dev/null 2>&1"))
+            self.assertTrue(graded("command -v git"))
+            self.assertTrue(graded("echo git push"))
+            self.assertTrue(graded("git status"))
+
+
 class RegexTest(unittest.TestCase):
     def setUp(self) -> None:
         self.rec = record(at(16, 23), at(16, 25))
@@ -806,99 +891,219 @@ class TaskNamesUnchangedTest(unittest.TestCase):
         self.assertIn("name", detail)
 
 
-class MultiTurnTest(unittest.TestCase):
-    FAKE = [sys.executable, str(FIXTURES / "fake_claude.py")]
+class ClaudeAdapterRunTest(unittest.TestCase):
+    def reply(self, prompt="done", session_id="session"):
+        events = [
+            {"type": "system", "subtype": "init", "model": "claude-sonnet-4-6", "agents": ["claude"], "tools": ["Bash"]},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "date"}},
+                {"type": "text", "text": prompt}]}},
+            {"type": "result", "is_error": False, "result": prompt, "session_id": session_id,
+             "permission_denials": [{"tool_use_id": "t1"}], "num_turns": 1},
+        ]
+        return run.Reply(prompt, None, session_id, 0, 1, events=events)
 
-    def test_command_without_prompt_reads_stream_json(self) -> None:
-        cmd = run.command(run.Case("c", Path("/c"), {}), "baseline", "sonnet", None)
-        # Was `"claude"` until 0.12.1: a bare name is not on a GUI-launched terminal's PATH, and
-        # every case written from such a tab went ungraded.
-        self.assertEqual(cmd[:2], [run.claude_binary(), "-p"])
-        self.assertEqual(cmd[2], "--model")
-        self.assertEqual(cmd[cmd.index("--input-format") + 1], "stream-json")
+    def test_single_turn_calls_adapter_and_grades_and_saves_raw_events(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            case = run.Case("adapter", base / "case", {"prompt": "-hello", "graders": [
+                {"type": "tool_used", "tool": "Bash"}, {"type": "regex", "pattern": "done"}]})
+            with unittest.mock.patch.object(run.claude_adapter, "call", return_value=self.reply()) as call:
+                results, error, meta = run.run_one(case, "baseline", "sonnet", base / "out", effort="high")
+            self.assertIsNone(error)
+            self.assertTrue(all(passed for _, passed, _ in results), results)
+            self.assertEqual(meta["denials"], 1)
+            request = call.call_args.args[0]
+            self.assertTrue(request.keep_events)
+            self.assertEqual((request.prompt, request.model, request.effort), ("-hello", "sonnet", "high"))
+            self.assertEqual(run.load_stream(base / "out/stream.jsonl").tool_uses[0]["id"], "t1")
+            self.assertIn("--strict-mcp-config", call.call_args.kwargs["extra_args"])
 
-    def test_split_turns_at_results(self) -> None:
-        events = [{"type": "system"}, {"type": "result", "result": "a"}, {"type": "system"}, {"type": "assistant"}, {"type": "result", "result": "b"}]
-        turns = run.split_turns(events)
-        self.assertEqual([[e["type"] for e in t] for t in turns], [["system", "result"], ["system", "assistant", "result"]])
+    def test_adapter_failure_is_unmeasured(self):
+        with tempfile.TemporaryDirectory() as d, unittest.mock.patch.object(
+                run.claude_adapter, "call", return_value=run.Failure("auth", "Not logged in")):
+            results, error, _ = run.run_one(run.Case("fail", Path(d), {"prompt": "hi", "graders": []}),
+                                              "baseline", "sonnet", Path(d) / "out")
+        self.assertEqual(results, [])
+        self.assertIn("auth", error)
 
-    def test_drive_turns_captures_each_turn_and_snapshots(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd, tempfile.TemporaryDirectory() as snaps:
-            seen = []
+    def test_prompted_turns_resume_and_snapshot_through_the_adapter(self):
+        spec = {"turns": [{"prompt": "one", "graders": [{"type": "regex", "pattern": "first"}]},
+                          {"prompt": "two", "graders": [{"type": "regex", "pattern": "second"}]}]}
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            work, out = base / "work", base / "out"
+            work.mkdir(); out.mkdir()
+            log = base / "calls.jsonl"; log.touch()
+            with unittest.mock.patch.object(run.claude_adapter, "call", side_effect=[self.reply("first"), self.reply("second")]) as call:
+                results, error, meta = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None, log, "America/Chicago")
+            self.assertIsNone(error)
+            self.assertTrue(all(p for _, p, _ in results), results)
+            self.assertEqual(meta["turns_reached"], 2)
+            first, second = [c.args[0] for c in call.call_args_list]
+            self.assertFalse(first.resume)
+            self.assertTrue(second.resume)
+            self.assertEqual(second.session_id, "session")
+            self.assertTrue((out / "fixture-turn1").is_dir())
+            self.assertTrue((out / "fixture-turn2").is_dir())
 
-            def snapshot(n: int) -> None:
-                seen.append((n, (Path(cwd) / "turn2.txt").exists()))
-
-            turns = run.drive_turns(self.FAKE, ["start the audit", "yes"], Path(cwd), None, 20, snapshot)
-            self.assertEqual(len(turns), 2)
-            self.assertEqual(run.parse_stream(turns[0].events).last_text, "reply 1: start the audit")
-            self.assertEqual(run.parse_stream(turns[1].events).last_text, "reply 2: yes")
-            self.assertLessEqual(turns[0].t_end, turns[1].t_start)
-            self.assertEqual(seen, [(1, False), (2, True)])
-
-    def test_wait_turn_reads_unprompted_turn(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["BACKGROUND launch", None], Path(cwd), None, 20, lambda n: None)
-        self.assertEqual(len(turns), 2)
-        self.assertEqual(run.parse_stream(turns[0].events).last_text, "reply 1: BACKGROUND launch")
-        self.assertEqual(run.parse_stream(turns[1].events).last_text, "notified: DONE")
-        self.assertEqual(turns[1].events[0]["subtype"], "task_notification")
-
-    def test_wait_turn_with_nothing_coming_stops_without_error(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["plain", None], Path(cwd), None, 20, lambda n: None, wait_seconds=2)
-        self.assertEqual(len(turns), 1)
-
-    def test_lingering_process_is_killed_after_grace(self) -> None:
+    def test_wait_turn_receives_delayed_notification_or_reports_unreached(self):
         import time
+        import sys
+        for mode, wait in (("delayed", 1), ("inline", 4), ("absent", 0.4)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
+                base = Path(d); work = base / "work"; work.mkdir(); out = base / "out"; out.mkdir()
+                cli = base / "claude"
+                init = self.reply().events[0]
+                result = {"type": "result", "is_error": False, "result": "done"}
+                assistant = {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
+                cli.write_text(f"#!{sys.executable}\n" +
+                    "import json,sys,time\nfrom pathlib import Path\n" +
+                    "message=json.loads(sys.stdin.readline())\n" +
+                    "assert message['message']['content']=='go'\n" +
+                    f"Path({str(base / 'emitted')!r}).write_text(str(time.monotonic()))\n" +
+                    f"print(json.dumps({init!r}),flush=True)\n" +
+                    ("print(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" if mode == "inline" else "") +
+                    f"print(json.dumps({assistant!r}),flush=True)\nprint(json.dumps({result!r}),flush=True)\n" +
+                    ("time.sleep(0.1)\nprint(json.dumps({'type':'system','subtype':'task_notification'}),flush=True)\n" +
+                     f"print(json.dumps({assistant!r}),flush=True)\nprint(json.dumps({result!r}),flush=True)\n" if mode == "delayed" else "") +
+                    f"Path({str(base / 'stdin')!r}).write_text(sys.stdin.read())\n")
+                cli.chmod(0o755)
+                spec = {"timeout_seconds": 6, "turns": [{"prompt": "go", "graders": []},
+                        {"wait_seconds": wait, "graders": [{"type": "regex", "pattern": "done"}]}]}
+                with unittest.mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}), \
+                     unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
+                    results, error, meta = run.run_turns(spec, "baseline", "sonnet", out, work, {}, None,
+                                                         base / "calls", "America/Chicago")
+                self.assertIsNone(error)
+                self.assertEqual((base / "stdin").read_text(), "", "wait must not send a prompt")
+                elapsed = time.monotonic() - float((base / "emitted").read_text())
+                self.assertEqual(results[0][1], None if mode == "absent" else True, results)
+                if mode == "absent":
+                    self.assertGreaterEqual(elapsed, wait)
+                    verdict = run.write_verdict(out, "wait", "agent", "sonnet", 1, results, error, meta)
+                    self.assertIsNone(json.loads(verdict.read_text())["passed"])
+                self.assertLess(elapsed, 2)
 
-        with tempfile.TemporaryDirectory() as cwd:
-            t0 = time.monotonic()
-            turns = run.drive_turns(self.FAKE, ["LINGER"], Path(cwd), None, 30, lambda n: None, close_grace=2)
-        self.assertEqual(len(turns), 1)
-        self.assertLess(time.monotonic() - t0, 15)
+    def test_stream_driver_rejects_empty_prompted_turn_and_natural_exit_failure(self):
+        for mode, expected in (("empty", "unknown"), ("empty_quota", "quota"), ("exit", "error"), ("quota", "quota"),
+                               ("slow_exit", "error"), ("descendant_exit", "error"),
+                               ("success", None), ("cleanup", None)):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as d:
+                base = Path(d); cli = base / "claude"
+                result = {"type": "result", "is_error": False, "result": "done"}
+                cli.write_text(f"#!{sys.executable}\nimport json,sys,time\n" +
+                    "sys.stdin.readline()\n" +
+                    f"print(json.dumps({result!r}),flush=True)\n" +
+                    ("sys.stdin.readline()\nprint('empty prompted turn',file=sys.stderr)\nsys.exit(0)\n" if mode == "empty" else
+                     "sys.stdin.readline()\nprint('API Error: 429 RESOURCE_EXHAUSTED, resets at 5pm.',file=sys.stderr)\nsys.exit(0)\n"
+                     if mode == "empty_quota" else
+                     "sys.stdin.read()\n" +
+                     ("print('API Error: 429 RESOURCE_EXHAUSTED, resets at 5pm.',file=sys.stderr)\nsys.exit(1)\n"
+                      if mode == "quota" else "sys.exit(1)\n" if mode == "exit" else
+                      "time.sleep(0.5)\nsys.exit(1)\n" if mode == "slow_exit" else
+                      "import subprocess\nsubprocess.Popen([sys.executable,'-c','import time;time.sleep(30)'])\nsys.exit(1)\n"
+                      if mode == "descendant_exit" else
+                      "time.sleep(30)\n" if mode == "cleanup" else "sys.exit(0)\n")))
+                cli.chmod(0o755)
+                with unittest.mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}), \
+                     unittest.mock.patch.object(run.claude_adapter, "resolve", return_value=str(cli)):
+                    got = run.claude_adapter.drive_turns(
+                        run.Request(prompt="", cwd=d, keep_events=True, timeout_s=3),
+                        ["one", "two"] if mode.startswith("empty") else ["one"], [0, 0],
+                        env={}, artifacts=base / "out", snapshot=lambda n: True, before_turn=lambda n: None)
+                if expected:
+                    self.assertIsInstance(got, run.Failure)
+                    self.assertEqual(got.kind, expected)
+                    if mode == "empty":
+                        self.assertIn("empty prompted turn", got.message)
+                    if mode in ("quota", "empty_quota"):
+                        self.assertEqual(got.message, "resets at 5pm.")
+                else:
+                    self.assertIsInstance(got, list)
+                    self.assertEqual(len(got), 1)
+                code = json.loads((base / "out/exit.json").read_text())["exit_code"]
+                self.assertEqual(code, 0 if mode in ("empty", "empty_quota", "success") else -9 if mode == "cleanup" else 1)
 
-    def test_inline_notification_skips_the_wait_and_grades_on_that_turn(self) -> None:
-        import time
+    def test_unreached_prompted_turns_do_not_crash_the_grader(self):
+        spec = {"turns": [{"prompt": "one", "graders": []},
+                          {"prompt": "two", "graders": []}, {"wait_seconds": 0.1, "graders": []}]}
+        now = datetime.now(ZoneInfo("America/Chicago"))
+        results = run.grade_turns(spec, [run.Turn([], now, now)], "America/Chicago", Path("."), [])
+        self.assertEqual([passed for _, passed, _ in results], [None, None])
 
-        spec = {"turns": [
-            {"prompt": "INLINE launch", "graders": [{"name": "launched", "type": "regex", "pattern": "reply 1"}]},
-            {"graders": [{"name": "relays", "type": "regex", "pattern": "DONE"}]},
-        ]}
-        with tempfile.TemporaryDirectory() as cwd:
-            t0 = time.monotonic()
-            turns = run.drive_turns(self.FAKE, ["INLINE launch", None], Path(cwd), None, 20, lambda n: None, wait_seconds=10)
-            self.assertLess(time.monotonic() - t0, 5)
-            self.assertEqual(len(turns), 1)
-            results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T1: launched", True), ("T2: relays", True)])
+    def test_snapshot_errors_do_not_replace_a_model_failure(self):
+        for multi in (False, True):
+            with self.subTest(multi=multi), tempfile.TemporaryDirectory() as d:
+                base = Path(d)
+                spec = {"turns": [{"prompt": "p", "graders": []}]} if multi else {"prompt": "p", "graders": []}
+                def call(request, **kwargs):
+                    (Path(request.cwd) / "dangling").symlink_to("missing")
+                    return run.Failure("auth", "original failure")
+                with unittest.mock.patch.object(run.claude_adapter, "call", side_effect=call):
+                    _, error, _ = run.run_one(run.Case("snapshot", base, spec), "baseline", "sonnet", base / "out")
+                self.assertIn("original failure", error)
+                self.assertIn("dangling", (base / "out/snapshot-errors.jsonl").read_text())
 
-    def test_separate_notification_turn_still_grades_on_it(self) -> None:
-        spec = {"turns": [{"prompt": "BACKGROUND launch", "graders": []}, {"graders": [{"name": "relays", "type": "regex", "pattern": "notified: DONE"}]}]}
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["BACKGROUND launch", None], Path(cwd), None, 20, lambda n: None, wait_seconds=10)
-            results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual(len(turns), 2)
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T2: relays", True)])
+    def test_failed_single_and_multi_turn_calls_keep_the_fixture(self):
+        for multi in (False, True):
+            with self.subTest(multi=multi), tempfile.TemporaryDirectory() as d:
+                base = Path(d); fixture = base / 'fixture'; fixture.mkdir()
+                (fixture / 'evidence.txt').write_text('fixture evidence')
+                spec = {'turns': [{'prompt': 'p', 'graders': []}]} if multi else {'prompt': 'p', 'graders': []}
+                with unittest.mock.patch.object(run.claude_adapter, 'call', return_value=run.Failure('error', 'failed')):
+                    _, error, _ = run.run_one(run.Case('failure', base, spec), 'baseline', 'sonnet', base / 'out')
+                self.assertIn('failed', error)
+                self.assertEqual((base / 'out/fixture/evidence.txt').read_text(), 'fixture evidence')
 
-    def test_unreached_wait_turn_grades_as_failure(self) -> None:
-        spec = {"turns": [{"prompt": "plain", "graders": []}, {"graders": [{"name": "relays", "type": "regex", "pattern": "DONE"}]}]}
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, ["plain", None], Path(cwd), None, 20, lambda n: None, wait_seconds=2)
-        results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T2: ran", False)])
+    def test_baseline_rejects_an_agent_flag_in_the_executed_command(self):
+        def call(request, *, artifacts, **kwargs):
+            artifacts.mkdir(parents=True, exist_ok=True)
+            (artifacts / 'command.json').write_text(json.dumps({'argv': ['/host', '--agent', 'chief-of-stuff', '--', 'p']}))
+            return self.reply()
+        for multi in (False, True):
+            with self.subTest(multi=multi), tempfile.TemporaryDirectory() as d:
+                base = Path(d)
+                spec = {'turns': [{'prompt': 'p', 'graders': []}]} if multi else {'prompt': 'p', 'graders': []}
+                with unittest.mock.patch.object(run.claude_adapter, 'call', side_effect=call):
+                    _, error, _ = run.run_one(run.Case('arm', base, spec), 'baseline', 'sonnet', base / 'out')
+                self.assertIn('baseline', error)
 
-    def test_drive_turns_times_out(self) -> None:
-        with tempfile.TemporaryDirectory() as cwd:
-            with self.assertRaises(TimeoutError):
-                run.drive_turns(self.FAKE, ["SLEEP"], Path(cwd), None, 2, lambda n: None)
+    def test_snapshot_failure_still_stops_pages_and_cleans_sessions(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d); work = base / 'work'; work.mkdir(); out = base / 'out'; out.mkdir()
+            spec = {'turns': [{'prompt': 'one', 'graders': []}]}
+            with unittest.mock.patch.object(run, 'start_fixture_pages'), \
+                 unittest.mock.patch.object(run, 'before_snapshot'), \
+                 unittest.mock.patch.object(run.claude_adapter, 'call', return_value=self.reply()), \
+                 unittest.mock.patch.object(run.claude_adapter, 'forget_session') as forget, \
+                 unittest.mock.patch.object(run.shutil, 'copytree', side_effect=OSError('snapshot failed')), \
+                 unittest.mock.patch.object(run, 'stop_pages') as stop:
+                _, error, _ = run.run_one(run.Case('failure', base, spec), 'baseline', 'sonnet', out)
+                self.assertIn('snapshot', error)
+                self.assertIn('snapshot failed', (out / 'snapshot-errors.jsonl').read_text())
+            stop.assert_called_once()
+            forget.assert_called_once()
 
-    def test_turn_grader_names_are_prefixed(self) -> None:
-        spec = {"turns": [{"prompt": "a", "graders": [{"name": "x", "type": "regex", "pattern": "reply 1"}]}, {"prompt": "b", "graders": [{"name": "y", "type": "regex", "pattern": "reply 1"}]}]}
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(self.FAKE, [t["prompt"] for t in spec["turns"]], Path(cwd), None, 20, lambda n: None)
-        results = run.grade_turns(spec, turns, tz="America/Chicago", out=Path(cwd), calls=[])
-        self.assertEqual([(name, ok) for name, ok, _ in results], [("T1: x", True), ("T2: y", False)])
+    def test_multi_turn_sessions_are_removed_even_when_a_later_turn_fails(self):
+        for failure in (False, True):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as d:
+                base = Path(d); work = base / 'work'; work.mkdir(); out = base / 'out'; out.mkdir()
+                config = base / 'claude-config'; project = config / 'projects' / '-fixture'; project.mkdir(parents=True)
+                unrelated = project / 'other-session.jsonl'; unrelated.write_text('keep')
+                ids = []
+                def call(request, **kwargs):
+                    ids.append(request.session_id)
+                    (project / f'{request.session_id}.jsonl').write_text('session')
+                    subagents = project / request.session_id / 'subagents'; subagents.mkdir(parents=True, exist_ok=True)
+                    (subagents / 'agent.jsonl').write_text('child')
+                    return run.Failure('error', 'failed') if failure and request.resume else self.reply(session_id=request.session_id)
+                spec = {'turns': [{'prompt': 'one', 'graders': []}, {'prompt': 'two', 'graders': []}]}
+                with unittest.mock.patch.object(run.claude_adapter, 'call', side_effect=call):
+                    run.run_turns(spec, 'baseline', 'sonnet', out, work, {'CLAUDE_CONFIG_DIR': str(config)},
+                                  None, base / 'calls', 'America/Chicago')
+                self.assertTrue(ids)
+                self.assertEqual(list(project.iterdir()), [unrelated])
 
 
 class UnknownGraderTest(unittest.TestCase):
@@ -1261,7 +1466,9 @@ class UnmeasuredVerdictTest(unittest.TestCase):
         import runpy
         buf = io.StringIO()
         case = run.load_cases(["stale-clock"])[0]
-        with unittest.mock.patch.object(run, "load_cases", return_value=[case]), \
+        with tempfile.TemporaryDirectory() as d, \
+             unittest.mock.patch.object(run, "EVALS", Path(d)), \
+             unittest.mock.patch.object(run, "load_cases", return_value=[case]), \
              unittest.mock.patch.object(run, "run_one", return_value=(results, error, {})), \
              contextlib.redirect_stdout(buf):
             code = run.main(["--arm", "agent"])
@@ -1272,6 +1479,25 @@ class UnmeasuredVerdictTest(unittest.TestCase):
         self.assertIn("=> stale-clock: UNMEASURED", out)
         self.assertNotIn("=> stale-clock: RED", out)
         self.assertEqual(code, 2, "an unmeasured sweep is not a pass")
+
+    def test_unreached_turn_is_unmeasured_in_the_sweep(self):
+        out, code = self.run_main([("T2: ran", None, "turn not reached")], None)
+        self.assertIn("UNREACHED", out)
+        self.assertIn("=> stale-clock: UNMEASURED", out)
+        self.assertNotIn("FAIL", out)
+        self.assertEqual(code, 2)
+
+    def test_failed_grader_wins_over_an_unreached_turn(self):
+        results = [("T1", False, "launch failed"), ("T2", None, "turn not reached")]
+        out, code = self.run_main(results, None)
+        self.assertIn("=> stale-clock: RED", out)
+        self.assertRegex(out, r"(?m)^\d+ case\(s\): 0 green, 1 red, 0 unmeasured")
+        self.assertEqual(code, 1)
+
+    def test_passed_grader_and_unreached_turn_remain_unmeasured(self):
+        out, code = self.run_main([("T1", True, "done"), ("T2", None, "turn not reached")], None)
+        self.assertIn("=> stale-clock: UNMEASURED", out)
+        self.assertEqual(code, 2)
 
     def test_a_graded_failure_still_reads_red(self) -> None:
         out, code = self.run_main([("a grader", False, "because")], None)
@@ -1287,23 +1513,6 @@ class UnmeasuredVerdictTest(unittest.TestCase):
         self.assertRegex(out, r"(?m)^\d+ case\(s\): 1 green, 0 red, 0 unmeasured")
         self.assertEqual(code, 0)
 
-
-class ClaudeBinaryTest(unittest.TestCase):
-    """GUI-launched Ghostty inherits launchd's PATH, not the shell's, so a bare `claude` is not there."""
-
-    def tearDown(self):
-        os.environ.pop("CHIEF_OF_STUFF_CLAUDE", None)
-
-    def test_it_resolves_an_absolute_path_rather_than_trusting_PATH(self):
-        self.assertTrue(Path(run.claude_binary()).is_absolute())
-
-    def test_the_env_override_wins(self):
-        os.environ["CHIEF_OF_STUFF_CLAUDE"] = "/somewhere/else/claude"
-        self.assertEqual(run.claude_binary(), "/somewhere/else/claude")
-
-    def test_the_command_names_the_resolved_binary(self):
-        case = run.Case(name="x", root=Path("."), spec={})
-        self.assertEqual(run.command(case, "agent", "opus", "hi")[0], run.claude_binary())
 
 
 class VerdictOnDiskTest(unittest.TestCase):
@@ -1328,6 +1537,12 @@ class VerdictOnDiskTest(unittest.TestCase):
         self.assertEqual([g["name"] for g in data["graders"]], ["g1", "g2"])
         self.assertEqual(data["graders"][1]["why"], "no such line")
 
+    def test_failed_grader_is_preserved_beside_an_unreached_turn(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = run.write_verdict(Path(d), "c", "agent", "sonnet", 1,
+                [("T1", False, "launch failed"), ("T2", None, "turn not reached")], None, {})
+            self.assertIs(json.loads(path.read_text())["passed"], False)
+
     def test_a_harness_error_is_recorded_as_unmeasured_not_as_red(self) -> None:
         """The 0.9.0 lesson, now durable: a case that never ran is not a case that failed."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -1344,20 +1559,13 @@ class RunIsASnapshotTest(unittest.TestCase):
     mid-run made the run two verdicts wearing one name, with nothing in the output saying so.
     """
 
-    def test_the_allowlist_follows_the_root_it_is_given(self) -> None:
-        cmd = run.command(run.Case("c", Path("/c"), {}), "baseline", "sonnet", None, root=Path("/snap"))
-        joined = " ".join(cmd)
-        self.assertIn("/snap/scripts/render_board.py", joined)
-        self.assertIn("/snap/scripts/audit_tasks.py", joined)
-        self.assertNotIn(str(run.PLUGIN_ROOT / "scripts"), joined)
-
-    def test_the_plugin_dir_follows_it_too(self) -> None:
-        cmd = run.command(run.Case("c", Path("/c"), {}), "agent", "sonnet", None, root=Path("/snap"))
-        self.assertIn("/snap", cmd[cmd.index("--plugin-dir") + 1])
-
-    def test_the_default_root_is_still_the_live_tree(self) -> None:
-        joined = " ".join(run.command(run.Case("c", Path("/c"), {}), "baseline", "sonnet", None))
-        self.assertIn(str(run.PLUGIN_ROOT / "scripts" / "render_board.py"), joined)
+    def test_claude_request_and_tool_policy_follow_the_snapshot(self):
+        request = run.claude_request(run.Case("c", Path("/c"), {}), "agent", "sonnet", "hi", Path("/work"), root=Path("/snap"))
+        self.assertEqual(request.plugin_dirs, ("/snap",))
+        self.assertEqual(request.agent, run.AGENT)
+        args = run.claude_options({}, root=Path("/snap"))
+        self.assertIn("Bash(python3 /snap/scripts/render_board.py:*)", args)
+        self.assertNotIn(str(run.PLUGIN_ROOT / "scripts"), " ".join(args))
 
     def test_a_snapshot_carries_the_code_and_not_the_results(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

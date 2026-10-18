@@ -7,6 +7,7 @@ import subprocess
 import tempfile
 import time
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,12 +19,13 @@ import claude_adapter
 import cleanup
 import forge_review
 import process_status
+import performance
 import reconcile
 import slots
 import store
 import supervisor
 import worker
-from evals.test_engine import KEY, NOW, policies
+from evals.test_engine import KEY, NOW, FakeForge, policies
 
 
 class WorkerTest(unittest.TestCase):
@@ -44,7 +46,8 @@ class WorkerTest(unittest.TestCase):
         self.persona = self.p.personas["builder"]
         self.forge = SimpleNamespace(
             issue=lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Forge title", body="Issue body")),
-            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"),
+            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head", number=9),
+            request_base=lambda number: "trunk",
             protected_branches=lambda: ("trunk", "main"))
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
@@ -196,6 +199,21 @@ class WorkerTest(unittest.TestCase):
         rebuild.assert_not_called()
         self.assertEqual(start.call_args.args[0].cwd, str(self.tree))
 
+    def test_retry_may_cut_a_branch_when_no_earlier_attempt_started_a_worker(self):
+        # A transient issue-read failure records attempt 1 as failed before any worktree exists.
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch(attempt=2)
+        build.assert_called_once()
+
+    def test_retry_refuses_a_fresh_branch_after_an_earlier_worker_started(self):
+        self.db.set_resume(KEY, {"runs": {"implement-1": {"pid": 1}}})
+        with mock.patch.object(worker.make_worktree, "build") as build:
+            with self.assertRaisesRegex(RuntimeError, "no existing worktree"):
+                self.launch(attempt=2)
+        build.assert_not_called()
+
     def test_verification_failure_records_no_segment_or_run(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
@@ -218,12 +236,178 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(record["started_at"], NOW.isoformat())
         self.assertTrue(record["session_id"])
 
+    def launch_with_settings(self, settings, stage="implement", data=None):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(settings)
+        if data is not None:
+            self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            used = self.launch(stage)
+        return used, start.call_args.args[0]
+
+    def test_launch_takes_the_first_claude_entry_of_the_stage_rotation(self):
+        # #851: 1.0 launches Claude only; earlier hosts are skipped and logged until 1.1 (#701).
+        used, request = self.launch_with_settings('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", '
+                                                  '"cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
+        self.assertEqual(used, ("sonnet", "high"))
+        self.assertEqual((request.model, request.effort), ("sonnet", "high"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "claude:sonnet@high"})
+        logged = " ".join(entry.message for entry in self.db.log(KEY))
+        for skipped in ("codex:gpt-6.1-sol@high", "cursor:auto", "agy:gemini-4-argon-high", "#701"):
+            self.assertIn(skipped, logged)
+
+    def test_launch_without_a_rotation_uses_the_persona_model(self):
+        used, request = self.launch_with_settings("[workers]\nmode = \"one-shot\"\n")
+        self.assertEqual(used, (self.persona.model, self.persona.effort or ""))
+        self.assertEqual(request.model, self.persona.model)
+
+    def test_a_quota_stop_advances_to_the_next_claude_entry(self):
+        used, request = self.launch_with_settings(
+            '[models.implement]\nrotation = ["claude:sonnet@high", "codex:x@high", "claude:opus@medium"]\n',
+            data={"quota": {"reset": "later", "retry_at": NOW.isoformat()}, "model": {"implement": "claude:sonnet@high"}})
+        self.assertEqual(used, ("opus", "medium"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "claude:opus@medium"})
+
+    def host_launched(self, protected=True):
+        """#700: a codex start through host_adapter, recorded and claimed like any other."""
+        self.forge.default_branch_protected = lambda: protected
+        entry = worker.ModelEntry("codex", "gpt-6.1-sol", "high")
+        with mock.patch.object(worker, "_model", return_value=entry), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.host_adapter, "start",
+                               side_effect=lambda runtime, request, run_dir, env: (self.start(request, run_dir), "")) as host, \
+             mock.patch.object(worker.claude_adapter, "start") as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = self.launch()
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, clock=lambda: NOW, launch=lambda: used)
+        return used, host, claude
+
+    def test_a_non_claude_entry_needs_the_forge_to_protect_the_default_branch(self):
+        with self.assertRaisesRegex(RuntimeError, "protects the default branch"):
+            self.host_launched(protected=False)
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_non_claude_start_goes_through_its_host_and_keeps_the_default_head(self):
+        used, host, claude = self.host_launched()
+        claude.assert_not_called()
+        self.assertEqual(host.call_args.args[0], "codex")
+        self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
+        self.assertEqual(self.db.segments(KEY)[0].runtime, "codex")
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        # #860: every protected branch's head, not only the default's.
+        self.assertEqual((record["runtime"], record["branch_heads"]), ("codex", {"trunk": "d" * 40, "main": "d" * 40}))
+
+    def test_a_non_claude_entry_needs_the_branch_its_request_targets_protected(self):
+        # §13: chief-of-stuff's requests target develop while its default is main; both must be protected.
+        self.forge.request_base = lambda number: "release"
+        with self.assertRaisesRegex(RuntimeError, "the branch its request targets"):
+            self.host_launched()
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_non_claude_run_holds_when_the_default_branch_moved_outside_the_engine(self):
+        self.host_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "stdout").write_text("finished")
+        (run / "stderr").write_text("")
+        self.report(run)
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.host_adapter, "cleanup") as cleanup, \
+             mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        cleanup.assert_called_once()
+        moved.assert_called_once()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+        self.assertIn("trunk moved", " ".join(entry.message for entry in self.db.log(KEY)))
+
+    ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
+                '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
+
+    def launch_rotation(self, on_path=("codex", "agent", "agy"), protected=True, data=None):
+        """#701: a launch from the owner's mixed rotation; returns (used, the host the start went to)."""
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(self.ROTATION)
+        if data is not None:
+            self.db.set_resume(KEY, data)
+        self.forge.default_branch_protected = lambda: protected
+        went = []
+
+        def host(runtime, request, run_dir, env):
+            went.append(runtime)
+            return self.start(request, run_dir), ""
+
+        def claude(request, run_dir, **kwargs):
+            went.append("claude")
+            return self.start(request, run_dir)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "resolve", side_effect=lambda b: f"/bin/{b}" if b in on_path else None), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.host_adapter, "start", side_effect=host), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=claude), \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            used = self.launch()
+        return used, went[0]
+
+    def test_the_first_launchable_entry_of_any_runtime_launches(self):
+        used, went = self.launch_rotation()
+        self.assertEqual((used, went), (("gpt-6.1-sol", "high", "codex"), "codex"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "codex:gpt-6.1-sol@high"})
+
+    def test_a_host_whose_cli_is_missing_is_skipped_for_the_next_entry(self):
+        used, went = self.launch_rotation(on_path=("agent", "agy"))
+        self.assertEqual((used, went), (("auto", "", "cursor"), "cursor"))
+        self.assertIn("codex:gpt-6.1-sol@high", " ".join(e.message for e in self.db.log(KEY)))
+
+    def test_without_a_protected_default_branch_only_claude_launches(self):
+        used, went = self.launch_rotation(protected=False)
+        self.assertEqual((used, went), (("sonnet", "high"), "claude"))
+
+    def test_a_quota_stop_advances_across_runtimes(self):
+        used, went = self.launch_rotation(data={"quota": {"reset": "later", "retry_at": NOW.isoformat()},
+                                                "model": {"implement": "codex:gpt-6.1-sol@high"}})
+        self.assertEqual(went, "cursor")
+
+    def test_a_successful_launch_clears_the_quota_wait(self):
+        self.db.set_resume(KEY, {"quota": {"reset": "later", "retry_at": NOW.isoformat()}})
+        self.launched()
+        self.assertNotIn("quota", self.db.resume(KEY))
+
     def test_review_checks_out_request_branch(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             self.launch("review")
         self.assertEqual(build.call_args.kwargs["from_branch"], "feature/existing")
+
+    def test_starting_head_is_saved_before_the_worker_can_change_the_tree_and_survives_adoption(self):
+        def start(request, run_dir, **kwargs):
+            self.assertEqual((run_dir / "starting_head").read_text(), "head")
+            return self.start(request, run_dir, **kwargs)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=start), \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.launch()
+            data = self.db.resume(KEY)
+            record = data["runs"]["implement-1"]
+            self.assertEqual(record.get("starting_head"), "head")
+            data["runs"] = {}
+            self.db.set_resume(KEY, data)
+            self.launch()
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["starting_head"], "head")
+
+    def test_collect_recovers_starting_head_for_an_existing_run_record(self):
+        run = self.launched()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"].pop("starting_head")
+        self.db.set_resume(KEY, data)
+        worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"].get("starting_head"), "head")
 
     def test_reviewed_head_round_trips_through_run_and_collected_result(self):
         run = self.launched("review")
@@ -233,6 +417,7 @@ class WorkerTest(unittest.TestCase):
         self.forge.closing_request = mock.Mock(return_value=SimpleNamespace(branch="feature/existing", head="new-head"))
         data = self.db.resume(KEY)
         data["review_trees"]["1"]["head"] = "new-head"
+        data["runs"]["review-1"].pop("starting_head")  # Recover the durable launch baseline during collect.
         self.db.set_resume(KEY, data)
         (run / "stdout").write_text('{"is_error": false, "result": "reviewed"}')
         (run / "stderr").write_text("")
@@ -412,7 +597,7 @@ class WorkerTest(unittest.TestCase):
         fresh = self.trees / "fresh-review"
         fresh.mkdir()
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=fresh)) as build, \
-             mock.patch.object(worker.make_worktree, "git", side_effect=[(0, "head"), (0, "new-head")]), \
+             mock.patch.object(worker.make_worktree, "git", side_effect=[(0, "head"), (0, "new-head"), (0, "new-head")]), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
              mock.patch.object(worker.process_status, "identity", return_value="start"):
             self.launch("review")
@@ -473,9 +658,341 @@ class WorkerTest(unittest.TestCase):
                     self.assertIn("resets in 2 hours", quota["reset"])
                     self.assertEqual(quota["retry_at"], (NOW + timedelta(hours=2, minutes=1)).isoformat())
 
-    def report(self, run, outcome="done", stage="implement"):
+    def report(self, run, outcome="done", stage="implement", suite=None):
         session = json.loads((run / "started.json").read_text())["session_id"]
-        self.db.add_report(KEY, stage, 1, session, outcome, f"reported {outcome}", [])
+        kwargs = {"suite": suite} if suite is not None else {}
+        self.db.add_report(KEY, stage, 1, session, outcome, f"reported {outcome}", [], **kwargs)
+
+    def test_opted_in_assignment_names_the_suite_hold(self):
+        prompt = worker.dispatch_prompt.compose_issue(
+            self.db.items()[0], "title", "body", "implement", self.persona, root=self.root, require_green=True)
+        self.assertIn("require_green_tests", prompt)
+        self.assertIn("human review", prompt)
+        self.assertIn("passed, failed, skipped and xfailed are all known", prompt)
+        self.assertIn("passed > 0", prompt)
+        self.assertIn("failed, skipped and xfailed all zero", prompt)
+        off = worker.dispatch_prompt.compose_issue(
+            self.db.items()[0], "title", "body", "implement", self.persona, root=self.root)
+        self.assertNotIn("require_green_tests", off)
+
+    def test_opted_in_collect_holds_done_unless_the_suite_is_green(self):
+        green = {"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0}
+        cases = (
+            (True, {**green, "failed": 1}, "human_review", True),
+            (True, {**green, "passed": 0}, "human_review", True),
+            (True, {**green, "skipped": 2}, "human_review", True),
+            (True, {**green, "xfailed": 1}, "human_review", True),
+            (True, {"passed": True, "failed": 0, "skipped": 0, "xfailed": 0}, "human_review", True),
+            (True, {}, "human_review", True),
+            (True, green, "done", False),
+            (False, {**green, "failed": 1}, "done", False),
+            (True, None, "human_review", True),
+        )
+        for enabled, suite, expected, held in cases:
+            with self.subTest(enabled=enabled, suite=suite):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+                (self.root / "chief-of-stuff.toml").write_text(
+                    f"[workers]\nrequire_green_tests = {str(enabled).lower()}\n")
+                run = self.launched()
+                self.report(run, suite=suite)
+                (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
+                (run / "stderr").write_text("")
+                (run / "exit.json").write_text('{"exit_code": 0}')
+                with mock.patch.object(worker.process_status, "identity", return_value=None):
+                    worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1), require_green=enabled)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, expected)
+                self.assertEqual(self.db.items()[0].human_review, held)
+                self.assertEqual("suite_hold" in self.db.resume(KEY), held)
+                if held:
+                    log = self.db.log(KEY)[-1].message
+                    self.assertIn("suite is not green", log)
+                    self.assertIn("reported done", log)
+
+    def suite_run(self, stage="implement", outcome="done"):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text("[workers]\nrequire_green_tests = true\n")
+        self.db.upsert_item(KEY, stage=stage)
+        if stage == "fix":
+            self.p.stages["fix"] = replace(self.p.stages["implement"], name="fix")
+            flow = self.p.workflows["standard"]
+            self.p.workflows["standard"] = replace(flow, edges=flow.edges + (
+                reconcile.Edge("review", "fix"), reconcile.Edge("fix", "review")))
+            self.db.set_resume(KEY, {"worktree": str(self.tree), "work_branch": "head"})
+        run = self.launched(stage)
+        self.report(run, stage=stage, outcome=outcome,
+                    suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
+        (run / "stdout").write_text('{"is_error": false, "result": "stopped"}')
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        forge = FakeForge()
+        forge.rows[0].update(stage=stage, human_review=False)
+        return forge
+
+    def suite_pass(self, forge, launch, tree=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+        with mock.patch.object(engine.cleanup, "execute", return_value=0), mock.patch.object(engine, "_record_limits"), \
+             mock.patch.object(engine.engine_facts, "_tree_facts", return_value=tree):
+            return engine.run_pass(store=self.db, root=self.root, trees=self.trees,
+                                   forge=forge, policies=self.p, launch=launch,
+                                   workers=engine.settings.Workers(),
+                                   clock=lambda: NOW + timedelta(minutes=1), require_green=True)
+
+    def test_a_red_suite_does_not_replace_a_completion_hold(self):
+        forge = self.suite_run()
+        forge.add_human_hold = mock.Mock(return_value="")
+        self.suite_pass(forge, mock.Mock(return_value=("example", "")),
+                        tree=(reconcile.TreeState("head", 3, 0, 0), False, NOW))
+        self.assertNotIn("suite_hold", self.db.resume(KEY) or {})
+        self.assertTrue(self.db.items()[0].human_review)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertTrue(any("uncommitted" in row.message for row in self.db.log(KEY)))
+
+    def test_an_adopted_completed_start_finishes_on_the_same_pass(self):
+        forge = self.suite_run()
+        data = self.db.resume(KEY)
+        run = Path(data["runs"]["implement-1"]["run_dir"])
+        self.report(run, suite={"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0})
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        worker._runners.pop(str(run), None)
+        with mock.patch.object(engine.engine_facts, "gather", wraps=engine.engine_facts.gather) as gather:
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        gather.assert_called_once()
+        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["starting_head"], "head")
+
+    def test_an_exit_published_during_gather_waits_until_the_next_pass(self):
+        run = self.launched()
+        self.report(run)
+        (run / "stdout").write_text('{"is_error": false, "result": "done"}')
+        (run / "stderr").write_text("")
+        facts = reconcile.Facts()
+
+        def gather():
+            (run / "exit.json").write_text('{"exit_code": 0}')
+            return facts
+
+        finish = mock.Mock()
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.assertIs(worker.collect(self.db, self.root, lambda: NOW, gather=gather, finish=finish), facts)
+        finish.assert_not_called()
+        worker.collect(self.db, self.root, lambda: NOW, gather=lambda: facts, finish=finish)
+        finish.assert_called_once()
+
+    def test_failed_close_stays_open_logs_once_and_other_collection_and_planning_continue(self):
+        forge = self.suite_run()
+        forge.kanban = SimpleNamespace(stage_map={}, hold_stages=())
+        forge.add_human_hold = mock.Mock(side_effect=lambda number: "label unavailable" if number == 1 else "")
+        other = KEY.rpartition("#")[0] + "#2"
+        fresh = KEY.rpartition("#")[0] + "#3"
+        forge.rows.extend([{"issue_key": other, "stage": "implement", "forge_state": "open"},
+                           {"issue_key": fresh, "stage": "implement", "forge_state": "open"}])
+        for number, row in enumerate(forge.rows):
+            row["body"] = f"## File ownership\n- write: `src/{number}.py`"
+        self.db.upsert_item(other, stage="implement")
+        self.db.record_segment(other, "implement", 1, NOW.isoformat())
+        launch = mock.Mock(return_value=("example", ""))
+        for _ in range(2):
+            self.suite_pass(forge, launch)
+            self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertIsNotNone(self.db.segments(other)[0].ended_at)
+        self.assertIn(fresh, [call.args[0] for call in launch.call_args_list])
+        errors = [row.message for row in self.db.log(KEY) if "close failed" in row.message]
+        self.assertEqual(len(errors), 1)
+        self.assertIn("label unavailable", errors[0])
+
+    def test_a_foreign_session_cannot_replace_the_current_red_suite(self):
+        for exitless in (False, True):
+            with self.subTest(exitless=exitless):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                forge = self.suite_run()
+                self.db.add_report(KEY, "implement", 1, "foreign", "done", "foreign green", [],
+                                   suite={"passed": 5, "failed": 0, "skipped": 0, "xfailed": 0})
+                if exitless:
+                    run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+                    (run / "exit.json").unlink()
+                with mock.patch.object(worker.process_status, "identity", return_value=None):
+                    self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                self.assertIn("suite_hold", self.db.resume(KEY))
+
+    def test_a_dead_worker_without_an_exit_holds_a_red_suite(self):
+        forge = self.suite_run()
+        run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run_dir / "exit.json").unlink()
+        forge.add_human_hold = mock.Mock(return_value="")
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(engine.engine_facts.process_status, "identity", return_value=None):
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+        self.assertEqual(self.db.resume(KEY)["suite_hold"]["stage"], "implement")
+        launch = mock.Mock(return_value=("example", ""))
+        self.suite_pass(forge, launch)
+        launch.assert_not_called()
+
+    def test_a_non_done_report_is_not_suite_gated(self):
+        forge = self.suite_run(outcome="blocked")
+        forge.add_human_hold = mock.Mock(return_value="")
+        with mock.patch.object(engine.engine_facts, "_tree_facts",
+                               return_value=(reconcile.TreeState("head", 0, 0, 0), False, NOW)):
+            self.suite_pass(forge, mock.Mock(return_value=("example", "")))
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "blocked")
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
+        forge.add_human_hold.assert_not_called()
+
+    def test_suite_hold_survives_forge_errors_and_restart_until_release(self):
+        cases = ((stage, failure) for stage in ("implement", "fix")
+                 for failure in ("label unavailable", RuntimeError("forge offline")))
+        for stage, failure in cases:
+            with self.subTest(stage=stage, failure=failure):
+                if self.db.segments():
+                    self.db.engine.dispose()
+                    self.setUp()
+                forge = self.suite_run(stage)
+                def hold(number):
+                    if hold.failure:
+                        if isinstance(hold.failure, Exception):
+                            raise hold.failure
+                        return hold.failure
+                    forge.rows[0]["human_review"] = True
+                    return ""
+                hold.failure = failure
+                forge.add_human_hold = mock.Mock(side_effect=hold)
+                launch = mock.Mock(return_value=("example", ""))
+                self.suite_pass(forge, launch)
+                # Reopen the store: a process-local flag cannot preserve this hold.
+                self.db.engine.dispose()
+                self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
+                self.addCleanup(self.db.engine.dispose)
+                self.suite_pass(forge, launch)
+                launch.assert_not_called()
+                self.assertTrue(self.db.items()[0].human_review)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                evidence = "\n".join(row.message for row in self.db.log(KEY))
+                self.assertIn("suite is not green", evidence)
+                self.assertNotIn("unreadable worker run", evidence)
+                hold.failure = None
+                self.suite_pass(forge, launch)
+                self.suite_pass(forge, launch)
+                launch.assert_not_called()
+                self.assertEqual(forge.add_human_hold.call_count, 3)
+                forge.rows[0]["human_review"] = False
+                actions = self.suite_pass(forge, launch)
+                self.assertEqual(actions, [reconcile.Review(KEY, 1)])
+                self.assertEqual(launch.call_args.args[1], "review")
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+
+    def test_releasing_a_review_suite_hold_accepts_the_review(self):
+        forge = self.suite_run(stage="review")
+        data = self.db.resume(KEY)
+        data["review_findings"] = {"attempt": 1, "counts": {}}
+        self.db.set_resume(KEY, data)
+        def hold(number):
+            forge.rows[0]["human_review"] = True
+            return ""
+        forge.add_human_hold = mock.Mock(side_effect=hold)
+        launch = mock.Mock(return_value=("example", ""))
+        self.suite_pass(forge, launch)
+        launch.assert_not_called()
+        forge.rows[0]["human_review"] = False
+        with mock.patch.object(engine.engine_merge, "execute", return_value=False):
+            actions = self.suite_pass(forge, launch)
+        self.assertEqual(actions, [reconcile.Merge(KEY)])
+        launch.assert_not_called()
+        self.assertEqual(self.db.resume(KEY)["runs"]["review-1"]["result"]["outcome"], "done")
+
+    def test_accepting_suite_hold_preserves_human_review_performance_after_restart(self):
+        forge = self.suite_run()
+        def hold(number):
+            forge.rows[0]["human_review"] = True
+            return ""
+        forge.add_human_hold = mock.Mock(side_effect=hold)
+        launch = mock.Mock(return_value=("example", ""))
+        self.suite_pass(forge, launch)
+        forge.rows[0]["human_review"] = False
+        self.suite_pass(forge, launch)
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: NOW)
+        self.addCleanup(self.db.engine.dispose)
+        segment = self.db.segments(KEY)[0]
+        self.assertEqual(segment.outcome, "done")
+        rows = performance.table([segment], NOW.date(), NOW.date())
+        self.assertEqual((rows[0].completed, rows[0].human_review), (1, 1))
+
+    def test_closed_suite_holds_retire_without_publication_or_acceptance(self):
+        for published in (False, True):
+            with self.subTest(published=published):
+                self.db.record_segment(KEY, "implement", 1, NOW.isoformat(),
+                                       ended_at=NOW.isoformat(), outcome="human_review")
+                self.db.set_resume(KEY, {"suite_hold": {"stage": "implement", "attempt": 1,
+                                                        "published": published}})
+                forge = FakeForge()
+                forge.rows[0].update(forge_state="closed", human_review=False)
+                forge.add_human_hold = mock.Mock(return_value="")
+                launch = mock.Mock()
+                self.suite_pass(forge, launch)
+                forge.add_human_hold.assert_not_called()
+                launch.assert_not_called()
+                self.assertNotIn("suite_hold", self.db.resume(KEY))
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+
+    def test_malformed_suite_holds_fail_closed_without_blocking_other_issues(self):
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(),
+                               ended_at=NOW.isoformat(), outcome="human_review")
+        invalid_record = "suite hold: invalid suite hold record"
+        missing_segment = "suite hold: suite hold must reference a completed human-review segment"
+        bad_holds = [({}, invalid_record), ("broken", invalid_record),
+                     ({"published": True}, invalid_record),
+                     ({"stage": "implement", "attempt": 99, "published": True}, missing_segment),
+                     ({"stage": "implement", "attempt": True, "published": True}, invalid_record),
+                     ({"stage": "implement", "attempt": 1, "published": "yes"}, invalid_record)]
+        other = KEY.rpartition("#")[0] + "#2"
+        for hold, message in bad_holds:
+            with self.subTest(hold=hold):
+                self.db.set_resume(KEY, {"suite_hold": hold})
+                forge = FakeForge()
+                forge.rows[0]["human_review"] = False
+                forge.rows.append({"issue_key": other, "stage": "implement", "forge_state": "open"})
+                forge.add_human_hold = mock.Mock(return_value="")
+                launch = mock.Mock(return_value=("example", ""))
+                # slots would otherwise keep the fake second worker's reservation on the next case.
+                self.db.drop_segment(other, "implement", 1)
+                self.suite_pass(forge, launch)
+                self.assertTrue(self.db.items()[0].human_review)
+                self.assertEqual(self.db.resume(KEY)["suite_hold"], hold)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                self.assertEqual(launch.call_args.args[0], other)
+                forge.add_human_hold.assert_not_called()
+                hold_logs = [entry.message for entry in self.db.log(KEY)
+                             if entry.message.startswith("suite hold:")]
+                self.assertEqual(hold_logs[-1], message)
+
+    def test_missing_hold_observations_retain_hold_and_original_outcome(self):
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(),
+                               ended_at=NOW.isoformat(), outcome="human_review")
+        hold = {"stage": "implement", "attempt": 1, "published": True}
+        for rows in ([], [{"issue_key": KEY}]):
+            with self.subTest(rows=rows):
+                self.db.set_resume(KEY, {"suite_hold": hold})
+                engine._sync_suite_holds(FakeForge(), self.db, rows, NOW.isoformat())
+                self.assertEqual(self.db.resume(KEY)["suite_hold"], hold)
+                self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+                self.assertTrue(self.db.items()[0].human_review)
+
+    def test_collect_uses_passed_policy_when_workspace_configuration_breaks(self):
+        self.suite_run()
+        (self.root / "CLAUDE.md").write_bytes(b"\xff")
+        (self.root / "chief-of-stuff.toml").write_text("invalid toml [")
+        worker.collect(self.db, self.root, lambda: NOW, require_green=True)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
 
     def test_successful_host_takes_the_segment_outcome_from_its_session_report(self):
         for outcome, expected in (("done", "done"), ("blocked", "blocked"), ("failed", "failed"), (None, "failed")):
@@ -521,6 +1038,12 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([s.outcome for s in self.db.segments()], ["failed", "failed"])
         self.assertEqual(len(self.db.log(KEY)), 2)
 
+    def test_a_gone_worker_with_no_exit_record_stays_open_for_the_planner(self):
+        self.launched()
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW)
+        self.assertIsNone(self.db.segments()[0].ended_at)
+
     def test_malformed_run_records_and_result_end_failed(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         self.db.set_resume(KEY, {"runs": ["invalid"]})
@@ -559,15 +1082,15 @@ class WorkerTest(unittest.TestCase):
                                  NOW + timedelta(hours=3), {}, quota_resets={KEY: NOW + timedelta(hours=2)})
         self.assertEqual(planned, [reconcile.Dispatch(KEY, "implement", "builder", 6)])
 
-    def test_engine_collects_before_reading_forge(self):
+    def test_engine_syncs_forge_before_collecting_so_completion_uses_declared_ownership(self):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
-        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a: order.append("collect")), \
+        with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect") or kw["gather"]()), \
              mock.patch.object(engine, "_record_limits"), \
              mock.patch.object(engine.cleanup, "execute", return_value=0):
             engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
                             trees=self.trees, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: NOW)
-        self.assertEqual(order[:2], ["collect", "forge"])
+        self.assertEqual(order[:2], ["forge", "collect"])
 
     def test_failed_review_start_can_reuse_its_prepared_tree(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \

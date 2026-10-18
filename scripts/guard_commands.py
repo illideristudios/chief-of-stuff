@@ -7,6 +7,7 @@ The guard is a rail, not a sandbox: engine merge verification remains the author
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
+import os
 from pathlib import PurePosixPath
 import re
 import shlex
@@ -457,7 +458,7 @@ def _one(tokens: list[str], protected: tuple[str, ...], depth: int) -> bool:
                            "ls-files", "ls-tree", "cat-file", "grep", "blame", "remote", "config", "worktree", "help",
                            "init", "clone", "describe", "reflog", "clean", "check-ignore", "update-index", "diff-tree"}:
             raise Unparsed()
-    # Unrecognised launchers may execute the remainder (e.g. docker exec). Inspect visible nested
+    # Unrecognised launchers may execute the remainder (e.g. runner exec box). Inspect visible nested
     # commands, but never treat an unknown wrapper as proof that a sensitive write is safe.
     if name not in {"echo", "printf", "git"}:
         for token in args:
@@ -501,6 +502,146 @@ def _denied(command: str, protected: tuple[str, ...], depth: int) -> bool:
         else:
             segment.append(token)
     return False
+
+
+# #874: programs a PermissionRequest may allow without anyone, because they only read. Anything else goes to the trio.
+READERS = {"ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ag", "sort", "uniq", "cut", "tr", "file",
+           "stat", "tree", "jq", "yq", "du", "df", "pwd", "echo", "printf", "which", "basename", "dirname", "realpath",
+           "readlink", "diff", "cmp", "comm", "nl", "column", "true", "false", "test", "[", "find"}
+GIT_READS = {"status", "diff", "log", "show", "rev-parse", "ls-files", "ls-tree", "cat-file", "grep", "blame",
+             "describe", "shortlog", "show-ref", "merge-base", "name-rev", "rev-list", "for-each-ref", "branch", "remote"}
+FORGE_READS = {"view", "list", "diff", "checks", "status", "item-list", "field-list", "trace"}
+RTK_READS = {"ls", "read", "grep", "find", "tree", "wc", "diff", "json", "deps", "env", "summary"}
+
+
+def _segments(command: str) -> list[tuple[list[str], list[str]]]:
+    """(words, redirect targets) per simple command, by the same tokenizer and separators the gate uses."""
+    tokens, out, words, targets, i = _tokens(command), [], [], [], 0
+    tokens.append((";", True))
+    while i < len(tokens):
+        token, operator = tokens[i]
+        i += 1
+        if operator and token in REDIRECTIONS:
+            if i >= len(tokens) or tokens[i][1]:
+                raise Unparsed()
+            targets.append(tokens[i][0])
+            i += 1
+        elif operator and token in SEPARATORS:
+            if words or targets:
+                out.append((words, targets))
+            words, targets = [], []
+        elif operator:
+            raise Unparsed()
+        else:
+            words.append(token)
+    return out
+
+
+def inside(path: str, cwd: str | None) -> bool:
+    """Whether a path argument stays in the worktree; a word that is not a path (no /, ~ or ..) is inside."""
+    if not path.startswith(("/", "~")) and ".." not in PurePosixPath(path).parts:
+        return True
+    if not cwd or path.startswith("~"):
+        return False  # a home path is outside any worktree; the guard does not expand it
+    target = os.path.normpath(os.path.join(cwd, path))  # lexical only: this module reads no files
+    root = os.path.normpath(cwd)
+    return target == root or target.startswith(root + os.sep)
+
+
+def _reads_only(words: list[str]) -> bool:
+    name, args = PurePosixPath(words[0]).name, words[1:]
+    if name == "rtk":
+        if not args:
+            return False
+        if args[0] == "proxy":
+            return bool(args[1:]) and _reads_only(args[1:])
+        if args[0] == "git":
+            return _reads_only(args)
+        return args[0] in RTK_READS
+    if name == "git":
+        # Options that run a configured or given program, even on a read verb (architect audit on #875, hole 2).
+        if any(a in {"-c", "-O", "--ext-diff", "--textconv"} or a.startswith(("-c", "--config-env", "--exec-path",
+                                                                               "--open-files-in-pager"))
+               or a.startswith("-") and not a.startswith("--") and "O" in a for a in args):
+            return False
+        args = _global_args(args, {"-C", "--git-dir", "--work-tree"}, {"--no-pager", "--paginate"})
+        if not args or args[0] not in GIT_READS:
+            return False
+        if args[0] == "branch" and any(a in {"-d", "-D", "-m", "-M", "-c", "-C", "--delete", "--move", "--copy",
+                                             "-u", "--set-upstream-to", "--unset-upstream", "-f", "--force"}
+                                       or not a.startswith("-") for a in args[1:]):
+            return False  # listing only: a name argument creates a branch
+        if args[0] == "remote" and args[1:] and args[1] not in {"-v", "--verbose", "show", "get-url"}:
+            return False
+        return True
+    if name in {"gh", "glab"}:
+        return len(args) >= 2 and args[1] in FORGE_READS
+    if name not in READERS:
+        return False
+    if name == "find" and any(a in {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf",
+                                    "-fls"} for a in args):
+        return False
+    if name in {"rg", "ag"} and any(a.split("=", 1)[0] in {"--pre", "--pre-glob"} for a in args):
+        return False  # --pre runs a preprocessor command on every file
+    return True
+
+
+def judgement(command: str, protected_branches: tuple[str, ...], cwd: str | None) -> tuple[str, str]:
+    """#874: a PermissionRequest's answer for a Bash command: ("deny", reason) for what the gate refuses, ("allow", "")
+    for a fully parsed command of read-only programs whose paths and redirects stay in the worktree (/dev/null and file
+    descriptors are not writes), else ("trio", why). This never overrules Claude's own layer for a write or a secret read."""
+    reason = denial_reason(command, protected_branches)
+    if reason:
+        return "deny", reason
+    try:
+        segments = _segments(command)
+    except (ValueError, TypeError, RecursionError):
+        return "trio", "the guard cannot parse this command"
+    for raw, targets in segments:
+        words = _unwrap(list(raw)) if raw else []
+        # A VAR=value prefix (GIT_PAGER, GIT_EXTERNAL_DIFF, GH_PAGER...) can make a reader run a program (hole 1).
+        if any(ASSIGNMENT.match(word) for word in raw[:len(raw) - len(words)]):
+            return "trio", "an environment assignment prefixes the command"
+        # Brace expansion builds paths the lexical check never sees: cat {.,/etc}/passwd (hole 3).
+        if any("{" in word for word in [*raw, *targets]):
+            return "trio", "a brace expansion can name a path outside the worktree"
+        if words and not _reads_only(words):
+            return "trio", f"{PurePosixPath(words[0]).name} is not a known read-only command"
+        for arg in words[1:]:
+            value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
+            if not inside(value, cwd) or _in_git_dir(value):
+                return "trio", f"{value} is outside the worktree or in its .git"
+        for target in targets:
+            if target != "/dev/null" and not target.isdigit() and (not inside(target, cwd) or _in_git_dir(target)):
+                return "trio", f"a redirect to {target} is outside the worktree or in its .git"
+    return "allow", ""
+
+
+def _in_git_dir(path: str) -> bool:
+    """A .git component: in a linked worktree <cwd>/.git is in-tree, and rewriting it redirects the engine's later
+    credentialed git calls (architect audit on #875, hole 4)."""
+    return ".git" in PurePosixPath(path).parts
+
+
+READ_TOOLS = {"Read", "Glob", "Grep", "LS"}
+WRITE_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def permission_judgement(event: dict, protected_branches: tuple[str, ...]) -> tuple[str, str]:
+    """#874: ("allow", ""), ("deny", reason) or ("trio", why) for a PermissionRequest. Bash is judged by guard_commands,
+    as the PreToolUse gate judges it. Reads and file edits are allowed inside the worktree only, so a secret read or
+    an outside write still waits; every other tool goes to the trio. Nothing here becomes an owner ask."""
+    tool, given, cwd = event.get("tool_name"), event.get("tool_input") or {}, event.get("cwd")
+    if not isinstance(given, dict):
+        return "trio", "the permission request has no readable input"
+    if tool == "Bash":
+        return judgement(given.get("command"), protected_branches, cwd)
+    if tool in READ_TOOLS | WRITE_TOOLS:
+        path = given.get("file_path") or given.get("notebook_path") or given.get("path") or ("." if tool in READ_TOOLS else "")
+        if isinstance(path, str) and path and inside(path, cwd) and not (tool in WRITE_TOOLS and _in_git_dir(path)):
+            return "allow", ""
+        return "trio", f"{tool} of {path or 'an unnamed path'} is outside the worktree"
+    return "trio", f"{tool or 'this tool'} has no permission rule"
 
 
 def denial_reason(command: str, protected_branches: tuple[str, ...]) -> str | None:

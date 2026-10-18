@@ -28,6 +28,8 @@ HHMM = re.compile(r"^([01]\d|2[0-3]):[0-5]\d$")
 OFFSET = re.compile(r"^(\d+)([hm])$")
 WORKER_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 HERDR_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+RULES_MAX = 64  # rules; the rendered assignment budget is checked by dispatch_prompt.validate_worker_rules at engine start
+RULES_TOTAL_CAP = 6000  # sum of len(rule)
 CLAUDE_AS_PROFILE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*")  # claude-as's valid_profile_name
 DEFAULT_WARNINGS = ("24h", "3h", "1h")
 POLICY = Path(__file__).resolve().parent.parent / "assets" / "policy.toml"  # the shipped policy and workflow
@@ -99,8 +101,10 @@ class Workers:
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
-    require_green_tests: bool = False  # one-shot completion requires known counts with passed > 0 and no failures, skips or xfails
+    require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
+    teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
+    teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
 
 
 @dataclass(frozen=True)
@@ -242,6 +246,8 @@ def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, S
 
 
 def _entry(where: str, text) -> ModelEntry:
+    if isinstance(text, str) and ":" not in text and text.strip():
+        text = f"claude:{text}"  # #701: an entry with no runtime prefix still means Claude, as 1.0 configs wrote it
     runtime, sep, rest = text.partition(":") if isinstance(text, str) else ("", "", "")
     if not sep or runtime not in RUNTIMES:
         raise SettingsError(f"{where}: {text!r} is not runtime:model-id with runtime one of {', '.join(RUNTIMES)}")
@@ -321,9 +327,18 @@ def _workers(table) -> Workers:
     ):
         raise SettingsError('[workers] rules must be a list of non-blank, single-line strings without control or Unicode format characters '
                             'or "(via " markers, each at most 2400 characters')
+    if len(rules) > RULES_MAX or sum(map(len, rules)) > RULES_TOTAL_CAP:
+        raise SettingsError(f"[workers] rules must be at most {RULES_MAX} rules and {RULES_TOTAL_CAP} characters in all")
     # Preserve the user's wording, including surrounding spaces.
+    commands = {}
+    for key in ("teardown", "teardown_list"):
+        value = table.get(key, "")
+        if key in table and (not isinstance(value, str) or not value.strip()
+                             or re.search(r"[\x00-\x1f\x7f-\x9f]", value)):
+            raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
+        commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules))
+                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules), **commands)
 
 
 def _repos(table) -> dict[str, str]:

@@ -4,6 +4,7 @@ default; a read that fails is an error, never an empty forge."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 import tempfile
@@ -102,6 +103,9 @@ class FakeGh(tma.FakeGhGraphql):
                 rows = rows[:forge.forge_review.REQUEST_LIMIT]
             else:
                 rows = self.prs
+                if "--base" in args:
+                    rows = [row for row in rows if row.get("baseRefName") == args[args.index("--base") + 1]]
+                rows = rows[:int(args[args.index("--limit") + 1])]
             return 0, json.dumps([{k: v for k, v in row.items() if k in fields} for row in rows]), ""
         if args[:2] == ["project", "field-list"]:
             opts = [*self.project.options, *FLOW.terminal_stages]
@@ -153,7 +157,7 @@ class GitHubTest(unittest.TestCase):
     def test_snapshot_is_one_issue_row_with_its_stage_mark(self):
         row = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshot("github:example/app#3")
         self.assertEqual(row, {
-            "issue_key": "github:example/app#3", "title": "Fix the parser", "forge_state": "open",
+            "issue_key": "github:example/app#3", "title": "Fix the parser", "body": "the body", "forge_state": "open",
             "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready",
             "stage_mark": "stage: review",
         })
@@ -179,6 +183,12 @@ class GitHubTest(unittest.TestCase):
                             gh_issue(2, "free", ["stage: review", "other hold"])])
         snapshots = forge.Forge(GH, kanban=FLOW, gh=gh).snapshots()
         self.assertEqual([row.get("human_review") for row in snapshots], [True, False])
+
+    def test_snapshot_hold_membership_matches_case_insensitive_publication(self):
+        gh = FakeGh(issues=[gh_issue(1, "held", ["stage: review", "NEEDS HUMAN"])])
+        adapter = forge.Forge(GH, kanban=FLOW, gh=gh)
+        self.assertTrue(adapter.snapshots()[0]["human_review"])
+        self.assertTrue(adapter.snapshot(adapter.key(1))["human_review"])
 
     def test_snapshot_bounds_closed_history_by_update_recency(self):
         limit = forge.forge_review.REQUEST_LIMIT
@@ -224,7 +234,7 @@ class GitHubTest(unittest.TestCase):
                             prs=[tma.pr(21, reviews)], bodies={21: "Closes #3"})
                 snapshot, = forge.Forge(GH, approver="robin", kanban=FLOW, gh=gh).snapshots()
                 self.assertEqual((snapshot["review_state"], snapshot["merge_state"]), ("changes_requested", "ready"))
-                item = store.WorkItem(**{k: v for k, v in snapshot.items() if k != "stage_mark"})
+                item = store.WorkItem(**{k: v for k, v in snapshot.items() if k not in ("stage_mark", "body")})
                 for stage in ("review", "merge"):
                     item.stage = stage
                     self.assertEqual(tr.reconcile.plan([item],
@@ -250,20 +260,32 @@ class GitHubTest(unittest.TestCase):
                 request, = forge.Forge(GH, approver="robin", gh=FakeGh(prs=[tma.pr(21, reviews)])).requests()
                 self.assertEqual((request.approval, tma.ma.blocked(request)), (approval, blockers))
 
+    def test_snapshots_include_issue_bodies_from_the_list_read(self):
+        gh = github()
+        def listed(args, input_text=None):
+            code, out, err = gh(args, input_text)
+            if args[:2] == ["issue", "list"]:
+                fields = args[args.index("--json") + 1].split(",")
+                out = json.dumps([{k: v for k, v in row.items() if k in fields} for row in json.loads(out)])
+            return code, out, err
+        rows = forge.Forge(GH, gh=listed).snapshots()
+        self.assertEqual([row["body"] for row in rows], ["the body", "the body"])
+        self.assertFalse([args for args in gh.all_calls if args[:2] == ["issue", "view"]])
+
     def test_snapshots_carry_identity_stage_review_and_merge_state(self):
         got = forge.Forge(GH, approver="robin", kanban=FLOW, gh=github()).snapshots()
         self.assertEqual(got, [
-            {"issue_key": "github:example/app#3", "title": "Fix the parser", "forge_state": "open", "stage": "review",
+            {"issue_key": "github:example/app#3", "title": "Fix the parser", "body": "the body", "forge_state": "open", "stage": "review",
              "human_review": False, "review_state": "approved", "merge_state": "ready",
              "stage_mark": "stage: review"},
-            {"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open", "stage": "doing",
+            {"issue_key": "github:example/app#4", "title": "Add a flag", "body": "the body", "forge_state": "open", "stage": "doing",
              "human_review": False, "review_state": "", "merge_state": "", "stage_mark": "stage: doing"},
         ])
 
     def test_what_was_not_configured_is_left_out_so_a_sync_never_blanks_it(self):
         got = forge.Forge(GH, gh=github()).snapshots()
         self.assertEqual([sorted(s) for s in got],
-                         [["forge_state", "issue_key", "merge_state", "title"]] * 2)
+                         [["body", "forge_state", "issue_key", "merge_state", "title"]] * 2)
 
     def test_a_failed_read_is_an_error_never_an_empty_forge(self):
         for broken in (("issue", "list"), ("pr", "list"), ("api", "graphql")):
@@ -322,9 +344,239 @@ class GitHubTest(unittest.TestCase):
                               ("github:example/app#4", "open", "doing", "")])
 
 
+class LandingTest(unittest.TestCase):
+    def setUp(self):
+        requests = mock.patch.object(forge.Forge, "requests", return_value=[])
+        self.requests = requests.start()
+        self.addCleanup(requests.stop)
+
+    def test_squash_landing_uses_the_merge_commit_and_current_main_pipeline(self):
+        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "squashed"}}
+        gh = FakeGh(merged=[merged])
+        adapter = forge.Forge(GH, gh=gh)
+        key = adapter.key(3)
+        for sha, status, base, expected in (
+                ("squashed", "running", "squashed", (True, False)),
+                ("squashed", "passed", "squashed", (True, True)),
+                ("later", "passed", "squashed", (True, True)),
+                ("older", "passed", "older", (False, False))):
+            with self.subTest(sha=sha, status=status), \
+                 mock.patch.object(forge.Forge, "_pipeline_read", return_value={"merge_base_commit": {"sha": base}}):
+                heads = {}
+                result = adapter.landings(forge.Pipeline(1, "main", sha, status, ""), [key], heads=heads)
+                self.assertEqual(result[key], expected)
+                self.assertEqual(heads, {key: "head"} if expected[0] else {})
+        merged["baseRefName"] = "release"
+        gh.merged = [merged]
+        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""), [key])[key], (None, None))
+
+    def test_gitlab_uses_the_squash_sha_and_merge_base(self):
+        adapter = forge.Forge(GL)
+        row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
+               "merge_commit_sha": "merge", "squash_commit_sha": "squash", "sha": "head"}
+        with mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
+             mock.patch.object(forge.Forge, "_pipeline_read", side_effect=lambda path:
+                               [] if path.startswith("merge_requests?") else {"id": "squash"}) as read:
+            key = adapter.key(3)
+            heads = {}
+            self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key], heads=heads)[key], (True, True))
+            self.assertEqual(heads, {key: "head"})
+            self.assertIn("repository/merge_base?", read.call_args.args[0])
+
+    def test_gitlab_fast_forward_uses_source_sha_and_verifies_ancestry(self):
+        adapter = forge.Forge(GL)
+        row = {"iid": 21, "description": "Closes #3", "target_branch": "main",
+               "merge_commit_sha": None, "squash_commit_sha": None, "sha": "source-head"}
+        for base, expected in (("source-head", (True, True)), ("older", (False, False))):
+            with self.subTest(base=base), \
+                 mock.patch.object(forge.Forge, "_merged_requests", return_value=[row]), \
+                 mock.patch.object(forge.Forge, "_pipeline_read", side_effect=lambda path:
+                                   [] if path.startswith("merge_requests?") else {"id": base}) as read:
+                key = adapter.key(3)
+                self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key])[key], expected)
+                self.assertIn("source-head", read.call_args.args[0])
+
+    def test_only_the_newest_closing_request_can_prove_a_landing(self):
+        body = "Closes #3"
+        release = {"number": 40, "body": body, "baseRefName": "release", "headRefOid": "head", "mergeCommit": {"oid": "side"},
+                   "updatedAt": "2026-03-03"}
+        missed = {"number": 22, "body": body, "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "other"},
+                  "updatedAt": "2026-03-02"}
+        landed = {"number": 21, "body": body, "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "squashed"},
+                  "updatedAt": "2026-03-01"}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[release, landed]))
+        key = adapter.key(3)
+        pipeline = forge.Pipeline(1, "main", "squashed", "passed", "")
+
+        def read(path):
+            read.paths.append(path)
+            return {"merge_base_commit": {"sha": "unrelated"}}
+
+        read.paths = []
+        with mock.patch.object(forge.Forge, "_pipeline_read", side_effect=read):
+            self.assertEqual(adapter.landings(pipeline, [key])[key], (True, True))
+        self.assertEqual(read.paths, [])
+        missed["updatedAt"] = "2026-03-04"
+        landed["updatedAt"] = "2026-03-01"
+        landed["mergeCommit"] = {"oid": "squashed"}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[missed, landed]))
+        read.paths = []
+        with mock.patch.object(forge.Forge, "_pipeline_read", side_effect=read):
+            self.assertEqual(adapter.landings(pipeline, [key])[key], (False, False))
+        self.assertEqual(len(read.paths), 1)
+        later = {"number": 23, "body": body, "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "other"},
+                 "updatedAt": "2026-03-01"}
+        landed["updatedAt"] = "2026-03-05"
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[landed, later]))
+        read.paths = []
+        with mock.patch.object(forge.Forge, "_pipeline_read", side_effect=read):
+            self.assertEqual(adapter.landings(pipeline, [key])[key], (False, False))
+        self.assertEqual(len(read.paths), 1)
+
+    def test_landings_read_open_closers_without_review_or_discussion_reads(self):
+        for home in (GH, GL):
+            for target, expected in (("main", (None, None)), ("release", (True, True))):
+                with self.subTest(home=home, target=target):
+                    if home == GH:
+                        merged = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
+                                  "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+                        opened = {"number": 40, "headRefOid": "new-head", "baseRefName": target,
+                                  "closingIssuesReferences": [{"number": 3, "repository": {
+                                      "owner": {"login": "example"}, "name": "app"}}]}
+                    else:
+                        merged = {"iid": 21, "sha": "old-head", "description": "Closes #3",
+                                  "target_branch": "main", "merge_commit_sha": "squashed"}
+                        opened = {"iid": 40, "sha": "new-head", "target_branch": target, "description": "Closes #3"}
+                    gh = FakeGh(prs=[opened] if home == GH else [])
+                    adapter = forge.Forge(home, gh=gh, token="test-token")
+                    with mock.patch.object(adapter.__class__, "_merged_requests", return_value=[merged]), \
+                         mock.patch.object(forge.backlog, "_call", return_value=([opened], {}, "")) as call:
+                        self.requests.side_effect = forge.ForgeError("unrelated request review failed")
+                        key = adapter.key(3)
+                        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                                          [key])[key], expected)
+                    self.requests.assert_not_called()
+                    if home == GH:
+                        self.assertEqual(len(gh.all_calls), 1)
+                        args = gh.all_calls[0]
+                        self.assertEqual(args[:2], ["pr", "list"])
+                        self.assertEqual(args[args.index("--state") + 1], "open")
+                        self.assertEqual(args[args.index("--base") + 1], "main")
+                        self.assertEqual(set(args[args.index("--json") + 1].split(",")),
+                                         {"number", "headRefOid", "baseRefName", "closingIssuesReferences"})
+                        call.assert_not_called()
+                    else:
+                        call.assert_called_once()
+                        self.assertEqual(parse_qs(urlsplit(call.call_args.args[1]).query)["state"], ["opened"])
+                        self.assertEqual(parse_qs(urlsplit(call.call_args.args[1]).query)["target_branch"], ["main"])
+                        self.assertTrue(urlsplit(call.call_args.args[1]).path.endswith("/merge_requests"))
+
+    def test_open_closers_filter_the_base_and_use_the_paginated_github_limit(self):
+        merged = {"number": 21, "body": "Closes #3", "headRefOid": "head",
+                  "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+        release = [{"number": n, "headRefOid": "release-head", "baseRefName": "release"}
+                   for n in range(100, 201)]
+        for main_count in (0, 101, backlog.GH_LIMIT):
+            with self.subTest(main_count=main_count):
+                opened = release + [{"number": n, "headRefOid": "other-head", "baseRefName": "main"}
+                                    for n in range(300, 300 + main_count)]
+                gh = FakeGh(prs=opened, merged=[merged])
+                adapter = forge.Forge(GH, gh=gh)
+                key = adapter.key(3)
+                pipeline = forge.Pipeline(1, "main", "squashed", "passed", "")
+                if main_count == backlog.GH_LIMIT:
+                    with self.assertRaises(forge.ForgeError):
+                        adapter.landings(pipeline, [key])
+                else:
+                    self.assertEqual(adapter.landings(pipeline, [key])[key], (True, True))
+                args = next(args for args in gh.all_calls if args[:2] == ["pr", "list"]
+                            and args[args.index("--state") + 1] == "open")
+                self.assertEqual(args[args.index("--base") + 1], pipeline.ref)
+                self.assertEqual(args[args.index("--limit") + 1], str(backlog.GH_LIMIT))
+
+    def test_a_newer_open_request_or_changed_head_cannot_use_an_old_landing(self):
+        merged = {"number": 21, "headRefOid": "old-head", "body": "Closes #3",
+                  "baseRefName": "main", "mergeCommit": {"oid": "squashed"}}
+        opened = {"number": 22, "headRefOid": "new-head", "baseRefName": "main",
+                  "closingIssuesReferences": [{"number": 3, "repository": {
+                      "owner": {"login": "example"}, "name": "app"}}]}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged], prs=[opened]))
+        key = adapter.key(3)
+        for number in (21, 22):
+            with self.subTest(number=number):
+                opened["number"] = number
+                adapter.gh.prs = [dict(opened)]
+                self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                                  [key])[key], (None, None))
+        adapter.gh.prs = [{**opened, "number": 21, "headRefOid": "old-head"}]
+        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                          [key])[key], (True, True))
+
+    def test_landing_comparison_errors_are_attached_to_the_affected_issue(self):
+        merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "merge"}}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged]))
+        for response in (forge.ForgeError("compare: permission denied"), {"unexpected": "shape"}):
+            errors = {}
+            with self.subTest(response=response), \
+                 mock.patch.object(forge.Forge, "_pipeline_read", **(
+                     {"side_effect": response} if isinstance(response, Exception) else {"return_value": response})):
+                key = adapter.key(3)
+                result = adapter.landings(forge.Pipeline(1, "main", "later", "passed", ""), [key], errors=errors)
+                self.assertEqual(result[key], (None, None))
+                self.assertIn(key, errors)
+                self.assertTrue("permission denied" in errors[key] or "merge base" in errors[key])
+
+
 class StageWriteBackTest(unittest.TestCase):
     def edits(self, gh):
         return [c for c in gh.all_calls if c[:2] == ["issue", "edit"]]
+
+    def test_release_hold_is_guarded_previewable_and_idempotent_on_both_forges(self):
+        for host in ("github", "gitlab"):
+            for required in (False, True):
+                with self.subTest(host=host, required=required):
+                    config = replace(FLOW, hold_stages=("doing",) if required else ())
+                    labels = ["stage: doing", "needs human", "bug"]
+                    if host == "github":
+                        gh = FakeGh(issues=[gh_issue(4, "Retry", labels)])
+                        f = forge.Forge(GH, kanban=config, gh=gh)
+                        read_labels = lambda: [x["name"] for x in gh.issues[4]["labels"]]
+                        patch = contextlib.nullcontext()
+                    else:
+                        issues = {4: gl_issue(4, "Retry", labels)}
+                        f = forge.Forge(GL, kanban=config, token="t")
+                        read_labels = lambda: issues[4]["labels"]
+                        patch = mock.patch.object(backlog, "_call", gitlab_call(issues, {}))
+                    with patch:
+                        preview = f.write_stage(4, "doing", expected="doing", release_hold=True)
+                        self.assertTrue(preview.ok, preview.error)
+                        self.assertEqual(read_labels(), labels)
+                        for _ in range(2):
+                            got = f.write_stage(4, "doing", expected="doing", release_hold=True, commit=True)
+                            self.assertTrue(got.done, got.error)
+                            self.assertEqual(set(read_labels()), {"stage: doing", "bug"} |
+                                             ({"needs human"} if required else set()))
+
+    def test_release_hold_refuses_missing_prior_and_stage_drift(self):
+        for host in ("github", "gitlab"):
+            for kwargs in ({}, {"expected": "doing"}, {"expected": "review"},
+                           {"expected": "doing", "initialize": True}):
+                with self.subTest(host=host, kwargs=kwargs):
+                    labels = ["stage: review", "needs human"]
+                    if host == "github":
+                        gh = FakeGh(issues=[gh_issue(4, "Retry", labels)])
+                        f = forge.Forge(GH, kanban=FLOW, gh=gh)
+                        read_labels = lambda: [x["name"] for x in gh.issues[4]["labels"]]
+                        patch = contextlib.nullcontext()
+                    else:
+                        issues = {4: gl_issue(4, "Retry", labels)}
+                        f = forge.Forge(GL, kanban=FLOW, token="t")
+                        read_labels = lambda: issues[4]["labels"]
+                        patch = mock.patch.object(backlog, "_call", gitlab_call(issues, {}))
+                    with patch:
+                        got = f.write_stage(4, "doing", release_hold=True, commit=True, **kwargs)
+                    self.assertFalse(got.ok)
+                    self.assertEqual(read_labels(), labels)
 
     def test_a_stage_write_previews_by_default(self):
         gh = github()
@@ -351,7 +603,7 @@ class StageWriteBackTest(unittest.TestCase):
         url = gh_issue(4, "Add a flag")["url"]
         gh = FakeGh(issues=[gh_issue(4, "Add a flag")], status={url: "Doing"})
         got = forge.Forge(GH, kanban=BOARD, gh=gh).snapshots()
-        self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "forge_state": "open",
+        self.assertEqual(got, [{"issue_key": "github:example/app#4", "title": "Add a flag", "body": "the body", "forge_state": "open",
                                 "stage": "doing", "human_review": False, "stage_mark": "stage: doing",
                                 "merge_state": ""}])
 
@@ -670,10 +922,10 @@ class GitLabTest(unittest.TestCase):
 
     def test_snapshots_carry_identity_stage_review_and_merge_state(self):
         self.assertEqual(self.forge.snapshots(), [
-            {"issue_key": "gitlab:gitlab.example.test/team/app#3", "title": "Fix the parser", "forge_state": "open",
+            {"issue_key": "gitlab:gitlab.example.test/team/app#3", "title": "Fix the parser", "body": "what to fix", "forge_state": "open",
              "stage": "review", "human_review": False, "review_state": "approved", "merge_state": "ready",
              "stage_mark": "stage: review"},
-            {"issue_key": "gitlab:gitlab.example.test/team/app#4", "title": "Add a flag", "forge_state": "open",
+            {"issue_key": "gitlab:gitlab.example.test/team/app#4", "title": "Add a flag", "body": "", "forge_state": "open",
              "stage": "", "human_review": False, "review_state": "", "merge_state": "", "stage_mark": ""},
         ])
 
@@ -1003,6 +1255,48 @@ class ProtectedBranchesTest(unittest.TestCase):
         with mock.patch.object(backlog, "_call", call):
             self.assertEqual(forge.Forge(GL, token="t").protected_branches(), ("trunk", "release"))
 
+    def test_default_branch_protected_reads_whether_the_forge_protects_the_default(self):
+        # §13 (b): a non-Claude worker launches only where the default branch itself is protected.
+        def gh(protected):
+            def answer(args, input_text=None):
+                if args[:2] == ["api", f"repos/{REPO}"]:
+                    return 0, "trunk\n", ""
+                if args[:2] == ["api", f"repos/{REPO}/branches?protected=true&per_page=100"]:
+                    return 0, protected, ""
+                return 1, "", "unexpected"
+            return answer
+        self.assertTrue(forge.Forge(GH, gh=gh("release\ntrunk\n")).default_branch_protected())
+        self.assertFalse(forge.Forge(GH, gh=gh("release\n")).default_branch_protected())
+        self.assertEqual(forge.Forge(GH, gh=gh("release\n")).protected_branches(), ("trunk", "release"))
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).default_branch_protected()
+
+    def test_request_base_reads_the_branch_a_request_targets(self):
+        gh = lambda args, input_text=None: (0, '{"baseRefName": "develop"}', "") if args[:2] == ["pr", "view"] else (1, "", "x")
+        self.assertEqual(forge.Forge(GH, gh=gh).request_base(7), "develop")
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "not found")).request_base(7)
+        base = GL.api(GL.project)
+        with mock.patch.object(backlog, "_call", lambda method, url, token, timeout, payload=None:
+                               ({"target_branch": "main"}, {}, "") if url == f"{base}/merge_requests/7" else (None, {}, "x")):
+            self.assertEqual(forge.Forge(GL, token="t").request_base(7), "main")
+
+    def test_merge_commit_reads_what_a_merged_request_landed_as(self):
+        # §13 (c): the engine records this; an unreadable or unmerged answer is None, which the check cannot vouch for.
+        def gh(out, code=0):
+            return lambda args, input_text=None: (code, out, "") if args[:2] == ["pr", "view"] else (1, "", "unexpected")
+        self.assertEqual(forge.Forge(GH, gh=gh('{"mergeCommit": {"oid": "abc123"}}')).merge_commit(7), "abc123")
+        self.assertIsNone(forge.Forge(GH, gh=gh('{"mergeCommit": null}')).merge_commit(7))
+        self.assertIsNone(forge.Forge(GH, gh=gh("", 1)).merge_commit(7))
+        base = GL.api(GL.project)
+        for answer, want in (({"state": "merged", "merge_commit_sha": None, "squash_commit_sha": "sq1", "sha": "head"}, "sq1"),
+                             ({"state": "merged", "merge_commit_sha": None, "squash_commit_sha": None, "sha": "head"}, "head"),
+                             ({"state": "opened", "merge_commit_sha": "m1"}, None)):
+            with self.subTest(answer=answer), mock.patch.object(
+                    backlog, "_call", lambda method, url, token, timeout, payload=None, a=answer:
+                    (a, {}, "") if url == f"{base}/merge_requests/7" else (None, {}, "unexpected")):
+                self.assertEqual(forge.Forge(GL, token="t").merge_commit(7), want)
+
     def test_an_unreadable_answer_is_an_error_never_an_empty_list(self):
         with self.assertRaises(forge.ForgeError):
             forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).protected_branches()
@@ -1024,6 +1318,22 @@ BOARD_FLOW = Kanban(
 )
 
 class GitHubProjectWriteTest(unittest.TestCase):
+    def test_release_hold_preserves_project_status_and_rejects_drift(self):
+        self.labels = ["kind::code", BOARD_FLOW.human_review_label]
+        self.status = "Test"
+        got = forge.Forge(GH, kanban=self.config, gh=self.gh).write_stage(
+            7, "test", expected="test", release_hold=True, commit=True)
+        self.assertTrue(got.done, got.error)
+        self.assertEqual(self.status, "Test")
+        self.assertEqual(self.labels, ["kind::code"])
+        self.labels.append(BOARD_FLOW.human_review_label)
+        self.status = "Build"
+        got = forge.Forge(GH, kanban=self.config, gh=self.gh).write_stage(
+            7, "test", expected="test", release_hold=True, commit=True)
+        self.assertFalse(got.ok)
+        self.assertEqual(self.status, "Build")
+        self.assertIn(BOARD_FLOW.human_review_label, self.labels)
+
     def setUp(self):
         self.ref = backlog.IssueRef("example/app", 7)
         self.item_url = self.ref.url

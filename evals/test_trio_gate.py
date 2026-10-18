@@ -236,7 +236,7 @@ class GateTest(unittest.TestCase):
         ask_id = self.store.add_ask(KEY, "implement", 1, "session", self.decision.question, list(OPTIONS), "ctx")
         decision = replace(self.decision, topic="ask", instance=f"ask-{ask_id}", context="ctx")
         self.consult([reply("concern")] * 3, decision=decision)
-        self.store.answer_ask(ask_id, OPTIONS[1])
+        self.store.answer_ask(KEY, ask_id, OPTIONS[1])
         ask, = self.store.asks(KEY)
         settled = decision_actions.answer_ask(self.store.decisions(KEY), ask)
         self.assertEqual((settled.topic, settled.question, settled.answer, settled.decided_by),

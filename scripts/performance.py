@@ -55,7 +55,7 @@ def table(segments: Iterable[Any], since: date, until: date, by: str = "day",
         for seg in segs:
             if seg.outcome == "done":
                 completed += 1
-            elif seg.outcome == "human_review":
+            if seg.outcome == "human_review" or getattr(seg, "required_human_review", False):
                 human_review += 1
             if seg.attempt > 1:
                 relaunched += 1

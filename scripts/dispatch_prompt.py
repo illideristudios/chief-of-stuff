@@ -13,6 +13,7 @@ import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -252,8 +253,11 @@ def skills_line(skills: tuple[str, ...]) -> str:
 
 
 def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, root: Path | None = None,
-                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = ()) -> str:
-    """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or a header over BODY_CAP raises RefusedError (E3)."""
+                  skills: tuple[str, ...] = (), rules: tuple[str, ...] = (), require_green: bool = False) -> str:
+    """Compose a store/forge assignment with prevalidated workspace rules; invalid row data or an assignment prefix over BODY_CAP raises RefusedError (E3).
+
+    The cap covers metadata, persona rules, delivery, review, skills and architecture,
+    before the forge title and body are appended."""
     key = _clean("issue key", row.issue_key)
     name = _clean("store title", row.title)
     delivery = (f"{COMMITS}\nPut `Closes #{key.rpartition('#')[2]}` in the pull/merge request body "
@@ -262,6 +266,11 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
         delivery = ("Commits: Commit the fixes and verify them with tests, then push the existing request branch "
                     "before reporting done; do not open a new request. Report its URL and head sha.\n")
     review = f"{CODE_REVIEW}\n{REVIEW_RULE}\n" if stage == "review" else ""
+    suite_gate = ("" if not require_green else
+                  "Rule: Workspace [workers] require_green_tests is enabled: the engine holds a done report "
+                  "as human review unless passed, failed, skipped and xfailed are all known, with passed > 0 "
+                  "and failed, skipped and xfailed all zero. Report those counts on the report tool; omit a count "
+                  "when unknown.\n")
     architecture = ""
     if root is not None and stage in ("implement", "fix"):
         line = architecture_line(root)
@@ -271,12 +280,34 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
             f"Job: {ISSUE_JOBS.get(stage, persona.role)}\nPersona: {persona.role}\n"
             + "".join(f"Rule: {rule}\n" for rule in persona.rules)
             + delivery
+            + suite_gate
             + review
             + (skills_line(skills) + "\n" if skills else "")
             + architecture)
     if len(assignment) > BODY_CAP:
         raise RefusedError(f"the assignment is {len(assignment)} characters, over the {BODY_CAP} cap")
     return assignment + f"\n## Forge issue\n\n{title}\n\n{body}\n"
+
+
+def validate_worker_rules(root: Path, settings: Settings, policies: Any) -> None:
+    """Refuse rules that cannot fit a configured engine stage before it can reserve a worker.
+
+    Budget the two bounded row fields at LINE_CAP; the rest uses the same renderer,
+    workspace paths, stage skills, persona rules and suite policy as launch.
+    """
+    if not settings.workers.rules:
+        return
+    row = SimpleNamespace(issue_key="k" * LINE_CAP, title="t" * LINE_CAP)
+    for stage, place in policies.stages.items():
+        if place.persona is None:
+            continue
+        defaults = settings.stages.get(stage)
+        try:
+            compose_issue(row, "", "", stage, policies.personas[place.persona], root=root,
+                          skills=defaults.skills if defaults else (), rules=settings.workers.rules,
+                          require_green=settings.workers.require_green_tests)
+        except RefusedError as exc:
+            raise RefusedError(f"[workers] rules do not fit the {stage} assignment: {exc}") from None
 
 
 def commit_rule(workflow: Workflow, root: Path) -> str:

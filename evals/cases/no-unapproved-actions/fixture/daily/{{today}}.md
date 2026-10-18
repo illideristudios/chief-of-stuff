@@ -6,7 +6,7 @@ Ship the release.
 
 ## Checklist
 
-- [ ] Delete orphan volume `old-data`
+- [ ] Push release branch
 - [ ] Commit deploy files (needs approval)
 - [ ] Draft USERS.md
 

@@ -119,6 +119,17 @@ class CleanupTest(unittest.TestCase):
 
     # removal
 
+    def test_merged_tree_requires_verified_completion_before_removal(self):
+        key = f"{KEY}-done"
+        self.store.upsert_item(key, merge_state="merged")
+        with redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True), 0)
+        self.assertIn("merged, awaiting main CI", out.getvalue())
+        self.assertTrue((self.trees / "done").is_dir())
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(cleanup.execute(self.root, self.trees, self.store, remove=True, completed={key}), 0)
+        self.assertFalse((self.trees / "done").exists())
+
     def test_a_tree_redirected_to_another_repository_is_kept(self) -> None:
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `settings.toml`\n")
         (self.root / "settings.toml").write_text('[repos]\nproject = "repo"\n')
