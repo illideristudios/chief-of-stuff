@@ -170,6 +170,23 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.db.asks(KEY), [])
         self.assertEqual(len(self.db.decisions(KEY)), 7)
 
+    def test_the_audits_four_holes_never_auto_allow(self):
+        # Architect audit on #875: each of these runs a program or reaches outside while looking like a read.
+        holes = {
+            "assignment prefix": "GIT_EXTERNAL_DIFF=./x git diff",
+            "pager prefix": "GH_PAGER=./x gh pr view 1",
+            "git executes": "git log --ext-diff",
+            "git textconv": "git diff --textconv",
+            "brace expansion": "cat {.,/etc}/passwd",
+            "redirect into .git": "ls > .git/config",
+        }
+        for hole, command in holes.items():
+            with self.subTest(hole=hole):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertEqual(self.permission("Write", file_path=".git/hooks/pre-commit")["behavior"], "deny")
+        self.assertEqual(self.permission("Read", file_path=".git/HEAD"), {"behavior": "allow"})  # reading .git is fine
+        self.assertEqual(self.db.asks(KEY), [])
+
     def test_reads_and_edits_are_allowed_inside_the_worktree_only(self):
         self.assertEqual(self.permission("Read", file_path=str(self.root / "README.md")), {"behavior": "allow"})
         self.assertEqual(self.permission("Edit", file_path="scripts/x.py"), {"behavior": "allow"})

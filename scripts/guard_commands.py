@@ -559,6 +559,11 @@ def _reads_only(words: list[str]) -> bool:
             return _reads_only(args)
         return args[0] in RTK_READS
     if name == "git":
+        # Options that run a configured or given program, even on a read verb (architect audit on #875, hole 2).
+        if any(a in {"-c", "-O", "--ext-diff", "--textconv"} or a.startswith(("-c", "--config-env", "--exec-path",
+                                                                               "--open-files-in-pager"))
+               or a.startswith("-") and not a.startswith("--") and "O" in a for a in args):
+            return False
         args = _global_args(args, {"-C", "--git-dir", "--work-tree"}, {"--no-pager", "--paginate"})
         if not args or args[0] not in GIT_READS:
             return False
@@ -592,18 +597,30 @@ def judgement(command: str, protected_branches: tuple[str, ...], cwd: str | None
         segments = _segments(command)
     except (ValueError, TypeError, RecursionError):
         return "trio", "the guard cannot parse this command"
-    for words, targets in segments:
-        words = _unwrap(list(words)) if words else []
+    for raw, targets in segments:
+        words = _unwrap(list(raw)) if raw else []
+        # A VAR=value prefix (GIT_PAGER, GIT_EXTERNAL_DIFF, GH_PAGER...) can make a reader run a program (hole 1).
+        if any(ASSIGNMENT.match(word) for word in raw[:len(raw) - len(words)]):
+            return "trio", "an environment assignment prefixes the command"
+        # Brace expansion builds paths the lexical check never sees: cat {.,/etc}/passwd (hole 3).
+        if any("{" in word for word in [*raw, *targets]):
+            return "trio", "a brace expansion can name a path outside the worktree"
         if words and not _reads_only(words):
             return "trio", f"{PurePosixPath(words[0]).name} is not a known read-only command"
         for arg in words[1:]:
             value = arg.split("=", 1)[1] if arg.startswith("-") and "=" in arg else arg
-            if not inside(value, cwd):
-                return "trio", f"{value} is outside the worktree"
+            if not inside(value, cwd) or _in_git_dir(value):
+                return "trio", f"{value} is outside the worktree or in its .git"
         for target in targets:
-            if target != "/dev/null" and not target.isdigit() and not inside(target, cwd):
-                return "trio", f"a redirect to {target} is outside the worktree"
+            if target != "/dev/null" and not target.isdigit() and (not inside(target, cwd) or _in_git_dir(target)):
+                return "trio", f"a redirect to {target} is outside the worktree or in its .git"
     return "allow", ""
+
+
+def _in_git_dir(path: str) -> bool:
+    """A .git component: in a linked worktree <cwd>/.git is in-tree, and rewriting it redirects the engine's later
+    credentialed git calls (architect audit on #875, hole 4)."""
+    return ".git" in PurePosixPath(path).parts
 
 
 READ_TOOLS = {"Read", "Glob", "Grep", "LS"}
@@ -621,7 +638,7 @@ def permission_judgement(event: dict, protected_branches: tuple[str, ...]) -> tu
         return judgement(given.get("command"), protected_branches, cwd)
     if tool in READ_TOOLS | WRITE_TOOLS:
         path = given.get("file_path") or given.get("notebook_path") or given.get("path") or ("." if tool in READ_TOOLS else "")
-        if isinstance(path, str) and path and inside(path, cwd):
+        if isinstance(path, str) and path and inside(path, cwd) and not (tool in WRITE_TOOLS and _in_git_dir(path)):
             return "allow", ""
         return "trio", f"{tool} of {path or 'an unnamed path'} is outside the worktree"
     return "trio", f"{tool or 'this tool'} has no permission rule"
