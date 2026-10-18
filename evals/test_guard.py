@@ -157,6 +157,39 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.permission(command=command), {"behavior": "allow"})
         self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
 
+    def test_routine_reads_and_own_tree_git_writes_are_allowed_without_anyone(self):
+        # #890: the shapes the engines' workers actually asked about (names invented), each now judged by rule.
+        commands = (
+            "git add docs/plans/issue-7.md && git commit -q -m \"docs: plan the widget for issue 7\"",
+            "git commit -m \"Plan the widget page for #7\" -m \"Co-Authored-By: A Model <noreply@example.test>\"",
+            "git add PLAN-7.md",
+            "git ls-files; rtk read GOAL.md; sed -n 1,135p DESIGN.md",
+            "sed -n 1,130p DESIGN.md; echo ------; sed -n 440,480p DESIGN.md; rtk grep -n -i \"widget\" DESIGN.md",
+            "git branch -a | head -30; git worktree list; which python3 ffmpeg node 2>&1",
+            "find . -path ./node_modules -prune -o -path ./.git -prune -o -type f -print | grep -v '/obj/' | head -100",
+            "grep -rIl --exclude-dir=node_modules --exclude-dir=.git widget . | head",
+            "git switch -c widget-7",
+            "sed -n '10p;20,30p' notes.md",  # a `$` never reaches the sed rule: the gate's tokenizer refuses it first
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command), {"behavior": "allow"})
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_sed_scripts_that_write_or_run_and_history_rewrites_are_not_auto_allowed(self):
+        for command in ("sed -n '1p;w /tmp/x' notes.md", "sed -n 'e touch x' notes.md", "sed -n '1r /etc/hosts' a",
+                        "sed -i -n 1p notes.md", "git commit --amend -m x", "git commit --no-verify -m x",
+                        "git commit -qn -m x", "git -C ../other add x", "git -c core.hooksPath=x commit -m x",
+                        "git checkout -b x origin/main", "git worktree add ../x", "cat ../sibling/secret"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertTrue(all(ask.answer is None for ask in self.db.asks(KEY)))  # each waits for the trio, not allowed
+
+    def test_an_ask_records_the_worktree_so_the_engine_can_judge_it_again(self):
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.assertEqual(json.loads(ask.context)["cwd"], str(self.root))
+
     def test_a_merge_chained_after_a_read_is_denied_with_the_reason(self):
         decision = self.permission(command="git status && gh pr merge 12 --merge")
         self.assertEqual(decision["behavior"], "deny")

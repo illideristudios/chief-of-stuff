@@ -1711,6 +1711,57 @@ class EngineTest(unittest.TestCase):
         self.assertAlmostEqual(self.db.resume(KEY)["spend_usd"], 0.3)
         self.assertEqual(model.n, 3)
 
+    def permission_ask(self, command):
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        context = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}, "why": "an older, narrower rule"})
+        return self.db.add_ask(KEY, "implement", 1, "session", "Permission requested for Bash", ["allow", "deny"], context)
+
+    def test_an_open_permission_ask_raised_under_an_older_rule_is_answered_by_todays(self):
+        # #890 (3): appended answers close the asks, so the held issue becomes ready; no row is deleted.
+        self.permission_ask("git add PLAN-7.md")
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        self.assertEqual(self.db.asks(KEY)[0].answer, "allow")
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
+        self.assertTrue(any(e.message.startswith("permission allow: Permission requested for Bash") for e in self.db.log(KEY)))
+
+    def test_a_split_trio_denies_a_permission_and_never_asks_the_owner(self):
+        # #890 (2): unjudged goes to the trio only; a split denies with the reason on the run.
+        self._trio()
+        self.permission_ask("cat ../sibling/notes.md")
+        self.run_pass(model=self._votes([("adopt", "allow"), ("concern", "deny"), ("adopt", "allow")]))
+        self.assertEqual(self.db.asks(KEY)[0].answer, "deny")
+        latest = self.db.decisions(KEY)[-1]
+        self.assertEqual((latest.answer, latest.decided_by), ("deny", "guard"))
+        self.assertEqual(decision_actions.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY)), [])
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
+        self.assertTrue(any("the trio did not adopt an answer" in e.message for e in self.db.log(KEY)))
+
+    def test_a_trio_with_nothing_launchable_or_every_entry_exhausted_denies_a_permission(self):
+        # Architect on #891: for a permission ask, what goes to the owner elsewhere is a deny here.
+        rotation = (engine.settings.ModelEntry("codex", "m1"), engine.settings.ModelEntry("cursor", "m2"))
+        quota = lambda request: model_port.Failure("quota", "429 quota")  # noqa: E731
+        for name, port in (("nothing launchable", model_port.Port(quota, rotation, launchable=lambda runtime: False)),
+                           ("every entry exhausted", model_port.Port(quota, rotation))):
+            with self.subTest(name):
+                self._trio()
+                self.db.engine.dispose()
+                self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+                self.addCleanup(self.db.engine.dispose)
+                ask_id = self.permission_ask(f"cat ../sibling/{name.replace(' ', '-')}.md")
+                self.run_pass(model=port)
+                answer = next(a.answer for a in self.db.asks(KEY) if a.id == ask_id)
+                self.assertEqual(answer, "deny")
+                self.assertEqual(decision_actions.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY)), [])
+                self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
+
+    def test_an_unavailable_trio_denies_a_permission(self):
+        self.permission_ask("cat ../sibling/notes.md")
+        self.run_pass()  # no model: the trio cannot be consulted
+        self.assertEqual(self.db.asks(KEY)[0].answer, "deny")
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
+
     def test_a_split_trio_escalates_once(self):
         self._trio()
         self.db.upsert_item(KEY, title="Parser", stage="implement")

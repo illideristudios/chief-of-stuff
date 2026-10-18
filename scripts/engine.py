@@ -25,6 +25,7 @@ import dispatch_prompt
 import engine_facts
 import engine_merge
 import forge
+import guard_commands
 import host_adapter
 import issue_gate
 import limits_history
@@ -272,6 +273,29 @@ def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "impl
         store.set_resume(key, data)
 
 
+def _permission(ask: Any) -> dict | None:
+    """The event a worker's permission ask records (#874), or None for any other ask."""
+    try:
+        event = json.loads(ask.context or "")
+    except (TypeError, ValueError):
+        return None
+    if (isinstance(event, dict) and "tool_name" in event and tuple(ask.options) == ("allow", "deny")
+            and str(ask.question).startswith("Permission requested for ")):
+        return event
+    return None
+
+
+def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at: str) -> None:
+    """#890: a permission request is never an owner decision. The guard's rule or the trio answers it; a split,
+    unavailable or exhausted trio denies it, with the reason on the run's log. The answer is appended, never a delete."""
+    store.answer_ask(key, ask.id, answer)
+    row = decision_actions.ask_decision(store.decisions(key), ask)
+    if row is not None and not (row.answer or "").strip():
+        trio_gate.record(store, key, decision_actions.DecisionUpdate(
+            row.topic, row.question, answer, "guard", {**row.record, "recommendation": answer, "settled_by": why}))
+    store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
+
+
 def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
     for item in store.items():
         if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
@@ -285,9 +309,19 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
         _settle_asks(store, key)
         asks = store.asks(key)
         for ask in (ask for ask in asks if not ask.answer):
+            permission = _permission(ask)
+            if permission is not None:
+                # Judged again by today's rule, so an ask raised under a narrower one is closed by its answer.
+                verdict, why = guard_commands.permission_judgement(permission, ())
+                if verdict != "trio":
+                    _settle_permission(store, key, ask, verdict, "the guard's rule" + (f": {why}" if why else ""), at)
+                    continue
             stage = ask.stage or item.stage or workflow.start
             resolved = _resolved(policies, store, key, stage)
             if _consultation_blocked(store, key, resolved, at, stage=stage):
+                if permission is not None:
+                    _settle_permission(store, key, ask, "deny", "the trio is unavailable: a limit or a quota holds it", at)
+                    continue
                 break
             row = decision_actions.ask_decision(store.decisions(key), ask)
             topic, question, instance = decision_actions.identity(row) if row is not None else (
@@ -296,6 +330,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                              model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock)
             if choice:
                 store.answer_ask(key, ask.id, choice)
+            elif permission is not None:
+                _settle_permission(store, key, ask, "deny", "the trio did not adopt an answer", at)
         for row, segment in replacements:
             resolved = _resolved(policies, store, key, segment.stage)
             if _consultation_blocked(store, key, resolved, at, stage=segment.stage):
