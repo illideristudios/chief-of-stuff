@@ -47,6 +47,18 @@ class Policy:
     time_minutes: float | None = None
 
 
+def breach(resolved: Policy, usage) -> str | None:
+    """The first configured limit that measured usage has reached. An unset limit, or usage not yet measured, is not a breach."""
+    # shortcut: ping when usage reaches the limit, until a warn fraction is configured
+    if not usage:
+        return None
+    for field, kind in (("spend_usd", "spend"), ("quota_percent", "quota"), ("time_minutes", "time")):
+        limit, used = getattr(resolved, field), usage.get(field)
+        if limit is not None and type(used) in (int, float) and used >= limit:
+            return kind
+    return None
+
+
 @dataclass(frozen=True)
 class Persona:
     """A reviewer or actor profile. With `agent` it is an agent: a full Claude Code agent that may use personas."""
@@ -154,6 +166,8 @@ def _trio(where: str, value, personas: set[str]) -> tuple[str, ...]:
     trio = _names(where, value)
     if len(trio) != 3 or len(set(trio)) != 3 or not set(trio) <= personas:
         raise PolicyError(f"{where} must be three distinct personas of {', '.join(sorted(personas))}")
+    if "architect" in trio:
+        raise PolicyError(f"{where}: architect cannot be a decision-trio member")
     return trio
 
 

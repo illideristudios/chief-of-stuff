@@ -388,13 +388,19 @@ class Store:
         return self._all(select(Ask).where(Ask.issue_key == issue_key).order_by(Ask.id))
 
     def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
-        """An operator's answer is bound to the named issue; worker tools never expose this write."""
-        if not answer.strip():
+        """An operator's or the trio's adopted answer, bound to the named issue; worker tools never expose this write.
+        An answer outside the ask's options, or a second answer, is refused (#750)."""
+        if not isinstance(answer, str) or not answer.strip():
             raise ValueError("an ask answer must not be empty")
         with self.session() as s:
-            if not s.execute(update(Ask).where(Ask.issue_key == issue_key, Ask.id == ask_id)
-                             .values(answer=answer)).rowcount:
+            row = s.get(Ask, ask_id)
+            if row is None or row.issue_key != issue_key:
                 raise KeyError(f"ask {ask_id} does not belong to {issue_key}")
+            if row.answer is not None:
+                raise KeyError(f"ask {ask_id} is already answered")  # #750: a second answer is refused
+            if row.options and answer not in row.options:
+                raise ValueError(f"ask answer {answer!r} is not in options")
+            row.answer = answer
 
     def _all(self, stmt: Any) -> list[Any]:
         with self.session() as s:

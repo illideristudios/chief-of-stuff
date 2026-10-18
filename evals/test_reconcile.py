@@ -39,6 +39,7 @@ class Decision:
     answer: str | None = None
     topic: str = "scope"
     question: str = "Split the parser?"
+    record: dict | None = None
 
 
 def policies():
@@ -180,8 +181,9 @@ class ReconcileTest(unittest.TestCase):
                                    [Segment("review")], {}, quota_resets={KEY: later}),
                          [reconcile.Merge(KEY)])
         self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        # #750 ruling 1 (rule 11): a gate Ask is a trio consult that spends model quota, so a reset holds it too.
         self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: later}),
-                         [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
+                         [reconcile.Wait(KEY, "quota reset pending")])
         self.assertEqual(self.plan(history=[Segment("implement")], quota_resets={KEY: NOW}),
                          [reconcile.Ask(KEY, "plan", "gate requires Zach's approval")])
 
@@ -310,14 +312,76 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(actions, [reconcile.Merge(KEY)] if answer and answer.strip() else
                                  [reconcile.Wait(KEY, "decision pending")])
 
-    def test_a_pending_permission_decision_holds_the_next_launch(self):
-        # #874: a worker's unjudgeable permission request waits for the trio and shows as NEEDS INPUT, never relaunching.
-        launch = self.plan()
-        self.assertIsInstance(launch[0], (reconcile.Dispatch, reconcile.Review))
-        asked = Decision(None, topic="permission", question="Permission requested for Bash")
-        self.assertEqual(self.plan(decisions={KEY: [asked]}), [reconcile.Wait(KEY, "permission decision pending")])
-        answered = [asked, Decision("allow", topic="permission", question="Permission requested for Bash")]
-        self.assertEqual(type(self.plan(decisions={KEY: answered})[0]), type(launch[0]))
+    def test_measured_usage_at_a_configured_limit_stops_dispatch(self):
+        for field, kind, value in (("spend_usd", "spend", 2), ("quota_percent", "quota", 80), ("time_minutes", "time", 30)):
+            with self.subTest(field=field):
+                self.p = replace(policies(), base=replace(policies().base, **{field: value}))
+                self.assertEqual(self.plan(usage={KEY: {field: value}}),
+                                 [reconcile.Limit(KEY, kind, f"reached {kind} limit")])
+                self.p = replace(policies(), base=replace(policies().base, **{field: value}))
+                self.assertEqual(self.plan(usage={KEY: {field: value - 0.1}}),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+                self.p = policies()
+                self.assertEqual(self.plan(usage={KEY: {field: value}}),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
+    def test_a_room_limit_overrides_an_unset_base(self):
+        self.p.rooms["lab"] = policy.Place("lab", policy={"time_minutes": 5})
+        self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}, rooms={KEY: "lab"}),
+                         [reconcile.Limit(KEY, "time", "reached time limit")])
+        self.assertEqual(self.plan(usage={KEY: {"time_minutes": 5}}),
+                         [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+
+    def test_limit_breach_stops_only_new_dispatches_and_reviews(self):
+        self.p = replace(policies(), base=replace(policies().base, spend_usd=1))
+        usage = {KEY: {"spend_usd": 1}}
+        self.assertEqual(self.plan(history=[Segment("implement", ended_at=None)], usage=usage), [])
+        ready = replace(Item(), stage="merge", merge_state="ready")
+        self.assertEqual(self.plan(ready, [Segment("review")], {}, usage=usage), [reconcile.Merge(KEY)])
+        self.assertEqual(self.plan(replace(Item(), human_review=True), usage=usage),
+                         [reconcile.Wait(KEY, "human review")])
+
+    def test_a_restart_supersedes_an_older_unanswered_review_decision_at_merge(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        history = [Segment("implement", 1, NOW - timedelta(hours=4), NOW - timedelta(hours=3)),
+                   Segment("review", 1, NOW - timedelta(hours=3), NOW - timedelta(hours=2)),
+                   Segment("implement", 2, NOW - timedelta(hours=1), NOW - timedelta(minutes=30)),
+                   Segment("review", 2, NOW - timedelta(minutes=20), NOW - timedelta(minutes=10))]
+        decisions = [Decision(None, "design", "Split?", {"decision": {"stage": "review", "attempt": 1}}),
+                     Decision(None, record={"reversed": True}),
+                     Decision(None, record={"restarted": "implement", "restart_attempt": 2})]
+        self.assertEqual(self.plan(item, history, {}, decisions={KEY: decisions}),
+                         [reconcile.Wait(KEY, "decision pending")])
+        decisions.append(Decision("replacement"))
+        self.assertEqual(self.plan(item, history, {}, decisions={KEY: decisions}), [reconcile.Merge(KEY)])
+
+    def test_a_reversed_decision_routes_back_to_the_workflow_start(self):
+        item = replace(Item(), stage="merge", merge_state="ready")
+        reversed_decisions = {KEY: [Decision(None, record={"reversed": True})]}
+        actions = self.plan(item, [Segment("review")], {}, decisions=reversed_decisions)
+        self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        reversed_decisions[KEY].append(Decision(None, record={"restarted": "implement"}))
+        # After the restarted start stage finishes, the workflow advances to review and merge instead of looping.
+        restarted_history = [Segment("review", started_at=NOW - timedelta(hours=3), ended_at=NOW - timedelta(hours=2)),
+                             Segment("implement", started_at=NOW - timedelta(hours=1), ended_at=NOW)]
+        self.assertEqual(self.plan(replace(item, stage="implement"), restarted_history, {}, decisions=reversed_decisions),
+                         [reconcile.Review(KEY, 2)])
+        reviewed_history = [*restarted_history,
+                            Segment("review", 2, started_at=NOW + timedelta(minutes=1), ended_at=NOW + timedelta(minutes=2))]
+        self.assertEqual(self.plan(item, reviewed_history, {}, decisions=reversed_decisions),
+                         [reconcile.Wait(KEY, "decision pending")])
+        reversed_decisions[KEY].append(Decision("replacement"))
+        self.assertEqual(self.plan(item, reviewed_history, {}, decisions=reversed_decisions),
+                         [reconcile.Merge(KEY)])
+
+    def test_a_held_or_split_gate_decision_waits_instead_of_asking_again(self):
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        for answer in ("hold", None):
+            with self.subTest(answer=answer):
+                decisions = {KEY: [Decision(answer, topic="plan", question="gate requires Zach's approval",
+                                            record={"decision": {"context": "implement-1"}})]}
+                self.assertEqual(self.plan(history=[Segment("implement", 1)], decisions=decisions),
+                                 [reconcile.Wait(KEY, "decision pending")])
 
     def test_a_later_answer_resolves_an_earlier_pending_row_for_the_same_question(self):
         item = replace(Item(), stage="merge", merge_state="ready")

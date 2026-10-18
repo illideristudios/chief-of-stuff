@@ -10,14 +10,17 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable
-from datetime import datetime
+from collections.abc import Callable, Collection
+from dataclasses import is_dataclass, replace
+from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import cleanup
+import claude_adapter
 import clock as engine_clock
+import decision_actions
 import dispatch_prompt
 import engine_facts
 import engine_merge
@@ -25,8 +28,10 @@ import forge
 import issue_gate
 import limits_history
 import limits_probe
+import model_port
 import ownership
 import policy
+import readiness
 import reconcile
 import settings
 import shell_setup
@@ -34,6 +39,7 @@ import slots
 import startup
 import store_access
 import supervisor
+import trio_gate
 import worker
 from forge_port import ForgeError
 from workspace import worktrees_dir
@@ -91,9 +97,215 @@ def _planning_inputs(store: Any, items: list) -> dict:
                           if (counts := reconcile.review_findings(states[key], history)) is not None},
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
+        "pending_asks": {item.issue_key: any(not ask.answer for ask in store.asks(item.issue_key)) for item in items},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
                          if (quota := state.get("quota"))},
+        "usage": {key: nums for key, state in states.items() if (nums := _measured(state))},
+        "waived_gates": {key: tuple(state.get("waived_gates") or ())
+                         for key, state in states.items() if state.get("waived_gates")},
     }
+
+
+def _measured(state: dict) -> dict:
+    return {key: state[key] for key in ("spend_usd", "time_minutes", "quota_percent")
+            if type(state.get(key)) in (int, float)}
+
+
+def _interrupt(store: Any, key: str, kind: str, reason: str, at: str, *, scope: dict) -> None:
+    """Persist the issue's interrupt when it changes."""
+    data = _resume(store, key)
+    record = {"kind": kind, "reason": reason, **scope}
+    if data.get("interrupt") != record:
+        store.add_log(key, f"{kind}: {reason}", at)
+        data["interrupt"] = record
+        store.set_resume(key, data)
+
+
+def _add_spend(store: Any, key: str, amount: float) -> None:
+    if type(amount) not in (int, float) or not amount:
+        return
+    data = _resume(store, key)
+    data["spend_usd"] = float(data.get("spend_usd") or 0) + float(amount)
+    store.set_resume(key, data)
+
+
+def _metered(store: Any, key: str, model: model_port.Model):
+    def call(request: model_port.Request):
+        got = model(request)
+        if isinstance(got, (model_port.Reply, model_port.Failure)):
+            _add_spend(store, key, got.cost_usd)
+        return got
+    return call
+
+
+def _resolved(policies: policy.Policies, store: Any, key: str, stage: str) -> policy.Policy:
+    room = _resume(store, key).get("room")
+    if room not in policies.rooms:
+        room = None
+    known = stage if stage in policies.stages else None
+    return policies.resolve(policies.stages[known].persona if known else None, known, room)
+
+
+def _workflow_for(policies: policy.Policies, store: Any, item: Any) -> policy.Workflow:
+    issue_type = _resume(store, item.issue_key).get("issue_type") or getattr(item, "issue_type", None)
+    return policies.workflow_for(issue_type)
+
+
+def _clear_waived_gates(store: Any, key: str) -> None:
+    data = _resume(store, key)
+    if data.pop("waived_gates", None) is not None:
+        store.set_resume(key, data)
+
+
+def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str, ...],
+            resolved: policy.Policy, personas, model, *, context: str = "", instance: str = "",
+            stage: str = "", attempt: int = 0,
+            gate: bool = False,
+            clock: engine_clock.Clock = engine_clock.system) -> str | None:
+    """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
+    decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
+                                  stage=stage, attempt=attempt, gate=gate)
+    earlier = store.decisions(key)
+    retry_key = json.dumps([topic, question, instance, stage, attempt, context, options])
+    retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
+    prior = decision_actions.latest(earlier).get((topic, question, instance))
+    failures = max(retry.get("failures", 0), decision_actions.stamped_failures(prior, context, options, stage, attempt))
+    if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
+            and datetime.fromisoformat(retry["retry_at"]) > clock()):
+        return None
+    outcome = trio_gate.decide(decision, earlier, resolved, personas,
+                               _metered(store, key, model) if model is not None else None, store, failures=failures)
+    rows = store.decisions(key)
+    data = _resume(store, key)
+    retries = data.get("trio_retries") or {}
+    if len(rows) > len(earlier) and decision_actions.retryable_failure(rows[-1].record):
+        delay = min(3600, 60 * 2 ** min(failures, 6))
+        retries[retry_key] = {"failures": failures + 1,
+                              "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
+        data["trio_retries"] = retries
+        store.set_resume(key, data)
+        return None
+    if retry_key in retries:
+        retries.pop(retry_key)
+        if not retries:
+            data.pop("trio_retries", None)
+        store.set_resume(key, data)
+    return outcome.recommendation if outcome.unanimous else None
+
+
+def _clear_interrupt(store: Any, key: str, kind: str, *, scope: dict) -> None:
+    data = _resume(store, key)
+    record = data.get("interrupt", {})
+    if record.get("kind") == kind and all(record.get(name) == value for name, value in scope.items()):
+        data.pop("interrupt")
+        store.set_resume(key, data)
+
+
+def _consultation_blocked(store: Any, key: str, resolved: policy.Policy, at: str, *, stage: str) -> bool:
+    data = _resume(store, key)
+    kind = policy.breach(resolved, _measured(data))
+    if kind:
+        _interrupt(store, key, "limit", f"reached {kind} limit", at, scope={"stage": stage})
+        return True
+    _clear_interrupt(store, key, "limit", scope={"stage": stage})
+    quota = data.get("quota")
+    return bool(quota and datetime.fromisoformat(quota["retry_at"]) > datetime.fromisoformat(at))
+
+
+def _link_replacement_asks(store: Any, key: str, replacements: list) -> None:
+    for origin, segment in replacements:
+        pending = decision_actions.replacement_ask(origin, segment, store.decisions(key), store.asks(key))
+        if pending is None:
+            continue
+        spec, ask, prior = pending
+        ask_id = ask.id if ask is not None else store.add_ask(key, **spec)
+        update = decision_actions.link_ask(prior, ask_id)
+        if update != prior:
+            store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record)
+
+
+def _settle_asks(store: Any, key: str) -> None:
+    for ask in store.asks(key):
+        rows = store.decisions(key)
+        linked = decision_actions.recover_ask_link(rows, ask)
+        if linked is not None:
+            store.add_decision(key, linked.topic, linked.question, linked.answer, linked.decided_by, linked.record)
+            rows = store.decisions(key)
+        answer = decision_actions.committed_ask_answer(rows, ask)
+        if answer is not None:
+            store.answer_ask(key, ask.id, answer)
+        elif ask.answer:
+            settled = decision_actions.answer_ask(rows, ask)
+            if settled is not None:
+                store.add_decision(key, settled.topic, settled.question, settled.answer,
+                                   settled.decided_by, settled.record)
+
+
+def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "implement",
+                              passed: Collection[str] = ()) -> None:
+    """Derive one interrupt per decision attempt, changing only decision-scoped state."""
+    key = item.issue_key
+    desired = {}
+    pending_rows = (decision_actions.owner_waits(store.decisions(key), store.segments(key), store.asks(key), start, passed)
+                    if item.forge_state != "closed" else ())
+    for pending in pending_rows:
+        scope = {"id": list(pending.decision_id), "stage": pending.stage, "attempt": pending.attempt}
+        desired[json.dumps(scope, sort_keys=True)] = {"kind": "ambiguity", "reason": pending.reason, "decision": scope}
+    data = _resume(store, key)
+    current = {json.dumps(i["decision"], sort_keys=True): i for i in data.get("decision_interrupts", ())}
+    for added in desired.keys() - current.keys():
+        store.add_log(key, f"ambiguity: {desired[added]['reason']}", at)
+    # The old singleton may contain a decision interrupt from an earlier engine version.
+    legacy = isinstance((data.get("interrupt") or {}).get("decision"), dict)
+    if current != desired or legacy:
+        if desired:
+            data["decision_interrupts"] = list(desired.values())
+        else:
+            data.pop("decision_interrupts", None)
+        if legacy:
+            data.pop("interrupt")
+        store.set_resume(key, data)
+
+
+def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+    for item in store.items():
+        if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
+            continue
+        key = item.issue_key
+        workflow = _workflow_for(policies, store, item)
+        replacements = decision_actions.replacements(store.decisions(key), store.segments(key), workflow.start,
+                                                     tuple(edge.gate for edge in workflow.edges if edge.gate))
+        # Repair an interrupted ask/link write before accepting any direct answer.
+        _link_replacement_asks(store, key, replacements)
+        _settle_asks(store, key)
+        asks = store.asks(key)
+        for ask in (ask for ask in asks if not ask.answer):
+            stage = ask.stage or item.stage or workflow.start
+            resolved = _resolved(policies, store, key, stage)
+            if _consultation_blocked(store, key, resolved, at, stage=stage):
+                break
+            row = decision_actions.ask_decision(store.decisions(key), ask)
+            topic, question, instance = decision_actions.identity(row) if row is not None else (
+                "ask", ask.question, f"ask-{ask.id}")
+            choice = _choice(store, key, topic, question, tuple(ask.options), resolved, policies.personas,
+                             model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock)
+            if choice:
+                store.answer_ask(key, ask.id, choice)
+        for row, segment in replacements:
+            resolved = _resolved(policies, store, key, segment.stage)
+            if _consultation_blocked(store, key, resolved, at, stage=segment.stage):
+                break
+            prior = row.record.get("decision")
+            if not isinstance(prior, dict):
+                _interrupt(store, key, "ambiguity", row.question, at, scope={"stage": segment.stage})
+                continue
+            context = decision_actions.replacement_context(row, segment)
+            _choice(store, key, row.topic, row.question, tuple(prior.get("options") or ()),
+                    resolved, policies.personas, model, context=context,
+                    instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock)
+        _link_replacement_asks(store, key, replacements)
+        _settle_asks(store, key)
+
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
@@ -260,7 +472,8 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "") -> list[reconcile.Action]:
+             max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "",
+             model: model_port.Model | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -313,6 +526,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     now = clock()
     at = now.isoformat()
     _sync_suite_holds(forge, store, snapshots, at)
+    for item in store.items():
+        data = _resume(store, item.issue_key)
+        quota = data.get("quota")
+        if quota and datetime.fromisoformat(quota["retry_at"]) <= now and "quota_percent" in data:
+            data.pop("quota_percent")
+            # The planner stamps the evaluated stage, which need not be item.stage.
+            interrupt = data.get("interrupt") or {}
+            if (interrupt.get("kind"), interrupt.get("reason")) == ("limit", "reached quota limit"):
+                data.pop("interrupt")
+            store.set_resume(item.issue_key, data)
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         key = item.issue_key
@@ -357,7 +580,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             store.set_resume(key, data)
         if pending:
             try:
-                if item.stage == pending["stage"]:
+                # A failed start keeps its segment to spend the retry budget; it does not consume a restart route.
+                claimed = ("attempt" not in pending or any(
+                    seg.stage == pending["stage"] and seg.attempt == pending["attempt"] and seg.outcome != "failed"
+                    for seg in store.segments(key)))
+                if not claimed or item.stage == pending["stage"]:
                     data.pop("pending_stage")
                     store.set_resume(key, data)
                 else:
@@ -368,6 +595,13 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if not logged or logged[-1].message != message:  # retried every pass; log only a change
                     store.add_log(key, message, at)
 
+    _route_asks(store, policies, model, at, clock)
+    if is_dataclass(facts):
+        # The trio may have answered asks since collect gathered them; plan from the answers it just stored.
+        asks = tuple(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt)
+                     for item in store.items() for row in store.asks(item.issue_key))
+        if asks != facts.asks:
+            facts = replace(facts, asks=asks)
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
     _remember_verified(store, facts)
@@ -419,16 +653,39 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         _fail_start(forge, store, key, stage, stages[key], action.attempt, board is not None, exc)
                         raise
 
+                restart = (stage != stages[key] and stage == _workflow_for(policies, store, by_key[key]).start
+                           and decision_actions.open_reversal(store.decisions(key), store.segments(key), stage))
+                if restart:
+                    # Persist the restart route before its durable segment consumes the
+                    # reversal, so a crash still retries/advances from workflow.start.
+                    data = _resume(store, key)
+                    data["pending_stage"] = {"stage": stage, "expected": stages[key], "attempt": action.attempt}
+                    store.set_resume(key, data)
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
                                 agent_type=persona, runtime="claude")
-                except Exception:
+                except BaseException:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
                                              runtime="claude", agent_type=persona)
+                    # A rejected claim or failed launch leaves no segment. A crash
+                    # after a durable claim must keep the route for recovery.
+                    # #750 ruling 2: a failed launch keeps _fail_start's stage move and hold, whose pending_stage
+                    # supersedes the route; only a claim refused before any launch rolls the route back.
+                    if restart and not launch_failed and not any(s.stage == stage and s.attempt == action.attempt
+                                                                 for s in store.segments(key)):
+                        data = _resume(store, key)
+                        data.pop("pending_stage", None)
+                        store.set_resume(key, data)
                     raise
+                _clear_waived_gates(store, key)
+                _clear_interrupt(store, key, "limit", scope={"stage": stage})
+                if isinstance(action, reconcile.Dispatch) and stage == _workflow_for(policies, store, by_key[key]).start:
+                    for rev in decision_actions.restarted(store.decisions(key), stage, action.attempt):
+                        store.add_decision(key, topic=rev.topic, question=rev.question,
+                                           answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
@@ -437,21 +694,27 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                          inputs=_planning_inputs(store, [by_key[key]]),
                                          hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
+                    _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Close):
                 worker.teardown_once(store, root, key, action.stage, action.attempt, teardown_command, at)
                 if action.suite_hold:
                     _arm_suite_hold(store, key, action.stage, action.attempt)
                 _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
                                action.reason, action.human_review, now)
-            elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
-                data = _resume(store, key)
-                record = {"kind": type(action).__name__, "reason": action.reason}
-                if isinstance(action, reconcile.Ask):
-                    record["gate"] = action.gate
-                if data.get("interrupt") != record:
-                    store.add_log(key, f"{record['kind'].lower()}: {action.reason}", at)
-                    data["interrupt"] = record  # M5/M6 delivers and resolves the interrupt.
+            elif isinstance(action, reconcile.Ask):
+                resolved = _resolved(policies, store, key, action.source)
+                if _consultation_blocked(store, key, resolved, at, stage=action.source):
+                    continue
+                choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
+                                 resolved, policies.personas, model, context=action.context, stage=action.stage,
+                                 attempt=action.attempt, gate=True, clock=clock)
+                if choice == "approve":
+                    data = _resume(store, key)
+                    data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
                     store.set_resume(key, data)
+            elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
+                kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
+                _interrupt(store, key, kind, action.reason, at, scope={"stage": action.stage})
                 if isinstance(action, reconcile.Escalate):
                     # A permanent refusal or exhausted budget ends automatic release; removing the
                     # hold later works without editing the engine's resume records.
@@ -469,6 +732,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         except Exception as exc:
             if not isinstance(exc, HoldReleaseFailed):
                 store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
+    for item in store.items():
+        workflow, state = _workflow_for(policies, store, item), _resume(store, item.issue_key)
+        passed = reconcile.passed_gates(workflow, policies, state.get("room"), now, state.get("waived_gates") or ())
+        _sync_decision_interrupts(store, item, at, workflow.start, passed)
     completed = {item.issue_key for item in store.items()
                  if item.forge_state == "closed" and item.merge_state == "merged"
                  and reconcile.completion_wait(item.issue_key, facts) is None
@@ -575,6 +842,7 @@ def main(argv: list[str] | None = None) -> int:
                              clone=root / selected if selected else root,
                              claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
                              require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+            model = partial(claude_adapter.call, claude_as_profile=config.workers.claude_as_profile)
             stop_pages = threading.Event()
             page_thread = None
             try:
@@ -586,7 +854,7 @@ def main(argv: list[str] | None = None) -> int:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
+                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency, model=model,
                                  require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
                     except Exception as exc:
                         failed = True
