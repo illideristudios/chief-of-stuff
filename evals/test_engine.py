@@ -1738,6 +1738,24 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
         self.assertTrue(any("the trio did not adopt an answer" in e.message for e in self.db.log(KEY)))
 
+    def test_a_trio_with_nothing_launchable_or_every_entry_exhausted_denies_a_permission(self):
+        # Architect on #891: for a permission ask, what goes to the owner elsewhere is a deny here.
+        rotation = (engine.settings.ModelEntry("codex", "m1"), engine.settings.ModelEntry("cursor", "m2"))
+        quota = lambda request: model_port.Failure("quota", "429 quota")  # noqa: E731
+        for name, port in (("nothing launchable", model_port.Port(quota, rotation, launchable=lambda runtime: False)),
+                           ("every entry exhausted", model_port.Port(quota, rotation))):
+            with self.subTest(name):
+                self._trio()
+                self.db.engine.dispose()
+                self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+                self.addCleanup(self.db.engine.dispose)
+                ask_id = self.permission_ask(f"cat ../sibling/{name.replace(' ', '-')}.md")
+                self.run_pass(model=port)
+                answer = next(a.answer for a in self.db.asks(KEY) if a.id == ask_id)
+                self.assertEqual(answer, "deny")
+                self.assertEqual(decision_actions.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY)), [])
+                self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
+
     def test_an_unavailable_trio_denies_a_permission(self):
         self.permission_ask("cat ../sibling/notes.md")
         self.run_pass()  # no model: the trio cannot be consulted
@@ -2980,7 +2998,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine, "run_pass") as passed, \
              mock.patch.object(engine.claude_adapter, "call") as call:
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
-            request = object()
+            request = engine.model_port.Request("q")  # #879: a request names its runtime; empty is Claude
             passed.call_args.kwargs["model"](request)
         self.assertEqual(call.call_args.args, (request,))
 
@@ -3379,6 +3397,32 @@ class PolicyFingerprintTest(unittest.TestCase):
         self.assertEqual(logged[1], "")
         self.assertNotEqual(logged[2], "")
         self.assertNotEqual(logged[0], logged[2])
+
+
+class TrioPortTest(unittest.TestCase):
+    """#879: the trio's port sends Claude to claude_adapter and other hosts, read-only, to host_adapter."""
+
+    def test_each_request_goes_to_its_hosts_adapter(self):
+        with mock.patch.object(engine.claude_adapter, "call", return_value="claude") as claude, \
+             mock.patch.object(engine.host_adapter, "judge", return_value="host") as host:
+            self.assertEqual(engine._judge(engine.model_port.Request("q"), claude_as_profile="p"), "claude")
+            self.assertEqual(engine._judge(engine.model_port.Request("q", runtime="codex")), "host")
+        self.assertEqual(claude.call_args.kwargs, {"claude_as_profile": "p"})
+        host.assert_called_once()
+
+    def test_only_a_host_with_a_read_only_mode_and_its_cli_can_judge(self):
+        engine._judges.cache_clear()
+        self.addCleanup(engine._judges.cache_clear)
+        with mock.patch.object(engine.host_adapter, "available", side_effect=lambda runtime: runtime != "agy"):
+            self.assertTrue(engine._judges("claude"))
+            self.assertTrue(engine._judges("codex"))
+            self.assertFalse(engine._judges("agy"))
+            self.assertFalse(engine._judges("nonesuch"))
+
+    def test_the_spend_meter_keeps_the_trio_rotation(self):
+        port = engine.model_port.Port(lambda request: engine.model_port.Reply("", None, "", 0.5, 1), ("x",), "random")
+        metered = engine._metered(mock.Mock(), "k", port)
+        self.assertEqual((metered.rotation, metered.pick), (("x",), "random"))
 
 
 class LoginPathTest(unittest.TestCase):

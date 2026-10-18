@@ -21,6 +21,10 @@ class Runtime:
     # #700: an engine worker's non-interactive flags, `{cwd}` standing for its tree; empty where claude_adapter builds argv.
     worker_argv: tuple[str, ...] = ()
     prompt_argv: tuple[str, ...] = ()  # the tokens right before the prompt, where the CLI takes it as a flag's value
+    # #879: a read-only judgement call's flags (`{cwd}`, `{schema}`, `{out}`, `{schema_text}`); empty where claude_adapter
+    # builds argv, or where the host has no read-only mode and so cannot sit in the trio (§6).
+    judge_argv: tuple[str, ...] = ()
+    judge_prompt: str = ""  # the prompt's prefix where the CLI takes it attached to a flag, as agy's `--print=`
 
     @property
     def takes_effort(self) -> bool:
@@ -48,12 +52,16 @@ RUNTIMES = (
             effort_argv=("-c", "model_reasoning_effort={effort}"),
             # `never` returns blocked operations to the model; network for fetch, push and forge APIs.
             worker_argv=("-a", "never", "exec", "-C", "{cwd}", "--sandbox", "workspace-write",
-                         "-c", "sandbox_workspace_write.network_access=true", "--ephemeral")),
+                         "-c", "sandbox_workspace_write.network_access=true", "--ephemeral"),
+            judge_argv=("exec", "-C", "{cwd}", "--sandbox", "read-only", "--ephemeral", "--skip-git-repo-check",
+                        "--output-schema", "{schema}", "-o", "{out}")),
     Runtime("cursor", binary="agent", display="Cursor CLI", needs_model=False, schedules=True,
-            worker_argv=("--print", "--force", "--trust", "--approve-mcps", "--workspace", "{cwd}")),
+            worker_argv=("--print", "--force", "--trust", "--approve-mcps", "--workspace", "{cwd}"),
+            judge_argv=("--print", "--trust", "--mode", "ask", "--output-format", "json", "--workspace", "{cwd}")),
     Runtime("agy", binary="agy", display="Antigravity", needs_model=True, schedules=True,
             effort_argv=("--effort", "{effort}"),
-            worker_argv=("--mode", "accept-edits", "--dangerously-skip-permissions"), prompt_argv=("--print",)),
+            worker_argv=("--mode", "accept-edits", "--dangerously-skip-permissions"), prompt_argv=("--print",),
+            judge_argv=("--mode", "plan", "--output-format", "json", "--json-schema", "{schema_text}"), judge_prompt="--print="),
 )
 NAMES = tuple(runtime.name for runtime in RUNTIMES)
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # the levels a worker launch and a persona take

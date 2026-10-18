@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 from decision_actions import DecisionUpdate, exhaust_retry, human_answer, identity, preserve_ask_link, retryable_failure
-from model_port import Failure, Model, Reply, Request
+from model_port import Failure, Model, Reply, Request, draw
 from policy import Persona, Policy, PolicyError
 
 TIMEOUT_S = 60
@@ -54,13 +54,15 @@ def select(policy: Policy, personas: Mapping[str, Persona], tags: Sequence[str])
     return tuple(personas[name] for name in names)
 
 
-def _request(decision: dict, persona: Persona) -> Request:
+def _request(decision: dict, persona: Persona, entry: Any = None) -> Request:
     prompt = (f"You are {persona.name}: {persona.role}.\nRules: {json.dumps(persona.rules)}\n"
               "Review this decision independently. Vote adopt only if you recommend adopting it without concerns; "
               "otherwise vote concern. Choose one of the options as your choice and give non-empty reasoning.\n"
               f"Options: {json.dumps(decision['options'])}\n"
               f"Decision: {json.dumps(decision)}")
-    return Request(prompt, model=persona.model, effort=persona.effort or "", timeout_s=TIMEOUT_S, schema={
+    model, effort, runtime = ((entry.model, entry.effort or "", entry.runtime) if entry is not None
+                              else (persona.model, persona.effort or "", ""))
+    return Request(prompt, model=model, effort=effort, runtime=runtime, timeout_s=TIMEOUT_S, schema={
         "type": "object",
         "properties": {
             "vote": {"type": "string", "enum": ["adopt", "concern"]},
@@ -100,6 +102,36 @@ def record(store: Any, key: str, update: DecisionUpdate) -> Any | None:
     return won[-1] if won else None
 
 
+def _members(model: Model, trio: Sequence[Persona]) -> tuple[list[Any], bool | None]:
+    """Each member's `[models.trio]` entry (§6, #879): distinct entries, different runtimes first, reused in turn
+    when fewer can launch. No rotation is the personas' own models (None entries, diversity unrecorded); a rotation
+    with nothing launchable has no members."""
+    rotation = tuple(getattr(model, "rotation", ()) or ())
+    if not rotation:
+        return [None] * len(trio), None
+    chosen = draw(rotation, len(trio), launchable=getattr(model, "launchable", lambda runtime: True),
+                  how=getattr(model, "pick", "first"))
+    diverse = len(chosen) == len(trio) and len({entry.runtime for entry in chosen}) == len(trio)
+    return [chosen[i % len(chosen)] for i in range(len(trio))] if chosen else [], diverse
+
+
+def _ask(model: Model, persona: Persona, described: dict, entry: Any, stopped: list,
+         others: Sequence[Any]) -> tuple[Any, Any, bool]:
+    """One member's answer. A quota stop moves the member to the next entry, one no other member holds when there is
+    one, so the trio stays diverse; (answer, entry, exhausted)."""
+    while True:
+        got = model(_request(described, persona, entry))
+        if entry is None or not (isinstance(got, Failure) and got.kind == "quota"):
+            return got, entry, False
+        stopped.append(entry)
+        drawn = dict(launchable=model.launchable, how=model.pick)
+        following = (draw(model.rotation, 1, used=[*stopped, *others], **drawn)
+                     or draw(model.rotation, 1, used=stopped, **drawn))
+        if not following:
+            return got, entry, True
+        entry = following[0]
+
+
 def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any,
             failures: int = 0) -> Outcome:
     """Consult all three under a resolved policy, then record adoption or escalation on the existing issue.
@@ -108,7 +140,19 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
     decision.validate()
     trio = select(policy, personas, decision.tags)
     described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
-    verdicts = [_verdict(persona, model(_request(described, persona)), decision.options) for persona in trio]
+    members, diverse = _members(model, trio)
+    verdicts, stopped, exhausted = [], [], False
+    for i, persona in enumerate(trio):
+        entry = members[i] if members else None
+        if not members:
+            got = Failure("missing_program", "no [models.trio] entry can launch read-only on this host")
+        else:
+            got, entry, out = _ask(model, persona, described, entry, stopped, members[:i] + members[i + 1:])
+            members[i], exhausted = entry, exhausted or out
+        # Each vote names what cast it, so trio accuracy can be compared per model (§6, section 9).
+        verdicts.append({**_verdict(persona, got, decision.options),
+                         "runtime": entry.runtime if entry is not None else "claude",
+                         "model": entry.model if entry is not None else persona.model})
     unanimous = (all(v["vote"] == "adopt" for v in verdicts)
                  and len({v["choice"] for v in verdicts}) == 1)
     recommendation = verdicts[0]["choice"] if unanimous else None
@@ -116,9 +160,14 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
     update = preserve_ask_link(store.decisions(decision.issue_key), DecisionUpdate(
         decision.topic, decision.question, recommendation if not hold else None,
         "trio" if unanimous and not hold else "zach",
-        {"decision": described, "verdicts": verdicts,
-         "recommendation": recommendation, "unanimous": unanimous}))
-    if retryable_failure(update.record):
+        {"decision": described, "verdicts": verdicts, "recommendation": recommendation, "unanimous": unanimous,
+         **({"diverse": diverse} if diverse is not None else {})}))
+    if exhausted and retryable_failure(update.record):
+        # Every entry a member could move to stopped on quota: the owner decides, as for an exhausted retry (§6).
+        update = DecisionUpdate(update.topic, update.question, None, "zach", {
+            **update.record, "retry_exhausted": failures + 1,
+            "error": f"trio unavailable: every [models.trio] entry stopped on quota: {decision.question}"})
+    elif retryable_failure(update.record):
         update = DecisionUpdate(update.topic, update.question, update.answer, "",
                                 {**update.record, "failures": failures + 1})
         update = exhaust_retry(update, failures + 1) or update

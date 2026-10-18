@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from dataclasses import asdict, replace
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -226,7 +228,8 @@ class GateTest(unittest.TestCase):
         self.assertEqual((row.issue_key, row.topic, row.question), (KEY, self.decision.topic, self.decision.question))
         self.assertEqual(row.record, {
             "decision": {**asdict(self.decision), "options": list(self.decision.options), "tags": list(self.decision.tags)},
-            "verdicts": [{"persona": name, "vote": "adopt", "choice": "Split the parser", "reasoning": reason}
+            "verdicts": [{"persona": name, "vote": "adopt", "choice": "Split the parser", "reasoning": reason,
+                          "runtime": "claude", "model": PERSONAS[name].model}  # #879: each vote names what cast it
                          for name, reason in zip(DEFAULT, reasons)],
             "recommendation": "Split the parser", "unanimous": True,
         })
@@ -394,6 +397,88 @@ class GateTest(unittest.TestCase):
                     self.consult([reply()] * 3, resolved=resolved)
                 self.assertEqual(self.model.requests, [])
                 self.assertEqual(self.store.decisions(KEY), [])
+
+
+
+E = lambda runtime, model, effort=None: SimpleNamespace(runtime=runtime, model=model, effort=effort)  # noqa: E731
+ROTATION = (E("claude", "claude-sonnet-5-5", "high"), E("cursor", "auto"), E("cursor", "composer-2.5"),
+            E("codex", "gpt-6.1-sol", "high"), E("agy", "gemini-4-argon-high"))
+
+
+class TrioModelsTest(unittest.TestCase):
+    """#879 (§6): the trio draws distinct models from [models.trio]; a persona's model is only the fallback."""
+    setUp = GateTest.setUp
+
+    def port(self, answer=None, rotation=ROTATION, pick="first", launchable=lambda runtime: True):
+        self.requests = []
+
+        def call(request):
+            self.requests.append(request)
+            return answer(request) if answer else reply()
+        return model_port.Port(call, rotation, pick, launchable)
+
+    def ask(self, port):
+        return trio_gate.consult(self.decision, self.policy, PERSONAS, port, self.store)
+
+    def test_three_distinct_models_on_three_runtimes_are_drawn_and_each_vote_names_its_model(self):
+        self.assertTrue(self.ask(self.port()).unanimous)
+        drawn = [(r.runtime, r.model, r.effort) for r in self.requests]
+        self.assertEqual(drawn, [("claude", "claude-sonnet-5-5", "high"), ("cursor", "auto", ""), ("codex", "gpt-6.1-sol", "high")])
+        row, = self.store.decisions(KEY)
+        self.assertEqual([(v["runtime"], v["model"]) for v in row.record["verdicts"]], [d[:2] for d in drawn])
+        self.assertTrue(row.record["diverse"])
+
+    def test_random_pick_draws_in_a_random_order(self):
+        with mock.patch.object(model_port.random, "sample", side_effect=lambda xs, n: list(reversed(xs))):
+            self.ask(self.port(pick="random"))
+        self.assertEqual([(r.runtime, r.model) for r in self.requests],
+                         [("agy", "gemini-4-argon-high"), ("codex", "gpt-6.1-sol"), ("cursor", "composer-2.5")])
+
+    def test_no_rotation_uses_each_personas_own_model(self):
+        self.ask(self.port(rotation=()))
+        self.assertEqual([(r.runtime, r.model) for r in self.requests], [("", PERSONAS[n].model) for n in DEFAULT])
+        self.assertNotIn("diverse", self.store.decisions(KEY)[0].record)
+
+    def test_fewer_than_three_launchable_entries_are_reused_and_recorded_as_not_diverse(self):
+        self.ask(self.port(launchable=lambda runtime: runtime == "cursor"))
+        self.assertEqual([r.model for r in self.requests], ["auto", "composer-2.5", "auto"])
+        self.assertFalse(self.store.decisions(KEY)[0].record["diverse"])
+
+    def test_a_quota_stop_moves_that_member_to_the_next_distinct_entry(self):
+        quota = lambda request: model_port.Failure("quota", "429 quota") if request.runtime == "cursor" else reply()  # noqa: E731
+        self.assertTrue(self.ask(self.port(quota)).unanimous)
+        votes = self.store.decisions(KEY)[0].record["verdicts"]
+        # cursor:auto stops, then cursor:composer-2.5; the member lands on an entry no other member stopped on.
+        self.assertEqual([(v["runtime"], v["model"]) for v in votes],
+                         [("claude", "claude-sonnet-5-5"), ("agy", "gemini-4-argon-high"), ("codex", "gpt-6.1-sol")])
+
+    def test_with_no_entry_left_after_quota_stops_the_owner_decides(self):
+        got = self.ask(self.port(lambda request: model_port.Failure("quota", "429 quota")))
+        self.assertTrue(got.escalated)
+        row = self.store.decisions(KEY)[-1]
+        self.assertEqual((row.answer, row.decided_by), (None, "zach"))
+        self.assertTrue(row.record["retry_exhausted"])
+        self.assertIn("every [models.trio] entry stopped on quota", row.record["error"])
+
+    def test_a_rotation_with_nothing_launchable_goes_to_the_owner(self):
+        got = self.ask(self.port(launchable=lambda runtime: False))
+        self.assertTrue(got.escalated)
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "zach")
+
+
+class DrawTest(unittest.TestCase):
+    """The pure selection beside model_port's rotation (#879, DRY with #853)."""
+
+    def test_different_runtimes_come_first_then_other_entries(self):
+        self.assertEqual(model_port.draw(ROTATION, 4), (ROTATION[0], ROTATION[1], ROTATION[3], ROTATION[4]))
+        self.assertEqual(model_port.draw(ROTATION[1:3], 3), ROTATION[1:3])
+
+    def test_used_entries_are_skipped_and_their_runtimes_count_as_drawn(self):
+        self.assertEqual(model_port.draw(ROTATION, 1, used=(ROTATION[0], ROTATION[1])), (ROTATION[3],))
+
+    def test_only_launchable_entries_are_drawn(self):
+        self.assertEqual(model_port.draw(ROTATION, 3, launchable=lambda runtime: runtime == "codex"), (ROTATION[3],))
 
 
 if __name__ == "__main__":
