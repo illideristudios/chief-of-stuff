@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 import tomllib
 from datetime import date
@@ -15,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog  # noqa: E402
 from forge import project_option_ids  # noqa: E402
 import issue_gate  # noqa: E402
-import make_worktree  # noqa: E402
+from shell_setup import clean_env  # noqa: E402
 from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import WORKSPACE_FILES, ConfigError, parse_coordinator
@@ -47,9 +48,16 @@ ENGINE_STATE = (".chief-of-stuff/", "store.db", "store.db-wal", "store.db-shm")
 def ignore_in_git(root: Path, names: list[str], dry: bool) -> str:
     """#870 (Zach, 2026-10-18: "the init files should be gitignored in any repo"): add each name under `root` to its
     repository's info/exclude, which git honours with no tracked change; "" outside a work tree or when all are there."""
-    code, top = make_worktree.git_trusted(["rev-parse", "--show-toplevel"], root)
-    code2, path = make_worktree.git_trusted(["rev-parse", "--path-format=absolute", "--git-path", "info/exclude"], root)
-    if code or code2 or not top or not path:
+    def read(*args: str) -> str:
+        # Two path reads need no credentials, so git runs without the write env's (CodeQL: nothing secret reaches print).
+        try:
+            done = subprocess.run(["git", "-C", str(root), *args], env=clean_env(), capture_output=True, text=True,
+                                  timeout=30)
+        except (OSError, subprocess.TimeoutExpired):
+            return ""
+        return done.stdout.strip() if done.returncode == 0 else ""
+    top, path = read("rev-parse", "--show-toplevel"), read("rev-parse", "--path-format=absolute", "--git-path", "info/exclude")
+    if not top or not path:
         return ""
     prefix = root.resolve().relative_to(Path(top).resolve()).as_posix()
     entries = ["/" + (f"{prefix}/" if prefix != "." else "") + name for name in names]
