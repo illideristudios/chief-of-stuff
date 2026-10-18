@@ -14,6 +14,7 @@ import claude_adapter
 import clock as engine_clock
 import dispatch_prompt
 import guard_binding
+import host_adapter
 import make_worktree
 import process_status
 import reconcile
@@ -167,8 +168,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if existing is not None:
         store.set_ownership(issue_key, existing["tree"], "tree")
         _save_run(store, issue_key, stage, attempt, existing)
-        ran = data.get("model", {}).get(stage, "").partition(":")[2]  # adopt what the start launched, not today's rotation
-        return (ran.rpartition("@")[0], ran.rpartition("@")[2]) if "@" in ran else (ran or actor.model, "" if ran else actor.effort or "")
+        # Adopt what the start launched, not today's rotation.
+        runtime, _, ran = data.get("model", {}).get(stage, "").partition(":")
+        model, _, effort = ran.rpartition("@") if "@" in ran else (ran, "", "")
+        used = (model, effort) if model else (actor.model, actor.effort or "")
+        return (*used, runtime) if runtime not in ("", "claude") else used
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     loaded = load_settings(root, settings_path(text))
     defaults = loaded.stages.get(stage)
@@ -253,7 +257,18 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
-    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
+    host: dict[str, str] = {}
+    if chosen.runtime == "claude":
+        runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
+    else:
+        # §13: no guard plugin on these hosts, so the forge's own protection of the default branch is required (b),
+        # and the default branch's head is kept so collect can see a merge outside the engine (c).
+        if not forge.default_branch_protected():
+            raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch")
+        default = forge.protected_branches()[0]
+        host = {"runtime": chosen.runtime, "default_branch": default,
+                "default_head": host_adapter.default_head(tree, default)}
+        runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
     try:
         deadline = time.monotonic() + 5
         while not (run_dir / "started.json").exists():
@@ -272,7 +287,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
                   "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
-                  "starting_head": starting_head}
+                  "starting_head": starting_head, **host}
         if stage == "review":
             record["reviewed_head"] = request_head.head
         _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
@@ -285,6 +300,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             except Exception:
                 pass
         finally:
+            host_adapter.cleanup(host)
             # The process is already up. collect() never sees a segment slots.claim drops on this failure.
             for error in teardown(root, tree, tree.name, teardown_command):
                 try:
@@ -293,6 +309,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                     pass
         raise start_error
     _runners[str(run_dir)] = runner
+    if chosen.runtime != "claude":
+        return chosen.model, chosen.effort or "", chosen.runtime  # slots records who actually ran it (§9)
     return chosen.model, chosen.effort or ""
 
 
@@ -360,7 +378,13 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 continue
             teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
             code = _exit_code(run_dir)
-            reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
+            runtime = record.get("runtime", "claude")
+            stdout, stderr = (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text()
+            if runtime == "claude":
+                reply = claude_adapter.classify(code, stdout, stderr)
+            else:
+                reply = host_adapter.classify(runtime, code, stdout, stderr)
+                host_adapter.cleanup(record)
             if isinstance(reply, Failure):
                 if reply.retryable:
                     outcome = reply.kind
@@ -396,6 +420,11 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
+            if runtime != "claude":
+                held = host_adapter.moved_outside_engine(store, record, now.isoformat())
+                if held:
+                    outcome, reason = "human_review", held
+                    store.set_human_review(key, True)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
         completed.append((segment, outcome, reason, now))

@@ -857,6 +857,16 @@ class Forge:
 
     def protected_branches(self) -> tuple[str, ...]:
         """The repository's default branch, then its protected branches, for the worker guard. Unreadable raises."""
+        default, protected = self._branch_protection()
+        return tuple(dict.fromkeys((default, *protected)))
+
+    def default_branch_protected(self) -> bool:
+        """§13 (b): whether the forge itself protects the default branch; a non-Claude worker launches only then."""
+        default, protected = self._branch_protection()
+        return default in protected
+
+    def _branch_protection(self) -> tuple[str, tuple[str, ...]]:
+        """(default branch, protected branch names) as the forge reports them. Unreadable raises."""
         _, repo = home_of(self.home)
         try:
             if self.github:
@@ -881,10 +891,9 @@ class Forge:
                 names += [row["name"] for row in rows]
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"protected branches: {exc}") from exc
-        found = tuple(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
-        if not found or not names[0].strip():
+        if not isinstance(names[0], str) or not names[0].strip():
             raise ForgeError("protected branches: the forge reported no default branch")
-        return found
+        return names[0], tuple(dict.fromkeys(n for n in names[1:] if isinstance(n, str) and n.strip()))
 
     # writes: preview unless commit
     def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None,
@@ -943,6 +952,22 @@ class Forge:
             raise ForgeError(f"{mark} not merged at {one.head}: {result or f'merge exited {code}'}")
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
+
+    def merge_commit(self, number: int) -> str | None:
+        """The commit a merged request landed as on its target, for §13 (c)'s record of engine merges; None when the
+        forge does not say (the check then cannot vouch for that commit, which holds)."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                code, out, _ = self.gh(["pr", "view", str(number), "-R", repo, "--json", "mergeCommit"])
+                return None if code else ((json.loads(out).get("mergeCommit") or {}).get("oid") or None)
+            got, _, err = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}", self._token(), backlog.TIMEOUT)
+            if err or not isinstance(got, dict) or got.get("state") != "merged":
+                return None
+            # A merge commit, else a squash commit, else a fast-forward that landed the request's own head.
+            return got.get("merge_commit_sha") or got.get("squash_commit_sha") or got.get("sha") or None
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
+            return None
 
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:

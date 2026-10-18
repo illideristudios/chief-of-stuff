@@ -269,6 +269,52 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(used, ("opus", "medium"))
         self.assertEqual(self.db.resume(KEY)["model"], {"implement": "claude:opus@medium"})
 
+    def host_launched(self, protected=True):
+        """#700: a codex start through host_adapter, recorded and claimed like any other."""
+        self.forge.default_branch_protected = lambda: protected
+        entry = worker.ModelEntry("codex", "gpt-6.1-sol", "high")
+        with mock.patch.object(worker, "_model", return_value=entry), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "default_head", return_value="d" * 40), \
+             mock.patch.object(worker.host_adapter, "start",
+                               side_effect=lambda runtime, request, run_dir, env: (self.start(request, run_dir), "")) as host, \
+             mock.patch.object(worker.claude_adapter, "start") as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = self.launch()
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, clock=lambda: NOW, launch=lambda: used)
+        return used, host, claude
+
+    def test_a_non_claude_entry_needs_the_forge_to_protect_the_default_branch(self):
+        with self.assertRaisesRegex(RuntimeError, "protects the default branch"):
+            self.host_launched(protected=False)
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_non_claude_start_goes_through_its_host_and_keeps_the_default_head(self):
+        used, host, claude = self.host_launched()
+        claude.assert_not_called()
+        self.assertEqual(host.call_args.args[0], "codex")
+        self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
+        self.assertEqual(self.db.segments(KEY)[0].runtime, "codex")
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        self.assertEqual((record["runtime"], record["default_branch"], record["default_head"]), ("codex", "trunk", "d" * 40))
+
+    def test_a_non_claude_run_holds_when_the_default_branch_moved_outside_the_engine(self):
+        self.host_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "stdout").write_text("finished")
+        (run / "stderr").write_text("")
+        self.report(run)
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.host_adapter, "cleanup") as cleanup, \
+             mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        cleanup.assert_called_once()
+        moved.assert_called_once()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+        self.assertIn("trunk moved", " ".join(entry.message for entry in self.db.log(KEY)))
+
     def test_a_successful_launch_clears_the_quota_wait(self):
         self.db.set_resume(KEY, {"quota": {"reset": "later", "retry_at": NOW.isoformat()}})
         self.launched()

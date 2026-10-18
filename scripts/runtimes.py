@@ -18,6 +18,9 @@ class Runtime:
     needs_model: bool  # a worker launch refuses to start without `--model`
     schedules: bool  # the host can run a recurring in-session check; without one, checks happen each turn
     effort_argv: tuple[str, ...] = ()  # the argv tokens that pass an effort, `{effort}` standing for the level; none where the CLI takes no effort
+    # #700: an engine worker's non-interactive flags, `{cwd}` standing for its tree; empty where claude_adapter builds argv.
+    worker_argv: tuple[str, ...] = ()
+    prompt_argv: tuple[str, ...] = ()  # the tokens right before the prompt, where the CLI takes it as a flag's value
 
     @property
     def takes_effort(self) -> bool:
@@ -27,15 +30,30 @@ class Runtime:
         """The argv tokens that pass `level`; none for an empty level."""
         return [token.format(effort=level) for token in self.effort_argv] if level else []
 
+    def worker_command(self, binary: str, cwd: str, model: str, effort: str, prompt: str,
+                       extra: list[str] = ()) -> list[str]:
+        """An engine worker's exact argv: flags, then `extra` (the engine channel), model and effort, then the prompt."""
+        flags = [*(["--model", model] if model else []), *self.effort_tokens(effort)]
+        return [binary, *(token.format(cwd=cwd) for token in self.worker_argv), *extra, *flags, *self.prompt_argv, prompt]
+
+
+# The session id stands alone between spaces so process identity finds it in the host's argv (#53, #700).
+WORKER_BOOTSTRAP = ("Your entire assignment is in {assignment}; read it first and follow it exactly. Work only in {cwd}. "
+                    "Before you finish, report your outcome with the engine MCP tool `report`. Session {session} .")
 
 RUNTIMES = (
     Runtime("claude", binary="claude", display="Claude Code", needs_model=False, schedules=True,
             effort_argv=("--effort", "{effort}")),
     Runtime("codex", binary="codex", display="Codex CLI", needs_model=False, schedules=False,
-            effort_argv=("-c", "model_reasoning_effort={effort}")),
-    Runtime("cursor", binary="agent", display="Cursor CLI", needs_model=False, schedules=True),
+            effort_argv=("-c", "model_reasoning_effort={effort}"),
+            # `never` returns blocked operations to the model; network for fetch, push and forge APIs.
+            worker_argv=("-a", "never", "exec", "-C", "{cwd}", "--sandbox", "workspace-write",
+                         "-c", "sandbox_workspace_write.network_access=true", "--ephemeral")),
+    Runtime("cursor", binary="agent", display="Cursor CLI", needs_model=False, schedules=True,
+            worker_argv=("--print", "--force", "--trust", "--approve-mcps", "--workspace", "{cwd}")),
     Runtime("agy", binary="agy", display="Antigravity", needs_model=True, schedules=True,
-            effort_argv=("--effort", "{effort}")),
+            effort_argv=("--effort", "{effort}"),
+            worker_argv=("--mode", "accept-edits", "--dangerously-skip-permissions"), prompt_argv=("--print",)),
 )
 NAMES = tuple(runtime.name for runtime in RUNTIMES)
 EFFORTS = ("low", "medium", "high", "xhigh", "max")  # the levels a worker launch and a persona take

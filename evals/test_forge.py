@@ -1255,6 +1255,38 @@ class ProtectedBranchesTest(unittest.TestCase):
         with mock.patch.object(backlog, "_call", call):
             self.assertEqual(forge.Forge(GL, token="t").protected_branches(), ("trunk", "release"))
 
+    def test_default_branch_protected_reads_whether_the_forge_protects_the_default(self):
+        # §13 (b): a non-Claude worker launches only where the default branch itself is protected.
+        def gh(protected):
+            def answer(args, input_text=None):
+                if args[:2] == ["api", f"repos/{REPO}"]:
+                    return 0, "trunk\n", ""
+                if args[:2] == ["api", f"repos/{REPO}/branches?protected=true&per_page=100"]:
+                    return 0, protected, ""
+                return 1, "", "unexpected"
+            return answer
+        self.assertTrue(forge.Forge(GH, gh=gh("release\ntrunk\n")).default_branch_protected())
+        self.assertFalse(forge.Forge(GH, gh=gh("release\n")).default_branch_protected())
+        self.assertEqual(forge.Forge(GH, gh=gh("release\n")).protected_branches(), ("trunk", "release"))
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).default_branch_protected()
+
+    def test_merge_commit_reads_what_a_merged_request_landed_as(self):
+        # §13 (c): the engine records this; an unreadable or unmerged answer is None, which the check cannot vouch for.
+        def gh(out, code=0):
+            return lambda args, input_text=None: (code, out, "") if args[:2] == ["pr", "view"] else (1, "", "unexpected")
+        self.assertEqual(forge.Forge(GH, gh=gh('{"mergeCommit": {"oid": "abc123"}}')).merge_commit(7), "abc123")
+        self.assertIsNone(forge.Forge(GH, gh=gh('{"mergeCommit": null}')).merge_commit(7))
+        self.assertIsNone(forge.Forge(GH, gh=gh("", 1)).merge_commit(7))
+        base = GL.api(GL.project)
+        for answer, want in (({"state": "merged", "merge_commit_sha": None, "squash_commit_sha": "sq1", "sha": "head"}, "sq1"),
+                             ({"state": "merged", "merge_commit_sha": None, "squash_commit_sha": None, "sha": "head"}, "head"),
+                             ({"state": "opened", "merge_commit_sha": "m1"}, None)):
+            with self.subTest(answer=answer), mock.patch.object(
+                    backlog, "_call", lambda method, url, token, timeout, payload=None, a=answer:
+                    (a, {}, "") if url == f"{base}/merge_requests/7" else (None, {}, "unexpected")):
+                self.assertEqual(forge.Forge(GL, token="t").merge_commit(7), want)
+
     def test_an_unreadable_answer_is_an_error_never_an_empty_list(self):
         with self.assertRaises(forge.ForgeError):
             forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).protected_branches()
