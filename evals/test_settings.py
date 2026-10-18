@@ -588,6 +588,11 @@ class ModelsTest(unittest.TestCase):
                 self.assertEqual([str(e) for e in self.load(f'[models.deep]\nrotation = ["{entry}"]\n').models["deep"]],
                                  [entry])
 
+    def test_an_entry_without_a_runtime_prefix_means_claude(self):
+        # #701: 1.0 configs that wrote a bare Claude model keep working.
+        rotation = self.load('[models.deep]\nrotation = ["opus@high", "codex:gpt-x"]\n').models["deep"]
+        self.assertEqual([str(entry) for entry in rotation], ["claude:opus@high", "codex:gpt-x"])
+
     def test_bad_tables_are_refused(self):
         for bad in (
             '[models]\ndeep = "claude:opus"\n',
@@ -595,7 +600,6 @@ class ModelsTest(unittest.TestCase):
             '[models.deep]\nrotation = []\n',
             '[models.deep]\nrotation = "claude:opus"\n',
             '[models.deep]\nrotation = ["gemini:pro"]\n',
-            '[models.deep]\nrotation = ["opus"]\n',
             '[models.deep]\nrotation = ["claude:"]\n',
             '[models.deep]\nrotation = ["claude:@high"]\n',
             '[models.deep]\nrotation = ["claude:opus@max"]\n',
