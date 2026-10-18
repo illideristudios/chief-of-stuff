@@ -221,6 +221,30 @@ def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, co
     store.set_resume(key, data)
 
 
+def _clear_tree(root: Path, tree: Path, store: Any, key: str, at: str) -> None:
+    """#901: a tree takes no new run while a process of an earlier run lives in it. A leftover whose runner is gone (a
+    refused or crashed start) is stopped and logged; one whose runner still runs refuses this launch."""
+    for command in sorted((supervisor.state_dir(root) / "runs").glob("*/command.json")):
+        try:
+            prior = json.loads(command.read_text())
+        except (OSError, ValueError):
+            continue
+        session = prior.get("session_id") if isinstance(prior, dict) else None
+        if prior.get("cwd") != str(tree) or not isinstance(session, str) or not session:
+            continue
+        live = process_status.carriers(session)
+        if not live:
+            continue
+        try:
+            runner = json.loads((command.parent / "started.json").read_text()).get("runner_pid")
+        except (OSError, ValueError, AttributeError):
+            runner = None
+        if runner in live and not (command.parent / "exit.json").exists():
+            raise RuntimeError(f"run {command.parent.name} is still live in {tree.name}")
+        process_status.stop_session(session)
+        store.add_log(key, f"stopped a leftover host of run {command.parent.name} in {tree.name}", at)
+
+
 def _declared_agent(text: str, agent: str) -> str:
     """Pass the agent type only when the workspace's Agent: lines declare it (§9)."""
     if not agent:
@@ -325,6 +349,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     # A failed start may be retried at the same attempt. Preserve its evidence under a unique sibling.
     if run_dir.exists():
         run_dir.rename(run_dir.with_name(f"{run_dir.name}-refused-{uuid.uuid4()}"))
+    _clear_tree(root, tree, store, issue_key, clock().isoformat())
     run_dir.mkdir(parents=True)
     (run_dir / "starting_head").write_text(starting_head)
     session_id = str(uuid.uuid4())
@@ -372,6 +397,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         pid = json.loads((run_dir / "started.json").read_text())["pid"]
         while True:
             identity = process_status.identity(pid, session_id, host=True)
+            if identity is None:
+                # A host that re-exec'd or forked carries the session id under another pid (#901).
+                identity = next(filter(None, (process_status.identity(other, session_id, host=True)
+                                              for other in process_status.carriers(session_id)
+                                              if other not in (pid, runner.pid))), None)
             runner_identity = process_status.identity(runner.pid, session_id)
             if identity is not None and runner_identity is not None and runner.poll() is None:
                 break
@@ -394,6 +424,13 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             except Exception:
                 pass
         finally:
+            try:
+                process_status.stop_session(session_id)  # #901: a host outside the runner's group, or orphaned by it
+            except Exception as stop_error:
+                try:
+                    store.add_log(issue_key, f"worker host stop failed: {stop_error}", clock().isoformat())
+                except Exception:
+                    pass
             host_adapter.cleanup(host)
             # The process is already up. collect() never sees a segment slots.claim drops on this failure.
             for error in teardown(root, tree, tree.name, teardown_command):
