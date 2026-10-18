@@ -1271,6 +1271,16 @@ class ProtectedBranchesTest(unittest.TestCase):
         with self.assertRaises(forge.ForgeError):
             forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).default_branch_protected()
 
+    def test_request_base_reads_the_branch_a_request_targets(self):
+        gh = lambda args, input_text=None: (0, '{"baseRefName": "develop"}', "") if args[:2] == ["pr", "view"] else (1, "", "x")
+        self.assertEqual(forge.Forge(GH, gh=gh).request_base(7), "develop")
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "not found")).request_base(7)
+        base = GL.api(GL.project)
+        with mock.patch.object(backlog, "_call", lambda method, url, token, timeout, payload=None:
+                               ({"target_branch": "main"}, {}, "") if url == f"{base}/merge_requests/7" else (None, {}, "x")):
+            self.assertEqual(forge.Forge(GL, token="t").request_base(7), "main")
+
     def test_merge_commit_reads_what_a_merged_request_landed_as(self):
         # §13 (c): the engine records this; an unreadable or unmerged answer is None, which the check cannot vouch for.
         def gh(out, code=0):

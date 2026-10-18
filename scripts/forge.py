@@ -953,6 +953,26 @@ class Forge:
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
 
+    def request_base(self, number: int) -> str:
+        """The branch a request targets, which §13 requires the forge to protect before a non-Claude worker. Unreadable raises."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                code, out, err = self.gh(["pr", "view", str(number), "-R", repo, "--json", "baseRefName"])
+                if code:
+                    raise RuntimeError(err.strip() or f"gh exited {code}")
+                base = json.loads(out)["baseRefName"]
+            else:
+                got, _, err = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}", self._token(), backlog.TIMEOUT)
+                if err:
+                    raise RuntimeError(err)
+                base = got["target_branch"]
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"request base: {exc}") from exc
+        if not isinstance(base, str) or not base.strip():
+            raise ForgeError("request base: the forge reported no target branch")
+        return base
+
     def merge_commit(self, number: int) -> str | None:
         """The commit a merged request landed as on its target, for §13 (c)'s record of engine merges; None when the
         forge does not say (the check then cannot vouch for that commit, which holds)."""
