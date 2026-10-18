@@ -88,14 +88,16 @@ def _verdict(persona: Persona, got: Reply | Failure, options: tuple[str, ...]) -
 def record(store: Any, key: str, update: DecisionUpdate) -> Any | None:
     """The one writer of decision rows: a trio result, an unavailable consultation, a board intent and the engine's
     transitions. Human answer wins: a row a person did not write never lands over a person's answer, which is
-    returned instead, with the check and the append in one transaction."""
-    with store.transaction():
-        if update.decided_by != "user":
-            human = human_answer(store.decisions(key), update)
-            if human is not None:
-                return human
-        store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record)
-    return None
+    returned instead, the check and the append under one write lock."""
+    won = []
+
+    def person_first(rows: list) -> Any | None:
+        won.append(human_answer(rows, update))
+        return won[-1]
+
+    store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record,
+                       unless=person_first if update.decided_by != "user" else None)
+    return won[-1] if won else None
 
 
 def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any,

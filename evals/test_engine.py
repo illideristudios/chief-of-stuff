@@ -817,7 +817,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([log.message for log in self.db.log(KEY)], ["wait: stage is outside the workflow"])
         self.db.set_human_review(KEY, True)
         self.run_pass()
-        self.assertEqual(self.db.log(KEY)[-1].message, "wait: needs input")
+        self.assertEqual(self.db.log(KEY)[-1].message, "wait: human review")
 
     def test_ask_and_escalate_are_recorded_once_and_preserve_resume_data(self):
         self.db.sync_from_forge(self.forge.snapshots())
@@ -933,10 +933,10 @@ class EngineTest(unittest.TestCase):
         self.finish("review")
         self.findings()
         self.assertEqual(self.forge.snapshots()[0]["merge_state"], "ready")
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertTrue(self.db.items()[0].human_review)
         self.findings(counts={"minor": 1})
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertEqual(len(self.launched), 2)
         gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 2)])
@@ -1278,7 +1278,7 @@ class EngineTest(unittest.TestCase):
             merged.assert_not_called()
             self.assertEqual(self.db.items()[0].stage, "merge")
             self.assertIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
-            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
             merged.assert_not_called()
             gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
             self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
@@ -1326,7 +1326,7 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
         self.assertFalse(any(call[:2] == ["pr", "merge"] for call in gh.all_calls))
         self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "merge", "expected": "review"})
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs input")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
         self.assertFalse(any(call[:2] == ["pr", "merge"] for call in gh.all_calls))
         self.assertEqual(self.db.items()[0].stage, "merge")
         self.assertTrue(self.db.items()[0].human_review)
@@ -1348,7 +1348,7 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
             self.finish("review")
             self.findings()
-            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "stage write pending")])
+            self.assertEqual(self.run_pass(), [])
         self.assertEqual(len(self.launched), 2)
 
     def test_clock_orders_latest_review_by_instant_and_passes_now_to_planner(self):
@@ -1413,7 +1413,7 @@ class EngineTest(unittest.TestCase):
         return self.decide("design", question, None if status == "reversed" else "Back", **record)
 
     def settled_reroute(self, stage="review"):
-        return self.add_intent(stage, "")
+        return self.add_intent(stage, "", question="Settled?")  # its own decision, so later intents leave it alone
 
     def test_a_pending_run_intent_runs_even_after_a_completed_stage_and_ends(self):
         self.db.sync_from_forge(self.forge.snapshots())

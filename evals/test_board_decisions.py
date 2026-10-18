@@ -103,9 +103,12 @@ class DecisionActionsTest(unittest.TestCase):
 
     def test_an_unchanged_state_appends_no_row(self) -> None:
         # Rows are append-only, so a pass that changes nothing must write nothing.
-        self.assertIsNone(da.meet_action(answered(), reconcile.Dispatch(KEY, "implement", "builder", 1)).update)
-        blocked = answered(status="blocked", blocked_reason="merge conflicts")
+        self.assertIsNone(da.meet_action(answered(decided_by="user"), reconcile.Dispatch(KEY, "implement", "builder", 1)).update)
+        blocked = answered(decided_by="user", status="blocked", blocked_reason="merge conflicts")
         self.assertIsNone(da.meet_action(blocked, reconcile.Wait(KEY, "merge conflicts")).update)
+
+    def test_a_models_answer_is_not_marked_blocked(self) -> None:
+        self.assertIsNone(da.meet_action(answered(decided_by="trio"), reconcile.Wait(KEY, "merge conflicts")).update)
 
     def test_blank_and_duplicate_answers_are_rejected(self):
         for record, text in ((make_decision(), "  "), (answered(), "Again")):

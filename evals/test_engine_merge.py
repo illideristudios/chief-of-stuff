@@ -256,7 +256,7 @@ class ExecutorTest(unittest.TestCase):
     def test_a_forge_human_review_hold_added_after_planning_refuses(self):
         self.at_merge_stage()
         self.gh.issues[3]["labels"] = self.HOLD
-        self.refused("needs input")
+        self.refused("human review")
 
     def test_a_forge_human_review_hold_added_during_the_policy_check_refuses(self):
         self.at_merge_stage()
@@ -306,7 +306,7 @@ class ExecutorTest(unittest.TestCase):
     def test_a_human_review_hold_added_after_planning_refuses(self):
         self.planned()
         self.db.set_human_review(self.key, True)
-        self.refused("needs input")
+        self.refused("human review")
 
     def test_fresh_forge_changes_requested_refuses_after_planning(self):
         self.planned()

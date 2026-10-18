@@ -94,19 +94,20 @@ class ReconcileTest(unittest.TestCase):
 
     def test_merge_waits_for_answered_but_blocked_decision(self):
         from types import SimpleNamespace
-        dec = SimpleNamespace(topic="scope", question="Choose", answer="Yes", status="blocked", blocked_reason="conflict")
+        dec = SimpleNamespace(topic="scope", question="Choose", answer="Yes", decided_by="user", record={},
+                              status="blocked", blocked_reason="conflict")
         actions = self.plan(replace(Item(), stage="merge", review_state="approved", merge_state="ready"),
                             history=[Segment("review")], findings={}, decisions={KEY: [dec]})
         self.assertEqual(actions, [reconcile.Wait(KEY, "decision pending")])
 
     def intent(self, stage, phase="run", status="re-routed"):
         from types import SimpleNamespace
-        return {KEY: [SimpleNamespace(id=1, topic="scope", question="Back?", answer="Back", status=status,
-                                      rerouted_to=stage, intent=phase)]}
+        return {KEY: [SimpleNamespace(id=1, topic="scope", question="Back?", answer="Back", decided_by="user", record={},
+                                      status=status, rerouted_to=stage, intent=phase)]}
 
     def test_a_pending_run_intent_obeys_the_human_hold(self):
         self.assertEqual(self.plan(replace(Item(), human_review=True), history=[Segment("implement")],
-                                   decisions=self.intent("implement")), [reconcile.Wait(KEY, "needs input")])
+                                   decisions=self.intent("implement")), [reconcile.Wait(KEY, "human review")])
 
     def test_a_pending_run_intent_to_review_plans_the_review(self):
         self.assertEqual(self.plan(replace(Item(), stage="review"), history=[Segment("implement")],
@@ -700,7 +701,7 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(item, findings={}), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 
     def test_human_review_items_wait_without_consuming_a_slot(self):
-        self.assertEqual(self.plan(replace(Item(), human_review=True)), [reconcile.Wait(KEY, "needs input")])
+        self.assertEqual(self.plan(replace(Item(), human_review=True)), [reconcile.Wait(KEY, "human review")])
 
     def test_retry_releases_an_extra_hold_only_for_the_current_failed_stage(self):
         for stage, action in (("implement", reconcile.Dispatch(KEY, "implement", "builder", 2)),

@@ -427,9 +427,18 @@ class Store:
     # decisions and log (append-only)
     def add_decision(self, issue_key: str, topic: str, question: str, answer: str | None = None,
                      decided_by: str = "", record: Any = None, *,
-                     asked_at: str | None = None, created_at: str | None = None) -> Decision:
+                     asked_at: str | None = None, created_at: str | None = None,
+                     unless: Callable[[list[Decision]], Decision | None] | None = None) -> Decision:
+        """Append one decision row. `unless` sees the issue's rows under the same write lock and may name one
+        that wins instead; then nothing is written and that row is returned."""
         stamp = asked_at or created_at or self._stamp()
         with self.session() as s:
+            if unless is not None:
+                winner = unless(list(s.scalars(select(Decision).where(Decision.issue_key == issue_key)
+                                               .order_by(Decision.id)).all()))
+                if winner is not None:
+                    s.expunge(winner)
+                    return winner
             row = Decision(issue_key=issue_key, topic=topic, question=question, answer=answer,
                            decided_by=decided_by, record=record, created_at=stamp)
             s.add(row)

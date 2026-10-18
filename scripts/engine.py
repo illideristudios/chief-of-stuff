@@ -99,9 +99,6 @@ def _planning_inputs(store: Any, items: list) -> dict:
                           if (counts := reconcile.review_findings(states[key], history)) is not None},
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
-        # The engine's own pending move holds its issue; a hold release is planned through, as before.
-        "pending_stages": {key: pending for key, state in states.items()
-                           if (pending := state.get("pending_stage")) and not pending.get("release_hold")},
         "pending_asks": {item.issue_key: any(not ask.answer for ask in store.asks(item.issue_key)) for item in items},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
                          if (quota := state.get("quota"))},
@@ -710,7 +707,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                      for item in store.items() for row in store.asks(item.issue_key))
         if asks != facts.asks:
             facts = replace(facts, asks=asks)
-    items = store.items()
+    items = [item for item in store.items()
+             if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
     _remember_verified(store, facts)
     inputs = _planning_inputs(store, items)
     actions = reconcile.plan(items, policies=policies,

@@ -94,10 +94,9 @@ class IntentCurrencyTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "review", "expected": "implement"})
 
     def test_a_reversal_from_a_held_stage_writes_its_stage_and_drops_the_hold(self):
-        self.forge.kanban = SimpleNamespace(holds=lambda stage: stage == "merge", stage_map={})
-        self.forge.rows[0]["stage"] = "merge"
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: stage == "merge", stage_map={}, hold_stages=("merge",))
+        self.forge.rows[0].update(stage="merge", human_review=True)  # the forge holds the card at merge
         self.db.sync_from_forge(self.forge.snapshots())
-        self.db.upsert_item(KEY, human_review=True)
         done = self.asked("implement", "Ship?", "Yes")
         reversal = self.add_intent(done, "reverse", text="No")
         self.assertEqual((reversal.intent, reversal.rerouted_to), ("run", "implement"))
@@ -105,6 +104,7 @@ class IntentCurrencyTest(unittest.TestCase):
         self.assertEqual(self.forge.writes, [(1, "implement", "merge", True)])
         # develop's stage-write rule: only the forge's next read clears a hold, so no held issue launches mid-pass.
         self.assertEqual(self.launched, [])
+        self.forge.rows[0]["human_review"] = False  # the forge's next read: the card has left the held stage
         self.run_pass()
         self.assertFalse(self.db.item(KEY).human_review)
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])

@@ -227,7 +227,7 @@ def restarted(decisions: Sequence[Any], stage: str, attempt: int | None = None) 
                            record={"restarted": stage, "restart_attempt": attempt,
                                    "recommendation": d.record.get("recommendation"),
                                    "decision": d.record.get("decision")})
-            for d in rows.values() if is_reversed(d)]
+            for d in rows.values() if is_reversed(d) and not d.record.get("intent")]  # a board intent ends by `advance`
 
 
 def replacements(decisions: Sequence[Any], history: Sequence[Any], start: str,
@@ -408,12 +408,18 @@ class Transition:
     actions: tuple[ForgeComment, ...] = ()
 
 
+def _field(row: Any, record: dict, name: str, default: Any = "") -> Any:
+    """A lifecycle field from the row's record, else the row's own attribute (the store exposes both)."""
+    value = record.get(name)
+    return value if value not in (None, "") else (getattr(row, name, None) or default)
+
+
 def _status(row: Any, record: dict) -> str:
     if record.get("status"):
         return str(record["status"])
     if record.get("reversed") or record.get("restarted"):
         return "reversed"
-    return "answered" if (getattr(row, "answer", None) or "").strip() else "open"
+    return str(getattr(row, "status", None) or ("answered" if (getattr(row, "answer", None) or "").strip() else "open"))
 
 
 def state_of(row: Any) -> DecisionState:
@@ -422,16 +428,19 @@ def state_of(row: Any) -> DecisionState:
         return row
     record = row.record if isinstance(getattr(row, "record", None), dict) else {}
     row_id = int(getattr(row, "id", 0) or 0)
-    intent = str(record.get("intent", "") or "")
+    intent = str(_field(row, record, "intent"))
     answer = str(getattr(row, "answer", "") or "")
     return DecisionState(
-        id=row_id, issue_key=str(getattr(row, "issue_key", "") or ""), gate=str(getattr(row, "topic", "") or ""),
-        prompt=str(getattr(row, "question", "") or ""), status=_status(row, record), answer=answer,
-        decided_by=str(getattr(row, "decided_by", "") or ""), asked_at=str(getattr(row, "created_at", "") or ""),
-        answered_at=record.get("answered_at", getattr(row, "created_at", None) if answer else None),
-        blocked_reason=str(record.get("blocked_reason", "") or ""), rerouted_to=str(record.get("rerouted_to", "") or ""),
-        intent=intent, intent_id=int(record.get("intent_id", 0) or 0) or (row_id if intent else 0),
-        superseded_by=int(record.get("superseded_by", 0) or 0), note=str(record.get("note", "") or ""), record=record)
+        id=row_id, issue_key=str(getattr(row, "issue_key", "") or ""),
+        gate=str(getattr(row, "topic", None) or getattr(row, "gate", "") or ""),
+        prompt=str(getattr(row, "question", None) or getattr(row, "prompt", "") or ""), status=_status(row, record),
+        answer=answer, decided_by=str(getattr(row, "decided_by", "") or ""),
+        asked_at=str(getattr(row, "created_at", None) or getattr(row, "asked_at", "") or ""),
+        answered_at=record.get("answered_at", getattr(row, "answered_at", None) or (getattr(row, "created_at", None) if answer else None)),
+        blocked_reason=str(_field(row, record, "blocked_reason")), rerouted_to=str(_field(row, record, "rerouted_to")),
+        intent=intent, intent_id=int(_field(row, record, "intent_id", 0) or 0) or (row_id if intent else 0),
+        superseded_by=int(_field(row, record, "superseded_by", 0) or 0), note=str(_field(row, record, "note")),
+        record=record)
 
 
 def current_rows(records: Sequence[Any]) -> list[Any]:
@@ -628,9 +637,10 @@ def respond(record: Any, action: str, text: str, *, target_stage: str = "", curr
 
 
 def meet_action(record: Any, action: Any) -> Transition:
-    """An answered decision shows blocked while the planner's action waits or escalates, and answered otherwise."""
+    """A person's answer shows blocked while the planner's action waits or escalates, and answered otherwise (#288).
+    A model's answer is not tracked this way, so trio rows do not grow with every wait."""
     prev = state_of(record)
-    if prev.status not in {"answered", "blocked"} or prev.intent:
+    if prev.status not in {"answered", "blocked"} or prev.intent or prev.decided_by != "user":
         return Transition(prev, None)
     kind = type(action).__name__ if action is not None else ""
     reason = str(getattr(action, "reason", "") or kind.casefold()) if kind in {"Wait", "Escalate"} else ""
