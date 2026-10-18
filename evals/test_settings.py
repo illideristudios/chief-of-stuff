@@ -588,6 +588,16 @@ class ModelsTest(unittest.TestCase):
                 self.assertEqual([str(e) for e in self.load(f'[models.deep]\nrotation = ["{entry}"]\n').models["deep"]],
                                  [entry])
 
+    def test_pick_is_first_by_default_random_on_request_and_nothing_else(self):
+        # #877: "can we make it so they randomly select".
+        got = self.load('[models.deep]\nrotation = ["claude:opus"]\npick = "random"\n'
+                        '[models.review]\nrotation = ["claude:opus"]\n')
+        self.assertEqual(got.model_picks, {"deep": "random", "review": "first"})
+        for bad in ('[models.deep]\nrotation = ["claude:opus"]\npick = "best"\n',
+                    '[models.deep]\npick = "random"\n'):
+            with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
+                self.load(bad)
+
     def test_an_entry_without_a_runtime_prefix_means_claude(self):
         # #701: 1.0 configs that wrote a bare Claude model keep working.
         rotation = self.load('[models.deep]\nrotation = ["opus@high", "codex:gpt-x"]\n').models["deep"]
