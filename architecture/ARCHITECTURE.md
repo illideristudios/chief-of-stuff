@@ -98,6 +98,7 @@ A person's actions on the board (answer, reverse, re-route) are intents, and the
 - **One current intent per issue.** Each pass, a pure function in `decision_actions` picks the newest pending intent for an issue and returns updates that mark every older pending intent superseded. A reverse is an intent like a re-route, so it supersedes too.
 - **The engine applies it.** It checks that the intent is still current, and only then writes the stage to the forge and records the outcome. A failed write leaves the intent pending for the next pass. Only a permanent failure blocks the intent's own decision.
 - **A pending intent holds its own issue only.** While it waits, the planner waits on that issue. It never marks sibling decisions blocked.
+- **Decisions are append-only.** A decision's identity is its topic, question and instance, and the newest row for that identity is its state. Every answer, trio verdict, reversal, intent phase (write, run, done), supersession, block and unblock is a new row. No row is ever updated in place. `store.add_decision` is the only writer, reached through `trio_gate.record` for trio verdicts. A trio verdict never appends over an identity whose newest row is the owner's answer: the human answer wins. A reversal is an intent whose done phase is the `restarted` row the engine already writes.
 
 ```
 I := an intent      C(I) := I is its issue's newest pending intent
