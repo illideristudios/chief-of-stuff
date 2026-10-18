@@ -160,21 +160,37 @@ def default_head(tree: Path, branch: str) -> str:
     return out.split()[0] if not code and out.split() else ""
 
 
+def engine_merges(store) -> set[str]:
+    """Every merge commit the engine recorded (engine_merge's structured `merges`), across all issues."""
+    found = set()
+    for item in store.items():
+        data = store.resume(item.issue_key)
+        for merge in (data.get("merges", []) if isinstance(data, dict) else []):
+            if isinstance(merge, dict) and isinstance(merge.get("sha"), str) and merge["sha"]:
+                found.add(merge["sha"])
+    return found
+
+
 def moved_outside_engine(store, record: dict, now: str) -> str:
-    """§13 (c): why a non-Claude run holds for human review, or "" when the default branch is where it started or
-    only the engine merged meanwhile. Unknown is never safe (ledger F3): an unreadable head holds too."""
+    """§13 (c): why a non-Claude run holds for human review, or "" when every first-parent commit the default branch
+    gained during the run is a merge the engine recorded. A direct push, a merge outside the engine, or an unreadable
+    range holds (ledger F3: unknown is never safe), naming each commit it cannot vouch for."""
     branch, before = record.get("default_branch", ""), record.get("default_head", "")
     if not branch:
         return ""
-    after = default_head(Path(record["tree"]), branch)
-    if not before or not after:
-        return f"cannot verify {branch} after a {record.get('runtime')} run; holding for human review"
+    runtime, tree = record.get("runtime"), Path(record["tree"])
+    fetched, _ = make_worktree.git_trusted(["fetch", "-q", "origin", f"refs/heads/{branch}"], tree)
+    after = default_head(tree, branch)
+    if fetched or not before or not after:
+        return f"cannot verify {branch} after a {runtime} run; holding for human review"
     if before == after:
         return ""
-    started = record.get("started_at", "")
-    engine = any(entry.message.startswith("merged ") and started <= entry.at <= now
-                 for item in store.items() for entry in store.log(item.issue_key))
-    if engine:
+    code, out = make_worktree.git_trusted(["rev-list", "--first-parent", f"{before}..{after}"], tree)
+    if code:
+        return f"cannot list {branch} from {before[:12]} to {after[:12]} after a {runtime} run; holding for human review"
+    recorded = engine_merges(store)
+    unknown = [commit for commit in out.split() if commit not in recorded]
+    if not unknown:
         return ""
-    return (f"{branch} moved from {before[:12]} to {after[:12]} during a {record.get('runtime')} run "
-            "and the engine merged nothing; holding for human review")
+    return (f"{branch} gained commits the engine did not merge during a {runtime} run: "
+            f"{', '.join(commit[:12] for commit in unknown)}; holding for human review")
