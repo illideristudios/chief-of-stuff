@@ -3348,6 +3348,32 @@ class PolicyFingerprintTest(unittest.TestCase):
         self.assertNotEqual(logged[0], logged[2])
 
 
+class TrioPortTest(unittest.TestCase):
+    """#879: the trio's port sends Claude to claude_adapter and other hosts, read-only, to host_adapter."""
+
+    def test_each_request_goes_to_its_hosts_adapter(self):
+        with mock.patch.object(engine.claude_adapter, "call", return_value="claude") as claude, \
+             mock.patch.object(engine.host_adapter, "judge", return_value="host") as host:
+            self.assertEqual(engine._judge(engine.model_port.Request("q"), claude_as_profile="p"), "claude")
+            self.assertEqual(engine._judge(engine.model_port.Request("q", runtime="codex")), "host")
+        self.assertEqual(claude.call_args.kwargs, {"claude_as_profile": "p"})
+        host.assert_called_once()
+
+    def test_only_a_host_with_a_read_only_mode_and_its_cli_can_judge(self):
+        engine._judges.cache_clear()
+        self.addCleanup(engine._judges.cache_clear)
+        with mock.patch.object(engine.host_adapter, "available", side_effect=lambda runtime: runtime != "agy"):
+            self.assertTrue(engine._judges("claude"))
+            self.assertTrue(engine._judges("codex"))
+            self.assertFalse(engine._judges("agy"))
+            self.assertFalse(engine._judges("nonesuch"))
+
+    def test_the_spend_meter_keeps_the_trio_rotation(self):
+        port = engine.model_port.Port(lambda request: engine.model_port.Reply("", None, "", 0.5, 1), ("x",), "random")
+        metered = engine._metered(mock.Mock(), "k", port)
+        self.assertEqual((metered.rotation, metered.pick), (("x",), "random"))
+
+
 class LoginPathTest(unittest.TestCase):
     """#871: under its LaunchAgent the engine ran `gh` against launchd's short PATH and every pass failed."""
 

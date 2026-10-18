@@ -606,6 +606,12 @@ class ModelsTest(unittest.TestCase):
         (self.root / "s.toml").write_text(text)
         return st.load(self.root, "s.toml")
 
+    def test_a_trio_rotation_and_pick_are_read_like_any_class(self):
+        got = self.load('[models.trio]\nrotation = ["claude:claude-sonnet-5-5@high", "codex:gpt-6.1-sol@high", "cursor:auto"]\n'
+                        'pick = "random"\n')
+        self.assertEqual([e.runtime for e in got.models["trio"]], ["claude", "codex", "cursor"])
+        self.assertEqual(got.model_picks["trio"], "random")
+
     def test_absent_models_is_empty(self):
         self.assertEqual(self.load('[workers]\nmode = "one-shot"\n').models, {})
 

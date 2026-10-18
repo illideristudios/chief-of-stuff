@@ -218,5 +218,60 @@ class HostAdapterTest(unittest.TestCase):
             host_adapter.start("claude", Request("p"), self.dir, env={})
 
 
+
+SCHEMA = {"type": "object", "properties": {"vote": {"type": "string"}}, "required": ["vote"]}
+
+
+class JudgeTest(unittest.TestCase):
+    """#879 (§6): a trio consult on Codex, Cursor or agy runs read-only and returns the host's structured answer."""
+
+    def judge(self, runtime, stdout, answer=None, returncode=0):
+        seen = {}
+
+        def run(argv, **kwargs):
+            seen["argv"], seen["cwd"] = argv, kwargs["cwd"]
+            if answer is not None:  # codex writes its answer to -o
+                Path(argv[argv.index("-o") + 1]).write_text(json.dumps(answer))
+            return SimpleNamespace(returncode=returncode, stdout=stdout, stderr="")
+
+        with mock.patch.object(host_adapter, "resolve", return_value=f"/b/{runtime}"), \
+             mock.patch.object(host_adapter, "login_argv", side_effect=lambda argv, **_: list(argv)), \
+             mock.patch.object(host_adapter.subprocess, "run", side_effect=run):
+            got = host_adapter.judge(Request("Vote?", model="m", runtime=runtime, schema=SCHEMA, timeout_s=5))
+        return got, seen
+
+    def test_each_host_judges_in_its_read_only_mode(self):
+        for runtime, flags in (("codex", ["--sandbox", "read-only"]), ("cursor", ["--mode", "ask"]),
+                               ("agy", ["--mode", "plan"])):
+            with self.subTest(runtime=runtime):
+                _, seen = self.judge(runtime, '{"status": "SUCCESS", "structured_output": {}, "result": "{}"}',
+                                     answer={} if runtime == "codex" else None)
+                argv = seen["argv"]
+                self.assertTrue(any(argv[i:i + 2] == flags for i in range(len(argv))), argv)
+                for unsafe in ("--force", "--dangerously-skip-permissions", "workspace-write", "accept-edits"):
+                    self.assertNotIn(unsafe, argv)
+                self.assertIn("m", argv)  # the drawn model
+        _, seen = self.judge("agy", '{"status": "SUCCESS", "structured_output": {"vote": "adopt"}}')
+        self.assertTrue(seen["argv"][-1].startswith("--print=Vote?"))  # agy takes the prompt attached to --print
+
+    def test_each_hosts_structured_answer_is_read_from_its_own_shape(self):
+        got, _ = self.judge("codex", "", answer={"vote": "adopt"})
+        self.assertEqual(got.data, {"vote": "adopt"})
+        got, _ = self.judge("agy", json.dumps({"status": "SUCCESS", "structured_output": {"vote": "adopt"}}))
+        self.assertEqual(got.data, {"vote": "adopt"})
+        got, _ = self.judge("cursor", json.dumps({"is_error": False, "result": 'I looked. {"vote": "adopt"}'}))
+        self.assertEqual(got.data, {"vote": "adopt"})
+
+    def test_a_quota_line_is_a_quota_stop_and_no_answer_is_an_error(self):
+        got, _ = self.judge("codex", "error 429 RESOURCE_EXHAUSTED quota", returncode=1)
+        self.assertEqual(got.kind, "quota")
+        got, _ = self.judge("cursor", json.dumps({"is_error": True, "result": "failed"}))
+        self.assertEqual(got.kind, "error")
+
+    def test_a_host_with_no_read_only_mode_or_no_cli_cannot_judge(self):
+        self.assertEqual(host_adapter.judge(Request("Vote?", runtime="claude")).kind, "missing_program")
+        with mock.patch.object(host_adapter, "resolve", return_value=None):
+            self.assertEqual(host_adapter.judge(Request("Vote?", runtime="codex")).kind, "missing_program")
+
 if __name__ == "__main__":
     unittest.main()
