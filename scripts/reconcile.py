@@ -15,6 +15,12 @@ from orphans import Claim
 from policy import Edge, Policies, Policy, SEVERITIES, Workflow, breach
 from tree_state import TreeState
 
+# The operation a log line reports. Notification recovery keys on it, never on the line's wording.
+OP_STAGE_WRITE, OP_DECISION_COMMENT, OP_WORKER_RUN = "stage_write", "decision_comment", "worker_run"
+OP_MERGE_REFUSED, OP_MERGE = "merge_refused", "merge"
+# A pending move holds its own issue only; no sibling decision shows blocked for it.
+HOLD_STAGE_WRITE, HOLD_REROUTE = "stage write pending", "re-route pending"
+
 
 class WorkItem(Protocol):
     issue_key: str
@@ -305,6 +311,9 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
             return Wait(key, "architect consultation is required")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
+    # An answer whose action is blocked, or an intent not yet done, holds merge; pending_decisions holds reversals.
+    if any(st.status == "blocked" or st.intent for st in decision_actions.states(decisions)):
+        return Wait(key, "decision pending")
     if workflow.start == "merge" and not any(e.target == "merge" for e in workflow.edges):
         return Merge(key)
     if len(edges) != 1:
@@ -528,7 +537,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          facts: Facts | None = None,
          usage: Mapping[str, Mapping[str, float]] | None = None,
          waived_gates: Mapping[str, Sequence[str]] | None = None,
-         pending_asks: Mapping[str, bool] | None = None) -> list[Action]:
+         pending_asks: Mapping[str, bool] | None = None,
+         pending_stages: Mapping[str, Mapping] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
@@ -548,11 +558,32 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
         history = segments.get(item.issue_key, ())
         room = (rooms or {}).get(item.issue_key)
-        action = _item(item, history, policies, issue_types.get(item.issue_key),
-                       room, now, open_findings.get(item.issue_key),
-                       (decisions or {}).get(item.issue_key, ()), hold_stages,
-                       (launcher_holds or {}).get(item.issue_key, {}), facts,
-                       tuple((waived_gates or {}).get(item.issue_key) or ()))
+        item_decisions = (decisions or {}).get(item.issue_key, ())
+        stage_write = (pending_stages or {}).get(item.issue_key)
+        intent = decision_actions.current_intent(item_decisions)
+        if item.forge_state != "closed" and (stage_write or (intent and (
+                intent.status == "blocked" or decision_actions.replaces_engine_move(intent, item.stage)))):
+            # The engine's own move, an intent whose stage is not yet written, or one a spent retry limit blocked:
+            # this issue waits (§6: a pending intent holds its own issue only).
+            actions.append(Wait(item.issue_key, HOLD_STAGE_WRITE if stage_write else HOLD_REROUTE))
+            continue
+        if intent and item.forge_state != "closed":
+            if _running_segment(history) is not None:
+                continue
+            # A person asked for this stage again; it still obeys the hold, the retry limit, and the review launch.
+            if item.human_review:
+                action = Wait(item.issue_key, "human review")
+            elif intent.rerouted_to not in policies.stages:
+                action = Wait(item.issue_key, "stage is outside the workflow")
+            else:
+                action = _work(item.issue_key, intent.rerouted_to, policies.workflow_for(issue_types.get(item.issue_key)),
+                               history, policies, room)
+        else:
+            action = _item(item, history, policies, issue_types.get(item.issue_key),
+                           room, now, open_findings.get(item.issue_key),
+                           item_decisions, hold_stages,
+                           (launcher_holds or {}).get(item.issue_key, {}), facts,
+                           tuple((waived_gates or {}).get(item.issue_key) or ()))
         if facts is not None and action is not None:
             action = _with_facts(action, item, history, facts, (*running, *accepted))
         if isinstance(action, Merge) and (pending_asks or {}).get(item.issue_key):

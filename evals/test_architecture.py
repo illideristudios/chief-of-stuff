@@ -70,6 +70,7 @@ DRAWS_NOTHING = (
     "worker_guard",  # Frameworks and Drivers: command hook JSON and store access.
     "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
     "work",
+    "decision_actions",  # Use Cases: pure decision lifecycle transitions.
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
@@ -229,6 +230,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/limits_versions/0001_limits",
         "migrations/versions/0004_report_suite",
         "migrations/versions/0005_segment_human_review",
+        "migrations/versions/0006_log_operation",
     }),
     "drivers": frozenset({
         "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
@@ -420,6 +422,11 @@ class DependencyRuleTest(unittest.TestCase):
     def test_reconcile_reaches_no_adapter_or_io_module(self) -> None:
         self.assertEqual(forbidden_reach(SCRIPTS, "reconcile",
                          {"store", "forge", "claude_adapter", "settings", "trio_gate"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
+
+    def test_decision_actions_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_actions",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages"},
                          frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
 
     def test_every_script_is_classified(self) -> None:

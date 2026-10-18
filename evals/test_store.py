@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, select
@@ -207,6 +208,21 @@ class StoreTest(unittest.TestCase):
                          [("architecture", "trio", {"votes": ["yes", "yes", "yes"]})])
         self.assertEqual([(e.at, e.message) for e in self.store.log(KEY)], [("09:00", "launched")])
 
+    def test_update_resume_changes_only_its_keys_from_the_current_value(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        self.store.set_resume(KEY, {"note": {"stage": "fix"}, "decision_comments": ["a"]})
+        seen = []
+
+        def drop_comments(data):
+            seen.append(dict(data))
+            data["decision_comments"] = []
+            data["interrupt"] = {"kind": "Ask"}
+
+        self.store.update_resume(KEY, drop_comments)
+        self.assertEqual(seen, [{"note": {"stage": "fix"}, "decision_comments": ["a"]}])
+        self.assertEqual(self.store.resume(KEY), {"note": {"stage": "fix"}, "decision_comments": [],
+                                                  "interrupt": {"kind": "Ask"}})
+
     def test_resume_state_round_trips(self) -> None:
         self.store.upsert_item(KEY, title="x")
         self.assertIsNone(self.store.resume(KEY))
@@ -287,6 +303,29 @@ class MigrationTest(unittest.TestCase):
             engine.dispose()
             self.assertEqual(drift, [])
 
+    def test_the_log_operation_migration_backfills_kind_from_the_old_wording(self) -> None:
+        old = {"stage write failed: x": "stage_write", "stage write refused: x": "stage_write",
+               "decision comment failed: x": "decision_comment", "merge refused: x": "merge_refused",
+               "merged #1": "merge", "escalate: retry limit reached": "worker_run",
+               "dispatch failed: x": "worker_run", "wait: merge is not ready": "unknown",
+               "ask failed: x": "unknown", "wait failed: x": "unknown", "merge failed: x": "merge_refused",
+               "unrecognized worker failed: x": "unknown", "arbitrary refused operation": "unknown",
+               "worker implement attempt 1: failed": "worker_run", "review failed: x": "worker_run"}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            command.upgrade(store._config(path), "0005")  # the revision before 0006_log_operation
+            conn = sqlite3.connect(path)
+            conn.execute("insert into work_item (issue_key, title, stage, forge_state, review_state, merge_state, human_review, "
+                         "updated_at) values ('o/r#1', '', '', 'open', '', '', 0, '')")
+            for message in old:
+                conn.execute("insert into log_entry (issue_key, at, message) values ('o/r#1', 'now', ?)", (message,))
+            conn.commit()
+            conn.close()
+            store.migrate(path)
+            conn = sqlite3.connect(path)
+            kinds = dict(conn.execute("select message, kind from log_entry").fetchall())
+            conn.close()
+            self.assertEqual(kinds, old)
     def test_existing_human_review_segments_keep_history_when_schema_is_upgraded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.db"

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import decision_actions
 import engine
 import issue_gate
 import model_port
@@ -115,6 +116,21 @@ class EngineTest(unittest.TestCase):
         limits = mock.patch.object(engine, "_record_limits")
         limits.start()
         self.addCleanup(limits.stop)
+
+    def test_pass_delivers_exception_pings_after_store_updates(self):
+        observed = []
+        def ping(root, now):
+            observed.append((root, now, len(self.db.segments(KEY))))
+        with mock.patch("notify.sync_workspace", side_effect=ping) as sync:
+            self.run_pass()
+        sync.assert_called_once_with(self.root, NOW)
+        self.assertEqual(observed, [(self.root, NOW, 1)])
+
+    def test_ping_failure_does_not_abort_pass(self):
+        with mock.patch("notify.sync_workspace", side_effect=RuntimeError("queue unavailable")) as sync:
+            actions = self.run_pass()
+        self.assertTrue(actions)
+        sync.assert_called_once_with(self.root, NOW)
 
     def launch(self, key, stage, attempt, persona):
         self.launched.append((key, stage, attempt, persona))
@@ -864,7 +880,7 @@ class EngineTest(unittest.TestCase):
             with self.subTest(prior=prior):
                 forge = mock.Mock()
                 forge.write_stage.return_value = SimpleNamespace(ok=True, error="")
-                engine._write_stage(forge, mock.Mock(), KEY, "implement", prior)
+                engine._write_stage(forge, mock.MagicMock(), KEY, "implement", prior)
                 self.assertIs(forge.write_stage.call_args.kwargs["initialize"], initialize)
 
     def test_stage_write_failure_is_logged_and_retried_before_planning(self):
@@ -1352,6 +1368,308 @@ class EngineTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "cleanup failed"):
             self.run_pass()
         self.assertEqual(len(self.launched), 1)
+
+    def test_undeclared_agent_type_runs_default_agent(self):
+        # Section 9: undeclared persona agents use the default and record an empty agent type.
+        self.p = policy.parse({
+            "default_workflow": "standard",
+            "personas": {"builder": {"role": "implements", "model": "example", "agent_type": "nonexistent-agent"},
+                         "critic": {"role": "reviews", "model": "example"}},
+            "stages": {"implement": {"persona": "builder"}, "review": {"persona": "critic"}, "merge": {}},
+            "workflows": {"standard": {"start": "implement", "edges": [
+                {"from": "implement", "to": "review"}, {"from": "review", "to": "merge"},
+            ]}},
+        })
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
+
+    def decide(self, topic, question, answer=None, by="user", **record):
+        """Append a decision row, as trio_gate.record does for every writer (rows are append-only)."""
+        self.db.sync_from_forge(self.forge.snapshots())
+        return self.db.add_decision(KEY, topic, question, answer, by, record)
+
+    def state(self, row):
+        """A decision's current state: its identity's latest row."""
+        return decision_actions.state_of(decision_actions.latest(self.db.decisions(KEY))[decision_actions.identity(row)])
+
+    def test_answered_decision_meeting_a_blocked_action_records_blocked_status(self):
+        # M6 item 2 & #288: engine calls decision_actions when a planned action meets an answered decision.
+        dec = self.decide("design", "Approve schema?", "Yes")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "merge conflicts")]):
+            self.run_pass()
+            self.run_pass()
+        self.assertEqual((self.state(dec).status, self.state(dec).blocked_reason), ("blocked", "merge conflicts"))
+        self.assertEqual(len(self.db.decisions(KEY)), 2)  # an unchanged state appends nothing
+
+    def test_default_agent_has_no_declared_type(self):
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "")
+
+    def add_intent(self, stage, phase, *, status="re-routed", reason="", question="Back?"):
+        """A board intent as the page server leaves it: a decision row carrying its target stage and phase."""
+        record = {"status": status, "rerouted_to": stage, "intent": phase,
+                  **({"blocked_reason": reason} if reason else {}), **({"reversed": True} if status == "reversed" else {})}
+        return self.decide("design", question, None if status == "reversed" else "Back", **record)
+
+    def settled_reroute(self, stage="review"):
+        return self.add_intent(stage, "", question="Settled?")  # its own decision, so later intents leave it alone
+
+    def test_a_pending_run_intent_runs_even_after_a_completed_stage_and_ends(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "implement", 1, (NOW - timedelta(hours=2)).isoformat(),
+                               (NOW - timedelta(hours=1)).isoformat(), "done")
+        dec = self.add_intent("implement", "run", status="reversed")
+        self.run_pass()
+        self.assertEqual(self.launched, [(KEY, "implement", 2, "builder")])
+        self.assertEqual((self.state(dec).status, self.state(dec).intent), ("reversed", ""))
+        # The reversal's done phase is develop's restarted row.
+        self.assertEqual(self.state(dec).record["restarted"], "implement")
+
+    def test_a_write_intent_is_written_by_the_engine_then_runs_and_ends(self):
+        dec = self.add_intent("review", "write")
+        self.run_pass()
+        self.assertEqual(self.forge.writes, [(1, "review", "implement", True)])
+        self.assertEqual(self.db.item(KEY).stage, "review")
+        saved = self.state(dec)
+        self.assertEqual((saved.status, saved.blocked_reason, saved.rerouted_to, saved.intent), ("re-routed", "", "review", ""))
+        self.assertEqual(self.launched, [(KEY, "review", 1, "critic")])
+
+    def test_a_failed_write_stays_pending_blocks_nothing_and_is_retried(self):
+        dec = self.add_intent("review", "write")
+        for failure in (SimpleNamespace(ok=False, done=False, error="offline"), RuntimeError("offline")):
+            with self.subTest(failure=failure):
+                effect = {"side_effect": failure} if isinstance(failure, Exception) else {"return_value": failure}
+                with mock.patch.object(self.forge, "write_stage", **effect):
+                    actions = self.run_pass()
+                saved = self.state(dec)
+                self.assertEqual((saved.status, saved.blocked_reason, saved.intent), ("re-routed", "", "write"))
+                self.assertEqual(actions, [reconcile.Wait(KEY, "re-route pending")])
+                self.assertEqual(self.db.item(KEY).stage, "implement")
+        self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [reconcile.OP_STAGE_WRITE])
+        self.run_pass()
+        self.assertEqual((self.db.item(KEY).stage, self.state(dec).intent), ("review", ""))
+
+    def test_only_the_newest_intent_is_written_and_the_older_one_is_superseded(self):
+        old = self.add_intent("review", "write", question="A?")
+        newest = self.add_intent("implement", "write", question="B?")
+        self.forge.rows[0]["stage"] = "review"
+        self.run_pass()
+        self.assertEqual(self.forge.writes, [(1, "implement", "review", True)])
+        self.assertEqual((self.state(old).status, self.state(old).superseded_by, self.state(old).intent),
+                         ("superseded", newest.id, ""))
+        self.assertEqual(self.state(newest).status, "re-routed")
+
+    def test_a_reversal_supersedes_a_blocked_intent_and_runs(self):
+        blocked = self.add_intent("review", "run", status="blocked", reason="retry limit reached", question="A?")
+        reversal = self.add_intent("implement", "run", status="reversed", question="B?")
+        self.run_pass()
+        self.assertEqual(self.state(blocked).status, "superseded")
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+        self.assertEqual(self.state(reversal).intent, "")
+
+    def test_a_new_intent_replaces_the_engines_own_pending_move(self):
+        self.add_intent("review", "write")
+        self.db.set_resume(KEY, {"pending_stage": {"stage": "merge", "expected": "implement"}})
+        self.run_pass()
+        self.assertEqual([w[1] for w in self.forge.writes], ["review"])
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+
+    def test_waiting_on_an_intent_marks_no_sibling_decision_blocked(self):
+        sibling = self.decide("scope", "Ship?", "Yes")
+        for phase, status in (("write", "re-routed"), ("run", "blocked")):
+            with self.subTest(phase=phase):
+                held = self.add_intent("review", phase, status=status, reason="retry limit reached" if status == "blocked" else "")
+                with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+                    self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "re-route pending")])
+                    self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "re-route pending")])
+                self.assertEqual((self.state(sibling).status, self.state(sibling).blocked_reason), ("answered", ""))
+                self.decide("design", held.question, "Back", status="superseded")
+
+    def test_the_engines_own_stage_move_blocks_no_settled_reroute(self):
+        old = self.settled_reroute("review")
+        self.run_pass()
+        self.finish("implement")
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.run_pass()
+            self.run_pass()  # the retry of the move is what refuses it again
+        self.assertEqual(self.db.resume(KEY)["pending_stage"]["stage"], "review")
+        self.assertEqual(self.state(old).status, "re-routed")
+
+    def test_an_answered_decision_a_wait_blocked_is_unblocked_when_the_wait_is_the_decision_hold(self):
+        dec = self.decide("design", "Approve schema?", "Yes", status="blocked", blocked_reason="merge is not ready")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+            self.run_pass()
+        self.assertEqual((self.state(dec).status, self.state(dec).blocked_reason), ("answered", ""))
+
+    def test_a_decision_hold_wait_blocks_no_answered_decision(self):
+        answered = self.decide("design", "Approve schema?", "Yes")
+        self.decide("scope", "Still open?", by="zach")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+            self.run_pass()
+        self.assertEqual(self.state(answered).status, "answered")
+
+    def test_a_pending_sibling_decision_does_not_clear_another_decisions_block(self):
+        blocked = self.decide("design", "Approve schema?", "Yes", status="blocked", blocked_reason="merge conflicts")
+        self.decide("scope", "Still open?", by="zach")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+            self.run_pass()
+        self.assertEqual((self.state(blocked).status, self.state(blocked).blocked_reason), ("blocked", "merge conflicts"))
+
+    def spent_intent(self, status="reversed"):
+        dec = self.add_intent("implement", "run", status=status)
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Escalate(KEY, "retry limit reached")]):
+            self.run_pass()
+        return dec
+
+    def test_a_spent_retry_limit_blocks_only_the_intents_own_decision_and_keeps_the_hold(self):
+        other = self.settled_reroute("review")
+        for status in ("reversed", "re-routed"):
+            with self.subTest(status=status):
+                dec = self.spent_intent(status)
+                saved = self.state(dec)
+                self.assertEqual((saved.status, saved.blocked_reason, saved.intent), ("blocked", "retry limit reached", "run"))
+                self.assertFalse(decision_actions.is_closed(saved))
+                self.assertEqual(self.state(other).status, "re-routed")
+                for _ in range(2):
+                    self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "re-route pending")])
+                self.assertEqual(self.launched, [])
+                self.decide("design", dec.question, "Back", status="superseded")
+
+    def test_a_spent_reversal_waits_after_earlier_completed_work(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        dec = self.spent_intent()
+        for _ in range(2):
+            self.assertIsInstance(self.run_pass()[0], reconcile.Wait)
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.state(dec).status, "blocked")
+
+    def test_a_blocked_intent_is_left_alone_by_later_actions_and_decision_holds(self):
+        dec = self.spent_intent()
+        for action in (reconcile.Wait(KEY, "merge is not ready"), reconcile.Wait(KEY, "decision pending"), reconcile.Merge(KEY)):
+            with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
+                with mock.patch.object(engine.engine_merge, "execute", return_value=False):
+                    self.run_pass()
+            saved = self.state(dec)
+            self.assertEqual((saved.status, saved.blocked_reason, saved.intent), ("blocked", "retry limit reached", "run"))
+
+    def test_a_failed_stage_write_after_a_dispatch_is_logged_as_a_stage_write(self):
+        self.run_pass()
+        self.finish("implement")
+        with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="label offline")):
+            self.run_pass()
+        self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [reconcile.OP_STAGE_WRITE])
+
+    def test_a_failed_merge_hold_write_is_logged_as_a_stage_write_not_a_refused_merge(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: stage == "merge", stage_map={}, hold_stages=("merge",))
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Merge(KEY)]):
+            with mock.patch.object(self.forge, "write_stage", return_value=SimpleNamespace(ok=False, error="label offline")):
+                self.run_pass()
+        self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [reconcile.OP_STAGE_WRITE])
+
+    def test_a_failed_ask_is_not_recorded_as_a_worker_run(self):
+        self.db.sync_from_forge(self.forge.snapshots())
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Ask(KEY, "gate", "Split?")]):
+            with mock.patch.object(engine, "_choice", side_effect=RuntimeError("store busy")):
+                self.run_pass()
+        self.assertEqual([e.kind for e in self.db.log(KEY) if "failed" in e.message], [""])
+
+    def test_comments_board_rows_carry_are_posted_once(self):
+        self.decide("design", "Approve schema?", "Yes", status="answered", comment="first")
+        self.decide("design", "Approve schema?", "Yes", status="blocked", blocked_reason="wait")  # carries no comment
+        posted = []
+        self.forge.comment = lambda number, body, commit=False: posted.append(body) or ""
+        with mock.patch.object(engine.reconcile, "plan", return_value=[]):
+            self.run_pass()
+            self.run_pass()
+        self.assertEqual(posted, ["first"])
+
+    def test_a_comment_that_fails_is_retried_and_logged_once(self):
+        self.decide("design", "Approve schema?", "Yes", status="answered", comment="first")
+        self.forge.comment = mock.Mock(return_value="offline")
+        with mock.patch.object(engine.reconcile, "plan", return_value=[]):
+            self.run_pass()
+            self.run_pass()
+        self.assertEqual(self.forge.comment.call_count, 2)
+        self.assertEqual([e.message for e in self.db.log(KEY)], ["decision comment failed: offline"])
+        self.assertNotIn("decision_comments_sent", self.db.resume(KEY) or {})
+
+    def test_the_launch_ends_only_the_intent_it_carried(self):
+        carried = self.add_intent("implement", "run", status="reversed", question="A?")
+        launch = self.launch
+
+        def board_post_during_launch(key, stage, attempt, persona):
+            result = launch(key, stage, attempt, persona)
+            self.newer = self.add_intent("review", "write", question="B?")  # appended after planning
+            return result
+
+        self.launch = board_post_during_launch
+        self.run_pass()
+        # The newer intent is current, so the launch does not end the carried one or clear the newer: the next pass supersedes it.
+        self.assertEqual((self.state(carried).status, self.state(carried).intent), ("reversed", "run"))
+        self.assertEqual((self.state(self.newer).status, self.state(self.newer).intent), ("re-routed", "write"))
+        self.run_pass()
+        self.assertEqual((self.state(carried).status, self.state(carried).superseded_by), ("superseded", self.newer.id))
+
+    def test_a_worker_is_not_launched_for_an_intent_a_newer_one_has_replaced_since_planning(self):
+        old = self.add_intent("implement", "run", status="reversed", question="A?")
+        real_plan = engine.reconcile.plan
+
+        def plan(*args, **kwargs):
+            actions = real_plan(*args, **kwargs)
+            self.add_intent("review", "write", question="B?")  # appended while planning
+            return actions
+
+        with mock.patch.object(engine.reconcile, "plan", side_effect=plan):
+            self.run_pass()
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.state(old).intent, "run")
+
+    def test_a_retry_limit_blocks_only_the_current_intent_not_a_newer_one_that_replaced_it(self):
+        old = self.add_intent("implement", "run", question="A?")
+
+        def plan(*args, **kwargs):
+            self.newer = self.add_intent("review", "write", question="B?")
+            return [reconcile.Escalate(KEY, "retry limit reached")]
+
+        with mock.patch.object(engine.reconcile, "plan", side_effect=plan):
+            self.run_pass()
+        # The newer intent is current, so the spent limit blocks nothing: the older one is superseded.
+        self.assertEqual(self.state(old).status, "re-routed")
+        self.assertEqual((self.state(self.newer).status, self.state(self.newer).intent), ("re-routed", "write"))
+        self.run_pass()
+        self.assertEqual(self.state(old).status, "superseded")
+
+    def test_a_human_answer_during_a_trio_consult_wins_and_leaves_the_persons_row_latest(self):
+        # Architect ruling on #758, item 2: run against #750's merged consult path (engine._choice -> trio_gate).
+        self._trio()
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
+        consults = []
+
+        def person_answers(request):
+            if not consults:  # the person answers through the board while the first vote is in flight
+                self.db.add_decision(KEY, "plan", "gate requires Zach's approval", "hold", "user",
+                                     {"decision": {"context": "implement-1", "options": ["approve", "hold"]}})
+            consults.append(request)
+            return model_port.Reply("", {"vote": "adopt", "choice": "approve", "reasoning": "because"}, "", 0.1, 1)
+
+        self.run_pass(model=person_answers)
+        rows = self.db.decisions(KEY)
+        self.assertEqual([(r.answer, r.decided_by) for r in rows], [("hold", "user")])  # the trio's approval never landed
+        self.assertNotIn("waived_gates", self.db.resume(KEY) or {})
+        self.assertFalse([e for e in self.db.log(KEY) if "failed" in e.message])
+
+    def test_the_segment_records_the_agent_the_launcher_uses_from_the_stage_defaults(self):
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- Settings: `chief-of-stuff.toml`\n- Agent: specialist task\n")
+        (self.root / "chief-of-stuff.toml").write_text(
+            '[lanes.code]\nstages = ["implement"]\n[stages.implement]\nagent = "specialist"\n')
+        self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].agent_type, "specialist")
 
     def _trio(self, **fields):
         self.p = policy.parse({
@@ -2623,6 +2941,15 @@ class MainTest(unittest.TestCase):
         self.assertEqual(passed.call_args.kwargs["teardown_command"], "exit 7")
         self.assertEqual(passed.call_args.kwargs["launch"].keywords["teardown_command"], "exit 7")
         sleep.assert_not_called()
+
+    def test_the_production_pass_consults_the_trio_through_the_claude_adapter(self):
+        with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.claude_adapter, "call") as call:
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+            request = object()
+            passed.call_args.kwargs["model"](request)
+        self.assertEqual(call.call_args.args, (request,))
 
     def test_engine_passes_workspace_rules_to_its_worker_launch_port(self):
         path = self.root / "settings.toml"

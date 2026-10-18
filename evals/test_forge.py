@@ -1683,5 +1683,23 @@ class GitHubProjectWriteTest(unittest.TestCase):
         self.assertIn("unmapped prior stage", got.error)
         self.assertFalse(self.calls)
 
+
+class CommentTest(unittest.TestCase):
+    """A committed comment reaches the forge on GitLab as on GitHub; "" means it was posted (#643 review)."""
+
+    def test_a_gitlab_comment_is_posted_and_a_failed_post_is_reported(self):
+        calls = []
+
+        def call(method, url, token, timeout, body=None):
+            calls.append((method, url, body))
+            return None, {}, "" if len(calls) == 1 else "HTTP 500"
+
+        with mock.patch.object(backlog, "_call", call):
+            f = forge.Forge(GL, token="t")
+            self.assertEqual(f.comment(5, "hello", commit=True), "")
+            self.assertEqual(calls, [("POST", f"{GL.issues_url}/5/notes", {"body": "hello"})])
+            self.assertEqual(f.comment(5, "again", commit=True), "HTTP 500")
+
+
 if __name__ == "__main__":
     unittest.main()

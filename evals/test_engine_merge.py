@@ -263,7 +263,7 @@ class ExecutorTest(unittest.TestCase):
         with self.during_policy_check(lambda: self.gh.issues[3].update(labels=self.HOLD)):
             self.assertFalse(self.execute())
         self.assertEqual(self.gh.merges, [])
-        self.assertIn("held for human review", self.message())
+        self.assertIn("needs input on the forge", self.message())
 
     def test_a_stale_cached_approval_is_replaced_by_the_fresh_request(self):
         no_review = policy.parse({"default_workflow": "direct", "personas": {}, "stages": {"merge": {}},
@@ -349,6 +349,11 @@ class ExecutorTest(unittest.TestCase):
                                       stage_mark=None)
         self.assertIn("merge refused", self.message())
         self.assertIn("head changed", self.db.log(self.key)[0].message)
+
+    def test_a_merge_that_is_not_confirmed_is_not_logged_as_a_merge(self):
+        with mock.patch.object(forge.Forge, "merge", return_value="queued #21 at abc"):
+            self.assertFalse(self.execute())
+        self.assertEqual(self.db.log(self.key)[0].kind, "")
 
     def test_a_queued_github_request_is_logged_once_and_returns_false(self):
         def queued(args, input_text=None):

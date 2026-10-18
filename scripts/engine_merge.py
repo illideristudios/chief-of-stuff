@@ -48,10 +48,10 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
         message = forge.merge(request.number, commit=True, issue_key=action.issue_key, approval=request.approval,
                               head=request.head, stage_mark=stage_mark)
     except (ForgeError, PolicyError) as exc:
-        store.add_log(action.issue_key, f"merge refused: {exc}", at)
+        store.add_log(action.issue_key, f"merge refused: {exc}", at, reconcile.OP_MERGE_REFUSED)
         return False
-    store.add_log(action.issue_key, message, at)
     merged = message.startswith("merged ")
+    store.add_log(action.issue_key, message, at, reconcile.OP_MERGE if merged else "")  # queued or unknown: not a merge
     if merged:
         # §13 (c): a structured record of what the engine merged, so a non-Claude run's check can tell it apart.
         sha = getattr(forge, "merge_commit", lambda number: None)(request.number)

@@ -37,6 +37,10 @@ model = "sonnet"
 role = "PLACEHOLDER: reviews the change"
 model = "opus"
 
+[personas.staff]
+role = "PLACEHOLDER: weighs the decision as a senior staff engineer"
+model = "opus"
+
 [personas.architect]
 role = "PLACEHOLDER: holds the change to the architecture"
 model = "opus"

@@ -26,6 +26,7 @@ from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
 from shell_setup import teardown
+from reconcile import OP_WORKER_RUN
 
 _runners: dict[str, Any] = {}
 # #851: the [models.<class>] rotation a stage launches from; planning is deep work and a fix continues an implementation.
@@ -195,12 +196,13 @@ def _guarded(forge: Any, issue_key: str) -> bool:
 
 
 def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict, model: str = "") -> None:
-    data = _resume(store, key)
-    data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
-    if model:
-        data["model"] = {**data.get("model", {}), stage: model}
-    data.pop("quota", None)
-    store.set_resume(key, data)
+    def save(data: dict) -> None:
+        data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
+        if model:
+            data["model"] = {**data.get("model", {}), stage: model}
+        data.pop("quota", None)
+
+    store.update_resume(key, save)
 
 
 def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, command: str, at: str) -> None:
@@ -226,6 +228,15 @@ def _declared_agent(text: str, agent: str) -> str:
     return agent if agent in make_worktree.agent_types(text) else ""
 
 
+def agent_for(text: str, actor: Any, defaults: Any) -> str:
+    """The agent type a launch passes: the persona's, else the stage default's, when the workspace declares it."""
+    return _declared_agent(text, getattr(actor, "agent", "") or (defaults.agent if defaults else "") or "")
+
+
+def stage_defaults(root: Path, text: str, stage: str) -> Any:
+    return load_settings(root, settings_path(text)).stages.get(stage)
+
+
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
@@ -249,7 +260,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     loaded = load_settings(root, settings_path(text))
     defaults = loaded.stages.get(stage)
-    agent = _declared_agent(text, actor.agent or (defaults.agent if defaults else "") or "")
+    agent = agent_for(text, actor, defaults)
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
@@ -296,12 +307,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         store.set_ownership(issue_key, str(tree), "tree")
         if stage != "review":
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
-            data.update(worktree=str(tree), work_branch=branch)
-            store.set_resume(issue_key, data)
+            store.update_resume(issue_key, lambda d: d.update(worktree=str(tree), work_branch=branch))
         else:
-            data["review_trees"] = {**data.get("review_trees", {}), str(attempt): {
-                "tree": str(tree), "branch": branch, "head": request_head.head}}
-            store.set_resume(issue_key, data)
+            prepared = {"tree": str(tree), "branch": branch, "head": request_head.head}
+            store.update_resume(issue_key, lambda d: d.update(
+                review_trees={**d.get("review_trees", {}), str(attempt): prepared}))
             code, actual_head = make_worktree.git(["rev-parse", "HEAD"], tree)
             if code or actual_head != request_head.head:
                 raise RuntimeError("prepared review tree does not match the request head")
@@ -480,8 +490,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         if previous.stage != segment.stage or previous.outcome not in RETRYABLE:
                             break
                         stops += 1
-                    data["quota"] = {"reset": reason, "retry_at": retry_at(reason, now, stops).isoformat()}
-                    store.set_resume(key, data)
+                    quota = {"reset": reason, "retry_at": retry_at(reason, now, stops).isoformat()}
+                    store.update_resume(key, lambda d: d.update(quota=quota))
                 else:
                     outcome, reason = "failed", reply.message
             else:
@@ -529,5 +539,5 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             continue
         store.end_segment(key, segment.stage, segment.attempt, ended.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),
-                      now.isoformat())
+                      now.isoformat(), OP_WORKER_RUN)
     return facts

@@ -29,6 +29,7 @@ import issue_gate
 import limits_history
 import limits_probe
 import model_port
+import notify
 import ownership
 import policy
 import readiness
@@ -42,6 +43,7 @@ import supervisor
 import trio_gate
 import worker
 from forge_port import ForgeError
+from reconcile import HOLD_REROUTE, HOLD_STAGE_WRITE, OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
@@ -221,7 +223,7 @@ def _link_replacement_asks(store: Any, key: str, replacements: list) -> None:
         ask_id = ask.id if ask is not None else store.add_ask(key, **spec)
         update = decision_actions.link_ask(prior, ask_id)
         if update != prior:
-            store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record)
+            trio_gate.record(store, key, update)
 
 
 def _settle_asks(store: Any, key: str) -> None:
@@ -229,7 +231,7 @@ def _settle_asks(store: Any, key: str) -> None:
         rows = store.decisions(key)
         linked = decision_actions.recover_ask_link(rows, ask)
         if linked is not None:
-            store.add_decision(key, linked.topic, linked.question, linked.answer, linked.decided_by, linked.record)
+            trio_gate.record(store, key, linked)
             rows = store.decisions(key)
         answer = decision_actions.committed_ask_answer(rows, ask)
         if answer is not None:
@@ -237,8 +239,7 @@ def _settle_asks(store: Any, key: str) -> None:
         elif ask.answer:
             settled = decision_actions.answer_ask(rows, ask)
             if settled is not None:
-                store.add_decision(key, settled.topic, settled.question, settled.answer,
-                                   settled.decided_by, settled.record)
+                trio_gate.record(store, key, settled)
 
 
 def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "implement",
@@ -321,13 +322,106 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
         fields["human_review"] = True
     elif release_hold:
         fields["human_review"] = False
-    store.upsert_item(key, **fields)
-    data = _resume(store, key)
-    data.pop("pending_stage", None)
+    def clear(data: dict) -> None:
+        data.pop("pending_stage", None)
+        if release_hold:
+            data.pop("launcher_hold", None)
+
+    with store.transaction():
+        store.upsert_item(key, **fields)
+        store.update_resume(key, clear)
     if release_hold:
-        data.pop("launcher_hold", None)
         store.add_log(key, f"hold released for {stage}", store.clock().isoformat())
-    store.set_resume(key, data)
+
+
+def _apply(store: Any, key: str, update: decision_actions.DecisionUpdate | None) -> None:
+    if update is not None:
+        trio_gate.record(store, key, update)
+
+
+def _settle(store: Any, key: str, step: Callable[..., Any], intent_id: int, *args: Any) -> bool:
+    """Record an intent's outcome only while it is still the issue's current one, with any older intent superseded
+    in the same transaction so it can never become current again."""
+    with store.transaction():
+        rows = store.decisions(key)
+        current = decision_actions.current_intent(rows)
+        if current is None or current.intent_id != intent_id:
+            return False
+        for update in decision_actions.supersede(rows):
+            _apply(store, key, update)
+        _apply(store, key, step(rows, intent_id, *args))
+    return True
+
+
+def _is_current(store: Any, key: str, intent_id: int) -> bool:
+    current = decision_actions.current_intent(store.decisions(key))
+    return current is not None and current.intent_id == intent_id
+
+
+def _apply_intent(forge: Any, store: Any, key: str) -> None:
+    """The one place a board intent is acted on (§6). Choose the issue's current intent and supersede the older
+    ones, then write its stage and record that it landed. A failed write raises and the intent stays pending."""
+    if decision_actions.current_intent(store.decisions(key)) is None:
+        return  # no write lock for an issue with nothing to apply
+    with store.transaction():
+        rows = store.decisions(key)
+        for update in decision_actions.supersede(rows):
+            _apply(store, key, update)
+        intent = decision_actions.current_intent(rows)
+        if decision_actions.replaces_engine_move(intent, store.item(key).stage):
+            store.update_resume(key, lambda data: data.pop("pending_stage", None))  # a person's intent replaces the engine's own move
+    if intent.status == "blocked":
+        return
+    item = store.item(key)
+    if intent.rerouted_to and item.stage != intent.rerouted_to:
+        if not _is_current(store, key, intent.intent_id):
+            return  # a newer intent arrived; the next pass applies it
+        _write_stage(forge, store, key, intent.rerouted_to, item.stage)
+    if intent.intent == "write":
+        _settle(store, key, decision_actions.advance, intent.intent_id)
+
+
+def _replaced(store: Any, key: str, planned: decision_actions.DecisionState | None) -> bool:
+    """Whether the issue's current intent changed, or first appeared, since planning chose its action."""
+    current = decision_actions.current_intent(store.decisions(key))
+    return (planned.intent_id if planned else None) != (current.intent_id if current else None)
+
+
+def _sync_decisions_with_action(store: Any, key: str, action: reconcile.Action) -> None:
+    """An answered decision shows blocked while its issue's action waits, and answered again once it does not."""
+    if isinstance(action, reconcile.Wait) and action.reason in (HOLD_REROUTE, HOLD_STAGE_WRITE):
+        return  # a pending move holds its own issue only; no sibling decision shows blocked for it
+    with store.transaction():
+        decisions = store.decisions(key)
+        if isinstance(action, reconcile.Wait) and action.reason == "decision pending":
+            # With no open decision, a blocked answer is what holds merge: restore it.
+            for update in decision_actions.restore_held(decisions):
+                _apply(store, key, update)
+            return
+        for state in decision_actions.states(decisions):
+            _apply(store, key, decision_actions.meet_action(state, action).update)
+
+
+def _deliver_comments(forge: Any, store: Any, key: str, at: str) -> None:
+    """Post the issue comments board actions recorded on their rows; each is sent once, keyed by its words."""
+    queued = decision_actions.pending_comments(store.decisions(key), _resume(store, key).get("decision_comments_sent", ()))
+    delivered, failure = [], ""
+    for body in queued:
+        try:
+            error = forge.comment(int(key.rpartition("#")[2]), body, commit=True)
+        except Exception as exc:
+            error = str(exc)
+        if error:
+            failure = error
+        else:
+            delivered.append(body)
+    if delivered:
+        store.update_resume(key, lambda data: data.__setitem__(
+            "decision_comments_sent", [*data.get("decision_comments_sent", []), *delivered]))
+    message = f"decision comment failed: {failure}"
+    logged = store.log(key)
+    if failure and (not logged or logged[-1].message != message):  # retried every pass; log only a change
+        store.add_log(key, message, at, OP_DECISION_COMMENT)
 
 
 def _restore_hold(forge: Any, store: Any, key: str) -> None:
@@ -539,6 +633,15 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         key = item.issue_key
+        try:
+            _apply_intent(forge, store, key)
+        except Exception as exc:
+            message = f"stage write failed: {exc}"
+            last = next((entry for entry in reversed(store.log(key)) if entry.kind == OP_STAGE_WRITE), None)
+            if last is None or last.message != message:  # intervening wait logs do not repeat a refusal
+                store.add_log(key, message, at, OP_STAGE_WRITE)
+            continue
+        item = store.item(key) or item
         data = _resume(store, key)
         pending = data.get("pending_stage")
         release = pending if pending and pending.get("release_hold") else None
@@ -591,9 +694,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     _write_stage(forge, store, key, pending["stage"], pending["expected"])
             except Exception as exc:
                 message = f"stage write failed: {exc}"
-                logged = store.log(key)
-                if not logged or logged[-1].message != message:  # retried every pass; log only a change
-                    store.add_log(key, message, at)
+                last = next((entry for entry in reversed(store.log(key)) if entry.kind == OP_STAGE_WRITE), None)
+                if last is None or last.message != message:  # intervening wait logs do not repeat a refusal
+                    store.add_log(key, message, at, OP_STAGE_WRITE)
+    for item in store.items():
+        _deliver_comments(forge, store, item.issue_key, at)
 
     _route_asks(store, policies, model, at, clock)
     if is_dataclass(facts):
@@ -605,15 +710,24 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
     _remember_verified(store, facts)
+    inputs = _planning_inputs(store, items)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
-                             facts=facts, **_planning_inputs(store, items))
+                             facts=facts, **inputs)
+    intents = {key: decision_actions.current_intent(rows) for key, rows in inputs["decisions"].items()}  # what planning saw
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
+    claude_text = (root / "CLAUDE.md").read_text(encoding="utf-8") if (root / "CLAUDE.md").is_file() else ""
     for action in actions:
         key = action.issue_key
+        planned = intents.get(key)
+        if isinstance(action, (reconcile.Dispatch, reconcile.Review)) and _replaced(store, key, planned):
+            continue  # a newer intent arrived since planning; the next pass plans from it
+        op = (OP_MERGE_REFUSED if isinstance(action, reconcile.Merge)
+              else OP_WORKER_RUN if isinstance(action, (reconcile.Dispatch, reconcile.Review)) else "")
         try:
+            _sync_decisions_with_action(store, key, action)
             stage = None
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"
@@ -621,6 +735,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
+                agent_name = worker.agent_for(claude_text, policies.personas.get(persona or policies.stages[stage].persona),
+                                              worker.stage_defaults(root, claude_text, stage))
                 launch_failed = False
 
                 def start():
@@ -664,12 +780,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
-                                agent_type=persona, runtime="claude")
+                                agent_type=agent_name, runtime="claude")
                 except BaseException:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
-                                             runtime="claude", agent_type=persona)
+                                             runtime="claude", agent_type=agent_name)
                     # A rejected claim or failed launch leaves no segment. A crash
                     # after a durable claim must keep the route for recovery.
                     # #750 ruling 2: a failed launch keeps _fail_start's stage move and hold, whose pending_stage
@@ -682,10 +798,12 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     raise
                 _clear_waived_gates(store, key)
                 _clear_interrupt(store, key, "limit", scope={"stage": stage})
+                if planned is not None:
+                    # The intent's worker launched: a re-route is done, and a reversal's done phase is its restart.
+                    _settle(store, key, decision_actions.advance, planned.intent_id, stage, action.attempt)
                 if isinstance(action, reconcile.Dispatch) and stage == _workflow_for(policies, store, by_key[key]).start:
                     for rev in decision_actions.restarted(store.decisions(key), stage, action.attempt):
-                        store.add_decision(key, topic=rev.topic, question=rev.question,
-                                           answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
+                        trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
@@ -715,6 +833,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
                 kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
                 _interrupt(store, key, kind, action.reason, at, scope={"stage": action.stage})
+                if isinstance(action, reconcile.Escalate) and planned is not None and planned.intent == "run":
+                    # A spent retry limit blocks the intent's own decision, which keeps holding the issue.
+                    _settle(store, key, decision_actions.block, planned.intent_id, action.reason)
                 if isinstance(action, reconcile.Escalate):
                     # A permanent refusal or exhausted budget ends automatic release; removing the
                     # hold later works without editing the engine's resume records.
@@ -725,13 +846,20 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if last != message:
                     store.add_log(key, message, at)
             if stage is not None and stage != stages[key]:
-                data = _resume(store, key)
-                data["pending_stage"] = {"stage": stage, "expected": stages[key]}
-                store.set_resume(key, data)
-                _write_stage(forge, store, key, stage, stages[key])
+                op = OP_STAGE_WRITE
+                pending = {"stage": stage, "expected": stages[key]}  # the engine's own move: it names no decision
+                with store.transaction():
+                    # A board intent accepted during the action owns the stage; the engine's own route to it does not.
+                    queued = _resume(store, key).get("pending_stage")
+                    mine = ((not queued or queued.get("stage") == stage)
+                            and decision_actions.current_intent(store.decisions(key)) is None)
+                    if mine:
+                        store.update_resume(key, lambda data: data.__setitem__("pending_stage", pending))
+                if mine:
+                    _write_stage(forge, store, key, stage, stages[key])
         except Exception as exc:
             if not isinstance(exc, HoldReleaseFailed):
-                store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
+                store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at, op)
     for item in store.items():
         workflow, state = _workflow_for(policies, store, item), _resume(store, item.issue_key)
         passed = reconcile.passed_gates(workflow, policies, state.get("room"), now, state.get("waived_gates") or ())
@@ -740,6 +868,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                  if item.forge_state == "closed" and item.merge_state == "merged"
                  and reconcile.completion_wait(item.issue_key, facts) is None
                  and not any(segment.ended_at is None for segment in store.segments(item.issue_key))}
+    try:
+        notify.sync_workspace(root, now)
+    except Exception as exc:
+        print(f"engine: exception pings failed: {exc}", file=sys.stderr)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True,
                        completed=completed):
         raise RuntimeError("cleanup failed; see the issue logs")

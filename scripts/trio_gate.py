@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
-from decision_actions import DecisionUpdate, exhaust_retry, identity, preserve_ask_link, retryable_failure
+from decision_actions import DecisionUpdate, exhaust_retry, human_answer, identity, preserve_ask_link, retryable_failure
 from model_port import Failure, Model, Reply, Request
 from policy import Persona, Policy, PolicyError
 
@@ -85,9 +85,19 @@ def _verdict(persona: Persona, got: Reply | Failure, options: tuple[str, ...]) -
     return {"persona": persona.name, "vote": "concern", "choice": None, "reasoning": reasoning}
 
 
-def record(store: Any, key: str, update: DecisionUpdate) -> None:
-    """One writer for a trio result, including an unavailable consultation."""
-    store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record)
+def record(store: Any, key: str, update: DecisionUpdate) -> Any | None:
+    """The one writer of decision rows: a trio result, an unavailable consultation, a board intent and the engine's
+    transitions. Human answer wins: a row a person did not write never lands over a person's answer, which is
+    returned instead, the check and the append under one write lock."""
+    won = []
+
+    def person_first(rows: list) -> Any | None:
+        won.append(human_answer(rows, update))
+        return won[-1]
+
+    store.add_decision(key, update.topic, update.question, update.answer, update.decided_by, update.record,
+                       unless=person_first if update.decided_by != "user" else None)
+    return won[-1] if won else None
 
 
 def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any,
@@ -112,7 +122,9 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
         update = DecisionUpdate(update.topic, update.question, update.answer, "",
                                 {**update.record, "failures": failures + 1})
         update = exhaust_retry(update, failures + 1) or update
-    record(store, decision.issue_key, update)
+    human = record(store, decision.issue_key, update)
+    if human is not None:  # a person answered while the trio was consulting
+        return Outcome(human.answer, True)
     return Outcome(update.answer, unanimous and not hold,
                    "" if unanimous and not hold else str(update.record.get("error") or decision.question))
 

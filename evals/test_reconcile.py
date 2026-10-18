@@ -92,6 +92,57 @@ class ReconcileTest(unittest.TestCase):
         return reconcile.plan([item], {item.issue_key: history}, self.p, {}, slots, NOW,
                               {} if findings is None else {item.issue_key: findings}, **kwargs)
 
+    def test_merge_waits_for_answered_but_blocked_decision(self):
+        from types import SimpleNamespace
+        dec = SimpleNamespace(topic="scope", question="Choose", answer="Yes", decided_by="user", record={},
+                              status="blocked", blocked_reason="conflict")
+        actions = self.plan(replace(Item(), stage="merge", review_state="approved", merge_state="ready"),
+                            history=[Segment("review")], findings={}, decisions={KEY: [dec]})
+        self.assertEqual(actions, [reconcile.Wait(KEY, "decision pending")])
+
+    def intent(self, stage, phase="run", status="re-routed"):
+        from types import SimpleNamespace
+        return {KEY: [SimpleNamespace(id=1, topic="scope", question="Back?", answer="Back", decided_by="user", record={},
+                                      status=status, rerouted_to=stage, intent=phase)]}
+
+    def test_a_pending_run_intent_obeys_the_human_hold(self):
+        self.assertEqual(self.plan(replace(Item(), human_review=True), history=[Segment("implement")],
+                                   decisions=self.intent("implement")), [reconcile.Wait(KEY, "human review")])
+
+    def test_a_pending_run_intent_to_review_plans_the_review(self):
+        self.assertEqual(self.plan(replace(Item(), stage="review"), history=[Segment("implement")],
+                                   decisions=self.intent("review")), [reconcile.Review(KEY, 1)])
+
+    def test_a_run_intent_waits_for_the_engine_to_write_its_stage(self):
+        self.assertEqual(self.plan(history=[Segment("implement")], decisions=self.intent("review")),
+                         [reconcile.Wait(KEY, "re-route pending")])
+
+    def test_a_pending_run_intent_takes_the_next_attempt_and_stops_at_the_retry_limit(self):
+        history = [Segment("implement", 1, outcome="failed"), Segment("implement", 2, outcome="failed")]
+        self.assertEqual(self.plan(history=history[:1], decisions=self.intent("implement")),
+                         [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        tired = [Segment("implement", n, outcome="done") for n in range(1, 6)]
+        self.assertEqual(self.plan(history=tired, decisions=self.intent("implement")),
+                         [reconcile.Escalate(KEY, "retry limit reached for implement")])
+
+    def test_a_write_intent_or_a_blocked_intent_holds_its_issue_at_every_stage(self):
+        for stage in ("implement", "review", "merge"):
+            for phase, status in (("write", "re-routed"), ("run", "blocked")):
+                with self.subTest(stage=stage, phase=phase):
+                    self.assertEqual(self.plan(replace(Item(), stage=stage), history=[Segment(stage)],
+                                               decisions=self.intent("implement", phase, status)),
+                                     [reconcile.Wait(KEY, "re-route pending")])
+
+    def test_a_finished_intent_holds_nothing(self):
+        self.assertEqual(self.plan(history=[Segment("implement")], decisions=self.intent("implement", "")),
+                         [reconcile.Review(KEY, 1)])
+
+    def test_an_intent_holds_only_its_own_issue(self):
+        other = "github:example/project#2"
+        actions = reconcile.plan([Item(), Item(issue_key=other)], {KEY: [Segment("implement")], other: [Segment("implement")]},
+                                 self.p, {}, 4, NOW, {}, decisions=self.intent("implement", "write"))
+        self.assertEqual(actions, [reconcile.Wait(KEY, "re-route pending"), reconcile.Review(other, 1)])
+
     def test_closed_items_and_any_running_segment_get_no_actions(self):
         self.assertEqual(self.plan(replace(Item(), forge_state="closed")), [])
         self.assertEqual(self.plan(history=[Segment("review", ended_at=None)]), [])

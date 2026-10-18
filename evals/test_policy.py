@@ -230,9 +230,22 @@ class FieldTest(unittest.TestCase):
         self.assertTrue(all(shipped.personas[n].agent is None for n in shipped.base.trio))
 
     def test_a_trio_is_three_distinct_known_personas(self):
-        for trio in ('["reviewer", "architect"]', '["reviewer", "reviewer", "architect"]', '["reviewer", "architect", "ghost"]'):
+        for trio in ('["reviewer", "designer"]', '["reviewer", "reviewer", "designer"]', '["reviewer", "designer", "ghost"]'):
             with self.subTest(trio=trio):
                 refused(self, BASE.replace('trio = ["reviewer", "designer", "implementer"]', f"trio = {trio}"), "trio")
+
+    def test_the_architect_is_never_a_trio_member(self):
+        # Section 6: the architect is a standing session the engine never starts; the trio would launch it.
+        refused(self, BASE.replace('"designer", "implementer"]', '"architect", "implementer"]', 1), "architect")
+        refused(self, BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["architect", "reviewer", "designer"] }\n'),
+                "architect")
+        refused(self, BASE.replace("[rooms.lab]\n", '[rooms.lab]\n[rooms.lab.policy]\ntrio = ["architect", "reviewer", "designer"]\n'),
+                "architect")
+
+    def test_the_shipped_policy_has_no_architect_in_its_trio(self):
+        got = settings.load_policy().resolve()
+        self.assertEqual(len(got.trio), 3)
+        self.assertNotIn("architect", got.trio)
 
     def test_the_trio_map_takes_a_topic_tag_to_three_personas(self):
         got = parse(BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["designer", "reviewer", "implementer"] }\n'))
