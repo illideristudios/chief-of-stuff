@@ -13,6 +13,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import claude_adapter
@@ -157,6 +158,63 @@ def classify(runtime: str, exit_code: int, stdout: str, stderr: str) -> Reply | 
     if exit_code == 127:
         return Failure("missing_program", f"{runtime}: {stderr.strip()[-300:] or 'command not found'}")
     return Failure("unknown", f"{runtime} exited {exit_code}: {(stderr or stdout).strip()[-300:]}")
+
+
+def _structured(runtime: str, stdout: str, out: Path) -> object:
+    """The answer each host gives a schema: Codex writes it to `-o`, agy returns `structured_output`, Cursor ends its
+    result text with it."""
+    if runtime == "codex":
+        return json.loads(out.read_text()) if out.is_file() else None
+    envelope = json.loads(stdout)
+    if runtime == "agy":
+        return envelope.get("structured_output") if envelope.get("status") == "SUCCESS" else None
+    if envelope.get("is_error"):
+        return None
+    text, decoder, found = str(envelope.get("result") or ""), json.JSONDecoder(), None
+    for start in (i for i, ch in enumerate(text) if ch == "{"):
+        try:
+            value, _ = decoder.raw_decode(text[start:])
+        except ValueError:
+            continue
+        found = value if isinstance(value, dict) else found
+    return found
+
+
+def judge(request: Request) -> Reply | Failure:
+    """A read-only judgement call on Codex, Cursor or agy, the trio's port for those hosts (§6, #879). It runs in a
+    fresh empty directory under the host's read-only mode, with no engine channel and no write access."""
+    entry = runtimes.get(request.runtime) if request.runtime in HOSTS else None
+    if entry is None or not entry.judge_argv:
+        return Failure("missing_program", f"{request.runtime or 'this host'} has no read-only judgement mode")
+    binary = resolve(entry.binary)
+    if not binary:
+        return Failure("missing_program", f"`{entry.binary}` is not on the login shell's PATH")
+    schema = json.dumps(request.schema or {"type": "object"})
+    with tempfile.TemporaryDirectory(prefix="cos-judge-") as tmp:
+        (Path(tmp) / "schema.json").write_text(schema)
+        out = Path(tmp) / "answer.json"
+        fill = {"cwd": tmp, "schema": str(Path(tmp) / "schema.json"), "out": str(out), "schema_text": schema}
+        prompt = f"{request.prompt}\nAnswer with only one JSON object matching this schema: {schema}"
+        argv = [binary, *(token.format(**fill) for token in entry.judge_argv),
+                *(["--model", request.model] if request.model else []), *entry.effort_tokens(request.effort),
+                f"{entry.judge_prompt}{prompt}"]
+        try:
+            done = subprocess.run(login_argv(argv), capture_output=True, text=True, stdin=subprocess.DEVNULL, cwd=tmp,
+                                  timeout=request.timeout_s, env=claude_adapter.model_env())
+        except subprocess.TimeoutExpired:
+            return Failure("unknown", f"{request.runtime} timed out after {request.timeout_s}s")
+        except (OSError, ShellError) as exc:
+            return Failure("missing_program", f"{request.runtime}: {exc}")
+        got = classify(request.runtime, done.returncode, done.stdout, done.stderr)
+        if isinstance(got, Failure):
+            return got
+        try:
+            data = _structured(request.runtime, done.stdout, out)
+        except (ValueError, OSError, AttributeError) as exc:
+            return Failure("error", f"{request.runtime} gave no readable answer: {exc}")
+    if data is None:
+        return Failure("error", f"{request.runtime} gave no structured answer")
+    return Reply(text=done.stdout[-4000:], data=data, session_id="", cost_usd=0.0, num_turns=1)
 
 
 def branch_heads(tree: Path, branches) -> dict[str, str]:
