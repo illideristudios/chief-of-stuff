@@ -1,8 +1,8 @@
 # What the suite assumes of its host: Python 3.14 with requirements.txt installed, git, ps, a zsh login shell, an installed claude,
-# and an `agy` on PATH (a stand-in: the suite resolves it and never runs it).
+# an `agy` on PATH (a stand-in: the suite resolves it and never runs it), and node for the page reload check (#337, #855).
 FROM python:3.14-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends git zsh procps curl ca-certificates \
+    && apt-get install -y --no-install-recommends git zsh procps curl ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/zsh ci
 COPY --chmod=755 .github/ci/agy /usr/local/bin/agy
