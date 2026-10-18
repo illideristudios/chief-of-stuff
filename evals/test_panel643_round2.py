@@ -10,11 +10,21 @@ from urllib.parse import urlencode
 
 from evals import test_m6_store_board as fixtures
 from evals import test_notify as notices
+import decision_actions as da
 import notify
 import pages
 import reconcile
 
 KEY, NOW = fixtures.KEY, fixtures.NOW
+
+
+def current(db, row):
+    """A decision's state: its identity's latest row (rows are append-only)."""
+    return da.state_of(da.latest(db.decisions(row.issue_key))[da.identity(row)])
+
+
+def decide(db, key, topic, question, answer=None, **record):
+    return db.add_decision(key, topic, question, answer, "user", record)
 
 
 class BoardPostTest(unittest.TestCase):
@@ -41,51 +51,49 @@ class BoardPostTest(unittest.TestCase):
         fg = mock.Mock()
         self.assertEqual(self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, fg), 303)
         fg.write_stage.assert_not_called()
-        saved = self.db.decisions(KEY)[-1]
-        self.assertNotEqual(saved.id, dec.id)
+        saved = current(self.db, dec)
+        self.assertNotEqual(saved.id, dec.id)  # appended, never updated in place
         self.assertEqual((saved.status, saved.rerouted_to, saved.intent), ("re-routed", "implement", "write"))
-        self.assertEqual((self.db.decision(dec.id).status, self.db.decision(dec.id).superseded_by), ("superseded", saved.id))
         self.assertEqual(self.db.item(KEY).stage, "review")
-        self.assertEqual(set(self.db.resume(KEY)), {"decision_comments"})
+        self.assertIsNone(self.db.resume(KEY))  # the page server writes only its row
 
     def test_a_reverse_appends_a_run_intent_and_closes_nothing_else(self):
-        held = self.db.add_decision(KEY, "design", "Choose A")
-        self.db.answer_decision(held.id, "Back", status="blocked", blocked_reason="retry limit reached",
-                                rerouted_to="implement", intent="run")
-        answered = self.db.add_decision(KEY, "scope", "Choose B")
-        self.db.answer_decision(answered.id, "Yes", status="answered")
+        held = decide(self.db, KEY, "design", "Choose A", "Back", status="blocked", blocked_reason="retry limit reached",
+                      rerouted_to="implement", intent="run")
+        answered = decide(self.db, KEY, "scope", "Choose B", "Yes", status="answered")
         self.assertEqual(self.post({"decision_id": answered.id, "action": "reverse", "answer": "No"}, mock.Mock()), 303)
-        saved = self.db.decisions(KEY)[-1]
-        self.assertEqual((saved.status, saved.answer, saved.intent), ("reversed", "No", "run"))
+        saved = current(self.db, answered)
+        self.assertEqual((saved.status, saved.note, saved.intent), ("reversed", "No", "run"))
         self.assertTrue(saved.rerouted_to)
         # Choosing the one current intent is the engine's job; the page server leaves the blocked one as it was.
-        self.assertEqual((self.db.decision(held.id).status, self.db.decision(held.id).intent), ("blocked", "run"))
+        self.assertEqual((current(self.db, held).status, current(self.db, held).intent), ("blocked", "run"))
 
     def test_a_settled_intent_cannot_be_re_routed_again(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         self.assertEqual(self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "implement"}, mock.Mock()), 303)
         pending = self.db.decisions(KEY)[-1]
-        self.assertEqual(pending.intent, "write")
+        self.assertEqual(current(self.db, pending).intent, "write")
         # An unapplied intent can still be replaced; once the engine has applied it, it is settled and cannot.
-        self.db.answer_decision(pending.id, pending.answer, status="re-routed", rerouted_to="implement", intent="")
-        self.assertEqual(self.post({"decision_id": pending.id, "action": "reroute", "target_stage": "review"}, mock.Mock()), 409)
-        self.assertEqual(self.post({"decision_id": pending.id, "action": "reverse", "answer": "No"}, mock.Mock()), 409)
-        self.assertEqual(self.db.decisions(KEY)[-1].id, pending.id)
+        settled = decide(self.db, KEY, "design", "Choose", pending.answer, status="re-routed", rerouted_to="implement")
+        self.assertEqual(self.post({"decision_id": settled.id, "action": "reroute", "target_stage": "review"}, mock.Mock()), 409)
+        self.assertEqual(self.post({"decision_id": settled.id, "action": "reverse", "answer": "No"}, mock.Mock()), 409)
+        self.assertEqual(self.db.decisions(KEY)[-1].id, settled.id)
 
     def test_a_target_with_no_worker_is_refused_before_anything_is_written(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         fg = mock.Mock()
         self.assertEqual(self.post({"decision_id": dec.id, "action": "reroute", "target_stage": "merge"}, fg), 400)
         fg.write_stage.assert_not_called()
-        self.assertEqual(self.db.decision(dec.id).status, "open")
+        self.assertEqual(current(self.db, dec).status, "open")
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
         self.assertNotIn("pending_stage", self.db.resume(KEY) or {})
 
-    def test_comments_are_queued_for_the_engine_not_sent_from_the_post(self):
+    def test_comments_are_left_on_the_row_for_the_engine_not_sent_from_the_post(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         fg = mock.Mock()
         self.assertEqual(self.post({"decision_id": dec.id, "answer": "Yes"}, fg), 303)
         fg.comment.assert_not_called()
-        queued = self.db.resume(KEY)["decision_comments"]
+        queued = da.pending_comments(self.db.decisions(KEY), ())
         self.assertEqual(len(queued), 1)
         self.assertIn("answered by user: Yes", queued[0])
 
@@ -112,12 +120,12 @@ class NotificationRecoveryTest(unittest.TestCase):
     def test_a_later_worker_success_does_not_hide_a_queued_comment_failure(self):
         w = self.ws()
         w.db.upsert_item(notices.KEY)
-        w.db.set_resume(notices.KEY, {"decision_comments": ["Decision #1 answered"]})
+        decide(w.db, notices.KEY, "design", "Back?", "Yes", status="answered", comment="Decision #1 answered")
         w.db.add_log(notices.KEY, "decision comment failed: offline", notices.NOW.isoformat(), kind=reconcile.OP_DECISION_COMMENT)
         later = notices.NOW + timedelta(minutes=5)
         self.recovered(w, later)
         self.assertEqual(len(self.rows(w, later)), 1)
-        w.db.set_resume(notices.KEY, {})
+        w.db.set_resume(notices.KEY, {"decision_comments_sent": ["Decision #1 answered"]})
         self.assertEqual(self.rows(w, later), [])
 
     def test_a_stage_write_failure_lasts_until_no_write_is_pending(self):
@@ -135,12 +143,12 @@ class NotificationRecoveryTest(unittest.TestCase):
         w = self.ws()
         w.db.upsert_item(notices.KEY)
         w.db.add_log(notices.KEY, "stage write failed: offline", notices.NOW.isoformat(), kind=reconcile.OP_STAGE_WRITE)
-        dec = w.db.add_decision(notices.KEY, "design", "Back?")
-        w.db.answer_decision(dec.id, "Back", status="re-routed", rerouted_to="fix", intent="write")
+        dec = decide(w.db, notices.KEY, "design", "Back?", "Back", status="re-routed", rerouted_to="fix", intent="write")
         later = notices.NOW + timedelta(minutes=5)
         self.recovered(w, later)
         self.assertEqual(len(self.rows(w, later)), 1)
-        w.db.answer_decision(dec.id, "Back", status="re-routed", rerouted_to="fix", intent="run")
+        decide(w.db, notices.KEY, "design", "Back?", "Back", status="re-routed", rerouted_to="fix", intent="run",
+               intent_id=dec.id)
         self.assertEqual(len(self.rows(w, later)), 1)  # a run intent whose stage is not written has its write to do too
         w.db.upsert_item(notices.KEY, stage="fix")
         self.assertEqual(self.rows(w, later), [])

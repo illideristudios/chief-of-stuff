@@ -742,6 +742,15 @@ class Page(unittest.TestCase):
         self.assertIn(".panels-head,.panels-tiles,.panels{--panels-ink:var(--fg)", css)
         self.assertIn('[data-kind="approved"]{--k:var(--stage-review)}', css)
 
+    def test_board_supplies_every_token_used_by_the_panel_layout(self) -> None:
+        required = set(re.findall(r"var\(--panels-([a-z-]+)\)", panels.BASE_CSS))
+        self.assertTrue(required)
+        self.assertEqual(required - rb.PANEL_TOKENS.keys(), set())
+        css = self.html.split("<style>", 1)[1].split("</style>", 1)[0]
+        for name in required:
+            with self.subTest(token=name):
+                self.assertIn(f"--panels-{name}:{rb.PANEL_TOKENS[name]}", css)
+
     def test_the_clocks_tick_every_second_with_seconds(self) -> None:
         script = self.html.split("<script>", 1)[1]
         self.assertIn("setInterval(tick,1000)", script)

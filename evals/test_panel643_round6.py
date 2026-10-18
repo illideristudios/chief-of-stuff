@@ -1,7 +1,7 @@
 """Round-six lifecycle regressions: one status vocabulary, read only by `state_of`."""
 import unittest
 
-from evals import test_decision_actions as decisions
+from evals import test_board_decisions as decisions
 import decision_actions as da
 import reconcile
 
@@ -17,11 +17,11 @@ class VocabularyTest(unittest.TestCase):
                 da.answer(record, "Discard reversal")
 
     def test_a_blocked_intent_has_one_status_and_cannot_restore_as_an_answer(self):
-        row = decisions.make_decision(status="reversed", answer="Redo", rerouted_to="implement", intent="run")
-        blocked = da.block([row], row.id, "retry limit reached").decision
+        rows = [decisions.make_decision(status="reversed", answer="Redo", rerouted_to="implement", intent="run")]
+        blocked = da.state_of(decisions.appended(rows, da.block(rows, rows[0].id, "retry limit reached")))
         self.assertEqual((blocked.status, da.state_of(blocked).status), ("blocked", "blocked"))
-        self.assertIsNone(da.meet_action(blocked, reconcile.Dispatch(decisions.KEY, "implement", "builder", 1)).store_write)
-        self.assertEqual(da.restore_held([blocked]), [])
+        self.assertIsNone(da.meet_action(blocked, reconcile.Dispatch(decisions.KEY, "implement", "builder", 1)).update)
+        self.assertEqual(da.restore_held(rows), [])
         with self.assertRaises(ValueError):
             da.answer(blocked, "Discard reversal")
 

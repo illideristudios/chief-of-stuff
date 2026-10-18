@@ -1,7 +1,7 @@
 """The issue-keyed store: one row per forge issue, written by upsert only.
 
 The forge is the source of truth. The forge-owned columns of a `WorkItem` (title, stage, forge/review/merge state, and the
-human-review flag when kanban is configured) are a cache `sync_from_forge` can rebuild; segments, decisions, ownership, log,
+human-review flag when kanban is configured) and declared file ownership are rebuildable; segments, decisions, tree ownership, log,
 and resume are the engine's own and are never touched by a sync. Omitted snapshot fields keep their stored values.
 The schema lives in `migrations/`, not in `create_all`: `migrate` is the one place
 it changes, and a test holds these models to what the migrations build.
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sqlite3
 from contextlib import closing, contextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -57,6 +58,7 @@ class Segment(Base):
     started_at: Mapped[str] = mapped_column(String)
     ended_at: Mapped[str | None] = mapped_column(String, nullable=True)
     outcome: Mapped[str | None] = mapped_column(String, nullable=True)
+    required_human_review: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
     runtime: Mapped[str] = mapped_column(String, default="", server_default="")
     model: Mapped[str] = mapped_column(String, default="", server_default="")
     effort: Mapped[str] = mapped_column(String, default="", server_default="")
@@ -129,7 +131,7 @@ class Ownership(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"))
     path: Mapped[str] = mapped_column(String)
-    mode: Mapped[str] = mapped_column(String, default="write")  # "write" or "read"
+    mode: Mapped[str] = mapped_column(String, default="write")  # "write", "read", or engine-owned "tree"
 
 
 class LogEntry(Base):
@@ -162,6 +164,7 @@ class Report(WorkerRecord, Base):
     outcome: Mapped[str] = mapped_column(String)
     summary: Mapped[str] = mapped_column(String)
     findings: Mapped[list[dict[str, Any]]] = mapped_column(JSON)
+    suite: Mapped[Any] = mapped_column(JSON, nullable=True)
 
     @property
     def status(self) -> str:
@@ -184,12 +187,30 @@ class Ask(WorkerRecord, Base):
     answer: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
-def _config(path: Path | str) -> Config:
+def _run_result(data: dict, stage: str, attempt: int, outcome: str, ended_at: str) -> None:
+    """Record the review stage's collected result. Other stages leave runs unchanged."""
+    runs = data.get("runs")
+    record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+    if isinstance(record, dict) and stage == "review":
+        record["result"] = {"reviewed_head": record.get("reviewed_head"),
+                            "outcome": outcome, "ended_at": ended_at}
+
+
+def migration_config(path: Path | str, metadata, versions: Path | None = None) -> Config:
+    """Shared Alembic environment; separate databases supply their own metadata and revisions."""
     cfg = Config()
     cfg.set_main_option("script_location", str(Path(__file__).with_name("migrations")))
-    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}")
-    cfg.attributes["metadata"] = Base.metadata
+    cfg.set_main_option("path_separator", "os")
+    # ConfigParser interpolates percent signs; escape literal URL characters.
+    cfg.set_main_option("sqlalchemy.url", f"sqlite:///{path}".replace("%", "%%"))
+    if versions is not None:
+        cfg.set_main_option("version_locations", str(versions))
+    cfg.attributes["metadata"] = metadata
     return cfg
+
+
+def _config(path: Path | str) -> Config:
+    return migration_config(path, Base.metadata)
 
 
 def is_current(path: Path | str) -> bool:
@@ -310,6 +331,8 @@ class Store:
         done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome), ("runtime", runtime),
                                   ("model", model), ("effort", effort), ("agent_type", agent_type))
                 if v is not None}
+        if outcome == "human_review":
+            done["required_human_review"] = True
         self._upsert(Segment, ("issue_key", "stage", "attempt"),
                      {"issue_key": issue_key, "stage": stage, "attempt": attempt, "started_at": started_at, **done})
         if runner is not None:
@@ -325,17 +348,42 @@ class Store:
             self.update_resume(issue_key, note)
 
     def end_segment(self, issue_key: str, stage: str, attempt: int, ended_at: str, outcome: str) -> None:
-        """Complete only an existing open segment, without altering its start or actor."""
+        """Atomically complete an open segment, preserving start and actor.
+
+        A review also records its collected result. Other stages do not.
+        """
         with self.session() as s:
-            s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
-                                           Segment.attempt == attempt, Segment.ended_at.is_(None))
-                      .values(ended_at=ended_at, outcome=outcome))
+            changed = s.execute(update(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
+                                                     Segment.attempt == attempt, Segment.ended_at.is_(None))
+                                .values(ended_at=ended_at, outcome=outcome,
+                                        **({"required_human_review": True} if outcome == "human_review" else {})))
+            resume = s.get(Resume, issue_key)
+            if changed.rowcount and resume is not None and isinstance(resume.data, dict):
+                data = deepcopy(resume.data)
+                _run_result(data, stage, attempt, outcome, ended_at)
+                resume.data = data
 
     def drop_segment(self, issue_key: str, stage: str, attempt: int) -> None:
         """Remove a segment that never started (a reservation whose launch failed)."""
         with self.session() as s:
             s.execute(delete(Segment).where(Segment.issue_key == issue_key, Segment.stage == stage,
                                             Segment.attempt == attempt))
+
+    def segment_runs(self) -> list[tuple[str, str, int, str | None, Any]]:
+        """Each segment's issue, stage, attempt, end time, and resume run entry (or None)."""
+        with self.session() as s:
+            rows = s.execute(select(Segment.issue_key, Segment.stage, Segment.attempt, Segment.ended_at, Resume.data)
+                             .outerjoin(Resume, Resume.issue_key == Segment.issue_key)
+                             .order_by(Segment.id)).all()
+        out = []
+        for key, stage, attempt, ended, data in rows:
+            entry = None
+            if isinstance(data, dict):
+                runs = data.get("runs")
+                if isinstance(runs, dict):
+                    entry = runs.get(f"{stage}-{attempt}")
+            out.append((key, stage, attempt, ended, entry))
+        return out
 
     def segments(self, issue_key: str | None = None) -> list[Segment]:
         stmt = select(Segment).order_by(Segment.id)
@@ -361,7 +409,22 @@ class Store:
     def ownership(self, issue_key: str) -> list[Ownership]:
         return self._all(select(Ownership).where(Ownership.issue_key == issue_key).order_by(Ownership.path))
 
-    # decisions and log
+    def replace_file_ownership(self, issue_key: str, scopes: list[tuple[str, str]]) -> None:
+        """Replace the forge's declaration atomically, retaining engine worktree registrations.
+
+        Older workers registered absolute tree paths as write rows; adopt those as tree rows too.
+        Declared file paths are always repository-relative.
+        """
+        with self.session() as s:
+            for row in s.scalars(select(Ownership).where(Ownership.issue_key == issue_key)).all():
+                if row.mode == "tree" or Path(row.path).is_absolute():
+                    row.mode = "tree"
+                else:
+                    s.delete(row)
+            s.flush()
+            s.add_all(Ownership(issue_key=issue_key, path=path, mode=mode) for path, mode in scopes)
+
+    # decisions and log (append-only)
     def add_decision(self, issue_key: str, topic: str, question: str, answer: str | None = None,
                      decided_by: str = "", record: Any = None, *,
                      asked_at: str | None = None, created_at: str | None = None) -> Decision:
@@ -380,58 +443,6 @@ class Store:
             if row is not None:
                 s.expunge(row)
             return row
-
-    def record_trio(self, decision_id: int, answer: str | None, decided_by: str, record: dict) -> None:
-        with self.session() as s:
-            row = s.get(Decision, decision_id)
-            if row is None or row.status != "open" or row.answer:
-                return  # A person answered while the model was consulting.
-            row.answer = answer
-            row.decided_by = decided_by
-            row.record = record
-
-    def answer_decision(self, decision_id: int, answer: str, *, decided_by: str = "user",
-                        answered_at: str | None = None, status: str = "answered",
-                        blocked_reason: str = "", rerouted_to: str = "", intent: str = "",
-                        superseded_by: int = 0) -> Decision | None:
-        stamp = answered_at or self._stamp()
-        with self.session() as s:
-            row = s.get(Decision, decision_id)
-            if row is None:
-                return None
-            rec = dict(row.record) if isinstance(row.record, dict) else ({"prior": row.record} if row.record is not None else {})
-            rec["status"] = status
-            rec["answered_at"] = stamp
-            if blocked_reason:
-                rec["blocked_reason"] = blocked_reason
-            else:
-                rec.pop("blocked_reason", None)
-            if rerouted_to:
-                rec["rerouted_to"] = rerouted_to
-            for name, value in (("intent", intent), ("superseded_by", superseded_by)):
-                if value:
-                    rec[name] = value
-                else:
-                    rec.pop(name, None)
-            row.answer = answer
-            row.decided_by = decided_by
-            row.record = rec
-            s.flush()
-            s.expunge(row)
-            return row
-
-    def update_decision(self, write: Any) -> Decision | None:
-        return self.answer_decision(
-            int(write.decision_id),
-            str(write.answer or ""),
-            decided_by=str(write.decided_by or ""),
-            answered_at=write.answered_at,
-            status=str(write.status or "answered"),
-            blocked_reason=str(getattr(write, "blocked_reason", "") or ""),
-            rerouted_to=str(getattr(write, "rerouted_to", "") or ""),
-            intent=str(getattr(write, "intent", "") or ""),
-            superseded_by=int(getattr(write, "superseded_by", 0) or 0),
-        )
 
     def decisions(self, issue_key: str | None = None) -> list[Decision]:
         stmt = select(Decision).order_by(Decision.id)
@@ -472,13 +483,35 @@ class Store:
             mutate(data)
             self.set_resume(issue_key, data)
 
+    def finish_suite_hold(self, issue_key: str, *, accept: bool) -> None:
+        """Atomically retire the hold, optionally accepting its segment.
+
+        Accepting a review records that collected result as done. Other stages only change the
+        segment outcome. The Use Case decides when this transition is allowed. Keep the historical
+        review marker and actor/timing fields when accepting; callers never edit the worker result layout.
+        """
+        with self.session() as s:
+            resume = s.get(Resume, issue_key)
+            data = deepcopy(resume.data)
+            hold = data.pop("suite_hold")
+            if accept:
+                segment = s.scalar(select(Segment).where(Segment.issue_key == issue_key,
+                                   Segment.stage == hold["stage"], Segment.attempt == hold["attempt"]))
+                if segment is None:
+                    raise ValueError("suite hold segment not found")
+                _run_result(data, segment.stage, segment.attempt, "done", segment.ended_at)
+                segment.outcome = "done"
+                segment.required_human_review = True
+            # Assign a fresh object so SQLAlchemy persists the nested JSON transition.
+            resume.data = data
+
     # Worker reports are append-only, including late reports from older attempts.
     def add_report(self, issue_key: str, stage: str, attempt: int, session_id: str,
-                   outcome: str, summary: str, findings: list[dict[str, Any]],
+                   outcome: str, summary: str, findings: list[dict[str, Any]], suite: Any = None,
                    *, created_at: str | None = None) -> int:
         with self.session() as s:
             row = Report(issue_key=issue_key, stage=stage, attempt=attempt, session_id=session_id,
-                         outcome=outcome, summary=summary, findings=findings,
+                         outcome=outcome, summary=summary, findings=findings, suite=suite,
                          created_at=created_at or self._stamp())
             s.add(row)
             s.flush()
@@ -507,6 +540,16 @@ class Store:
                 stmt = stmt.where(getattr(Report, key) == value)
         return self._all(stmt.order_by(Report.attempt, Report.id))
 
+    def segment_reports(self, issue_key: str, stage: str, attempt: int) -> list[Report]:
+        """Reports for this segment's recorded worker session, in insertion order."""
+        data = self.resume(issue_key)
+        runs = data.get("runs") if isinstance(data, dict) else None
+        record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+        session = record.get("session_id") if isinstance(record, dict) else None
+        if not isinstance(session, str) or not session:
+            return []
+        return self.reports(issue_key, stage=stage, attempt=attempt, session_id=session)
+
     def add_ask(self, issue_key: str, stage: str, attempt: int, session_id: str,
                 question: str, options: list[str], context: str) -> int:
         with self.session() as s:
@@ -521,6 +564,21 @@ class Store:
         if issue_key is not None:
             stmt = stmt.where(Ask.issue_key == issue_key)
         return self._all(stmt)
+
+    def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
+        """An operator's or the trio's adopted answer, bound to the named issue; worker tools never expose this write.
+        An answer outside the ask's options, or a second answer, is refused (#750)."""
+        if not isinstance(answer, str) or not answer.strip():
+            raise ValueError("an ask answer must not be empty")
+        with self.session() as s:
+            row = s.get(Ask, ask_id)
+            if row is None or row.issue_key != issue_key:
+                raise KeyError(f"ask {ask_id} does not belong to {issue_key}")
+            if row.answer is not None:
+                raise KeyError(f"ask {ask_id} is already answered")  # #750: a second answer is refused
+            if row.options and answer not in row.options:
+                raise ValueError(f"ask answer {answer!r} is not in options")
+            row.answer = answer
 
     def _all(self, stmt: Any) -> list[Any]:
         with self.session(write=False) as s:

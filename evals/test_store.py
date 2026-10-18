@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -229,6 +230,17 @@ class StoreTest(unittest.TestCase):
         self.store.set_resume(KEY, {"next": "merge", "waiting_on": []})
         self.assertEqual(self.store.resume(KEY), {"next": "merge", "waiting_on": []})
 
+    def test_answer_ask_validates_options_and_single_answer(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        ask_id = self.store.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+        with self.assertRaises(ValueError):
+            self.store.answer_ask(KEY, ask_id, "Rewrite")
+        self.assertIsNone(self.store.asks(KEY)[0].answer)
+        self.store.answer_ask(KEY, ask_id, "Split")
+        self.assertEqual(self.store.asks(KEY)[0].answer, "Split")
+        with self.assertRaises(KeyError):
+            self.store.answer_ask(KEY, ask_id, "Split")
+
     def test_the_store_rebuilds_from_the_forge_and_sync_never_touches_engine_data(self) -> None:
         snapshots = [{"issue_key": KEY, "title": "x", "stage": "review", "forge_state": "open",
                       "review_state": "changes_requested", "merge_state": "blocked"}]
@@ -301,7 +313,7 @@ class MigrationTest(unittest.TestCase):
                "worker implement attempt 1: failed": "worker_run", "review failed: x": "worker_run"}
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.db"
-            command.upgrade(store._config(path), "0003")
+            command.upgrade(store._config(path), "0005")  # the revision before 0006_log_operation
             conn = sqlite3.connect(path)
             conn.execute("insert into work_item (issue_key, title, stage, forge_state, review_state, merge_state, human_review, "
                          "updated_at) values ('o/r#1', '', '', 'open', '', '', 0, '')")
@@ -314,6 +326,19 @@ class MigrationTest(unittest.TestCase):
             kinds = dict(conn.execute("select message, kind from log_entry").fetchall())
             conn.close()
             self.assertEqual(kinds, old)
+    def test_existing_human_review_segments_keep_history_when_schema_is_upgraded(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            store.command.upgrade(store._config(path), "0004")
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("INSERT INTO work_item VALUES (?, '', '', 'open', '', '', 0, '')", (KEY,))
+                for attempt, outcome in enumerate(("human_review", "done"), start=1):
+                    conn.execute("INSERT INTO segment (issue_key, stage, attempt, started_at, ended_at, outcome) "
+                                 "VALUES (?, 'implement', ?, '09:00', '10:00', ?)", (KEY, attempt, outcome))
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            self.assertEqual([s.required_human_review for s in db.segments(KEY)], [True, False])
 
     def test_migrating_twice_is_a_no_op_and_records_the_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

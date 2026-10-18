@@ -29,6 +29,96 @@ from settings import Kanban
 _LOCAL_CLOSE = re.compile(r"#\d+")  # a closing ref for this repository; anything else is qualified or foreign
 
 
+def _blocked_numbers(raw: Any) -> tuple[int, ...] | None:
+    """Open blocker numbers. () when the field names none. None when it is not a complete answer."""
+    if raw is None:
+        return ()
+    if isinstance(raw, dict):
+        nodes = raw.get("nodes")
+        total = raw.get("totalCount")
+        if not isinstance(nodes, list) or (isinstance(total, int) and total != len(nodes)):
+            return None
+    elif isinstance(raw, list):
+        nodes = raw
+    else:
+        return None
+    numbers = []
+    for node in nodes:
+        if not isinstance(node, dict) or type(node.get("number")) is not int:
+            return None
+        state = str(node.get("state", "OPEN")).upper()
+        if state == "CLOSED":
+            continue
+        if state not in ("OPEN", "OPENED"):
+            return None
+        numbers.append(node["number"])
+    return tuple(numbers)
+
+
+def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
+    row, error = _gh_json(forge.gh, ["issue", "list", "-R", forge.home.repo, "--state", "open",
+                                     "--json", "number,blockedBy", "--limit", str(backlog.GH_LIMIT)])
+    if error:
+        raise ForgeError(error)
+    if not isinstance(row, list) or len(row) >= backlog.GH_LIMIT:
+        raise ForgeError("issue list is not a complete list")
+    out: dict[str, tuple[str, ...]] = {}
+    for item in row:
+        if not isinstance(item, dict) or type(item.get("number")) is not int:
+            raise ForgeError("issue row has no number")
+        numbers = _blocked_numbers(item.get("blockedBy"))
+        if numbers is None:
+            raise ForgeError(f"blockers of #{item['number']} are incomplete")
+        if numbers:
+            raw = item["blockedBy"]
+            nodes = raw["nodes"] if isinstance(raw, dict) else raw
+            keys = []
+            for node in nodes:
+                if str(node.get("state", "OPEN")).upper() == "CLOSED":
+                    continue
+                repo = node.get("repository", {}).get("nameWithOwner")
+                url = node.get("url")
+                if url:
+                    ref = backlog.issue_ref(url, forge.home)
+                    if ref is None:
+                        raise ForgeError("a blocker has an unreadable issue URL")
+                    keys.append(f"github:{ref.repo}#{ref.number}")
+                else:
+                    keys.append(f"github:{repo}#{node['number']}" if repo else forge.key(node["number"]))
+            out[forge.key(item["number"])] = tuple(keys)
+    return out
+
+
+def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
+    # shortcut: one links read per open issue; page the list when a workspace exceeds one issues() page
+    got = forge.issues()
+    if not got.ok:
+        raise ForgeError(got.error)
+    secret = forge._token()
+    if not secret:
+        raise ForgeError(forge.home.missing_token)
+    out: dict[str, tuple[str, ...]] = {}
+    for issue in got.issues:
+        body, headers, error = backlog._get(f"{forge.home.issues_url}/{issue.iid}/links", secret, backlog.TIMEOUT)
+        if error or not isinstance(body, list):
+            raise ForgeError(error or f"links of #{issue.iid} are not a list")
+        if (headers.get("x-next-page") or "").strip():
+            raise ForgeError(f"links of #{issue.iid} span more than one page")
+        keys = []
+        for link in body:
+            if not isinstance(link, dict) or link.get("link_type") != "is_blocked_by" or link.get("state") != "opened":
+                continue
+            if type(link.get("iid")) is not int:
+                raise ForgeError(f"a link of #{issue.iid} has no iid")
+            ref = backlog.issue_ref(link.get("web_url", ""), forge.home)
+            if ref is None:
+                raise ForgeError(f"a blocker of #{issue.iid} has no readable project URL")
+            keys.append(f"gitlab:{ref.host}/{ref.repo}#{ref.number}")
+        if keys:
+            out[forge.key(issue.iid)] = tuple(keys)
+    return out
+
+
 def _gh_json(gh, args: list[str]):
     code, stdout, stderr = gh(args)
     if code:
@@ -154,10 +244,12 @@ def _github_labels_exist(gh, ref: backlog.IssueRef, names: tuple[str, ...]) -> s
 
 def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
                 commit: bool = False, expected_stage: str | None = None,
-                initialize: bool = False) -> kanban.Sync:
+                initialize: bool = False, release_hold: bool = False) -> kanban.Sync:
     """Update issue labels, or a GitHub Project Status plus the issue's hold label."""
     if ref.host != backlog.GITHUB:
         return kanban.Sync(ref, stage, error="issue is not on GitHub")
+    if error := kanban.release_error(stage, expected_stage, initialize, release_hold):
+        return kanban.Sync(ref, stage, error=error)
     try:
         config.label_for(stage)
     except KeyError:
@@ -172,7 +264,8 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
     if error:
         return kanban.Sync(ref, stage, error=error)
     current = kanban._canonical(config, current)
-    delta = kanban._github_label_delta(config, current, stage, keep_hold=kanban.extra_hold(config, current, expected_stage))
+    held = kanban.keep_hold(config, current, expected_stage, release_hold)
+    delta = kanban._github_label_delta(config, current, stage, keep_hold=held)
     managed = kanban._managed(config)
     current_labels = frozenset(current) & managed
     desired_labels = set(kanban.after(current, delta)) & managed
@@ -293,10 +386,12 @@ def _sync_github(ref: backlog.IssueRef, config: Kanban, stage: str, *, gh=None,
 def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, stage: str,
                  *, token: str | None = None, commit: bool = False,
                  expected_stage: str | None = None, initialize: bool = False,
-                 timeout: float = backlog.TIMEOUT) -> kanban.Sync:
+                 timeout: float = backlog.TIMEOUT, release_hold: bool = False) -> kanban.Sync:
     """GitLab's add/remove update leaves unrelated issue labels untouched."""
     if ref.host != backlog.home_of(cfg)[0]:
         return kanban.Sync(ref, stage, error="issue host does not match the configured GitLab host")
+    if error := kanban.release_error(stage, expected_stage, initialize, release_hold):
+        return kanban.Sync(ref, stage, error=error)
     try:
         config.label_for(stage)
     except KeyError:
@@ -317,7 +412,7 @@ def _sync_gitlab(cfg: backlog.Backlog, ref: backlog.IssueRef, config: Kanban, st
     if not isinstance(row, dict) or not isinstance(row.get("labels"), list):
         return kanban.Sync(ref, stage, error="GitLab issue has no readable labels")
     current = tuple(str(label) for label in row["labels"])
-    held = kanban.extra_hold(config, current, expected_stage)
+    held = kanban.keep_hold(config, current, expected_stage, release_hold)
     delta = kanban.label_delta(config, current, stage, keep_hold=held)
     managed = kanban._managed(config)
     prior = frozenset(kanban.label_delta(config, (), expected_stage).add) if expected_stage else frozenset()
@@ -513,14 +608,35 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"requests: {exc}") from exc
 
-    def _merged_closes(self) -> set[int]:
-        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+    def _open_closers(self, base: str) -> list[dict]:
+        """One bounded list of open closing identities, without CI, reviews or discussions."""
+        try:
+            limit = backlog.GH_LIMIT if self.github else forge_review.REQUEST_LIMIT
+            if self.github:
+                rows, error = _gh_json(self.gh, [
+                    "pr", "list", "-R", self.home.repo, "--state", "open", "--base", base,
+                    "--limit", str(limit), "--json",
+                    "number,headRefOid,baseRefName,closingIssuesReferences"])
+                if error:
+                    raise ForgeError(error)
+            else:
+                rows = self._pipeline_read("merge_requests?" + urlencode({
+                    "state": "opened", "target_branch": base, "per_page": limit}))
+            if (not isinstance(rows, list) or len(rows) >= limit
+                    or any(not isinstance(row, dict) for row in rows)):
+                raise ValueError("expected a complete list of open closing identities")
+            return rows
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"open closers: {exc}") from exc
+
+    def _merged_requests(self) -> list[dict]:
+        """Recently merged requests (bounded by REQUEST_LIMIT), including landing evidence."""
         try:
             if self.github:
                 code, out, err = self.gh(
                     ["pr", "list", "-R", self.home.repo, "--state", "merged",
                      "--search", "sort:updated-desc", "--limit", str(forge_review.REQUEST_LIMIT), "--json",
-                     "number,body,closingIssuesReferences"])
+                     "number,body,closingIssuesReferences,baseRefName,headRefOid,mergeCommit"])
                 if code:
                     raise ForgeError(f"merged requests: {err.strip() or code}")
                 rows = json.loads(out)
@@ -537,16 +653,84 @@ class Forge:
             # shortcut: only the REQUEST_LIMIT most recently updated merged requests annotate closed issues (merging
             # updates a request; later edits can shift the window). Other closed issues keep their terminal stage mark
             # and read merge_state "". Page the list if a rebuild needs every merge.
-            if not isinstance(rows, list):
-                raise TypeError(f"expected a list, got {type(rows).__name__}")
-            closed: set[int] = set()
-            for row in rows:  # inside the guard: a malformed row is a forge read error, not a crash
-                refs = (forge_review.github_closes(row, self.home.repo) if self.github else
-                        forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
-                closed.update(int(ref[1:]) for ref in refs if _LOCAL_CLOSE.fullmatch(ref))
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise TypeError("expected a list of merged request objects")
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"merged requests: {exc}") from exc
-        return closed
+        return rows
+
+    def _closed_refs(self, row: dict) -> list[str]:
+        refs = (forge_review.github_closes(row, self.home.repo) if self.github else
+                forge_review.closes(row.get("description"), gitlab=True, project=self.home.project, host=self.home.host))
+        return [ref for ref in refs if _LOCAL_CLOSE.fullmatch(ref)]
+
+    def _merged_closes(self) -> set[int]:
+        """Issue numbers closed by a recently merged request (bounded by REQUEST_LIMIT)."""
+        try:
+            return {int(ref[1:]) for row in self._merged_requests() for ref in self._closed_refs(row)}
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"merged requests: {exc}") from exc
+
+    def landings(self, pipeline: Pipeline, keys: list[str], *,
+                 errors: dict[str, str] | None = None,
+                 heads: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
+        """Prove the newest closing request's head landed in current main with a passing suite.
+
+        Uses forge ancestry, so a stale local checkout or an original PR head is no landing proof.
+        Missing bounded history or unreadable comparisons remain unknown.
+        When provided, errors receives per-issue failure details for the planner's wait log.
+        heads receives the source head of each verified landing, even after branch deletion.
+        """
+        found = {key: (None, None) for key in keys}
+        if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
+            return found
+        merged = self._merged_requests()
+        newest = {}
+        for row in [*merged, *self._open_closers(pipeline.ref)]:
+            if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
+                continue
+            identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
+            for ref in self._closed_refs(row):
+                key = self.key(int(ref[1:]))
+                if key in found and (key not in newest or identity[0] >= newest[key][0]):
+                    newest[key] = identity
+        for row in merged:
+            if row.get("baseRefName" if self.github else "target_branch") != pipeline.ref:
+                continue
+            identity = (row["number" if self.github else "iid"], row.get("headRefOid" if self.github else "sha"))
+            mine = [self.key(int(ref[1:])) for ref in self._closed_refs(row)]
+            mine = [key for key in mine if newest.get(key) == identity and identity[1]]
+            if not mine:
+                continue
+            try:
+                commit = ((row.get("mergeCommit") or {}).get("oid") if self.github else
+                          row.get("squash_commit_sha") or row.get("merge_commit_sha") or row.get("sha"))
+                landed = None
+                if isinstance(commit, str) and commit:
+                    if commit == pipeline.sha:
+                        landed = True
+                    elif self.github:
+                        compared = self._pipeline_read(f"compare/{quote(commit, safe='')}...{quote(pipeline.sha, safe='')}")
+                        base = compared.get("merge_base_commit", {}).get("sha")
+                        if not isinstance(base, str) or not base:
+                            raise ValueError("landing comparison returned no merge base")
+                        landed = base == commit
+                    else:
+                        query = urlencode({"refs[]": [commit, pipeline.sha]}, doseq=True)
+                        base = self._pipeline_read(f"repository/merge_base?{query}").get("id")
+                        if not isinstance(base, str) or not base:
+                            raise ValueError("landing comparison returned no merge base")
+                        landed = base == commit
+                result = landed, pipeline.status == "passed" if landed is True else landed
+            except (ForgeError, RuntimeError, OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                result = None, None
+                if errors is not None:
+                    errors.update((key, f"landing comparison: {exc}") for key in mine)
+            for key in mine:
+                found[key] = result
+                if heads is not None and result[0] is True:
+                    heads[key] = identity[1]
+        return found
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
         """The newest open request closing only the assigned issue; extra or cross-repo closing refs are unsafe to merge."""
@@ -568,6 +752,17 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"review threads: {exc}") from exc
 
+    def blocked_by(self) -> dict[str, tuple[str, ...]]:
+        """Open issues blocking each open issue, keyed by issue key. Raises ForgeError, saying why, when the read fails or is partial."""
+        try:
+            if self.github:
+                return _github_blocked(self)
+            return _gitlab_blocked(self)
+        except ForgeError:
+            raise
+        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise ForgeError(f"blockers: {exc}") from exc
+
     def snapshot(self, issue_key: str, *, issue: Any | None = None,
                  request: merge_ready.Request | None = None) -> dict[str, Any]:
         """One issue's forge row (as `snapshots` builds), plus the observed stage label merge can verify.
@@ -586,7 +781,7 @@ class Forge:
                 for ref in r.closes:
                     latest[int(ref[1:])] = r
             request = latest.get(issue.iid)
-        snap: dict[str, Any] = {"issue_key": issue_key, "title": issue.title,
+        snap: dict[str, Any] = {"issue_key": issue_key, "title": issue.title, "body": issue.body,
                                 "forge_state": "open" if issue.state == backlog.OPEN else "closed",
                                 "stage_mark": None}
         if self.kanban is not None:
@@ -596,7 +791,7 @@ class Forge:
                 if error:
                     raise ForgeError(f"project status: {error}")
             snap["stage"] = self._stage(issue, statuses)
-            snap["human_review"] = self.kanban.human_review_label in issue.labels
+            snap["human_review"] = self.kanban.human_review_label in kanban._canonical(self.kanban, issue.labels)
             snap["stage_mark"] = self.mark_for_stage(snap["stage"])
         if self.approver:
             snap["review_state"] = request.approval if request else ""
@@ -630,11 +825,11 @@ class Forge:
         out = []
         for one in sorted((*got.issues, *closed.issues), key=lambda i: i.iid):
             r = latest.get(one.iid)
-            snap = {"issue_key": self.key(one.iid), "title": one.title,
+            snap = {"issue_key": self.key(one.iid), "title": one.title, "body": one.body,
                     "forge_state": "open" if one.state == backlog.OPEN else "closed"}
             if self.kanban is not None:
                 snap["stage"] = self._stage(one, statuses if self.kanban.github_project and self.github else None)
-                snap["human_review"] = self.kanban.human_review_label in one.labels
+                snap["human_review"] = self.kanban.human_review_label in kanban._canonical(self.kanban, one.labels)
                 snap["stage_mark"] = self.mark_for_stage(snap["stage"])
             if self.approver:
                 snap["review_state"] = r.approval if r else ""
@@ -662,6 +857,16 @@ class Forge:
 
     def protected_branches(self) -> tuple[str, ...]:
         """The repository's default branch, then its protected branches, for the worker guard. Unreadable raises."""
+        default, protected = self._branch_protection()
+        return tuple(dict.fromkeys((default, *protected)))
+
+    def default_branch_protected(self) -> bool:
+        """§13 (b): whether the forge itself protects the default branch; a non-Claude worker launches only then."""
+        default, protected = self._branch_protection()
+        return default in protected
+
+    def _branch_protection(self) -> tuple[str, tuple[str, ...]]:
+        """(default branch, protected branch names) as the forge reports them. Unreadable raises."""
         _, repo = home_of(self.home)
         try:
             if self.github:
@@ -686,10 +891,9 @@ class Forge:
                 names += [row["name"] for row in rows]
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"protected branches: {exc}") from exc
-        found = tuple(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
-        if not found or not names[0].strip():
+        if not isinstance(names[0], str) or not names[0].strip():
             raise ForgeError("protected branches: the forge reported no default branch")
-        return found
+        return names[0], tuple(dict.fromkeys(n for n in names[1:] if isinstance(n, str) and n.strip()))
 
     # writes: preview unless commit
     def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None,
@@ -755,6 +959,41 @@ class Forge:
             return f"would comment on #{number}: {body}"
         return backlog.comment(self.home, number, body, token=None if self.github else self._token(),
                                commit=True, gh=self.gh).error
+    def request_base(self, number: int) -> str:
+        """The branch a request targets, which §13 requires the forge to protect before a non-Claude worker. Unreadable raises."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                code, out, err = self.gh(["pr", "view", str(number), "-R", repo, "--json", "baseRefName"])
+                if code:
+                    raise RuntimeError(err.strip() or f"gh exited {code}")
+                base = json.loads(out)["baseRefName"]
+            else:
+                got, _, err = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}", self._token(), backlog.TIMEOUT)
+                if err:
+                    raise RuntimeError(err)
+                base = got["target_branch"]
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"request base: {exc}") from exc
+        if not isinstance(base, str) or not base.strip():
+            raise ForgeError("request base: the forge reported no target branch")
+        return base
+
+    def merge_commit(self, number: int) -> str | None:
+        """The commit a merged request landed as on its target, for §13 (c)'s record of engine merges; None when the
+        forge does not say (the check then cannot vouch for that commit, which holds)."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                code, out, _ = self.gh(["pr", "view", str(number), "-R", repo, "--json", "mergeCommit"])
+                return None if code else ((json.loads(out).get("mergeCommit") or {}).get("oid") or None)
+            got, _, err = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}", self._token(), backlog.TIMEOUT)
+            if err or not isinstance(got, dict) or got.get("state") != "merged":
+                return None
+            # A merge commit, else a squash commit, else a fast-forward that landed the request's own head.
+            return got.get("merge_commit_sha") or got.get("squash_commit_sha") or got.get("sha") or None
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
+            return None
 
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:
@@ -762,19 +1001,20 @@ class Forge:
                               parent=parent, blocked_by=blocked_by)
 
     def write_stage(self, number: int, stage: str, expected: str | None = None, commit: bool = False,
-                    initialize: bool = False) -> kanban.Sync:
+                    initialize: bool = False, release_hold: bool = False) -> kanban.Sync:
         """Move the issue's stage (label, or GitHub Project Status when configured), leaving its other labels.
         `expected` is the stage the store last wrote; `initialize` starts a blank issue or migrates its legacy label into
-        Project Status, and is never inferred from a missing `expected`. A card moved by hand is reported, never overwritten."""
+        Project Status, and is never inferred from a missing `expected`. A card moved by hand is reported, never overwritten.
+        `release_hold` clears only an extra hold at the same guarded stage; stage-required holds remain."""
         host, repo = home_of(self.home)
         ref = IssueRef(repo, number, host)
         if self.kanban is None:
             return kanban.Sync(ref, stage, error="no [kanban] stage labels configured")
         if self.github:
             return _sync_github(ref, self.kanban, stage, gh=self.gh, commit=commit, expected_stage=expected,
-                                initialize=initialize)
+                                initialize=initialize, release_hold=release_hold)
         return _sync_gitlab(self.home, ref, self.kanban, stage, token=self.token, commit=commit, expected_stage=expected,
-                            initialize=initialize)
+                            initialize=initialize, release_hold=release_hold)
 
     def add_human_hold(self, number: int) -> str:
         """Add only the review hold; leave the numbered stage and Project Status untouched."""

@@ -96,6 +96,16 @@ class ExecutorTest(unittest.TestCase):
         self.assertEqual(len(self.gh.merges), 1)
         self.assertIn("merged", self.message())
 
+    def test_a_successful_merge_records_its_commit_structurally(self):
+        # §13 (c): a non-Claude run's check excuses only commits the engine recorded merging, never log prose.
+        self.planned()
+        with mock.patch.object(forge.Forge, "merge_commit", return_value="c" * 40):
+            self.assertTrue(self.execute())
+        merges = self.db.resume(self.key)["merges"]
+        self.assertEqual([(m["sha"], m["at"]) for m in merges], [("c" * 40, self.at)])
+        self.assertIsInstance(merges[0]["request"], int)
+        self.assertEqual(self.db.resume(self.key)["review_findings"], {"attempt": 1, "counts": {}})
+
     def test_room_policy_changed_after_planning_is_rechecked(self):
         self.db.set_resume(self.key, {"room": "lab", "review_findings": {"attempt": 1, "counts": {}}})
         self.planned()
@@ -315,7 +325,8 @@ class ExecutorTest(unittest.TestCase):
     def execute(self):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
         return engine_merge.execute(self.action, self.forge, self.db, at=self.at, policies=self.p,
-                                    inputs=engine._planning_inputs(self.db, [item]))
+                                    inputs=engine._planning_inputs(self.db, [item]),
+                                    hold_stages=getattr(self.forge.kanban, "hold_stages", ()))
 
     def message(self):
         entries = self.db.log(self.key)

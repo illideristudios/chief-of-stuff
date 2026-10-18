@@ -27,6 +27,22 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class WorkspaceFile:
+    """A file init leaves in a workspace and the command that adds it to one that lacks it; `command` takes `{root}`."""
+    name: str
+    command: str
+
+
+# Init's config and settings, also read by health for older workspaces. Init needs user/forge inputs;
+# --help explains those rather than suggesting an incomplete command that would fail.
+# Health only exercises `settings`: a missing config is a usage fault there. Model guidance stays out: the engine rotates models (ledger D10), so preflight does not advise installing it.
+WORKSPACE_FILES: dict[str, WorkspaceFile] = {
+    "config": WorkspaceFile("CLAUDE.md", "chief-of-stuff init --help"),
+    "settings": WorkspaceFile("chief-of-stuff.toml", "chief-of-stuff init --help"),
+}
+
+
+@dataclass(frozen=True)
 class Deadline:
     name: str
     at: datetime

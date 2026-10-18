@@ -12,6 +12,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import board_sources
+import decision_actions
 from estimate import estimates, history, task_end
 import kanban as kanban_tool
 from md import section
@@ -334,5 +335,6 @@ class PageData:
 def page_data(store) -> PageData:
     """Read the store through the use case once, before handing rows to presenters."""
     items = tuple(store.items())
-    return PageData(items, tuple(store.segments()), tuple(store.decisions()), tuple(store.reports()),
+    # Decision rows are append-only; presenters see each decision's latest row only.
+    return PageData(items, tuple(store.segments()), tuple(decision_actions.current_rows(store.decisions())), tuple(store.reports()),
                     {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()))

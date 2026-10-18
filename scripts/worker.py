@@ -3,31 +3,78 @@
 from __future__ import annotations
 
 import json
+import random
 import re
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from collections.abc import Callable
 
 import claude_adapter
 import clock as engine_clock
 import dispatch_prompt
 import guard_binding
+import host_adapter
 import make_worktree
 import process_status
+import reconcile
 import supervisor
-from settings import load as load_settings
+from settings import ModelEntry, SettingsError, pick, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
-from model_port import Failure, Request, retry_at
+from model_port import RETRYABLE, Failure, Reply, Request, retry_at
+from shell_setup import teardown
 from reconcile import OP_WORKER_RUN
 
 _runners: dict[str, Any] = {}
+# #851: the [models.<class>] rotation a stage launches from; planning is deep work and a fix continues an implementation.
+TASK_CLASS = {"plan": "deep", "implement": "implement", "fix": "implement", "review": "review"}
 
 
 def _resume(store: Any, key: str) -> dict:
     data = store.resume(key)
     return dict(data) if isinstance(data, dict) else {}
+
+
+def _num(value: Any) -> float:
+    if isinstance(value, bool):
+        return 0.0
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return num if 0 < num < float("inf") else 0.0
+
+
+def _record_usage(store: Any, key: str, stage: str, attempt: int,
+                  reply: Any, started: str, ended: datetime) -> None:
+    spend = _num(getattr(reply, "cost_usd", 0.0)) if isinstance(reply, (Reply, Failure)) else 0.0
+    minutes = 0.0
+    try:
+        begin = datetime.fromisoformat(started)
+        if begin.tzinfo is not None and ended.tzinfo is not None:
+            minutes = max(0.0, (ended - begin).total_seconds() / 60)
+    except (TypeError, ValueError):
+        minutes = 0.0
+    exhausted = isinstance(reply, Failure) and reply.kind == "quota"
+    if not spend and not minutes and not exhausted:
+        return
+    data = _resume(store, key)
+    recorded = set(data.get("usage_runs") or ()) if isinstance(data.get("usage_runs"), list) else set()
+    run_key = f"{stage}-{attempt}"
+    if run_key in recorded:
+        return
+    if spend:
+        data["spend_usd"] = _num(data.get("spend_usd")) + spend
+    if minutes:
+        data["time_minutes"] = _num(data.get("time_minutes")) + minutes
+    if exhausted:
+        # The host reported exhaustion; percentages before that point remain unknown.
+        data["quota_percent"] = 100.0
+    data["usage_runs"] = sorted(recorded | {run_key})
+    store.set_resume(key, data)
 
 
 def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
@@ -37,11 +84,21 @@ def _run_dir(root: Path, key: str, stage: str, attempt: int) -> Path:
     return supervisor.state_dir(root) / "runs" / f"{int(number)}-{stage}-{attempt}"
 
 
-def _exit_code(run_dir: Path) -> int:
-    code = json.loads((run_dir / "exit.json").read_text())["exit_code"]
+def _exit_record(run_dir: Path) -> tuple[int, datetime | None]:
+    payload = json.loads((run_dir / "exit.json").read_text())
+    code = payload["exit_code"]
     if type(code) is not int:
         raise ValueError("invalid adapter exit code")
-    return code
+    ended = payload.get("ended_at")
+    try:
+        when = datetime.fromisoformat(ended) if isinstance(ended, str) else None
+    except ValueError:
+        when = None
+    return code, (when if when is not None and when.tzinfo is not None else None)
+
+
+def _exit_code(run_dir: Path) -> int:
+    return _exit_record(run_dir)[0]
 
 
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
@@ -63,6 +120,8 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                       started_at=clock().isoformat())
     else:
         record = dict(record)
+    if "starting_head" not in record and (run_dir / "starting_head").is_file():
+        record["starting_head"] = (run_dir / "starting_head").read_text().strip()
     if stage == "review":
         record.setdefault("reviewed_head", data.get("review_trees", {}).get(str(attempt), {}).get("head"))
     if (any(type(record.get(field)) is not int or record[field] <= 0 for field in ("pid", "runner_pid"))
@@ -93,12 +152,73 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
     return record
 
 
-def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> None:
+def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
+           models: dict[str, tuple[ModelEntry, ...]], at: str,
+           launchable: Callable[[str], bool] = lambda runtime: runtime == "claude", how: str = "first",
+           choose: Callable[[tuple[ModelEntry, ...]], ModelEntry] | None = None) -> ModelEntry:
+    """The entry this start launches: the stage rotation's first launchable entry, or with `how` "random" a uniform
+    pick among the launchable ones (#877: comparing models over time), or the next one after a quota stop, across
+    runtimes (ledger D10, #701); the persona's model when none is launchable. An entry this engine cannot launch here
+    is logged as skipped, never a failure."""
+    cls = TASK_CLASS.get(stage, stage)
+    rotation = models.get(cls, ())
+    usable = tuple(entry for entry in rotation if launchable(entry.runtime))
+    chosen = (((choose or random.choice)(usable) if how == "random" else usable[0]) if usable
+              else ModelEntry("claude", actor.model, actor.effort or None))
+    previous = data.get("model", {}).get(stage)
+    if usable and "quota" in data and previous:
+        try:
+            chosen = pick(usable, after=previous)
+        except SettingsError:
+            pass  # every launchable entry has stopped; the quota wait is over, so start from the first again
+    passed = rotation if how == "random" else (rotation[:rotation.index(chosen)] if chosen in rotation else rotation)
+    skipped = [str(entry) for entry in passed if entry not in usable]
+    if skipped:
+        store.add_log(key, f"skipped {', '.join(skipped)}: not launchable here; a non-Claude host needs its CLI on "
+                           "PATH and a forge-protected default branch (§13, #701)", at)
+    return chosen
+
+
+def _guarded(forge: Any, issue_key: str) -> bool:
+    """§13: whether the forge protects the default branch and the branch this issue's request targets. Before a
+    request exists the worker opens one against the default branch, which is checked. A forge port without these
+    reads, or an unreadable answer, cannot vouch for protection (ledger F3: unknown is never safe)."""
+    try:
+        if not getattr(forge, "default_branch_protected", lambda: False)():
+            return False
+        try:
+            request = forge.closing_request(issue_key)
+        except ForgeError:
+            return True
+        return forge.request_base(request.number) in forge.protected_branches()
+    except (ForgeError, AttributeError, TypeError):
+        return False
+
+
+def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict, model: str = "") -> None:
     def save(data: dict) -> None:
         data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
+        if model:
+            data["model"] = {**data.get("model", {}), stage: model}
         data.pop("quota", None)
 
     store.update_resume(key, save)
+
+
+def teardown_once(store: Any, root: Path, key: str, stage: str, attempt: int, command: str, at: str) -> None:
+    """Run workspace teardown once for a segment, when that segment closes."""
+    data = _resume(store, key)
+    runs = data.get("runs")
+    record = runs.get(f"{stage}-{attempt}") if isinstance(runs, dict) else None
+    if not isinstance(record, dict) or record.get("torn_down"):
+        return
+    tree = record.get("tree")
+    if isinstance(tree, str) and tree:
+        for error in teardown(root, Path(tree), Path(tree).name, command):
+            store.add_log(key, f"worker teardown failed: {error}", at)
+    record["torn_down"] = True
+    data["runs"] = {**runs, f"{stage}-{attempt}": record}
+    store.set_resume(key, data)
 
 
 def _declared_agent(text: str, agent: str) -> str:
@@ -119,7 +239,8 @@ def stage_defaults(root: Path, text: str, stage: str) -> Any:
 
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
-           claude_as_profile: str = "", clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
+           claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
+           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -129,18 +250,24 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     data = _resume(store, issue_key)
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
     if existing is not None:
-        store.set_ownership(issue_key, existing["tree"])
+        store.set_ownership(issue_key, existing["tree"], "tree")
         _save_run(store, issue_key, stage, attempt, existing)
-        return actor.model, actor.effort or ""
+        # Adopt what the start launched, not today's rotation.
+        runtime, _, ran = data.get("model", {}).get(stage, "").partition(":")
+        model, _, effort = ran.rpartition("@") if "@" in ran else (ran, "", "")
+        used = (model, effort) if model else (actor.model, actor.effort or "")
+        return (*used, runtime) if runtime not in ("", "claude") else used
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
-    defaults = stage_defaults(root, text, stage)
+    loaded = load_settings(root, settings_path(text))
+    defaults = loaded.stages.get(stage)
     agent = agent_for(text, actor, defaults)
     row = next(item for item in store.items() if item.issue_key == issue_key)
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
     assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
-                                               skills=defaults.skills if defaults else ())
+                                               skills=defaults.skills if defaults else (), rules=rules,
+                                               require_green=require_green)
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
@@ -156,7 +283,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             raise RuntimeError("prepared review tree is unreadable")
         if request_head.branch != branch:
             raise RuntimeError("request branch changed since the refused start")
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
         if prepared_review.get("head") != request_head.head or head[1] != request_head.head:
             # Retain the obsolete tree under cleanup ownership; build the new head in a fresh checkout.
             tree_name = f"{tree_name}-{uuid.uuid4()}"
@@ -166,16 +293,18 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         code, actual = make_worktree.git(["symbolic-ref", "--short", "HEAD"], tree)
         if code or actual != branch or not tree.resolve().is_relative_to(trees.resolve()):
             raise RuntimeError("existing worktree is missing or no longer on the work branch")
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
     elif not prepared_review:
-        if stage == "fix" or (stage != "review" and attempt > 1):
+        started = any(name.startswith(f"{stage}-") for name in data.get("runs", {}))
+        # A failed start before any worker (such as an unreadable issue) left no tree to lose.
+        if stage == "fix" or (stage != "review" and attempt > 1 and started):
             raise RuntimeError("fix/retry has no existing worktree; refusing a fresh branch")
         from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
         made = make_worktree.build(root, clone or root, str(trees), tree_name, branch,
                                    agent, from_branch=from_branch)
         tree = made.path
-        store.set_ownership(issue_key, str(tree))
+        store.set_ownership(issue_key, str(tree), "tree")
         if stage != "review":
             # Keep this even after a refused start: a relaunch can use the tree without a fresh cut (#551).
             store.update_resume(issue_key, lambda d: d.update(worktree=str(tree), work_branch=branch))
@@ -188,24 +317,52 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                 raise RuntimeError("prepared review tree does not match the request head")
     if run_dir.resolve().is_relative_to(tree.resolve()):
         raise RuntimeError("engine run directory must be outside the worker tree")
+    code, starting_head = make_worktree.git(["rev-parse", "HEAD"], tree)
+    if code or not starting_head:
+        raise RuntimeError("cannot read the worker's starting HEAD")
     # Read before touching evidence: an unreadable forge refuses the start, never launches with defaults only.
     protected = tuple(dict.fromkeys((*guard_binding.DEFAULT_PROTECTED_BRANCHES, *forge.protected_branches())))
     # A failed start may be retried at the same attempt. Preserve its evidence under a unique sibling.
     if run_dir.exists():
         run_dir.rename(run_dir.with_name(f"{run_dir.name}-refused-{uuid.uuid4()}"))
     run_dir.mkdir(parents=True)
+    (run_dir / "starting_head").write_text(starting_head)
     session_id = str(uuid.uuid4())
     plugin = guard_binding.guard_plugin_dir()
     if plugin is None:
         raise RuntimeError("worker launch requires the guard/ plugin beside scripts/")
     plugin_dirs = (str(plugin),)
     env = {"CHIEF_OF_STUFF_WORKSPACE": str(root.resolve()),
+           "CHIEF_OF_STUFF_WORKER": tree.name,
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
-    request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
+    protects: list[bool] = []  # the forge is asked once, and only when a non-Claude entry is considered
+
+    def launchable(runtime: str) -> bool:
+        if runtime == "claude":
+            return True
+        if not host_adapter.available(runtime):
+            return False
+        if not protects:
+            protects.append(_guarded(forge, issue_key))
+        return protects[0]
+
+    chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat(), launchable,
+                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "first"))
+    request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
-    runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
+    host: dict[str, Any] = {}
+    if chosen.runtime == "claude":
+        runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
+    else:
+        # §13: no guard plugin on these hosts, so the forge must protect the default and the request's target, and
+        # every protected branch's head is kept so collect can see a merge or push outside the engine (#860).
+        if not _guarded(forge, issue_key):
+            raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch "
+                               "and the branch its request targets")
+        host = {"runtime": chosen.runtime, "branch_heads": host_adapter.branch_heads(tree, forge.protected_branches())}
+        runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
     try:
         deadline = time.monotonic() + 5
         while not (run_dir / "started.json").exists():
@@ -223,27 +380,46 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             time.sleep(0.01)
         record = {"pid": pid, "session_id": session_id, "identity": identity,
                   "runner_pid": runner.pid, "runner_identity": runner_identity,
-                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch}
+                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
+                  "starting_head": starting_head, **host}
         if stage == "review":
             record["reviewed_head"] = request_head.head
-        _save_run(store, issue_key, stage, attempt, record)
-    except Exception:
-        claude_adapter.cancel(runner)
-        raise
+        _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
+    except Exception as start_error:
+        try:
+            claude_adapter.cancel(runner)
+        except Exception as cancel_error:
+            try:
+                store.add_log(issue_key, f"worker cancel failed: {cancel_error}", clock().isoformat())
+            except Exception:
+                pass
+        finally:
+            host_adapter.cleanup(host)
+            # The process is already up. collect() never sees a segment slots.claim drops on this failure.
+            for error in teardown(root, tree, tree.name, teardown_command):
+                try:
+                    store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                except Exception:
+                    pass
+        raise start_error
     _runners[str(run_dir)] = runner
-    return actor.model, actor.effort or ""
+    if chosen.runtime != "claude":
+        return chosen.model, chosen.effort or "", chosen.runtime  # slots records who actually ran it (§9)
+    return chosen.model, chosen.effort or ""
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
-            trees: Path | None = None) -> None:
-    """Finish every exited or lost open segment, using only the engine's run directory."""
+            trees: Path | None = None, teardown_command: str = "", *, require_green: bool = False,
+            finish: Callable | None = None, gather: Callable[[], reconcile.Facts] | None = None) -> reconcile.Facts | None:
+    """Collect engine run evidence and session reports; persist suite holds for the engine to publish."""
+    completed = []
     for segment in store.segments():
         if segment.ended_at is not None:
             continue
         key = segment.issue_key
         data = _resume(store, key)
         now = clock()
-        outcome, reason = "failed", ""
+        outcome, reason, reply, exited_at = "failed", "", None, None
         try:
             runs = data.get("runs", {})
             if not isinstance(runs, dict):
@@ -270,6 +446,11 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             run_dir = _run_dir(root, key, segment.stage, segment.attempt)
             if Path(record["run_dir"]).resolve() != run_dir or run_dir.is_relative_to(Path(record["tree"]).resolve()):
                 raise ValueError("run record is outside the engine evidence directory")
+            if not record.get("starting_head") and (run_dir / "starting_head").is_file():
+                record["starting_head"] = (run_dir / "starting_head").read_text().strip()
+                _save_run(store, key, segment.stage, segment.attempt, record)
+                data = _resume(store, key)
+                record = data["runs"][f"{segment.stage}-{segment.attempt}"]
             runner = _runners.get(str(run_dir))
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))
@@ -286,34 +467,77 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
-                raise ValueError("missing adapter exit record")
-            code = _exit_code(run_dir)
-            reply = claude_adapter.classify(code, (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text())
+            if not (run_dir / "exit.json").exists():
+                # The planner closes it from tree, report and orphan evidence.
+                continue
+            teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
+            code, exited_at = _exit_record(run_dir)
+            runtime = record.get("runtime", "claude")
+            stdout, stderr = (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text()
+            if runtime == "claude":
+                reply = claude_adapter.classify(code, stdout, stderr)
+            else:
+                reply = host_adapter.classify(runtime, code, stdout, stderr)
+                host_adapter.cleanup(record)
             if isinstance(reply, Failure):
                 if reply.retryable:
                     outcome = reply.kind
                     reason = reply.message
-                    stops = sum(s.outcome == outcome for s in store.segments(key)) + 1
+                    stops = 1  # consecutive retryable stops in this stage; a stage change or other outcome restarts the backoff
+                    for previous in reversed(store.segments(key)):
+                        if previous.ended_at is None:
+                            continue  # The current attempt is still open until collection finishes.
+                        if previous.stage != segment.stage or previous.outcome not in RETRYABLE:
+                            break
+                        stops += 1
                     quota = {"reset": reason, "retry_at": retry_at(reason, now, stops).isoformat()}
                     store.update_resume(key, lambda d: d.update(quota=quota))
                 else:
                     outcome, reason = "failed", reply.message
             else:
                 # A clean exit is not completion: the worker's own report for this session decides.
-                reports = store.reports(key, stage=segment.stage, attempt=segment.attempt,
-                                        session_id=record["session_id"])
+                reports = store.segment_reports(key, segment.stage, segment.attempt)
                 if not reports:
                     reason = "worker stopped without reporting an outcome"
                 elif reports[-1].outcome == "done":
-                    outcome = "done"
+                    raw = reports[-1].suite if isinstance(reports[-1].suite, dict) else {}
+                    counts = dispatch_prompt.suite_counts(raw)
+                    # With a finish callback the shared verdict sees the raw done report and arms the suite hold.
+                    if finish is None and reconcile.suite_holds(counts, require_green=require_green):
+                        outcome = "human_review"
+                        reason = reconcile.suite_reason(counts, reports[-1].summary)
+                        store.set_human_review(key, True)
+                        data["suite_hold"] = {"stage": segment.stage, "attempt": segment.attempt,
+                                              "published": False}
+                        store.set_resume(key, data)
+                    else:
+                        outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
-            if segment.stage == "review":
-                # This attempt's collected result always names the SHA pinned at launch.
-                result = {"reviewed_head": record.get("reviewed_head"), "outcome": outcome, "ended_at": now.isoformat()}
-                store.update_resume(key, lambda d: d["runs"][f"{segment.stage}-{segment.attempt}"].update(result=result))
+            if runtime != "claude":
+                held = host_adapter.moved_outside_engine(store, record, now.isoformat())
+                if held:
+                    outcome, reason = "human_review", held
+                    store.set_human_review(key, True)
         except (OSError, ValueError, KeyError, TypeError, RuntimeError, OverflowError) as exc:
             reason = f"unreadable worker run: {exc}"
-        store.end_segment(key, segment.stage, segment.attempt, now.isoformat(), outcome)
+        completed.append((segment, outcome, reason, now, reply, exited_at))
+    # Adopt and backfill every run before the shared snapshot; later exits wait for the next pass.
+    facts = gather() if gather is not None else None
+    for segment, outcome, reason, now, reply, exited_at in completed:
+        key = segment.issue_key
+        # #750: spend and minutes per run, and the segment ends when the host exited, not when it was collected.
+        _record_usage(store, key, segment.stage, segment.attempt, reply, segment.started_at, exited_at or now)
+        ended = exited_at or now
+        if finish is not None:
+            try:
+                finish(segment, outcome, reason, ended, facts=facts)
+            except Exception as exc:
+                message = f"worker {segment.stage} attempt {segment.attempt} close failed: {exc}"
+                if not any(row.message == message for row in store.log(key)):
+                    store.add_log(key, message, now.isoformat())
+            continue
+        store.end_segment(key, segment.stage, segment.attempt, ended.isoformat(), outcome)
         store.add_log(key, f"worker {segment.stage} attempt {segment.attempt}: {outcome}" + (f": {reason}" if reason else ""),
                       now.isoformat(), OP_WORKER_RUN)
+    return facts

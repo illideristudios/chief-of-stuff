@@ -454,6 +454,17 @@ class OnRequestTest(unittest.TestCase):
         self.assertEqual(resp.status, 200, f"GET /workers answered {resp.status}")
         return resp.body.decode()
 
+    def test_activity_uses_the_workspace_claude_profile(self):
+        ws = self.ws
+        (ws.root / "cos.toml").write_text(f'[workers]\nmax_concurrency = {CAP}\nclaude_as_profile = "secondary"\n')
+        profiles = ws.home / "profiles"
+        profile_log = profiles / "secondary/projects" / ws.log.parent.name / ws.log.name
+        profile_log.parent.mkdir(parents=True)
+        profile_log.write_text(transcript_line("assistant", ws.last, {"input_tokens": 789}))
+        with mock.patch.dict(os.environ, {"CLAUDE_AS_PROFILES_DIR": str(profiles)}):
+            running = table(self.fetch(), "running")
+        self.assertEqual(column(running, row(running, "impl-a1"), "token"), "789")
+
     def test_the_next_request_shows_what_the_cache_and_logs_say_now(self):
         self.fetch()
         ws = self.ws

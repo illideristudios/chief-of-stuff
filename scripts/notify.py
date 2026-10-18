@@ -35,7 +35,7 @@ try:
     import store_access  # noqa: E402
 except ModuleNotFoundError:
     store_access = None  # type: ignore[assignment]
-from decision_actions import current_intent, replaces_engine_move, state_of
+from decision_actions import current_intent, current_rows, pending_comments, replaces_engine_move, state_of
 from reconcile import OP_DECISION_COMMENT, OP_MERGE, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN  # noqa: E402
 from settings import Settings, SettingsError, load  # noqa: E402
 from workspace import ConfigError, read_config  # noqa: E402
@@ -148,7 +148,7 @@ def _recovered(entry, stamp: datetime, db, segments: list, zone, now: datetime) 
         item = db.item(entry.issue_key)
         return not state.get("pending_stage") and not (intent and (intent.intent == "write" or replaces_engine_move(intent, item.stage if item else "")))
     if entry.kind == OP_DECISION_COMMENT:
-        return not state.get("decision_comments")
+        return not pending_comments(db.decisions(entry.issue_key), state.get("decision_comments_sent", ()))
     if entry.kind == OP_WORKER_RUN:
         return any(s.outcome == "done" and _parse_stamp(s.ended_at or s.started_at, zone, now) > stamp for s in segments)
     if entry.kind == OP_MERGE_REFUSED:
@@ -169,7 +169,7 @@ def store_rows(root: Path, cfg, settings: Settings, now: datetime) -> list[Row]:
         rows: list[Row] = []
         items = db.items()
         segments = db.segments()
-        decisions = db.decisions()
+        decisions = current_rows(db.decisions())
         opened = {i.issue_key for i in items if i.forge_state != "closed"}
         logs = db.log()
         segs_by_key: dict[str, list] = {}

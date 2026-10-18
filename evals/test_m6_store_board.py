@@ -207,8 +207,9 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.db.upsert_item(KEY2, workflow="build", stage="implement", forge_state="open", title="Cache warmup")
         self.d_open = self.db.add_decision(KEY, "design", "Split upload parser?")
         self.d_blocked = self.db.add_decision(KEY2, "plan", "Use Redis for cache?")
-        self.db.answer_decision(self.d_blocked.id, "Yes, use Redis", decided_by="user")
-        self.db.answer_decision(self.d_blocked.id, "Yes, use Redis", status="blocked", blocked_reason="merge conflicts")
+        self.db.add_decision(KEY2, "plan", "Use Redis for cache?", "Yes, use Redis", "user", {"status": "answered"})
+        self.db.add_decision(KEY2, "plan", "Use Redis for cache?", "Yes, use Redis", "user",
+                             {"status": "blocked", "blocked_reason": "merge conflicts"})
 
     def test_board_renders_open_and_blocked_decisions_and_blocked_is_never_closed(self) -> None:
         board_path, *_ = pg.write_board(self.root, now=NOW)
@@ -221,8 +222,9 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.assertNotRegex(html, r"(?i)>\s*closed\s*<")
 
     def test_a_superseded_decision_has_no_card_with_live_buttons(self) -> None:
-        gone = self.db.add_decision(KEY, "design", "Replaced question?")
-        self.db.answer_decision(gone.id, "Yes", status="superseded", superseded_by=self.d_open.id)
+        self.db.add_decision(KEY, "design", "Replaced question?")
+        self.db.add_decision(KEY, "design", "Replaced question?", "Yes", "user",
+                             {"status": "superseded", "superseded_by": self.d_open.id})
         html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
         self.assertIn("Split upload parser?", html)
         self.assertNotIn("Replaced question?", html)
@@ -250,19 +252,19 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             # 1. Answer the open decision:
             resp = post("/", {"decision_id": str(self.d_open.id), "action": "answer", "answer": "Split into two"})
             self.assertEqual(resp.status, 303)
-            d1 = next(d for d in self.db.decisions(KEY) if d.id == self.d_open.id)
-            self.assertEqual(d1.status, "answered")
+            d1 = self.db.decisions(KEY)[-1]  # appended on the decision's own identity
+            self.assertEqual((d1.topic, d1.question, d1.status), (self.d_open.topic, self.d_open.question, "answered"))
             self.assertEqual(d1.answer, "Split into two")
             self.assertEqual(d1.decided_by, "user")
 
-            # 2. Reverse the answered decision: its own row, a run intent; the answered one is closed by it.
+            # 2. Reverse the answered decision, posted from the row the board now shows: a run intent on its next row.
             resp = post("/", {"decision_id": str(self.d_open.id), "action": "reverse", "answer": "Keep single pass"})
+            self.assertEqual(resp.status, 409)  # a form from an older row is refused
+            resp = post("/", {"decision_id": str(d1.id), "action": "reverse", "answer": "Keep single pass"})
             self.assertEqual(resp.status, 303)
             d2 = self.db.decisions(KEY)[-1]
-            self.assertNotEqual(d2.id, self.d_open.id)
-            self.assertEqual((d2.status, d2.answer, d2.intent), ("reversed", "Keep single pass", "run"))
-            self.assertEqual((self.db.decision(self.d_open.id).status, self.db.decision(self.d_open.id).superseded_by),
-                             ("superseded", d2.id))
+            self.assertNotEqual(d2.id, d1.id)
+            self.assertEqual((d2.status, d2.record["note"], d2.intent), ("reversed", "Keep single pass", "run"))
 
             # 3. Re-route another decision to another stage: a write intent; the earlier intent is left for the engine.
             reroute_dec = self.db.add_decision(KEY, "plan", "Return to implementation?")
@@ -275,15 +277,15 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             self.assertEqual(resp.status, 303)
             d3 = self.db.decisions(KEY)[-1]
             self.assertNotEqual(d3.id, reroute_dec.id)
-            self.assertEqual(self.db.decision(reroute_dec.id).status, "superseded")
             self.assertEqual((d3.status, d3.rerouted_to, d3.intent), ("re-routed", "implement", "write"))
             self.assertEqual((self.db.decision(d2.id).status, self.db.decision(d2.id).intent), ("reversed", "run"))
             # The page server records only: no forge call, no card move, no slot.
             fake_forge.write_stage.assert_not_called()
             fake_forge.comment.assert_not_called()
             self.assertEqual(self.db.item(KEY).stage, "review")
-            self.assertEqual(set(self.db.resume(KEY)), {"decision_comments"})
-            self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 3)
+            self.assertIsNone(self.db.resume(KEY))  # the page server writes only its rows
+            import decision_actions
+            self.assertEqual(len(decision_actions.pending_comments(self.db.decisions(KEY), ())), 3)
 
 
 class StorePagesAndRoutesTest(unittest.TestCase):
@@ -400,11 +402,12 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
     def test_blocked_decision_holds_gantt(self):
         dec = self.db.add_decision(KEY, "design", "Choose parser")
         import decision_actions
+        import trio_gate
         transition = decision_actions.answer(dec, "Split", answered_at=NOW.isoformat())
-        self.db.update_decision(transition.store_write)
+        trio_gate.record(self.db, KEY, transition.update)
         import reconcile
-        transition = decision_actions.meet_action(self.db.decision(dec.id), reconcile.Wait(KEY, "conflict"))
-        self.db.update_decision(transition.store_write)
+        transition = decision_actions.meet_action(self.db.decisions(KEY)[-1], reconcile.Wait(KEY, "conflict"))
+        trio_gate.record(self.db, KEY, transition.update)
         row = next((status, row) for status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                    if row.href.endswith(urllib.parse.quote(KEY, safe="")))
         self.assertEqual(row[0], "needs input")

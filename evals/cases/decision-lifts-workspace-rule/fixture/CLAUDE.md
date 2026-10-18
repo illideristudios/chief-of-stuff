@@ -9,7 +9,7 @@
 - Timezone: {{tz}}
 - Calendars: none
 - Deadlines: none
-- Human-only actions: dashboard or console changes; `railway` commands; git commit, add, or push; spending money
+- Human-only actions: dashboard or console changes; git commit, add, or push; spending money
 
 ## Rules
 

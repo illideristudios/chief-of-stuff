@@ -18,7 +18,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from decision_actions import state_of
+from decision_actions import current_rows, state_of
 from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history, horizon,  # noqa: E402
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
@@ -305,7 +305,7 @@ def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kan
                       today: date) -> tuple[list[Task], dict[Task, str], set[Task], list]:
     store_items = db.items()
     store_segments = db.segments()
-    store_decisions = db.decisions()
+    store_decisions = current_rows(db.decisions())  # rows are append-only: each decision's latest
     segs_by_key: dict[str, list] = {}
     for seg in store_segments:
         segs_by_key.setdefault(seg.issue_key, []).append(seg)

@@ -25,6 +25,8 @@ COMMANDS = {
     "start": "start_coordinator.py",
     "init": "scripts/init_workspace.py",
     "work": "scripts/work.py",
+    "engine": "scripts/engine.py",
+    "supervisor": "scripts/supervisor.py",
     "models": "scripts/install_model_guidance.py",
     "worktree": "scripts/make_worktree.py",
     "worker": "scripts/spawn_session.py",
@@ -46,12 +48,13 @@ COMMANDS = {
     "merge-approved": "scripts/merge_approved.py",
     "merge-ready": "scripts/merge_ready.py",
     "performance": "scripts/performance_report.py",
+    "limits": "scripts/limits_cli.py",
     "review-threads": "scripts/review_threads.py",
     "sources": "scripts/board_sources.py",
     "tick": "scripts/flow.py",
 }
-# Commands whose scripts import store (SQLAlchemy/Alembic). Add cleanup/engine when they join COMMANDS.
-STORE_BACKED = frozenset({"adopt", "board", "decision", "notify", "pages", "performance", "tick", "work", "worker"})
+# Commands whose scripts import store (SQLAlchemy/Alembic).
+STORE_BACKED = frozenset({"adopt", "board", "decision", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
 def wrapper_text(current: Path) -> str:

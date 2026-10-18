@@ -266,37 +266,4 @@ class QueueLockTest(unittest.TestCase):
         self.assertEqual(before, ws.queue.read_bytes())
 
 
-@unittest.skipUnless(sys.platform == "darwin", "launchd exists only on macOS")
-class LaunchdSmokeTest(WorkspaceTest):
-    def test_crash_recovery_and_updates_with_no_coordinator(self):
-        # Registers only a temporary queue and job; never opens md-notify or a browser.
-        due = datetime.now(timezone.utc) + timedelta(days=2)
-        from zoneinfo import ZoneInfo
-        due = due.astimezone(ZoneInfo("America/Chicago"))
-        cfg = self.root / "CLAUDE.md"
-        cfg.write_text(cfg.read_text().replace("2026-09-23 23:59", due.strftime("%Y-%m-%d %H:%M")))
-        jobs = self.root / "agents"
-        def wait_for(predicate, timeout=25):
-            until = time.monotonic() + timeout
-            while time.monotonic() < until:
-                if predicate():
-                    return
-                time.sleep(0.1)
-            self.fail(f"service did not converge: {service.status(self.root)}")
-        try:
-            service.ensure(self.root, jobs_dir=jobs)
-            wait_for(lambda: service.status(self.root)["running"] and self.ws.queue.exists())
-            pid = service.status(self.root)["pid"]
-            self.assertEqual(service.ensure(self.root, jobs_dir=jobs), "notify: serving")
-            changed = due + timedelta(hours=1)
-            cfg.write_text(cfg.read_text().replace(due.strftime("%Y-%m-%d %H:%M"),
-                                                   changed.strftime("%Y-%m-%d %H:%M")))
-            wait_for(lambda: f"Due {changed:%Y-%m-%d %H:%M}" in self.ws.queue.read_text())
-            os.kill(pid, signal.SIGKILL)
-            wait_for(lambda: service.status(self.root)["running"] and service.status(self.root)["pid"] != pid)
-            (self.root / "chief-of-stuff.toml").write_text('[notify]\nadapter = "off"\n')
-            wait_for(lambda: service.status(self.root).get("disabled"))
-        finally:
-            service.stop(self.root, jobs_dir=jobs)
-            wait_for(lambda: not service.status(self.root)["running"])
-        self.assertFalse(list(jobs.glob("*.plist")))
+# The macOS-only launchd smoke test is removed until CI can run it (#855; Zach, 2026-10-17, approved).

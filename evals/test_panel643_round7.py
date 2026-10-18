@@ -6,6 +6,7 @@ from unittest import mock
 from urllib.parse import urlencode
 
 from evals import test_engine as engines
+import decision_actions as da
 import pages
 
 KEY = engines.KEY
@@ -32,10 +33,11 @@ class IntentEndToEndTest(unittest.TestCase):
 
     def asked(self, topic, question, answer=""):
         self.db.sync_from_forge(self.forge.snapshots())
-        dec = self.db.add_decision(KEY, topic, question)
-        if answer:
-            self.db.answer_decision(dec.id, answer, status="answered")
-        return dec
+        return self.db.add_decision(KEY, topic, question, answer or None, "user" if answer else "zach")
+
+    def current(self, row):
+        """A decision's state: its identity's latest row (rows are append-only)."""
+        return da.state_of(da.latest(self.db.decisions(KEY))[da.identity(row)])
 
     def test_a_reroute_is_written_to_the_forge_by_the_engine_only(self):
         dec = self.asked("design", "Back?")
@@ -50,9 +52,10 @@ class IntentEndToEndTest(unittest.TestCase):
         second = self.asked("scope", "Ship?", "Yes")
         self.assertEqual(self.post({"decision_id": first.id, "action": "reroute", "target_stage": "review"}), 303)
         self.assertEqual(self.post({"decision_id": second.id, "action": "reverse", "answer": "No"}), 303)
+        began = self.db.decisions(KEY)[-1]  # the reversal intent begins on this row
         self.run_pass()
-        reroute, reversal = self.db.decisions(KEY)[-2:]
-        self.assertEqual((reroute.status, reroute.superseded_by, reroute.intent), ("superseded", reversal.id, ""))
+        reroute, reversal = self.current(first), self.current(second)
+        self.assertEqual((reroute.status, reroute.superseded_by, reroute.intent), ("superseded", began.id, ""))
         self.assertEqual((reversal.status, reversal.intent), ("reversed", ""))
         self.assertEqual((self.forge.writes, self.launched), ([], [(KEY, "implement", 1, "builder")]))
 
@@ -60,14 +63,15 @@ class IntentEndToEndTest(unittest.TestCase):
         first = self.asked("design", "Back?")
         self.assertEqual(self.post({"decision_id": first.id, "action": "reroute", "target_stage": "review"}), 303)
         reroute = self.db.decisions(KEY)[-1]
-        self.db.answer_decision(reroute.id, "Back", status="blocked", blocked_reason="retry limit reached",
-                                rerouted_to="review", intent="run")
+        self.db.add_decision(KEY, reroute.topic, reroute.question, "Back", "user",
+                             {"status": "blocked", "blocked_reason": "retry limit reached", "rerouted_to": "review",
+                              "intent": "run", "intent_id": reroute.id})
         self.run_pass()
         self.assertEqual(self.launched, [])
         second = self.asked("scope", "Ship?", "Yes")
         self.assertEqual(self.post({"decision_id": second.id, "action": "reverse", "answer": "No"}), 303)
         self.run_pass()
-        self.assertEqual(self.db.decision(reroute.id).status, "superseded")
+        self.assertEqual(self.current(reroute).status, "superseded")
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
 
 

@@ -17,7 +17,7 @@ import heapq
 from dataclasses import replace
 from datetime import datetime, timedelta
 
-from decision_actions import state_of
+from decision_actions import current_rows, state_of
 import gantt
 from clock import done_clock, parse_stamp as _parse_store_dt
 from fragment import esc, issue_href
@@ -220,7 +220,7 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
     """Build one Gantt row per store issue with all its `(issue, stage, attempt)` segments (M6 item 1, Exit S2)."""
     items = db.items()
     all_segments = db.segments()
-    all_decisions = db.decisions()
+    all_decisions = current_rows(db.decisions())  # rows are append-only: each decision's latest
     segs_by_key: dict[str, list] = {}
     for seg in all_segments:
         segs_by_key.setdefault(seg.issue_key, []).append(seg)

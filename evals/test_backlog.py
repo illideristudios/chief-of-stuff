@@ -596,7 +596,7 @@ class GitHubReadTest(unittest.TestCase):
         got = bl.issues(GH, gh=gh)
         self.assertTrue(got.ok, got.error)
         self.assertEqual(gh.calls, [["issue", "list", "-R", REPO, "--state", "open", "--json",
-                                     "number,title,state,labels,url,updatedAt,closedAt", "--limit", "5000"]])
+                                     "number,title,state,labels,url,updatedAt,closedAt,body", "--limit", "5000"]])
         self.assertEqual(got.issues, (bl.Issue(iid=3, title="inbox.py", state=bl.OPEN, labels=("bug",),
                                                 web_url=f"https://github.com/{REPO}/issues/3",
                                                 updated_at="2026-09-22T19:24:55Z",

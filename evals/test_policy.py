@@ -20,11 +20,7 @@ BASE = """
 default_workflow = "standard"
 
 [policy]
-trio = ["reviewer", "staff", "implementer"]
-
-[personas.staff]
-role = "weighs the trade-offs"
-model = "opus"
+trio = ["reviewer", "designer", "implementer"]
 
 [personas.implementer]
 role = "implements"
@@ -35,6 +31,10 @@ rules = ["write the failing test first"]
 [personas.reviewer]
 role = "reviews"
 model = "opus"
+
+[personas.designer]
+role = "designs"
+model = "sonnet"
 
 [personas.architect]
 role = "holds the architecture"
@@ -92,10 +92,10 @@ class ShippedPolicyTest(unittest.TestCase):
         self.assertEqual(len(got.workflows), 1)
         self.assertIn(got.default_workflow, got.workflows)
 
-    def test_the_shipped_personas_are_marked_placeholders(self):
+    def test_unsettled_shipped_personas_are_marked_placeholders(self):
         self.assertIn("PLACEHOLDER", settings.POLICY.read_text())
-        for persona in settings.load_policy().personas.values():
-            self.assertIn("PLACEHOLDER", persona.role, persona.name)
+        for name in ("reviewer", "architect"):
+            self.assertIn("PLACEHOLDER", settings.load_policy().personas[name].role, name)
 
     def test_the_shipped_base_needs_no_word_from_zach_and_has_no_limits(self):
         base = settings.load_policy().resolve()
@@ -158,7 +158,7 @@ class ResolveTest(unittest.TestCase):
         self.assertFalse(self.p.resolve("implementer", "implement").architect)
 
     def test_the_base_policy_reaches_every_scope(self):
-        self.assertEqual(self.p.resolve("implementer", "implement", "ops").trio, ("reviewer", "staff", "implementer"))
+        self.assertEqual(self.p.resolve("implementer", "implement", "ops").trio, ("reviewer", "designer", "implementer"))
 
     def test_an_unknown_name_is_refused(self):
         for args in (("nobody",), (None, "nowhere"), (None, None, "attic")):
@@ -211,17 +211,35 @@ class FieldTest(unittest.TestCase):
         got = parse(BASE.replace("[policy]\n", "[policy]\nspend_usd = 20\nquota_percent = 80.5\ntime_minutes = 90\n")).resolve()
         self.assertEqual((got.spend_usd, got.quota_percent, got.time_minutes), (20, 80.5, 90))
 
+    def test_architect_is_refused_in_default_and_tagged_trios_at_every_scope(self):
+        for scope in ("policy", "personas.implementer.policy", "stages.implement.policy", "rooms.lab.policy"):
+            for field in ('trio = ["reviewer", "architect", "implementer"]',
+                          'trios = { design = ["reviewer", "architect", "implementer"] }'):
+                with self.subTest(scope=scope, field=field):
+                    text = BASE.replace('trio = ["reviewer", "designer", "implementer"]', '')
+                    if scope == "policy":
+                        text = text.replace("[policy]", "[policy]\n" + field)
+                    else:
+                        text += f"\n[{scope}]\n{field}\n"
+                    refused(self, text, "architect")
+
+    def test_shipped_trio_uses_only_the_three_sonnet_personas(self):
+        shipped = settings.load_policy()
+        self.assertEqual(shipped.base.trio, ("implementer", "senior-architect", "senior-staff-engineer"))
+        self.assertEqual([shipped.personas[n].model for n in shipped.base.trio], ["sonnet"] * 3)
+        self.assertTrue(all(shipped.personas[n].agent is None for n in shipped.base.trio))
+
     def test_a_trio_is_three_distinct_known_personas(self):
-        for trio in ('["reviewer", "staff"]', '["reviewer", "reviewer", "staff"]', '["reviewer", "staff", "ghost"]'):
+        for trio in ('["reviewer", "designer"]', '["reviewer", "reviewer", "designer"]', '["reviewer", "designer", "ghost"]'):
             with self.subTest(trio=trio):
-                refused(self, BASE.replace('trio = ["reviewer", "staff", "implementer"]', f"trio = {trio}"), "trio")
+                refused(self, BASE.replace('trio = ["reviewer", "designer", "implementer"]', f"trio = {trio}"), "trio")
 
     def test_the_architect_is_never_a_trio_member(self):
         # Section 6: the architect is a standing session the engine never starts; the trio would launch it.
-        refused(self, BASE.replace('"staff", "implementer"]', '"architect", "implementer"]', 1), "architect")
-        refused(self, BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["architect", "reviewer", "staff"] }\n'),
+        refused(self, BASE.replace('"designer", "implementer"]', '"architect", "implementer"]', 1), "architect")
+        refused(self, BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["architect", "reviewer", "designer"] }\n'),
                 "architect")
-        refused(self, BASE.replace("[rooms.lab]\n", '[rooms.lab]\n[rooms.lab.policy]\ntrio = ["architect", "reviewer", "staff"]\n'),
+        refused(self, BASE.replace("[rooms.lab]\n", '[rooms.lab]\n[rooms.lab.policy]\ntrio = ["architect", "reviewer", "designer"]\n'),
                 "architect")
 
     def test_the_shipped_policy_has_no_architect_in_its_trio(self):
@@ -230,8 +248,8 @@ class FieldTest(unittest.TestCase):
         self.assertNotIn("architect", got.trio)
 
     def test_the_trio_map_takes_a_topic_tag_to_three_personas(self):
-        got = parse(BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["staff", "reviewer", "implementer"] }\n'))
-        self.assertEqual(got.resolve().trios, {"security": ("staff", "reviewer", "implementer")})
+        got = parse(BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["designer", "reviewer", "implementer"] }\n'))
+        self.assertEqual(got.resolve().trios, {"security": ("designer", "reviewer", "implementer")})
         refused(self, BASE.replace("[policy]\n", '[policy]\ntrios = { security = ["architect"] }\n'), "security")
 
     def test_a_stage_or_persona_can_ask_for_a_full_session(self):

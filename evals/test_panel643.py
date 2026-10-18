@@ -20,10 +20,20 @@ import source_page
 import store
 import store_access
 import task_forge
+import trio_gate
 import workers_page
 
 KEY, NOW = fixtures.KEY, fixtures.NOW
 OTHER = "github:example/other#12"
+
+
+def current(db, row):
+    """A decision's state: its identity's latest row (rows are append-only)."""
+    return da.state_of(da.latest(db.decisions(row.issue_key))[da.identity(row)])
+
+
+def comments(db):
+    return da.pending_comments(db.decisions(KEY), ())
 
 
 class PanelTest(unittest.TestCase):
@@ -50,11 +60,11 @@ class PanelTest(unittest.TestCase):
         fg.comment.return_value = ""
         with mock.patch.object(pages.forge, "for_workspace", return_value=fg):
             self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "  "})[0], 400)
-            self.assertEqual(self.db.decision(dec.id).status, "open")
+            self.assertEqual(current(self.db, dec).status, "open")
             self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "Yes"})[0], 303)
             self.assertEqual(self.request("POST", "/", {"decision_id": dec.id, "answer": "No"})[0], 409)
-        self.assertEqual(self.db.decision(dec.id).answer, "Yes")
-        self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 1)
+        self.assertEqual(current(self.db, dec).answer, "Yes")
+        self.assertEqual(len(comments(self.db)), 1)
 
     def test_simultaneous_answers_have_one_winner_and_one_queued_comment(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
@@ -81,7 +91,7 @@ class PanelTest(unittest.TestCase):
             for thread in threads:
                 thread.join(15)
         self.assertEqual(sorted(results), [303, 409])
-        self.assertEqual(len(self.db.resume(KEY)["decision_comments"]), 1)
+        self.assertEqual(len(comments(self.db)), 1)
 
     def test_reverse_at_merge_records_the_stage_that_did_the_work(self):
         self.db.upsert_item(KEY, stage="merge")
@@ -93,16 +103,18 @@ class PanelTest(unittest.TestCase):
         with mock.patch.object(pages.forge, "for_workspace", return_value=fg):
             status, _ = self.request("POST", "/", {"decision_id": dec.id, "action": "reverse", "answer": "No"})
         self.assertEqual(status, 303)
-        saved = self.db.decisions(KEY)[-1]
+        saved = current(self.db, dec)
         self.assertEqual((saved.status, saved.rerouted_to, saved.intent), ("reversed", "implement", "run"))
-        self.assertEqual((self.db.decision(dec.id).status, self.db.decision(dec.id).superseded_by), ("superseded", saved.id))
+        # The reversal is appended on the decision's own identity, in develop's reversal shape.
+        self.assertEqual(len(self.db.decisions(KEY)), 2)
+        self.assertTrue(da.is_reversed(self.db.decisions(KEY)[-1]))
 
     def test_record_update_supersedes_old_resume_status(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
         self.db.set_resume(KEY, {"decisions": {str(dec.id): {"status": "blocked", "blocked_reason": "old"}}})
-        self.db.update_decision(da.answer(self.db.decision(dec.id), "Yes").store_write)
-        self.assertEqual(self.db.decision(dec.id).status, "answered")
-        self.assertEqual(self.db.decisions()[0].blocked_reason, "")
+        trio_gate.record(self.db, KEY, da.answer(self.db.decision(dec.id), "Yes").update)
+        self.assertEqual(current(self.db, dec).status, "answered")
+        self.assertEqual(current(self.db, dec).blocked_reason, "")
 
     def test_reroute_survives_comment_failure_and_persists_its_intent(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
@@ -114,9 +126,9 @@ class PanelTest(unittest.TestCase):
             self.assertEqual(self.request("POST", "/", data)[0], 303)
             self.assertEqual(self.request("POST", "/", data)[0], 409)
         fg.write_stage.assert_not_called()
-        # The re-route is its own row; the asked decision is closed as superseded by it, so the replay is refused.
-        rerouted = self.db.decisions(KEY)[-1]
-        self.assertEqual((rerouted.status, self.db.decision(dec.id).status), ("re-routed", "superseded"))
+        # The re-route is the decision's newer row, so the replay of the older form is refused.
+        rerouted = current(self.db, dec)
+        self.assertEqual((rerouted.status, len(self.db.decisions(KEY))), ("re-routed", 2))
         self.assertEqual((rerouted.rerouted_to, rerouted.intent), ("implement", "write"))
 
     def test_store_busy_is_an_http_error(self):

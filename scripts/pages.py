@@ -49,12 +49,16 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import forge
 import page_reload
+import supervisor
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
 CACHE = ".sources.json"
 REFRESH = 60  # seconds between forge reads
+POLL = 5  # seconds between healthy server checks
+RETRY_MIN = 1
+RETRY_MAX = 60
 RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
@@ -399,6 +403,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         import decision_actions
         import sqlite3
         import store_access
+        import trio_gate
+        from dataclasses import replace
         from settings import load_policy
         from sqlalchemy.exc import OperationalError
         from supervisor import ServiceError
@@ -417,25 +423,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             db = store_access.migrated_store(root)
 
             def record():
-                """The decision, its intent and its queued comments, in one short write transaction."""
+                """Append the person's row, with any comment for the engine to post, in one short write transaction."""
                 dec = db.decision(int(dec_id))
                 if dec is None:
                     return (404, "no such decision")
+                # Rows are append-only: the form names the row it was rendered from, and a newer one refuses it.
+                if decision_actions.latest(db.decisions(dec.issue_key)).get(decision_actions.identity(dec)).id != dec.id:
+                    return (409, "the decision changed since this page was rendered")
                 item = db.item(dec.issue_key)
                 data = db.resume(dec.issue_key) or {}
-                # An intent gets its own immutable row; a validation failure rolls this allocation back.
-                row = db.add_decision(dec.issue_key, dec.topic, dec.question) if action != "answer" else None
                 tr = decision_actions.respond(
                     dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
                     history=db.segments(dec.issue_key), policies=load_policy(), issue_type=data.get("issue_type"),
-                    answered_at=now_iso, row_id=row.id if row else 0)
-                for write in (tr.store_write, tr.source):
-                    if write is not None:
-                        db.update_decision(write)
+                    answered_at=now_iso)
                 bodies = [a.body for a in tr.actions]
-                if bodies:  # the engine delivers them, so no forge call waits on this request
-                    db.update_resume(dec.issue_key, lambda data: data.__setitem__(
-                        "decision_comments", [*data.get("decision_comments", []), *bodies]))
+                if tr.update is not None:  # the engine posts the comment, so no forge call waits on this request
+                    trio_gate.record(db, dec.issue_key, replace(tr.update, record={**tr.update.record, "comment": "\n\n".join(bodies)})
+                                     if bodies else tr.update)
                 return None
 
             try:
@@ -589,15 +593,15 @@ def _who(port: int) -> str | None:
 def is_pages_serve(pid: int, port: int | None = None) -> bool:
     """True when `pid`'s command line is `pages.py serve`, and on `port` when given. A reused pid is someone else's."""
     try:
-        command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True).stdout
-    except OSError:
+        command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="], capture_output=True, text=True, timeout=1).stdout
+    except (OSError, subprocess.TimeoutExpired):
         return False  # cannot verify identity: do not signal
     if "pages.py serve" not in command:
         return False
     return port is None or bool(re.search(rf"--port {port}(\s|$)", command))
 
 
-def _stop(pages_dir: Path, port: int) -> None:
+def _stop(pages_dir: Path, port: int, stop: threading.Event | None = None) -> None:
     """Stop the older pages server on the port. Only the pid file's process, and only when it runs
     `pages.py serve` on this port: a reused pid is someone else's."""
     try:
@@ -608,15 +612,39 @@ def _stop(pages_dir: Path, port: int) -> None:
         raise PagesError(f"an older pages server answers on port {port}, but pid {pid} is not it; stop it by hand")
     os.kill(pid, signal.SIGTERM)
     for _ in range(30):
+        if stop is not None and stop.is_set():
+            return
         if _who(port) is None:
             return
-        time.sleep(0.1)
+        if stop is None:
+            time.sleep(0.1)
+        else:
+            stop.wait(0.1)
     raise PagesError(f"the older pages server (pid {pid}) is still answering on port {port}")
 
 
-def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> str:
+def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, stop: threading.Event | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
-    moves to another port: the URL is the board's address, and a board that wanders is a board nobody has open."""
+    moves to another port. Returns `pages: serving`, `pages: started`, `pages: restarted` or `pages: stopped`; raises PagesError."""
+    with contextlib.ExitStack() as stack:
+        while True:
+            if stop is not None and stop.is_set():
+                return "pages: stopped"
+            try:
+                stack.enter_context(supervisor.lock(pages_dir / ".ensure.lock", wait=stop is None))
+                break
+            except supervisor.ServiceError:
+                if stop is None:
+                    raise
+                stop.wait(0.1)
+        return _ensure(pages_dir, port, log, root, stop)
+
+
+def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
+    """Probe, replace and start under the same lock, including concurrent CLI ensures.
+
+    Returns "pages: serving", "pages: started", "pages: restarted" or "pages: stopped"; raises PagesError when the port is not ours
+    or the server does not come up."""
     who = _who(port)
     restart = False
     if who is not None:
@@ -624,30 +652,42 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None) -> s
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
         if _version(who) >= _version(f"{SERVER}/{VERSION}"):
             return "pages: serving"
-        _stop(pages_dir, port)
+        _stop(pages_dir, port, stop)
         restart = True
+    if stop is not None and stop.is_set():
+        return "pages: stopped"
     pages_dir.mkdir(parents=True, exist_ok=True)
     log.parent.mkdir(parents=True, exist_ok=True)
     argv = [sys.executable, str(Path(__file__).resolve()), "serve", "--dir", str(pages_dir), "--port", str(port)]
     with log.open("a") as out:
         proc = subprocess.Popen(argv + (["--root", str(root.resolve())] if root is not None else []),
                                 stdout=out, stderr=out, stdin=subprocess.DEVNULL, start_new_session=True)
-    for _ in range(30):
-        if (_who(port) or "").startswith(SERVER):
-            (pages_dir / PID).write_text(str(proc.pid))  # .pid names only a server that answered (#248)
-            return "pages: restarted" if restart else "pages: started"
-        if proc.poll() is not None:
-            break
-        time.sleep(0.1)
-    if proc.poll() is None:  # failed start must not leave a detached server with no pid file (#493)
-        with contextlib.suppress(OSError):
-            proc.terminate()
-        try:
-            proc.wait(timeout=1)
-        except subprocess.TimeoutExpired:
+    recorded = False
+    try:
+        for _ in range(30):
+            if stop is not None and stop.is_set():
+                return "pages: stopped"
+            if (_who(port) or "").startswith(SERVER):
+                (pages_dir / PID).write_text(str(proc.pid))  # .pid names only a server that answered (#248)
+                recorded = True
+                return "pages: restarted" if restart else "pages: started"
+            if proc.poll() is not None:
+                break
+            if stop is None:
+                time.sleep(0.1)
+            else:
+                stop.wait(0.1)
+        raise PagesError(f"the pages server did not come up on port {port}; see {log}")
+    finally:
+        if not recorded and proc.poll() is None:  # failed or cancelled start owns its unrecorded child
             with contextlib.suppress(OSError):
-                proc.kill()
-    raise PagesError(f"the pages server did not come up on port {port}; see {log}")
+                proc.terminate()
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                proc.wait(timeout=1)
 
 
 def from_config(root: Path) -> tuple[Path, int]:
@@ -656,6 +696,39 @@ def from_config(root: Path) -> tuple[Path, int]:
         return pages_address(root)
     except (OSError, ConfigError) as e:
         raise PagesError(str(e)) from None
+
+
+def supervise(root: Path, stop: threading.Event) -> None:
+    """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts.
+
+    A workspace with no board is polled again, so one added later is served. Returns when `stop` is set or
+    another engine already holds `pages-supervisor.lock`; an unexpected error is logged and retried."""
+    try:
+        with supervisor.lock(supervisor.state_dir(root) / "pages-supervisor.lock"):
+            retry, last_error = RETRY_MIN, None
+            while not stop.is_set():
+                try:
+                    cfg = read_config(root)
+                    if cfg.pages_dir or cfg.board_url:
+                        pages_dir, port = from_config(root)
+                        status = ensure(pages_dir, port, supervisor.state_dir(root) / "pages.log", root, stop=stop)
+                    else:
+                        status = "pages: serving"  # nothing to serve; poll for a board added later
+                    last_error = None
+                except Exception as exc:  # a thread that dies silently leaves the board unserved until restart
+                    status = None
+                    if str(exc) != last_error:
+                        print(f"pages: {exc}", file=sys.stderr, flush=True)
+                        last_error = str(exc)
+                if status == "pages: serving":
+                    delay, retry = POLL, RETRY_MIN
+                else:
+                    # A start is only healthy once a later probe still finds it serving.
+                    delay, retry = retry, min(RETRY_MAX, retry * 2)
+                if stop.wait(delay):
+                    return
+    except supervisor.ServiceError:
+        print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
 
 
 def main(argv: list[str] | None = None) -> int:

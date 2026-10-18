@@ -26,6 +26,7 @@ class Request:
     timeout_s: float | None = None
     worker: bool = False  # workers have tools and workspace context even before the guard plugin is installed
     agent: str = ""
+    keep_events: bool = False  # retain the completed call's raw events for eval graders
 
 
 @dataclass(frozen=True)
@@ -35,6 +36,7 @@ class Reply:
     session_id: str
     cost_usd: float  # the host's own estimate
     num_turns: int
+    events: list[dict[str, Any]] | None = None
 
 
 # missing_program, quota, session_missing, auth and budget each name their cause; error is the model's own failure;
@@ -46,6 +48,7 @@ RETRYABLE = ("quota", "unknown")
 class Failure:
     kind: str  # missing_program | quota | session_missing | auth | budget | error | unknown
     message: str
+    cost_usd: float = 0.0
 
     @property
     def retryable(self) -> bool:
