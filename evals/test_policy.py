@@ -350,5 +350,38 @@ class WorkflowTest(unittest.TestCase):
             refused(self, BASE.replace('default_workflow = "standard"', f"default_workflow = {bad}"), "default_workflow")
 
 
+
+class OverlayTest(unittest.TestCase):
+    """#827: a workspace's overlay merges keys over the shipped policy; it adds no table."""
+
+    def shipped(self):
+        return tomllib.loads(BASE)
+
+    def test_a_stage_policy_key_is_merged_over_the_shipped_table(self):
+        merged = policy.overlay(self.shipped(), {"stages": {"review": {"policy": {"architect": False}}}})
+        got = policy.parse(merged)
+        self.assertFalse(got.resolve("reviewer", "review").architect)
+        self.assertEqual(got.resolve("reviewer", "review").zach_gates, ("merge",))  # a sibling key is kept
+        self.assertTrue(parse().resolve("reviewer", "review").architect)  # the shipped data is not changed
+
+    def test_a_field_is_replaced_whole(self):
+        merged = policy.overlay(self.shipped(), {"policy": {"trio": ["implementer", "reviewer", "designer"]}})
+        self.assertEqual(policy.parse(merged).resolve().trio, ("implementer", "reviewer", "designer"))
+
+    def test_a_section_the_shipped_policy_lacks_is_refused_with_its_name(self):
+        for over, name in (({"rooms": {"attic": {}}}, "rooms.attic"), ({"stages": {"deploy": {}}}, "stages.deploy"),
+                           ({"colours": {}}, "colours")):
+            with self.subTest(name=name), self.assertRaises(policy.PolicyError) as caught:
+                policy.overlay(self.shipped(), over)
+            self.assertIn(name, str(caught.exception))
+
+    def test_an_unknown_key_is_refused_with_its_name(self):
+        for over, name in (({"policy": {"colour": "red"}}, "colour"),
+                           ({"stages": {"review": {"colour": "red"}}}, "colour"),
+                           ({"stages": {"review": {"policy": {"colour": "red"}}}}, "colour")):
+            with self.subTest(over=over), self.assertRaises(policy.PolicyError) as caught:
+                policy.parse(policy.overlay(self.shipped(), over))
+            self.assertIn(name, str(caught.exception))
+
 if __name__ == "__main__":
     unittest.main()

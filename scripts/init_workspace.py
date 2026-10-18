@@ -21,7 +21,7 @@ from backlog_ref import BacklogError, parse_backlog
 from install_model_guidance import destination as guidance_destination, install as install_guidance
 from workspace import WORKSPACE_FILES, ConfigError, parse_coordinator
 from settings import (Kanban, SettingsError, kanban_from_table, load as load_settings, load_policy,
-                      unmapped_stages, workflow_stages)
+                      unmapped_stages, workflow_stages, workspace_policy)
 
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -129,11 +129,11 @@ def settings_text(launcher: str, mode: str = "interactive") -> str:
     return text
 
 
-def _require_engine_ready(config) -> None:
+def _require_engine_ready(config, root: Path) -> None:
     """Preserved settings must already carry a complete shipped workflow map; init does not rewrite them."""
     if config.kanban is None:
         raise InitError("existing settings need [kanban] with the shipped workflow map before the engine can start")
-    unmapped = unmapped_stages(config.kanban, load_policy())
+    unmapped = unmapped_stages(config.kanban, workspace_policy(root, config.policy_overlay))
     if unmapped:
         raise InitError(f"existing settings [kanban.map] has no label for workflow stage {', '.join(unmapped)}")
 
@@ -234,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
                 existing_settings = load_settings(root, settings.name)
             except SettingsError as exc:
                 raise InitError(f"existing settings are invalid: {exc}") from None
-            _require_engine_ready(existing_settings)
+            _require_engine_ready(existing_settings, root)
             board = existing_settings.kanban
         new_settings = settings_text(args.launcher, args.worker_mode)
         if board is None:  # a fresh settings file provisions what its own template names

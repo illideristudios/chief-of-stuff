@@ -217,6 +217,8 @@ class Settings:
     repos: dict[str, str] = field(default_factory=dict)
     stages: dict[str, Stage] = field(default_factory=dict)
     limits: Limits = field(default_factory=Limits)
+    # #827: a policy TOML, relative to the workspace root, merged over the shipped policy; "" runs the shipped one.
+    policy_overlay: str = ""
 
 
 def _stages(table, lanes: dict[str, Lane], kanban: Kanban | None) -> dict[str, Stage]:
@@ -529,6 +531,18 @@ def _notify(table: dict, root: Path) -> Notify:
     return Notify(adapter=adapter, queue=queue, warnings=tuple((w, _offset(w)) for w in labels), **times)
 
 
+def _policy_overlay(table, root: Path) -> str:
+    if not isinstance(table, dict) or (extra := sorted(set(table) - {"overlay"})):
+        raise SettingsError(f"[policy]: unknown key {', '.join(extra)}" if isinstance(table, dict)
+                            else "[policy] is not a table")
+    path = table.get("overlay", "")
+    if not isinstance(path, str) or not path.strip() or "\0" in path:
+        raise SettingsError('[policy] overlay: a policy TOML path, relative to the workspace root')
+    if not (Path(root) / path).resolve().is_relative_to(Path(root).resolve()):
+        raise SettingsError(f"[policy] overlay: {path!r} is outside the workspace root")
+    return path
+
+
 def load(root: Path, settings_path: str | None) -> Settings:
     """`settings_path` is the `Settings:` line's value, relative to `root`, or None when there is none.
 
@@ -566,25 +580,49 @@ def load(root: Path, settings_path: str | None) -> Settings:
     pages = _pages(data["pages"]) if "pages" in data else Pages()
     repos = _repos(data["repos"]) if "repos" in data else {}
     limits = _limits(data["limits"]) if "limits" in data else Limits()
+    policy_overlay = _policy_overlay(data["policy"], Path(root)) if "policy" in data else ""
     budgets = data.get("budgets", {})
     if not isinstance(budgets, dict) or not set(budgets) <= {"S", "M", "L", "XL"}:
         raise SettingsError(f"{settings_path}: [budgets] is a table of S, M, L, XL")
     budgets = {size: _offset(v, f"[budgets] {size}") for size, v in budgets.items()}
     table = data.get("notify")
     if table is None:
-        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits)
+        return Settings(lanes=lanes, budgets=budgets, kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits, policy_overlay=policy_overlay)
     if not isinstance(table, dict):
         raise SettingsError(f"{settings_path}: [notify] is not a table")
     return Settings(notify=_notify(table, Path(root)), lanes=lanes, budgets=budgets,
-                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits)
+                    kanban=kanban, workflow=workflow, workers=workers, pages=pages, models=models, model_picks=model_picks, graph=graph, repos=repos, stages=stages, limits=limits, policy_overlay=policy_overlay)
+
+
+def _policy_toml(path: Path, name: str) -> dict:
+    try:
+        return tomllib.loads(Path(path).read_text())
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
+        raise policy.PolicyError(f"{name}: {e}") from None
+    except OSError as e:
+        raise policy.PolicyError(f"{name}: {e.strerror or e}") from None
 
 
 def load_policy(path: Path = POLICY) -> policy.Policies:
     """The policy and workflow file (design decisions 12 and 13), the shipped one by default."""
-    try:
-        return policy.parse(tomllib.loads(Path(path).read_text()))
-    except (tomllib.TOMLDecodeError, UnicodeDecodeError) as e:
-        raise policy.PolicyError(f"{path}: {e}") from None
+    return policy.parse(_policy_toml(path, str(path)))
+
+
+def workspace_policy_data(root: Path, overlay: str = "") -> dict:
+    """The shipped policy's tables with the workspace's `[policy] overlay` merged over them (#827). A named overlay
+    that is not a file is refused, never a silent fallback to the shipped policy."""
+    data = _policy_toml(POLICY, str(POLICY))
+    if not overlay:
+        return data
+    path = Path(root) / overlay
+    if not path.is_file():
+        raise policy.PolicyError(f"[policy] overlay {overlay}: no such file")
+    return policy.overlay(data, _policy_toml(path, overlay), f"[policy] overlay {overlay}")
+
+
+def workspace_policy(root: Path, overlay: str = "") -> policy.Policies:
+    """The policy one workspace runs under: the engine, init and the board all load it here."""
+    return policy.parse(workspace_policy_data(root, overlay)) if overlay else load_policy()
 
 
 def workflow_stages(policies: policy.Policies) -> list[str]:

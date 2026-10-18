@@ -3329,6 +3329,25 @@ class MainTest(unittest.TestCase):
         self.assertTrue(seen[0][1].is_set())
 
 
+class PolicyFingerprintTest(unittest.TestCase):
+    """#827: the merged policy's fingerprint is logged when it changes, and only then."""
+
+    def test_a_changed_policy_is_logged_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logged = []
+            for data in ({"policy": {"retry_limit": 3}}, {"policy": {"retry_limit": 3}}, {"policy": {"retry_limit": 5}}):
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    engine._note_policy(root, data, "policy.toml")
+                logged.append(err.getvalue())
+        self.assertIn("engine: policy changed:", logged[0])
+        self.assertIn("overlay policy.toml", logged[0])
+        self.assertEqual(logged[1], "")
+        self.assertNotEqual(logged[2], "")
+        self.assertNotEqual(logged[0], logged[2])
+
+
 class LoginPathTest(unittest.TestCase):
     """#871: under its LaunchAgent the engine ran `gh` against launchd's short PATH and every pass failed."""
 
