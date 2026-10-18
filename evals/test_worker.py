@@ -46,7 +46,8 @@ class WorkerTest(unittest.TestCase):
         self.persona = self.p.personas["builder"]
         self.forge = SimpleNamespace(
             issue=lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Forge title", body="Issue body")),
-            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"),
+            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head", number=9),
+            request_base=lambda number: "trunk",
             protected_branches=lambda: ("trunk", "main"))
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
@@ -275,7 +276,8 @@ class WorkerTest(unittest.TestCase):
         entry = worker.ModelEntry("codex", "gpt-6.1-sol", "high")
         with mock.patch.object(worker, "_model", return_value=entry), \
              mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
-             mock.patch.object(worker.host_adapter, "default_head", return_value="d" * 40), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
              mock.patch.object(worker.host_adapter, "start",
                                side_effect=lambda runtime, request, run_dir, env: (self.start(request, run_dir), "")) as host, \
              mock.patch.object(worker.claude_adapter, "start") as claude, \
@@ -297,7 +299,15 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
         self.assertEqual(self.db.segments(KEY)[0].runtime, "codex")
         record = self.db.resume(KEY)["runs"]["implement-1"]
-        self.assertEqual((record["runtime"], record["default_branch"], record["default_head"]), ("codex", "trunk", "d" * 40))
+        # #860: every protected branch's head, not only the default's.
+        self.assertEqual((record["runtime"], record["branch_heads"]), ("codex", {"trunk": "d" * 40, "main": "d" * 40}))
+
+    def test_a_non_claude_entry_needs_the_branch_its_request_targets_protected(self):
+        # §13: chief-of-stuff's requests target develop while its default is main; both must be protected.
+        self.forge.request_base = lambda number: "release"
+        with self.assertRaisesRegex(RuntimeError, "the branch its request targets"):
+            self.host_launched()
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
 
     def test_a_non_claude_run_holds_when_the_default_branch_moved_outside_the_engine(self):
         self.host_launched()
@@ -336,7 +346,8 @@ class WorkerTest(unittest.TestCase):
             return self.start(request, run_dir)
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.host_adapter, "resolve", side_effect=lambda b: f"/bin/{b}" if b in on_path else None), \
-             mock.patch.object(worker.host_adapter, "default_head", return_value="d" * 40), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
              mock.patch.object(worker.host_adapter, "start", side_effect=host), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=claude), \
              mock.patch.object(worker.process_status, "identity", return_value="start"):

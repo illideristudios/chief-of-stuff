@@ -123,6 +123,22 @@ def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
     return chosen
 
 
+def _guarded(forge: Any, issue_key: str) -> bool:
+    """§13: whether the forge protects the default branch and the branch this issue's request targets. Before a
+    request exists the worker opens one against the default branch, which is checked. A forge port without these
+    reads, or an unreadable answer, cannot vouch for protection (ledger F3: unknown is never safe)."""
+    try:
+        if not getattr(forge, "default_branch_protected", lambda: False)():
+            return False
+        try:
+            request = forge.closing_request(issue_key)
+        except ForgeError:
+            return True
+        return forge.request_base(request.number) in forge.protected_branches()
+    except (ForgeError, AttributeError, TypeError):
+        return False
+
+
 def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict, model: str = "") -> None:
     data = _resume(store, key)
     data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
@@ -263,28 +279,23 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         if not host_adapter.available(runtime):
             return False
         if not protects:
-            try:
-                # A forge port without the read cannot vouch for protection; unknown is never safe (ledger F3).
-                protects.append(bool(getattr(forge, "default_branch_protected", lambda: False)()))
-            except ForgeError:
-                protects.append(False)
+            protects.append(_guarded(forge, issue_key))
         return protects[0]
 
     chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat(), launchable)
     request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
-    host: dict[str, str] = {}
+    host: dict[str, Any] = {}
     if chosen.runtime == "claude":
         runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
     else:
-        # §13: no guard plugin on these hosts, so the forge's own protection of the default branch is required (b),
-        # and the default branch's head is kept so collect can see a merge outside the engine (c).
-        if not forge.default_branch_protected():
-            raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch")
-        default = forge.protected_branches()[0]
-        host = {"runtime": chosen.runtime, "default_branch": default,
-                "default_head": host_adapter.default_head(tree, default)}
+        # §13: no guard plugin on these hosts, so the forge must protect the default and the request's target, and
+        # every protected branch's head is kept so collect can see a merge or push outside the engine (#860).
+        if not _guarded(forge, issue_key):
+            raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch "
+                               "and the branch its request targets")
+        host = {"runtime": chosen.runtime, "branch_heads": host_adapter.branch_heads(tree, forge.protected_branches())}
         runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
     try:
         deadline = time.monotonic() + 5

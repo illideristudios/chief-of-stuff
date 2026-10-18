@@ -176,6 +176,38 @@ class HostAdapterTest(unittest.TestCase):
         self.assertNotIn("m" * 12, held)
         self.assertIn("holding for human review", self.check(after="p" * 40, commits=["p" * 40]))
 
+    def test_a_worker_merge_into_a_non_default_protected_branch_holds_beside_an_engine_merge_on_default(self):
+        # #860: chief-of-stuff merges into develop while its default is main; every protected branch is checked.
+        record = {"tree": str(self.dir), "runtime": "codex",
+                  "branch_heads": {"main": "a" * 40, "develop": "b" * 40}}
+        after = {"main": "m" * 40, "develop": "w" * 40}
+        store = SimpleNamespace(items=lambda: [SimpleNamespace(issue_key="other")],
+                                resume=lambda key: {"merges": [{"request": 2, "sha": "m" * 40, "at": "t"}]})
+
+        def git(args, cwd):
+            if args[0] == "fetch":
+                return 0, ""
+            if args[0] == "ls-remote":
+                return 0, "\n".join(f"{after[ref.rsplit('/', 1)[1]]}\t{ref}" for ref in args[2:])
+            if args[0] == "rev-list":
+                return 0, {"a" * 40 + ".." + "m" * 40: "m" * 40, "b" * 40 + ".." + "w" * 40: "w" * 40}[args[2]]
+            raise AssertionError(args)
+        with mock.patch.object(host_adapter.make_worktree, "git_trusted", side_effect=git):
+            held = host_adapter.moved_outside_engine(store, record, "now")
+        self.assertIn("develop gained commits the engine did not merge: " + "w" * 12, held)
+        self.assertNotIn("main gained", held)
+
+    def test_branch_heads_reads_every_branch_in_one_call_and_marks_absent_ones(self):
+        calls = []
+
+        def git(args, cwd):
+            calls.append(args)
+            return 0, f"{'a' * 40}\trefs/heads/main\n{'b' * 40}\trefs/heads/develop"
+        with mock.patch.object(host_adapter.make_worktree, "git_trusted", side_effect=git):
+            heads = host_adapter.branch_heads(self.dir, ["main", "develop", "release", "main"])
+        self.assertEqual(heads, {"main": "a" * 40, "develop": "b" * 40, "release": ""})
+        self.assertEqual(len(calls), 1)
+
     def test_an_unreadable_branch_or_range_holds(self):
         self.assertIn("cannot verify", self.check(after="b" * 40, fetch=1))
         self.assertIn("cannot verify", self.check(after=""))
