@@ -373,6 +373,31 @@ class WorkerTest(unittest.TestCase):
                                                 "model": {"implement": "codex:gpt-6.1-sol@high"}})
         self.assertEqual(went, "cursor")
 
+    def test_random_pick_chooses_only_among_launchable_entries(self):
+        # #877, Zach: "the goal of this is to be evaluate performance of all the different models over time".
+        self.ROTATION = self.ROTATION + 'pick = "random"\n'
+        offered = []
+
+        def last(entries):
+            offered.append([str(e) for e in entries])
+            return entries[-1]
+        with mock.patch.object(worker.random, "choice", side_effect=last):
+            used, went = self.launch_rotation(on_path=("agent", "agy"))  # codex is not installed here
+        self.assertEqual(offered, [["cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]])
+        self.assertEqual((used, went), (("sonnet", "high"), "claude"))
+
+    def test_first_stays_the_default_and_a_quota_stop_still_advances_under_random(self):
+        with mock.patch.object(worker.random, "choice") as never:
+            self.assertEqual(self.launch_rotation()[1], "codex")
+        never.assert_not_called()
+
+    def test_a_quota_stop_advances_even_when_picking_at_random(self):
+        self.ROTATION = self.ROTATION + 'pick = "random"\n'
+        with mock.patch.object(worker.random, "choice", side_effect=lambda entries: entries[-1]):
+            used, went = self.launch_rotation(data={"quota": {"reset": "later", "retry_at": NOW.isoformat()},
+                                                    "model": {"implement": "codex:gpt-6.1-sol@high"}})
+        self.assertEqual(went, "cursor")
+
     def test_a_successful_launch_clears_the_quota_wait(self):
         self.db.set_resume(KEY, {"quota": {"reset": "later", "retry_at": NOW.isoformat()}})
         self.launched()
