@@ -252,7 +252,7 @@ class WorkerTest(unittest.TestCase):
                                                   '"cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
         self.assertEqual(used, ("sonnet", "high"))
         self.assertEqual((request.model, request.effort), ("sonnet", "high"))
-        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["model"], "claude:sonnet@high")
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "claude:sonnet@high"})
         logged = " ".join(entry.message for entry in self.db.log(KEY))
         for skipped in ("codex:gpt-6.1-sol@high", "cursor:auto", "agy:gemini-4-argon-high", "#701"):
             self.assertIn(skipped, logged)
