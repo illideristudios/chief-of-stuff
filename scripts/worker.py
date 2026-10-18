@@ -18,13 +18,15 @@ import make_worktree
 import process_status
 import reconcile
 import supervisor
-from settings import load as load_settings
+from settings import ModelEntry, SettingsError, pick, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Request, retry_at
 from shell_setup import teardown
 
 _runners: dict[str, Any] = {}
+# #851: the [models.<class>] rotation a stage launches from; planning is deep work and a fix continues an implementation.
+TASK_CLASS = {"plan": "deep", "implement": "implement", "fix": "implement", "review": "review"}
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -97,9 +99,32 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
     return record
 
 
-def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict) -> None:
+def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
+           models: dict[str, tuple[ModelEntry, ...]], at: str) -> ModelEntry:
+    """The entry this start launches: the stage rotation's first Claude entry, or the next one after a quota stop
+    (ledger D10); the persona's model without a Claude entry. 1.0 launches Claude only, so other hosts are logged
+    as skipped, never a failure, until 1.1 (#701)."""
+    rotation = models.get(TASK_CLASS.get(stage, stage), ())
+    claude = tuple(entry for entry in rotation if entry.runtime == "claude")
+    chosen = claude[0] if claude else ModelEntry("claude", actor.model, actor.effort or None)
+    previous = data.get("model", {}).get(stage)
+    if claude and "quota" in data and previous:
+        try:
+            chosen = pick(claude, after=previous)
+        except SettingsError:
+            pass  # every Claude entry has stopped; the quota wait is over, so start from the first again
+    skipped = [str(entry) for entry in (rotation[:rotation.index(chosen)] if chosen in rotation else rotation)
+               if entry.runtime != "claude"]
+    if skipped:
+        store.add_log(key, f"skipped {', '.join(skipped)}: the engine launches Claude only until 1.1 (#701)", at)
+    return chosen
+
+
+def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict, model: str = "") -> None:
     data = _resume(store, key)
     data["runs"] = {**data.get("runs", {}), f"{stage}-{attempt}": record}
+    if model:
+        data["model"] = {**data.get("model", {}), stage: model}
     data.pop("quota", None)
     store.set_resume(key, data)
 
@@ -142,7 +167,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     if existing is not None:
         store.set_ownership(issue_key, existing["tree"], "tree")
         _save_run(store, issue_key, stage, attempt, existing)
-        return actor.model, actor.effort or ""
+        ran = data.get("model", {}).get(stage, "").partition(":")[2]  # adopt what the start launched, not today's rotation
+        return (ran.rpartition("@")[0], ran.rpartition("@")[2]) if "@" in ran else (ran or actor.model, "" if ran else actor.effort or "")
     text = (root / "CLAUDE.md").read_text() if (root / "CLAUDE.md").is_file() else ""
     loaded = load_settings(root, settings_path(text))
     defaults = loaded.stages.get(stage)
@@ -223,7 +249,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
            "CHIEF_OF_STUFF_WORKER": tree.name,
            **guard_binding.guard_env(guard_binding.Binding(
                issue_key, stage, attempt, session_id, root.resolve(), clock(), protected))}
-    request = Request(assignment, model=actor.model, effort=actor.effort or "", session_id=session_id,
+    chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat())
+    request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                       cwd=str(tree), worker=True, agent=agent,
                       plugin_dirs=plugin_dirs)
     runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
@@ -248,7 +275,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                   "starting_head": starting_head}
         if stage == "review":
             record["reviewed_head"] = request_head.head
-        _save_run(store, issue_key, stage, attempt, record)
+        _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
     except Exception as start_error:
         try:
             claude_adapter.cancel(runner)
@@ -266,7 +293,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                     pass
         raise start_error
     _runners[str(run_dir)] = runner
-    return actor.model, actor.effort or ""
+    return chosen.model, chosen.effort or ""
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,
