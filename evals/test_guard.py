@@ -169,7 +169,7 @@ class GuardTest(unittest.TestCase):
             "find . -path ./node_modules -prune -o -path ./.git -prune -o -type f -print | grep -v '/obj/' | head -100",
             "grep -rIl --exclude-dir=node_modules --exclude-dir=.git widget . | head",
             "git switch -c widget-7",
-            "sed -n '10p;20,30p;40,$p' notes.md",
+            "sed -n '10p;20,30p' notes.md",  # a `$` never reaches the sed rule: the gate's tokenizer refuses it first
         )
         for command in commands:
             with self.subTest(command=command):
