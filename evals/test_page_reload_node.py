@@ -282,8 +282,46 @@ MUTANTS = [
 ]
 
 
-# ReloadSnippetInNodeTest (the snippet run in node) is removed until the CI image has node (#855, #337;
-# Zach, 2026-10-17, approved). The harness above stays for its return.
+@unittest.skipIf(skip_reason(), skip_reason())
+class ReloadSnippetInNodeTest(unittest.TestCase):
+    """The snippet every served page carries, run in node against the stub page."""
+
+    snippet = page_reload.inject(b"", SAME).decode()
+
+    def test_the_served_snippet_does_what_the_cases_say(self):
+        for (name, (_, want)), result in zip(SCENARIOS.items(), grade(self.snippet), strict=True):
+            with self.subTest(name):
+                self.assertEqual(result, want)
+
+    def test_the_notice_is_a_polite_live_region_so_assistive_tech_hears_it(self):
+        # The auto-reload cannot announce before it navigates; the notice (shown when typing blocks it) must be heard.
+        [got] = run_node(self.snippet, [changed({"tick": 1}, controls=[typed()], attrs=True)])
+        self.assertEqual(got["attrs"], {"role": "status", "aria-live": "polite"})
+
+    def test_every_mutant_dies(self):
+        for name, old, new in MUTANTS:
+            with self.subTest(name):
+                self.assertEqual(self.snippet.count(old), 1, "the text to mutate is not in the snippet exactly once")
+                self.assertNotEqual(failures(self.snippet.replace(old, new)), [], "the mutant survives every case")
+
+    def test_node_failures_are_errors_not_results(self):
+        with self.assertRaisesRegex(NodeFailed, "exited 1"):
+            run_node("throw new Error('boom')", [{"steps": []}])
+        with self.assertRaisesRegex(NodeFailed, "did not finish"):
+            run_node("for(;;){}", [{"steps": []}], timeout=1, driver=DRIVER.replace("timeout: 2000", "timeout: 60000"))
+        with self.assertRaisesRegex(NodeFailed, "no result"):
+            run_node("", [{"steps": []}], driver="console.log('not json')")
+        with self.assertRaisesRegex(NodeFailed, "for 2 scenarios"):  # a short list must not pass as a short run
+            run_node("", [{"steps": []}, {"steps": []}], driver="console.log('[]')")
+
+    def test_a_throw_the_snippet_swallows_is_an_error_not_a_kill(self):
+        # The stub has no document.querySelector: the mutant throws inside the poll's .then, which the snippet's own
+        # catch would hide as wrong counts.
+        crash = self.snippet.replace("document.querySelectorAll(sel)", "document.querySelector(sel)")
+        self.assertNotEqual(crash, self.snippet)
+        with self.assertRaisesRegex(NodeFailed, "exited 1"):
+            failures(crash)
+        self.assertEqual(failures(self.snippet), [])  # its own 'offline' rejection is still ignored
 
 
 class SkipReasonTest(unittest.TestCase):
