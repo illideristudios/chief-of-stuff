@@ -235,6 +235,40 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(record["started_at"], NOW.isoformat())
         self.assertTrue(record["session_id"])
 
+    def launch_with_settings(self, settings, stage="implement", data=None):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(settings)
+        if data is not None:
+            self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            used = self.launch(stage)
+        return used, start.call_args.args[0]
+
+    def test_launch_takes_the_first_claude_entry_of_the_stage_rotation(self):
+        # #851: 1.0 launches Claude only; earlier hosts are skipped and logged until 1.1 (#701).
+        used, request = self.launch_with_settings('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", '
+                                                  '"cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
+        self.assertEqual(used, ("sonnet", "high"))
+        self.assertEqual((request.model, request.effort), ("sonnet", "high"))
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["model"], "claude:sonnet@high")
+        logged = " ".join(entry.message for entry in self.db.log(KEY))
+        for skipped in ("codex:gpt-6.1-sol@high", "cursor:auto", "agy:gemini-4-argon-high", "#701"):
+            self.assertIn(skipped, logged)
+
+    def test_launch_without_a_rotation_uses_the_persona_model(self):
+        used, request = self.launch_with_settings("[workers]\nmode = \"one-shot\"\n")
+        self.assertEqual(used, (self.persona.model, self.persona.effort or ""))
+        self.assertEqual(request.model, self.persona.model)
+
+    def test_a_quota_stop_advances_to_the_next_claude_entry(self):
+        used, request = self.launch_with_settings(
+            '[models.implement]\nrotation = ["claude:sonnet@high", "codex:x@high", "claude:opus@medium"]\n',
+            data={"quota": {"reset": "later", "retry_at": NOW.isoformat()}, "model": {"implement": "claude:sonnet@high"}})
+        self.assertEqual(used, ("opus", "medium"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "claude:opus@medium"})
+
     def test_a_successful_launch_clears_the_quota_wait(self):
         self.db.set_resume(KEY, {"quota": {"reset": "later", "retry_at": NOW.isoformat()}})
         self.launched()
