@@ -163,11 +163,12 @@ class GuardTest(unittest.TestCase):
         self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
 
     def test_unparseable_commands_and_secret_reads_go_to_the_trio(self):
-        for command in ("cat $(whoami)", "cat ~/.ssh/id_ed25519", "echo x > /etc/hosts", "rm -rf build"):
+        for command in ("cat $(whoami)", "cat ~/.ssh/id_ed25519", "echo x > /etc/hosts", "rm -rf build",
+                        "sed 'e touch /tmp/x' notes.txt", "rg --pre ./run pattern .", "find . -exec rm {} +"):
             with self.subTest(command=command):
                 self.assertEqual(self.permission(command=command)["behavior"], "deny")
         self.assertEqual(self.db.asks(KEY), [])
-        self.assertEqual(len(self.db.decisions(KEY)), 4)
+        self.assertEqual(len(self.db.decisions(KEY)), 7)
 
     def test_reads_and_edits_are_allowed_inside_the_worktree_only(self):
         self.assertEqual(self.permission("Read", file_path=str(self.root / "README.md")), {"behavior": "allow"})

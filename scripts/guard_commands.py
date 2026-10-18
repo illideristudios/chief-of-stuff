@@ -507,7 +507,7 @@ def _denied(command: str, protected: tuple[str, ...], depth: int) -> bool:
 # #874: programs a PermissionRequest may allow without anyone, because they only read. Anything else goes to the trio.
 READERS = {"ls", "cat", "head", "tail", "wc", "grep", "egrep", "fgrep", "rg", "ag", "sort", "uniq", "cut", "tr", "file",
            "stat", "tree", "jq", "yq", "du", "df", "pwd", "echo", "printf", "which", "basename", "dirname", "realpath",
-           "readlink", "diff", "cmp", "comm", "nl", "column", "date", "true", "false", "test", "[", "find", "sed"}
+           "readlink", "diff", "cmp", "comm", "nl", "column", "true", "false", "test", "[", "find"}
 GIT_READS = {"status", "diff", "log", "show", "rev-parse", "ls-files", "ls-tree", "cat-file", "grep", "blame",
              "describe", "shortlog", "show-ref", "merge-base", "name-rev", "rev-list", "for-each-ref", "branch", "remote"}
 FORGE_READS = {"view", "list", "diff", "checks", "status", "item-list", "field-list", "trace"}
@@ -576,8 +576,8 @@ def _reads_only(words: list[str]) -> bool:
     if name == "find" and any(a in {"-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprint0", "-fprintf",
                                     "-fls"} for a in args):
         return False
-    if name == "sed" and any(a == "-i" or a.startswith(("-i", "--in-place")) for a in args):
-        return False
+    if name in {"rg", "ag"} and any(a.split("=", 1)[0] in {"--pre", "--pre-glob"} for a in args):
+        return False  # --pre runs a preprocessor command on every file
     return True
 
 
