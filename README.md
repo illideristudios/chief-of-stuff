@@ -145,6 +145,21 @@ A decision's page is `<pages dir>/decision-<slug>.json`, served as `http://127.0
 
 The board and `notify.py sync` also read precise deadlines from tracker `## Decisions` rows: put `deadline: <name> YYYY-MM-DD HH:MM` in the `item` column, or `deadline: <name> HH:MM` for a time on that tracker's date. A later decision for the same name updates its marker, task horizon, and future notification warnings. A decision without an exact time supplies no instant. Run notification sync after a precise deadline decision changes.
 
+## Workspace policy
+
+The engine runs the shipped policy, `assets/policy.toml`, unless the workspace names an overlay: set `[policy] overlay = "policy.toml"` in the workspace TOML, with the path relative to the workspace root. The overlay's keys are merged over the shipped policy. A table merges key by key, and a field is replaced whole. For example, `[stages.review.policy] architect = false` stops architect requests in that workspace only. An overlay changes keys of tables the shipped policy has: a persona, stage, room or workflow it does not have is refused by name, and so is an unknown key. A named overlay that is missing is refused at startup; the engine never falls back to the shipped policy. The engine, `init` and the board load the same merged policy, and the engine logs `engine: policy changed: <fingerprint>` when the merged policy differs from the one the workspace last ran.
+
+```
+O := the workspace names an overlay      F := the overlay file exists      K := every key and table it names is known
+P := the merged policy runs
+
+O ∧ F ∧ K → P              [#827: keys merged over the shipped policy]
+O ∧ ¬F → ¬P                [a refusal, never a silent fallback]
+O ∧ ¬K → ¬P                [refused by name]
+¬O → the shipped policy runs
+∴ a workspace runs a known policy or does not start
+```
+
 ## Engine issue ownership
 
 The engine reads file scopes from each issue body on every pass and when `chief-of-stuff work` starts an issue. Declare them in a `## File ownership` section:

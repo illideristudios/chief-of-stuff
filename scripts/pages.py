@@ -405,7 +405,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         import store_access
         import trio_gate
         from dataclasses import replace
-        from settings import load_policy
+        from settings import load as load_settings, workspace_policy
         from sqlalchemy.exc import OperationalError
         from supervisor import ServiceError
 
@@ -434,7 +434,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 data = db.resume(dec.issue_key) or {}
                 tr = decision_actions.respond(
                     dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
-                    history=db.segments(dec.issue_key), policies=load_policy(), issue_type=data.get("issue_type"),
+                    history=db.segments(dec.issue_key), policies=workspace_policy(root, load_settings(root, read_config(root).settings_path).policy_overlay), issue_type=data.get("issue_type"),
                     answered_at=now_iso)
                 bodies = [a.body for a in tr.actions]
                 if tr.update is not None:  # the engine posts the comment, so no forge call waits on this request

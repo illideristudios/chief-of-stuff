@@ -878,6 +878,21 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     return actions
 
 
+def _note_policy(root: Path, data: dict, overlay: str) -> None:
+    """Log the merged policy's fingerprint when it differs from the one this workspace last ran (#827)."""
+    fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:12]
+    seen = supervisor.state_dir(root) / "policy.fingerprint"
+    try:
+        if seen.read_text().strip() == fingerprint:
+            return
+    except OSError:
+        pass
+    print(f"engine: policy changed: {fingerprint} ({'overlay ' + overlay if overlay else 'shipped policy'})",
+          file=sys.stderr, flush=True)
+    seen.parent.mkdir(parents=True, exist_ok=True)
+    seen.write_text(fingerprint + "\n")
+
+
 def _prepare_handoff(release: Path) -> Path | None:
     """Prepare an update, persisting failed release/pins retries with 60s–1h exponential backoff."""
     try:
@@ -954,7 +969,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"{refused.refused}\n{refused.setup}")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
-            policies = settings.load_policy()
+            policy_data = settings.workspace_policy_data(root, config.policy_overlay)
+            policies = policy.parse(policy_data)
+            _note_policy(root, policy_data, config.policy_overlay)
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
             unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:

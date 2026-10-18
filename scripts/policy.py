@@ -5,11 +5,15 @@ Zach, 2026-10-10: "everything is policy driven. We have default policies, and ba
 configurable at a stage / room level." Every policy field starts from the base `[policy]` table and is overridden, in
 order, by the persona's, the stage's and the room's own `policy` table, so a value set for one stage or room holds only
 there. A field is replaced whole, never merged. This module reads no file: `settings.load_policy` reads the TOML.
+
+A workspace may name an overlay (#827): a policy TOML whose keys are merged over the shipped policy's, by `overlay`.
+It changes keys of tables the shipped policy has; it adds no persona, stage, room or workflow.
 """
 
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime
 from math import isfinite
@@ -260,6 +264,36 @@ def _workflow(name: str, value, stages: set[str]) -> Workflow:
     if not reached - {e.source for e in edges}:
         raise PolicyError(f"{where} has no end: every stage has an edge out")
     return Workflow(name, start, tuple(edges), _names(f"{where} issue_types", t.get("issue_types", [])))
+
+
+_NAMED = ("personas", "stages", "rooms", "workflows")
+
+
+def overlay(shipped: dict, over: dict, where: str = "overlay") -> dict:
+    """The shipped policy's tables with an overlay's keys merged over them (#827). A table merges key by key and a
+    field is replaced whole; a section the shipped policy does not have is refused with its name. `parse` then
+    refuses any unknown key, as it does in the shipped file."""
+    merged = deepcopy(shipped)
+    for section, value in over.items():
+        if section == "default_workflow":
+            merged[section] = value
+            continue
+        if section != "policy" and section not in _NAMED:
+            raise PolicyError(f"{where}: unknown section [{section}]")
+        _table(f"{where} [{section}]", value)
+        if section == "policy":
+            merged["policy"] = {**merged.get("policy", {}), **value}
+            continue
+        for name, table in value.items():
+            entry = merged.get(section, {}).get(name)
+            if entry is None:
+                raise PolicyError(f"{where}: unknown section [{section}.{name}]")
+            for key, field_value in _table(f"{where} [{section}.{name}]", table).items():
+                if key == "policy" and section != "workflows":
+                    entry["policy"] = {**entry.get("policy", {}), **_table(f"{where} [{section}.{name}.policy]", field_value)}
+                else:
+                    entry[key] = field_value
+    return merged
 
 
 def parse(data: dict) -> Policies:
