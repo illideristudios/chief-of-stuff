@@ -1827,5 +1827,25 @@ class MainTest(unittest.TestCase):
         self.assertTrue(seen[0][1].is_set())
 
 
+class LoginPathTest(unittest.TestCase):
+    """#871: under its LaunchAgent the engine ran `gh` against launchd's short PATH and every pass failed."""
+
+    def test_under_its_launch_agent_the_engine_adopts_the_login_path(self):
+        env = {"CHIEF_OF_STUFF_VERSION": "0.129.85", "PATH": "/usr/bin:/bin"}
+        with mock.patch.object(engine.shell_setup, "login_path", return_value="/opt/homebrew/bin:/usr/bin:/bin"):
+            engine.adopt_login_path(env)
+        self.assertEqual(env["PATH"], "/opt/homebrew/bin:/usr/bin:/bin")
+
+    def test_outside_the_launch_agent_or_with_an_unreadable_path_nothing_changes(self):
+        outside = {"PATH": "/usr/bin"}
+        with mock.patch.object(engine.shell_setup, "login_path") as never:
+            engine.adopt_login_path(outside)
+        never.assert_not_called()
+        unreadable = {"CHIEF_OF_STUFF_VERSION": "0.129.85", "PATH": "/usr/bin"}
+        with mock.patch.object(engine.shell_setup, "login_path", return_value=""):
+            engine.adopt_login_path(unreadable)
+        self.assertEqual((outside["PATH"], unreadable["PATH"]), ("/usr/bin", "/usr/bin"))
+
+
 if __name__ == "__main__":
     unittest.main()
