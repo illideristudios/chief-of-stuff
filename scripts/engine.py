@@ -29,6 +29,7 @@ import ownership
 import policy
 import reconcile
 import settings
+import shell_setup
 import slots
 import startup
 import store_access
@@ -38,6 +39,13 @@ from forge_port import ForgeError
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
+
+
+def adopt_login_path(environ=os.environ) -> None:
+    """#871: under its LaunchAgent (the only place CHIEF_OF_STUFF_VERSION is set) the engine has launchd's short PATH, so
+    the `gh`, `glab` and `git` it runs itself are not found. Take the login shell's PATH; an unreadable one changes nothing."""
+    if environ.get("CHIEF_OF_STUFF_VERSION") and (path := shell_setup.login_path(dict(environ))):
+        environ["PATH"] = path
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -534,6 +542,7 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--interval must be a finite positive number")
     root = args.root.resolve()
     newer = None
+    adopt_login_path()
     try:
         if (installed := supervisor.current_release()) != supervisor.RELEASE:
             if (python := _prepare_handoff(installed)) is not None:
