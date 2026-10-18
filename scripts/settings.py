@@ -622,7 +622,7 @@ def workspace_policy_data(root: Path, overlay: str = "") -> dict:
 
 def workspace_policy(root: Path, overlay: str = "") -> policy.Policies:
     """The policy one workspace runs under: the engine, init and the board all load it here."""
-    return policy.parse(workspace_policy_data(root, overlay))
+    return policy.parse(workspace_policy_data(root, overlay)) if overlay else load_policy()
 
 
 def workflow_stages(policies: policy.Policies) -> list[str]:

@@ -406,6 +406,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         import trio_gate
         from dataclasses import replace
         from settings import load as load_settings, workspace_policy
+        from workspace import settings_path
         from sqlalchemy.exc import OperationalError
         from supervisor import ServiceError
 
@@ -417,6 +418,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         text = form.get("answer", [""])[0].strip()
         target_stage = form.get("target_stage", [""])[0].strip()
         now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
+        try:  # #827: the workspace's own policy, overlay included, as the engine runs it
+            rules = Path(root) / "CLAUDE.md"
+            policies = workspace_policy(root, load_settings(root, settings_path(rules.read_text() if rules.is_file() else "")).policy_overlay)
+        except (OSError, ValueError) as exc:  # SettingsError and PolicyError are ValueErrors
+            return self.send_error(503, f"workspace policy unreadable: {exc}")
 
         db = None
         try:
@@ -434,7 +440,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 data = db.resume(dec.issue_key) or {}
                 tr = decision_actions.respond(
                     dec, action, text, target_stage=target_stage, current_stage=item.stage if item else "",
-                    history=db.segments(dec.issue_key), policies=workspace_policy(root, load_settings(root, read_config(root).settings_path).policy_overlay), issue_type=data.get("issue_type"),
+                    history=db.segments(dec.issue_key), policies=policies, issue_type=data.get("issue_type"),
                     answered_at=now_iso)
                 bodies = [a.body for a in tr.actions]
                 if tr.update is not None:  # the engine posts the comment, so no forge call waits on this request

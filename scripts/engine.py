@@ -969,9 +969,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"{refused.refused}\n{refused.setup}")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
-            policy_data = settings.workspace_policy_data(root, config.policy_overlay)
-            policies = policy.parse(policy_data)
-            _note_policy(root, policy_data, config.policy_overlay)
+            policies = settings.workspace_policy(root, config.policy_overlay)
+            _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay)
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
             unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:
