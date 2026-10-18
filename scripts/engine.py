@@ -279,7 +279,8 @@ def _permission(ask: Any) -> dict | None:
         event = json.loads(ask.context or "")
     except (TypeError, ValueError):
         return None
-    if (isinstance(event, dict) and "tool_name" in event and tuple(ask.options) == ("allow", "deny")
+    # Asks raised before #874 carry no options; they are permission requests all the same (#890 follow-up).
+    if (isinstance(event, dict) and "tool_name" in event and tuple(ask.options) in (("allow", "deny"), ())
             and str(ask.question).startswith("Permission requested for ")):
         return event
     return None
@@ -326,7 +327,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
             row = decision_actions.ask_decision(store.decisions(key), ask)
             topic, question, instance = decision_actions.identity(row) if row is not None else (
                 "ask", ask.question, f"ask-{ask.id}")
-            choice = _choice(store, key, topic, question, tuple(ask.options), resolved, policies.personas,
+            options = ("allow", "deny") if permission is not None else tuple(ask.options)
+            choice = _choice(store, key, topic, question, options, resolved, policies.personas,
                              model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock)
             if choice:
                 store.answer_ask(key, ask.id, choice)
