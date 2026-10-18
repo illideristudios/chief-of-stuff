@@ -1726,6 +1726,18 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
         self.assertTrue(any(e.message.startswith("permission allow: Permission requested for Bash") for e in self.db.log(KEY)))
 
+    def test_a_permission_ask_raised_before_874_with_no_options_is_settled_too(self):
+        # #890 follow-up: 60 of the 62 open permission asks were raised before the allow/deny form and carry none.
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        context = json.dumps({"tool_name": "Bash", "tool_input": {"command": "git ls-files"}})
+        self.db.add_ask(KEY, "plan", 1, "session", "Permission requested for Bash", [], context)
+        self.db.add_ask(KEY, "plan", 1, "session", "Permission requested for Bash", [],
+                        json.dumps({"tool_name": "Bash", "tool_input": {"command": "cat ../sibling/notes.md"}}))
+        self._trio()
+        self.run_pass(model=self._votes([("adopt", "allow")] * 3))
+        self.assertEqual([a.answer for a in self.db.asks(KEY)], ["allow", "allow"])  # the rule, then the trio's choice
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
+
     def test_a_split_trio_denies_a_permission_and_never_asks_the_owner(self):
         # #890 (2): unjudged goes to the trio only; a split denies with the reason on the run.
         self._trio()
