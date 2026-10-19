@@ -362,7 +362,8 @@ def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
         for path in request.plugin_dirs:
             declared = Path(path) / ".mcp.json"
             if declared.is_file():
-                servers.update(json.loads(declared.read_text().replace("${CLAUDE_PLUGIN_ROOT}", str(path))))
+                root = json.dumps(str(path))[1:-1]  # escaped, so a path with " or \ stays valid JSON
+                servers.update(json.loads(declared.read_text().replace("${CLAUDE_PLUGIN_ROOT}", root)))
         out += ["--mcp-config", json.dumps({"mcpServers": servers})] if servers else []
     return out + ["--", request.prompt]
 
