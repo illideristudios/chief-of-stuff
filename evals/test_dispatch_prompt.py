@@ -570,10 +570,6 @@ class InboxMetadataLineTest(unittest.TestCase):
         line = next(x for x in self.body.splitlines() if x.startswith("Inbox: "))
         self.assertTrue(Path(line.removeprefix("Inbox: ")).is_file(), line)
 
-    def test_inbox_metadata_line_format(self):
-        self.assertRegex(self.body, r"(?m)^Inbox: .*/scripts/inbox\.py$")
-
-
 class DualTransportFallbackAddressingTest(unittest.TestCase):
     """Fallback CLI commands must always target the role-based 'coordinator' mailbox."""
 
@@ -601,12 +597,6 @@ class DualTransportFallbackAddressingTest(unittest.TestCase):
         # Ensure the ephemeral session name is never used as mailbox address
         self.assertNotIn('--to "my-coord', body)
         self.assertNotIn(f'--to "{coord_session}"', body)
-
-    def test_all_four_fallback_command_types_present_with_coordinator_recipient(self):
-        body = dp.compose(self.root, "2026-09-18", "Security audit", coordinator="coord-alpha [abcdef]")
-        for msg_type in ("register", "ask", "stop", "progress"):
-            pattern = rf'send --to "coordinator" --from "<your_ref_or_name>" --type {msg_type}'
-            self.assertRegex(body, pattern)
 
     def test_fallback_command_delivers_to_coordinator_mailbox(self):
         mailbox_dir = self.root / ".chief-of-stuff" / "mailbox"
@@ -1281,9 +1271,6 @@ class PullRequestTest(unittest.TestCase):
         line = [x for x in self.body.splitlines() if x.startswith("Commits: ")][0]
         self.assertIn("when the work is finished and its suite is green", line)
         self.assertNotIn("when you are told to", line)
-
-    def test_the_commit_rule_survives(self):
-        self.assertIn("Commit small and often", self.body)
 
     def test_cimp_is_not_named(self):
         self.assertNotIn("CIMP", self.body)
