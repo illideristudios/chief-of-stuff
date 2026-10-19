@@ -1772,6 +1772,30 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(sorted((key, stage) for key, stage, *_ in self.launched), [(KEY, "plan"), (other, "plan")])
 
+    def planned_without_scope(self):
+        # An issue whose plan ran before #915/#820 asked plans to propose their file ownership.
+        self.plan_policy()
+        self.forge.rows[0].update(stage="plan", body="")
+        self.forge.snapshot = lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "plan", 1, started_at=NOW.isoformat(), ended_at=NOW.isoformat(), outcome="done")
+
+    def test_a_planned_issue_with_no_file_ownership_replans_to_propose_it(self):
+        self.planned_without_scope()
+        self.run_pass()
+        self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched], [(KEY, "plan", 2)])
+
+    def test_a_pending_scope_proposal_or_spent_replans_wait_instead(self):
+        self.planned_without_scope()
+        self.db.update_resume(KEY, lambda data: data.__setitem__("scope_proposal", {"stage": "plan", "attempt": 1,
+                                                                                    "scopes": []}))
+        self.run_pass()
+        self.db.update_resume(KEY, lambda data: (data.pop("scope_proposal"), data.__setitem__(
+            "scope_replans", engine.SCOPE_REPLANS)))
+        self.run_pass()
+        self.assertEqual(self.launched, [])
+        self.assertTrue(any(e.message == "wait: needs file ownership" for e in self.db.log(KEY)))
+
     def proposal(self, scopes=(("src/a.py", "write"), ("docs/design.md", "read"))):
         self.forge.rows[0]["body"] = "Fix the widget."
         self.db.sync_from_forge(self.forge.snapshots())
