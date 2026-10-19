@@ -356,6 +356,14 @@ def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
         out += ["--tools", "", "--safe-mode"]
     if request.worker:  # a PR branch's own settings, hooks and MCP servers would run as this user
         out += ["--setting-sources", "user", "--strict-mcp-config"]
+        # Strict mode also drops plugin MCP servers (Claude Code 2.1.303), so the guard's engine server, which
+        # carries the report tool, is passed explicitly; ${CHIEF_PYTHON} still expands from the worker's env.
+        servers = {}
+        for path in request.plugin_dirs:
+            declared = Path(path) / ".mcp.json"
+            if declared.is_file():
+                servers.update(json.loads(declared.read_text().replace("${CLAUDE_PLUGIN_ROOT}", str(path))))
+        out += ["--mcp-config", json.dumps({"mcpServers": servers})] if servers else []
     return out + ["--", request.prompt]
 
 
