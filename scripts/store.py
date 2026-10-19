@@ -410,12 +410,16 @@ class Store:
         return self._all(select(Ownership).where(Ownership.issue_key == issue_key).order_by(Ownership.path))
 
     def replace_file_ownership(self, issue_key: str, scopes: list[tuple[str, str]]) -> None:
-        """Replace the forge's declaration atomically, retaining engine worktree registrations.
+        """Replace the forge's declaration atomically once every segment for the issue has ended.
 
+        Retain engine worktree registrations. Check open segments under the same write lock as
+        the replacement, so a concurrent worker start cannot lose its launch scope.
         Older workers registered absolute tree paths as write rows; adopt those as tree rows too.
         Declared file paths are always repository-relative.
         """
         with self.session() as s:
+            if s.scalar(select(Segment.id).where(Segment.issue_key == issue_key, Segment.ended_at.is_(None)).limit(1)) is not None:
+                return
             for row in s.scalars(select(Ownership).where(Ownership.issue_key == issue_key)).all():
                 if row.mode == "tree" or Path(row.path).is_absolute():
                     row.mode = "tree"

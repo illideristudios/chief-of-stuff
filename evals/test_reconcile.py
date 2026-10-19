@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import policy
 import reconcile
+import readiness
 
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
@@ -845,16 +846,15 @@ class ReconcileTest(unittest.TestCase):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
 
     def test_an_item_that_waits_for_a_slot_claims_nothing_for_the_next(self):
-        import readiness
         keys = [f"github:example/project#{n}" for n in (1, 2, 3)]
         items = [replace(Item(), issue_key=key) for key in keys]
-        claims = (readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
+        claims = (readiness.Claim(keys[0], "docs/"), readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
         got = reconcile.plan(items, {}, self.p, {}, 1, NOW, {}, facts=reconcile.Facts(claims=claims, blockers=()))
         self.assertEqual([type(a).__name__ for a in got], ["Dispatch", "Wait", "Wait"])
         self.assertEqual([a.reason for a in got[1:]], ["no free worker slots"] * 2)
 
     def test_unknown_blockers_wait_with_their_reason(self):
-        facts = reconcile.Facts(blockers=None, blockers_error="auth required")
+        facts = reconcile.Facts(claims=(readiness.Claim(KEY, "src/"),), blockers=None, blockers_error="auth required")
         self.assertEqual(self.plan(facts=facts),
                          [reconcile.Wait(KEY, "dependency blockers unknown: auth required")])
 
@@ -879,13 +879,13 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(actions, [reconcile.Wait(KEY, f"file ownership conflict with {other}")])
 
     def test_released_read_only_hold_is_not_reinstated_from_a_retained_tree(self):
-        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, True),), blockers=())
+        facts = reconcile.Facts(claims=(readiness.Claim(KEY, ".", "read"),), read_only=(KEY,), changed=((KEY, True),), blockers=())
         self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
         self.assertEqual(self.plan(item=replace(Item(), human_review=True), history=[Segment("implement")], facts=facts),
                          [reconcile.Wait(KEY, "human review")])
 
     def test_unknown_finished_tree_does_not_reinstate_a_released_read_only_hold(self):
-        facts = reconcile.Facts(read_only=(KEY,), changed=((KEY, None),), blockers=())
+        facts = reconcile.Facts(claims=(readiness.Claim(KEY, ".", "read"),), read_only=(KEY,), changed=((KEY, None),), blockers=())
         self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
 
     def test_workflow_terminal_worker_requires_landing_when_it_disappears(self):

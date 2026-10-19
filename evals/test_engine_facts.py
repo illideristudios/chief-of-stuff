@@ -171,7 +171,7 @@ class GatherTest(unittest.TestCase):
         tree.mkdir()
         run = self.root / "run"
         run.mkdir()
-        self.db.replace_file_ownership(KEY, [(".", "read")])
+        self.db.set_ownership(KEY, "src/a.py", "read")
         data = self.db.resume(KEY)
         data["runs"]["implement-1"].update(tree=str(tree), run_dir=str(run))
         self.db.set_resume(KEY, data)
@@ -189,7 +189,7 @@ class GatherTest(unittest.TestCase):
         run = self.root / "run"
         run.mkdir()
         (run / "starting_head").write_bytes(b"\xff")
-        self.db.replace_file_ownership(KEY, [(".", "read")])
+        self.db.set_ownership(KEY, "src/a.py", "read")
         for run_dir in (str(run), "bad\x00path"):
             data = self.db.resume(KEY)
             data["runs"]["implement-1"].update(tree=str(tree), run_dir=run_dir)
@@ -224,7 +224,7 @@ class GatherTest(unittest.TestCase):
         head = git("rev-parse", "HEAD")
         git("update-ref", "refs/remotes/origin/feature", head)
         git("checkout", "--detach")
-        self.db.replace_file_ownership(KEY, [(".", "read")])
+        self.db.set_ownership(KEY, "src/a.py", "read")
         data = self.db.resume(KEY)
         data["runs"]["implement-1"].update(tree=str(tree), starting_head=head)
         self.db.set_resume(KEY, data)
@@ -281,7 +281,7 @@ class GatherTest(unittest.TestCase):
                 git.assert_called_once_with(["merge-base", "--is-ancestor", "HEAD", "main-sha"], tree)
 
     def test_finished_run_tree_evidence_remains_available_for_read_only_enforcement(self):
-        self.db.replace_file_ownership(KEY, [(".", "read")])
+        self.db.set_ownership(KEY, "src/a.py", "read")
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
         self.assertIn(KEY, self.gather().read_only)
         self.assertEqual(self.gather().changed, ((KEY, None),))

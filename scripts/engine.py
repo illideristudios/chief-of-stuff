@@ -641,13 +641,13 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 body = got.issue.body if isinstance(got.issue.body, str) else ""
             except (ForgeError, OSError, ValueError, TypeError) as exc:
                 store.add_log(key, f"ownership read failed: {exc}", clock().isoformat())
-                # A failed per-issue fallback preserves prior claims; a new issue owns the repository.
-                if not any(row.mode != "tree" for row in store.ownership(key)):
-                    scopes[key] = [(".", "write")]
+                # A failed read preserves prior declarations; a new issue waits without a scope.
                 continue
         scopes[key] = ownership.issue_scopes(body)
+    running = {segment.issue_key for segment in store.segments() if segment.ended_at is None}
     for key, declared in scopes.items():
-        store.replace_file_ownership(key, declared)
+        if key not in running:
+            store.replace_file_ownership(key, declared or [])
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
@@ -658,6 +658,18 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                   now=clock(), require_green=require_green),
                    finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
+
+    # Collection judges each exited worker against its launch scope. Apply pending edits only
+    # after every segment for that issue ends, then give readiness the current declarations.
+    still_running = {segment.issue_key for segment in store.segments() if segment.ended_at is None}
+    refreshed = {key: declared for key, declared in scopes.items() if key in running and key not in still_running}
+    for key, declared in refreshed.items():
+        store.replace_file_ownership(key, declared or [])
+    if refreshed:
+        claims = tuple(claim for claim in facts.claims if claim.issue_key not in refreshed) + tuple(
+            readiness.Claim(key, path, mode) for key, declared in refreshed.items() for path, mode in declared or [])
+        if claims != facts.claims:
+            facts = replace(facts, claims=claims)
 
     now = clock()
     at = now.isoformat()

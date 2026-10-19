@@ -58,6 +58,8 @@ def _conflict(issue_key: str, claims: Sequence[Claim], running: Sequence[str]) -
 def why_not(issue_key: str, *, claims: Sequence[Claim], running: Sequence[str],
             blockers: tuple[str, ...] | None, asks: Sequence[Ask], reports: Sequence[Report]) -> str | None:
     """Why this item must not be dispatched, or None when it may."""
+    if not any(c.issue_key == issue_key for c in claims):
+        return "needs file ownership"
     mine_asks = [row for row in asks if row.issue_key == issue_key]
     if any(not (row.answer or "").strip() for row in mine_asks):
         return "unanswered ask"
