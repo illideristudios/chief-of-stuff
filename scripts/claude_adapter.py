@@ -76,8 +76,8 @@ def cancel(process: subprocess.Popen) -> None:
     for sig in (signal.SIGTERM, signal.SIGKILL):
         try:
             os.killpg(process.pid, sig)
-        except ProcessLookupError:
-            pass
+        except (ProcessLookupError, PermissionError):
+            pass  # macOS answers EPERM for a group whose leader already exited and is unreaped (#901)
         try:
             process.wait(timeout=5)
             return
