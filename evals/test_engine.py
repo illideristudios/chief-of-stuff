@@ -1826,8 +1826,10 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {
                 **next(r for r in self.forge.rows if r["issue_key"] == issue_key), "stage_mark": None}):
             self.run_pass(model=slow)
-        self.assertEqual(votes.n, 3)  # the consult that started finishes; the next waits for a later pass
-        self.assertEqual(len([key for key in (KEY, other) if self.db.decisions(key)]), 1)
+        self.assertEqual(votes.n, 1)  # the first vote spends the budget: no further call, and the next consult waits
+        consulted = [key for key in (KEY, other) if self.db.decisions(key)]
+        self.assertEqual(len(consulted), 1)
+        self.assertTrue(decision_actions.retryable_failure(self.db.decisions(consulted[0])[-1].record))
 
     def _trio(self, **fields):
         self.p = policy.parse({

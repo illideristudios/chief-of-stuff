@@ -11,6 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import decision_actions  # noqa: E402
 import model_port  # noqa: E402
 import policy  # noqa: E402
 import store  # noqa: E402
@@ -468,6 +469,25 @@ class TrioModelsTest(unittest.TestCase):
         self.assertTrue(got.escalated)
         self.assertEqual([r.runtime for r in self.requests], ["claude", "cursor", "agy", "codex"])
         self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "")  # retryable, not yet the owner's
+
+    def test_a_call_gets_at_most_the_time_left_and_none_starts_once_it_is_gone(self):
+        # #927 review: the pass budget bounds every call, not only the start of a consult.
+        left = [150.0]
+
+        def first_uses_it_all(request):
+            left[0] = 0.0
+            return reply()
+        got = trio_gate.consult(self.decision, self.policy, PERSONAS, self.port(first_uses_it_all), self.store,
+                                remaining=lambda: left[0])
+        self.assertTrue(got.escalated)
+        self.assertEqual([r.timeout_s for r in self.requests], [trio_gate.TIMEOUT_S])  # min(120, 150); no further call
+        row = self.store.decisions(KEY)[-1]
+        self.assertEqual(row.decided_by, "")
+        self.assertTrue(decision_actions.retryable_failure(row.record))
+        left[0] = 30.0
+        trio_gate.consult(replace(self.decision, question="Short?"), self.policy, PERSONAS, self.port(), self.store,
+                          remaining=lambda: left[0])
+        self.assertEqual({r.timeout_s for r in self.requests}, {30.0})
 
     def test_with_no_entry_left_after_quota_stops_the_owner_decides(self):
         got = self.ask(self.port(lambda request: model_port.Failure("quota", "429 quota")))
