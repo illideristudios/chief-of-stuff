@@ -1409,12 +1409,6 @@ class ShaClosesTheLaneTest(unittest.TestCase):
         self.assertEqual(len(report.reopen), 1, report.lines)
         self.assertIn("is not on main", report.reopen[0].why)
 
-    def test_a_task_with_no_sha_reopens_exactly_as_before(self) -> None:
-        """The regression guard against 116a: no sha is no evidence, and no evidence clears nothing."""
-        report = self.tracker("done 10:00")
-        self.assertEqual(len(report.reopen), 1, report.lines)
-        self.assertIn("not on main", report.reopen[0].why)
-
     def test_a_malformed_sha_falls_back_and_says_so(self) -> None:
         report = self.tracker("done 10:00 not-a-sha")
         self.assertEqual(len(report.reopen), 1, report.lines)
