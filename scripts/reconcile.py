@@ -518,9 +518,11 @@ SCOPE_REPLANS = 2  # plan reruns an issue may take to propose the file ownership
 
 
 def _scope_replans(history: Sequence[Segment]) -> int:
-    """Plan runs launched after the issue's first finished plan; a start that failed at launch spends none."""
+    """Plan runs launched after the issue's first finished plan, or all of them when none finished; a start that failed
+    at launch spends none."""
     done = [seg.attempt for seg in history if seg.stage == "plan" and seg.outcome == "done"]
-    return sum(1 for seg in history if seg.stage == "plan" and done and seg.attempt > min(done)
+    start = min(done) if done else 0
+    return sum(1 for seg in history if seg.stage == "plan" and seg.attempt > start
                and not (seg.outcome == "failed" and seg.ended_at == seg.started_at))
 
 
