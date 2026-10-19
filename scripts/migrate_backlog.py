@@ -31,6 +31,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import backlog as bl
@@ -294,6 +295,23 @@ def main(argv: list[str] | None = None) -> int:
 
 
 
+# #883: a GitLab workspace is named by the engine's issue-key prefix, gitlab:<host>/<group>/<project>.
+GITLAB_WORKSPACE = re.compile(r'gitlab:([\w.-]+)/([\w.-]+(?:/[\w.-]+)+)')
+GITLAB_APPROVAL = re.compile(r'https://([\w.-]+)/([\w.-]+(?:/[\w.-]+)+)/-/merge_requests/(\d+)')
+GITHUB_APPROVAL = re.compile(r'https://github.com/([^/]+/[^/]+)/pull/(\d+)')
+
+
+def gitlab_home(repo: str):
+    """The GitLab backlog a `gitlab:<host>/<project>` workspace key names, or None for a GitHub `owner/repo`."""
+    found = GITLAB_WORKSPACE.fullmatch(repo)
+    return bl.Backlog(host=f'https://{found.group(1)}', project=found.group(2)) if found else None
+
+
+def issue_url(repo: str, number: int) -> str:
+    home = gitlab_home(repo)
+    return f'{home.host}/{home.project}/-/issues/{number}' if home else f'https://github.com/{repo}/issues/{number}'
+
+
 def ownership_gh(args: list[str], body: str | None = None):
     """gh is the only issue writer. Body text goes through a file, never shell quoting."""
     with tempfile.TemporaryDirectory() as directory:
@@ -389,12 +407,12 @@ def ownership_report(workspaces: list[dict]) -> str:
                   f"Code snapshot SHA256: `{workspace['code_sha256']}`", '', '### Needs the owner', '']
         for row in rows:
             if row['status'] == 'unresolved':
-                lines.append(f"- [#{row['number']}](https://github.com/{workspace['repo']}/issues/{row['number']}): {row['reason']}")
+                lines.append(f"- [#{row['number']}]({issue_url(workspace['repo'], row['number'])}): {row['reason']}")
         lines += ['', '### Proposed or retained declarations', '']
         for row in rows:
             if row['status'] == 'unresolved':
                 continue
-            lines += [f"#### [#{row['number']}](https://github.com/{workspace['repo']}/issues/{row['number']}) — {row['status']}", '',
+            lines += [f"#### [#{row['number']}]({issue_url(workspace['repo'], row['number'])}) — {row['status']}", '',
                       f"Original title/body SHA256: `{row['original']}`", '']
             if row['section']:
                 lines += ['```markdown', row['section'].rstrip(), '```', '']
@@ -403,31 +421,103 @@ def ownership_report(workspaces: list[dict]) -> str:
     return '\n'.join(lines).rstrip() + '\n'
 
 
-def apply_ownership(plan: dict, plan_text: str, approval_pr: str, plan_path: str, gh, validate) -> list[dict]:
-    """Apply exactly the plan in the approved PR head, skipping closed or changed issues."""
+def _verdict(bodies, sha: str) -> str:
+    verdict = ''
+    for body in bodies:
+        for found in re.finditer(r'(?m)^Architect: (APPROVED|CHANGES) ([0-9a-f]{40})[ \t]*$', body):
+            if found.group(2) == sha:
+                verdict = found.group(1)
+    return verdict
+
+
+def _github_ops(approval_pr: str, plan_path: str, repos: list[str], gh):
+    approved_repo = GITHUB_APPROVAL.fullmatch(approval_pr).group(1)
+    if any(gitlab_home(repo) for repo in repos):
+        raise ValueError('a GitHub approval cannot approve a GitLab plan; review it in an MR on that project')
+
+    def approved():
+        pr = gh(['pr', 'view', approval_pr, '--json', 'headRefOid,comments,url'])
+        if _verdict((c['body'] for c in pr['comments']), pr['headRefOid']) != 'APPROVED':
+            raise ValueError('architect approval is required for the PR current head')
+        return pr['headRefOid']
+
+    def reviewed(head):
+        return base64.b64decode(gh(['api', f'repos/{approved_repo}/contents/{plan_path}?ref={head}'])['content']).decode()
+
+    def view(repo, number):
+        now = gh(['issue', 'view', str(number), '--repo', repo, '--json', 'title,body,state'])
+        return now['title'], now.get('body') or '', now['state'].upper() == 'OPEN'
+
+    def edit(repo, number, body):
+        gh(['issue', 'edit', str(number), '--repo', repo, '--body-file', '-'], body)
+    return approved, reviewed, view, edit
+
+
+def _gitlab_ops(approval_mr: str, plan_path: str, repos: list[str], client):
+    """#883: the plan is reviewed in an MR on the same GitLab project, read through the GitLab backlog client, so
+    nothing Gauntlet-derived leaves that host (house rule 2). The approver is that project's architect or the owner."""
+    found = GITLAB_APPROVAL.fullmatch(approval_mr)
+    home, number = client.Backlog(host=f'https://{found.group(1)}', project=found.group(2)), found.group(3)
+    own = f'gitlab:{found.group(1)}/{found.group(2)}'
+    if any(repo != own for repo in repos):
+        raise ValueError(f'a GitLab approval approves only a plan for {own}; any other workspace needs its own review')
+    secret = client.token(home)
+    if not secret:
+        raise ValueError(home.missing_token)
+
+    def get(url):
+        body, headers, error = client._get(url, secret, client.TIMEOUT)
+        if error:
+            raise ValueError(f'GitLab: {error}')
+        return body, headers
+
+    def approved():
+        mr, _ = get(f'{home.api()}/merge_requests/{number}')
+        notes, page = [], '1'
+        while page:
+            batch, headers = get(f'{home.api()}/merge_requests/{number}/notes?per_page=100&sort=asc&page={page}')
+            notes += [note.get('body') or '' for note in batch]
+            page = (headers.get('x-next-page') or '').strip()
+        if _verdict(notes, mr['sha']) != 'APPROVED':
+            raise ValueError('architect approval is required for the MR current head')
+        return mr['sha']
+
+    def reviewed(head):
+        got, _ = get(f"{home.api()}/repository/files/{quote(plan_path, safe='')}?ref={head}")
+        return base64.b64decode(got['content']).decode()
+
+    def view(repo, number):
+        read = client.read_one(home, number, token=secret)
+        if not read.ok:
+            raise ValueError(f'GitLab: {read.error}')
+        return read.issue.title, read.issue.body, read.issue.state == 'opened'
+
+    def edit(repo, number, body):
+        error = client.set_description(home, number, body, token=secret)
+        if error:
+            raise ValueError(f'GitLab: {error}')
+    return approved, reviewed, view, edit
+
+
+def apply_ownership(plan: dict, plan_text: str, approval_pr: str, plan_path: str, gh, validate,
+                    gitlab=bl) -> list[dict]:
+    """Apply exactly the plan at the approved head, skipping closed or changed issues. A GitHub plan is approved on a
+    GitHub PR and a GitLab plan on an MR in its own project; either refuses the other (#883)."""
     if plan.get('version') != 1:
         raise ValueError('unsupported ownership plan version')
     if validate([''])[0] is not None:
         raise ValueError('requires #820 issue_gate parser')
-    match = re.fullmatch(r'https://github.com/([^/]+/[^/]+)/pull/(\d+)', approval_pr)
-    if not match or not plan_path or plan_path.startswith('/') or '..' in Path(plan_path).parts:
-        raise ValueError('use a GitHub approval PR URL and repository-relative --plan-path')
-    approved_repo = match.group(1)
-
-    def approved():
-        pr = gh(['pr', 'view', approval_pr, '--json', 'headRefOid,comments,url'])
-        sha, verdict = pr['headRefOid'], ''
-        for comment in pr['comments']:
-            for found in re.finditer(r'(?m)^Architect: (APPROVED|CHANGES) ([0-9a-f]{40})[ \t]*$', comment['body']):
-                if found.group(2) == sha:
-                    verdict = found.group(1)
-        if verdict != 'APPROVED':
-            raise ValueError('architect approval is required for the PR current head')
-        return sha
-
+    if not plan_path or plan_path.startswith('/') or '..' in Path(plan_path).parts:
+        raise ValueError('use a repository-relative --plan-path')
+    repos = [workspace['repo'] for workspace in plan['workspaces']]
+    if GITHUB_APPROVAL.fullmatch(approval_pr):
+        approved, reviewed, view, edit = _github_ops(approval_pr, plan_path, repos, gh)
+    elif GITLAB_APPROVAL.fullmatch(approval_pr):
+        approved, reviewed, view, edit = _gitlab_ops(approval_pr, plan_path, repos, gitlab)
+    else:
+        raise ValueError('use a GitHub approval PR URL or a GitLab approval MR URL')
     head = approved()
-    reviewed = gh(['api', f'repos/{approved_repo}/contents/{plan_path}?ref={head}'])
-    if base64.b64decode(reviewed['content']).decode() != plan_text:
+    if reviewed(head) != plan_text:
         raise ValueError('local plan differs from the reviewed plan at the approved head')
     results = []
     for workspace in plan['workspaces']:
@@ -437,10 +527,9 @@ def apply_ownership(plan: dict, plan_text: str, approval_pr: str, plan_path: str
                 continue
             result = dict(repo=repo, number=row['number'], status='skipped', reason='')
             try:
-                now = gh(['issue', 'view', str(row['number']), '--repo', repo, '--json', 'title,body,state'])
-                body, title = now.get('body') or '', now['title']
+                title, body, is_open = view(repo, row['number'])
                 digest = ownership_digest(title, body)
-                if now['state'].upper() != 'OPEN':
+                if not is_open:
                     result['reason'] = 'issue is closed'
                 elif digest == row['proposed']:
                     result['status'] = 'already applied'
@@ -456,7 +545,7 @@ def apply_ownership(plan: dict, plan_text: str, approval_pr: str, plan_path: str
                         raise ValueError('saved proposal digest does not match')
                     if approved() != head:
                         raise ValueError('approval PR head changed during apply')
-                    gh(['issue', 'edit', str(row['number']), '--repo', repo, '--body-file', '-'], candidate)
+                    edit(repo, row['number'], candidate)
                     result['status'] = 'written'
             except (ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
                 result.update(status='failed', reason=str(exc))
@@ -465,7 +554,7 @@ def apply_ownership(plan: dict, plan_text: str, approval_pr: str, plan_path: str
 
 
 def ownership_main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(description='Backfill open GitHub issues with reviewed file ownership sections.')
+    ap = argparse.ArgumentParser(description='Backfill open GitHub or GitLab issues with reviewed file ownership sections.')
     ap.add_argument('--workspace', action='append', default=[], metavar='OWNER/REPO=PATH', help='repeat for every engine workspace')
     mode = ap.add_mutually_exclusive_group(required=True)
     mode.add_argument('--dry-run', action='store_true')
@@ -490,12 +579,19 @@ def ownership_main(argv: list[str]) -> int:
         workspaces, seen = [], set()
         for spec in args.workspace:
             repo, sep, path = spec.partition('=')
-            if not sep or not re.fullmatch(r'[\w.-]+/[\w.-]+', repo) or repo in seen:
-                ap.error('invalid or duplicate --workspace; expected OWNER/REPO=PATH')
+            home = gitlab_home(repo)
+            if not sep or not (home or re.fullmatch(r'[\w.-]+/[\w.-]+', repo)) or repo in seen:
+                ap.error('invalid or duplicate --workspace; expected OWNER/REPO=PATH or gitlab:HOST/GROUP/PROJECT=PATH')
             seen.add(repo)
-            raw = ownership_gh(['api', f'repos/{repo}/issues?state=open&per_page=100', '--paginate', '--slurp'])
-            issues = [i for page in raw for i in page] if raw and isinstance(raw[0], list) else raw
-            issues = [i for i in issues if 'pull_request' not in i]
+            if home:
+                got = bl.issues(home)  # #883: every page, through the GitLab backlog client
+                if not got.ok:
+                    raise ValueError(f'{repo}: {got.error}')
+                issues = [dict(number=i.iid, title=i.title, body=i.body) for i in got.issues]
+            else:
+                raw = ownership_gh(['api', f'repos/{repo}/issues?state=open&per_page=100', '--paginate', '--slurp'])
+                issues = [i for page in raw for i in page] if raw and isinstance(raw[0], list) else raw
+                issues = [i for i in issues if 'pull_request' not in i]
             workspaces.append(ownership_plan(repo, issues, ownership_sources(Path(path)), validate))
         scripts = args.parser_root / 'scripts'
         parser_hashes = {name: hashlib.sha256((scripts / name).read_bytes()).hexdigest()
