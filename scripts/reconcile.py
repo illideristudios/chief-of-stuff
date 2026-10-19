@@ -191,6 +191,7 @@ class Facts:
     stall_after: timedelta = timedelta(minutes=45)
     suites: tuple[tuple[tuple[str, str, int], tuple], ...] = ()  # (issue, stage, attempt) → (counts, summary)
     require_green: bool = False
+    scope_pending: tuple[str, ...] = ()  # issues whose plan's file_ownership proposal awaits the trio or the owner
 
 
 def _time(value: datetime | str) -> datetime:
@@ -513,6 +514,28 @@ def _running_keys(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Seg
     return found
 
 
+SCOPE_REPLANS = 2  # plan reruns an issue may take to propose the file ownership its plan never proposed
+
+
+def _scope_replans(history: Sequence[Segment]) -> int:
+    """Plan runs launched after the issue's first finished plan; a start that failed at launch spends none."""
+    done = [seg.attempt for seg in history if seg.stage == "plan" and seg.outcome == "done"]
+    return sum(1 for seg in history if seg.stage == "plan" and done and seg.attempt > min(done)
+               and not (seg.outcome == "failed" and seg.ended_at == seg.started_at))
+
+
+def _replan_for_scope(action: Action | None, item: WorkItem, history: Sequence[Segment], facts: Facts,
+                      policies: Policies, running: Sequence[str]) -> Action | None:
+    """An issue held on "needs file ownership" with no proposal pending reruns its plan stage, whose report proposes the
+    scope the trio approves (#915, §8). Plans that ran before plans proposed scope otherwise wait forever."""
+    if not (isinstance(action, Wait) and action.reason == "needs file ownership" and "plan" in policies.stages
+            and item.issue_key not in facts.scope_pending and _scope_replans(history) < SCOPE_REPLANS):
+        return action
+    attempt = max((seg.attempt for seg in history if seg.stage == "plan"), default=0) + 1
+    return _with_facts(Dispatch(item.issue_key, "plan", policies.stages["plan"].persona, attempt), item, history,
+                       facts, running)
+
+
 def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment], facts: Facts,
                 running: Sequence[str]) -> Action | None:
     # Completion writes a forge hold before closure. A human's release must survive retained tree evidence.
@@ -587,6 +610,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                            tuple((waived_gates or {}).get(item.issue_key) or ()))
         if facts is not None and action is not None:
             action = _with_facts(action, item, history, facts, (*running, *accepted))
+            action = _replan_for_scope(action, item, history, facts, policies, (*running, *accepted))
         if isinstance(action, Merge) and (pending_asks or {}).get(item.issue_key):
             action = Wait(item.issue_key, "decision pending")
         if isinstance(action, (Dispatch, Review, Ask)):

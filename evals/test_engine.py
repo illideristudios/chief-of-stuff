@@ -1785,13 +1785,24 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched], [(KEY, "plan", 2)])
 
+    def test_a_replan_that_failed_at_launch_does_not_spend_one(self):
+        self.planned_without_scope()
+        for attempt in range(2, 2 + reconcile.SCOPE_REPLANS):  # refused starts: recorded at one instant, failed
+            self.db.record_segment(KEY, "plan", attempt, started_at=NOW.isoformat(), ended_at=NOW.isoformat(),
+                                   outcome="failed")
+        self.run_pass()
+        self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched],
+                         [(KEY, "plan", 2 + reconcile.SCOPE_REPLANS)])
+
     def test_a_pending_scope_proposal_or_spent_replans_wait_instead(self):
         self.planned_without_scope()
         self.db.update_resume(KEY, lambda data: data.__setitem__("scope_proposal", {"stage": "plan", "attempt": 1,
                                                                                     "scopes": []}))
         self.run_pass()
-        self.db.update_resume(KEY, lambda data: (data.pop("scope_proposal"), data.__setitem__(
-            "scope_replans", engine.SCOPE_REPLANS)))
+        self.db.update_resume(KEY, lambda data: data.pop("scope_proposal"))
+        for attempt in range(2, 2 + reconcile.SCOPE_REPLANS):  # re-plans already launched after the first done plan
+            self.db.record_segment(KEY, "plan", attempt, started_at=NOW.isoformat(),
+                                   ended_at=(NOW + timedelta(minutes=1)).isoformat(), outcome="done")
         self.run_pass()
         self.assertEqual(self.launched, [])
         self.assertTrue(any(e.message == "wait: needs file ownership" for e in self.db.log(KEY)))
