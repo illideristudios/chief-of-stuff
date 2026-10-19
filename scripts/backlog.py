@@ -585,6 +585,16 @@ def close(cfg: Backlog | GitHubBacklog, iid: int, token: str | None = None, comm
     return Written(CLOSE, what, done=not error, iid=iid, error=error)
 
 
+def set_description(cfg: Backlog, iid: int, description: str, token: str | None = None,
+                    timeout: float = TIMEOUT) -> str:
+    """Replace a GitLab issue's description, the ownership backfill's writer (#883). Returns the error, or ""."""
+    secret = _secret(cfg, token)
+    if not secret:
+        return cfg.missing_token
+    _got, _headers, error = _call("PUT", f"{cfg.issues_url}/{iid}", secret, timeout, {"description": description})
+    return error
+
+
 def comment(cfg: Backlog | GitHubBacklog, iid: int, body: str, token: str | None = None, commit: bool = False,
             timeout: float = TIMEOUT, gh=None) -> Written:
     what = f"#{iid}"
