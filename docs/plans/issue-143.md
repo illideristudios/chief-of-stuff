@@ -19,7 +19,7 @@ F → H                          [the refusal]
 
 ## Where the change lands
 
-This worktree is `work/issue-143-plan-1` off `origin/main` at `50091f80` (0.128.67). The engine that dispatched this plan, and the launcher the acceptance names, are on `origin/develop` (`5f91e749` at the last fetch), hundreds of commits ahead. `assets/policy.toml`, `scripts/worker.py`, `scripts/reconcile.py`, `scripts/dispatch_prompt.py`, `scripts/one_shot.py` and `scripts/engine_facts.py` are on develop; the symbols named below were re-checked there.
+This worktree is `work/issue-143-plan-1` off `origin/main` at `50091f80` (0.128.67). The engine that dispatched this plan, and the launcher the acceptance names, are on `origin/develop` (`28d43780` at the last fetch), hundreds of commits ahead. `assets/policy.toml`, `scripts/worker.py`, `scripts/reconcile.py`, `scripts/dispatch_prompt.py`, `scripts/one_shot.py` and `scripts/engine_facts.py` are on develop; the symbols named below were re-checked there.
 
 The first implementation step rebases this branch onto `origin/develop` and keeps the plan commit. Later stages reuse this worktree and this branch name: `worker.launch` keeps `worktree` and `work_branch` for every non-review stage. Code edits belong on that rebased tree.
 
@@ -39,7 +39,7 @@ Add `[stages.test]` with `persona = "implementer"`. Point `plan` at `test` with 
 
 Set `TASK_CLASS["test"] = "test"`. With no `[models.test]` rotation, `_model` already falls back to the persona's model. This workspace's `deep` and `implement` rotations are the same list with `pick = "random"`, so a separate class does not by itself pick a different model. The acceptance asks for a different worker. A `[models.test]` rotation can come later.
 
-Add a `test` job in `ISSUE_JOBS`. It tells the worker to commit only failing tests, to leave the behavior unimplemented, and to leave the pull request unopened. `compose_issue` attaches the red rule on the test stage and leaves the require-green rule off that stage. Implement, fix, and review keep the green rule.
+Add a `test` job in `ISSUE_JOBS`. It tells the worker to commit only failing tests on its work branch, push the branch without opening a pull request (so pre-merge completion sees zero unpushed commits), and leave the behavior unimplemented. `ISSUE_JOBS["implement"]` tells the implement worker to make the committed tests pass without modifying any file touched by the test commit. `compose_issue` attaches the red rule on the test stage and leaves the require-green rule off that stage. Implement, fix, and review keep the green rule.
 
 Put one test-path predicate next to `suite_holds` in `scripts/reconcile.py`. A path is a test path when a component equals `test`, `tests`, `__tests__`, `evals`, `spec`, or `specs`, or the filename matches `test_*`, `*_test.*`, `*.test.*`, or `*.spec.*`. Equality is the whole component, so `contest` is not a test path. Fixture files under `evals/cases/.../fixture/` are test paths, which is what the test commit should hold.
 
