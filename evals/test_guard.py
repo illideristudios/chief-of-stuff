@@ -151,6 +151,34 @@ class GuardTest(unittest.TestCase):
         self.assertIn("touch /outside/file", ask.context)
         self.assertIn("not a known read-only command", ask.context)  # #874's why travels with the ask
 
+    def test_a_permission_the_trio_allowed_is_granted_when_the_worker_asks_again(self):
+        # The hook denies at once and records an ask; the trio answers later. The resumed worker's retry must get that
+        # answer, or every approval is lost and a fresh ask is recorded each time.
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.db.answer_ask(KEY, ask.id, "allow")
+        self.assertEqual(self.permission(command="touch /outside/file"), {"behavior": "allow"})
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_permission_the_trio_denied_stays_denied_without_a_new_ask(self):
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.db.answer_ask(KEY, ask.id, "deny")
+        decision = self.permission(command="touch /outside/file")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn(f"ask {ask.id}", decision["message"])
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_repeat_of_a_pending_ask_waits_on_it_and_a_different_request_asks_anew(self):
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        decision = self.permission(command="touch /outside/file")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn(f"ask {ask.id}", decision["message"])
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+        self.permission(command="touch /outside/other")
+        self.assertEqual(len(self.db.asks(KEY)), 2)
+
     def test_the_143_read_is_allowed_without_anyone(self):
         command = ('rtk ls && git log --oneline -3 && rtk ls docs 2>/dev/null | head -50 && grep -rln "implement" '
                    '--include=*.py --include=*.go --include=*.rs --include=*.ts . 2>/dev/null | grep -v _vendor | head -40')
