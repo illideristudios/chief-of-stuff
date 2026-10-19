@@ -1794,6 +1794,16 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched],
                          [(KEY, "plan", 2 + reconcile.SCOPE_REPLANS)])
 
+    def test_an_issue_with_no_finished_plan_is_held_after_its_replans_fail(self):
+        # Architect review of #960: with no done plan, every launched plan run counts, so failures cannot loop.
+        later = (NOW + timedelta(minutes=1)).isoformat()
+        history = [SimpleNamespace(stage="plan", attempt=n, outcome="failed", started_at=NOW.isoformat(), ended_at=later)
+                   for n in range(1, 1 + reconcile.SCOPE_REPLANS)]
+        wait = reconcile.Wait(KEY, "needs file ownership")
+        got = reconcile._replan_for_scope(wait, SimpleNamespace(issue_key=KEY), history, reconcile.Facts(),
+                                          SimpleNamespace(stages={"plan": SimpleNamespace(persona="builder")}), ())
+        self.assertIs(got, wait)
+
     def test_a_pending_scope_proposal_or_spent_replans_wait_instead(self):
         self.planned_without_scope()
         self.db.update_resume(KEY, lambda data: data.__setitem__("scope_proposal", {"stage": "plan", "attempt": 1,
