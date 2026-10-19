@@ -452,6 +452,23 @@ class TrioModelsTest(unittest.TestCase):
         self.assertEqual([(v["runtime"], v["model"]) for v in votes],
                          [("claude", "claude-sonnet-5-5"), ("agy", "gemini-4-argon-high"), ("codex", "gpt-6.1-sol")])
 
+    def test_a_timed_out_or_unparsed_vote_is_replaced_by_another_entry_once(self):
+        # #928: a Cursor timeout or an agy answer with no structure is an outage, not a concern.
+        for kind in ("unknown", "error"):
+            with self.subTest(kind=kind):
+                failing = lambda request: model_port.Failure(kind, "cursor timed out") if request.runtime == "cursor" else reply()  # noqa: E731
+                self.assertTrue(self.ask(self.port(failing)).unanimous)
+                votes = self.store.decisions(KEY)[-1].record["verdicts"]
+                self.assertEqual([v["runtime"] for v in votes], ["claude", "agy", "codex"])
+                self.assertEqual([r.runtime for r in self.requests], ["claude", "cursor", "agy", "codex"])
+
+    def test_a_replacement_that_also_fails_keeps_the_failed_vote(self):
+        got = self.ask(self.port(lambda request: model_port.Failure("unknown", "timed out")
+                                 if request.runtime in ("cursor", "agy") else reply()))
+        self.assertTrue(got.escalated)
+        self.assertEqual([r.runtime for r in self.requests], ["claude", "cursor", "agy", "codex"])
+        self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "")  # retryable, not yet the owner's
+
     def test_with_no_entry_left_after_quota_stops_the_owner_decides(self):
         got = self.ask(self.port(lambda request: model_port.Failure("quota", "429 quota")))
         self.assertTrue(got.escalated)
