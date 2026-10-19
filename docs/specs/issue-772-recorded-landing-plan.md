@@ -5,14 +5,18 @@ Implementation plan for `github:illideristudios/chief-of-stuff#772`. The plan st
 Frank Lloyd AIght filed this from #753's review. #773 stated the same cost and is closed. Develop already skips `forge.landings` when resume holds `verified_landing is True` (`scripts/engine_facts.py:231-257`, `scripts/engine.py:67-83`). That flag does not name the merge it proved, so the next time the issue is closed and merged the gather still reports the old landing and the old green CI. Open pull request #824 binds the memo to a commit and conflicts with develop; it also drops `verified_landing_head`. Leave that branch. Implement from current develop.
 
 ```
-R := this pass's resume memo names the merge commit proved on main with green CI
-O := the item is still open, or closed without a merge
-W := the item is closed and merged, and this pass's snapshot names a different main merge commit (or the memo is only the legacy flag True)
-F := forge.landings is called for that item this pass
+R := the memo equals this pass's main merge commit
+O := the item is not closed-and-merged
+W := the item is closed and merged, and the snapshot names a commit the memo does not equal
+L := the memo is the legacy flag True and the snapshot names no commit
+F := forge.landings includes this item
+C := a stale memo is cleared before gather
 S := the store keeps the memo
 
 1. □(R → ¬F ∧ S)     [recorded completion leaves the per-pass recheck; the record stays]
-2. □((O ∨ W) → F)    [the forge stays source of truth while open, or while this merge is still unproved]
+2. □(O → C ∧ ¬F)     [open or unmerged: drop the memo; landings is only for closed merges]
+3. □(W → C ∧ F)      [a different commit is cleared, then the forge proves this merge]
+4. □(L → ¬F ∧ S)     [a flag outside the merged window stays recorded until a commit is named]
 ∴ a matching commit memo is not re-read; reopen and a new merge commit go back to the forge
 ```
 
