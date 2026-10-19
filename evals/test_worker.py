@@ -1403,6 +1403,15 @@ class WorkerTest(unittest.TestCase):
                          {"command": "${CHIEF_PYTHON}", "args": [f"{guard}/../scripts/engine_mcp.py"]})
         self.assertLess(args.index("--mcp-config"), args.index("--"))
 
+    def test_a_plugin_path_with_a_quote_or_backslash_still_gives_valid_mcp_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / 'odd "dir" \\ name'
+            plugin.mkdir()
+            (plugin / ".mcp.json").write_text('{"engine": {"command": "x", "args": ["${CLAUDE_PLUGIN_ROOT}/s.py"]}}')
+            args = claude_adapter.argv(worker.Request("p", worker=True, plugin_dirs=(str(plugin),)), "/fake", [])
+        config = json.loads(args[args.index("--mcp-config") + 1])
+        self.assertEqual(config["mcpServers"]["engine"]["args"], [f"{plugin}/s.py"])
+
     def test_forge_retains_request_head_branch(self):
         payload = [{"number": 1, "title": "Request", "url": "url", "headRefOid": "sha",
                     "headRefName": "feature/existing"}]
