@@ -85,6 +85,11 @@ class FakeForge:
         self.rows[0]["human_review"] = True
         return ""
 
+    def set_body(self, number, body, commit=False):
+        self.bodies = [*getattr(self, "bodies", []), (number, body, commit)]
+        next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))["body"] = body
+        return ""
+
     def closing_request(self, issue_key):
         return SimpleNamespace(number=10, verdict="ready", approval="", head=tf.tma.HEAD)
 
@@ -1744,6 +1749,66 @@ class EngineTest(unittest.TestCase):
             '[lanes.code]\nstages = ["implement"]\n[stages.implement]\nagent = "specialist"\n')
         self.run_pass()
         self.assertEqual(self.db.segments(KEY)[0].agent_type, "specialist")
+
+    def plan_policy(self):
+        self.p = policy.parse({
+            "default_workflow": "standard",
+            "personas": {"builder": {"role": "implements", "model": "build"}, "critic": {"role": "reviews", "model": "review"}},
+            "stages": {"plan": {"persona": "builder"}, "implement": {"persona": "builder"},
+                       "review": {"persona": "critic"}, "merge": {}},
+            "workflows": {"standard": {"start": "plan", "edges": [
+                {"from": "plan", "to": "implement"}, {"from": "implement", "to": "review"},
+                {"from": "review", "to": "implement"}, {"from": "review", "to": "merge"}]}},
+        })
+
+    def test_two_undeclared_plan_stage_issues_dispatch_together(self):
+        # #915 (§8): undeclared issues no longer serialize at the plan stage.
+        self.plan_policy()
+        other = KEY.rpartition("#")[0] + "#2"
+        self.forge.rows = [{"issue_key": key, "stage": "plan", "forge_state": "open", "merge_state": "", "body": ""}
+                           for key in (KEY, other)]
+        self.forge.snapshot = lambda issue_key, **_: {**next(r for r in self.forge.rows if r["issue_key"] == issue_key),
+                                                      "stage_mark": None}
+        self.run_pass()
+        self.assertEqual(sorted((key, stage) for key, stage, *_ in self.launched), [(KEY, "plan"), (other, "plan")])
+
+    def proposal(self, scopes=(("src/a.py", "write"), ("docs/design.md", "read"))):
+        self.forge.rows[0]["body"] = "Fix the widget."
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.update_resume(KEY, lambda data: data.__setitem__(
+            "scope_proposal", {"stage": "plan", "attempt": 1, "scopes": [list(s) for s in scopes]}))
+
+    def test_an_approved_scope_proposal_is_written_to_the_issue_and_the_store(self):
+        self._trio()
+        self.proposal()
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=self._votes([("adopt", "approve")] * 3))
+        (number, body, commit), = self.forge.bodies
+        self.assertEqual((number, commit), (1, True))
+        self.assertIn("## File ownership\n- write: `src/a.py`\n- read: `docs/design.md`", body)
+        self.assertTrue(body.startswith("Fix the widget."))
+        self.assertEqual(sorted((r.path, r.mode) for r in self.db.ownership(KEY) if r.mode != "tree"),
+                         [("docs/design.md", "read"), ("src/a.py", "write")])
+        self.assertNotIn("scope_proposal", self.db.resume(KEY))
+
+    def test_a_rejected_scope_proposal_is_never_written(self):
+        self._trio()
+        self.proposal()
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=self._votes([("adopt", "reject")] * 3))
+        self.assertFalse(getattr(self.forge, "bodies", []))
+        self.assertNotIn("scope_proposal", self.db.resume(KEY))
+        self.assertTrue(any("file ownership proposal rejected" in e.message for e in self.db.log(KEY)))
+
+    def test_a_split_on_a_scope_proposal_goes_to_the_owner_and_writes_nothing(self):
+        self._trio()
+        self.proposal()
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=self._votes([("adopt", "approve"), ("concern", "reject"), ("adopt", "approve")]))
+        self.assertFalse(getattr(self.forge, "bodies", []))
+        waits = decision_actions.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY))
+        self.assertEqual([w.decision_id[0] for w in waits], ["scope"])  # a real decision for the owner
+        self.assertIn("scope_proposal", self.db.resume(KEY))  # kept until the owner answers
 
     def _trio(self, **fields):
         self.p = policy.parse({

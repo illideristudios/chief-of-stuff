@@ -17,6 +17,18 @@ class ReadinessTest(unittest.TestCase):
         base.update(kwargs)
         return readiness.why_not(KEY, **base)
 
+    def test_two_undeclared_plan_runs_dispatch_together(self):
+        # #915 (§8): each plan run claims only its own plan file.
+        claims = (readiness.Claim(KEY, "docs/plans/issue-1.md", readiness.PLAN),
+                  readiness.Claim(OTHER, "docs/plans/issue-2.md", readiness.PLAN))
+        self.assertIsNone(self.why(claims=claims, running=(OTHER,), stage="plan"))
+
+    def test_the_plan_claim_admits_no_later_stage(self):
+        claims = (readiness.Claim(KEY, "docs/plans/issue-1.md", readiness.PLAN),)
+        for stage in ("implement", "fix", "review", ""):
+            with self.subTest(stage=stage):
+                self.assertEqual(self.why(claims=claims, stage=stage), "needs file ownership")
+
     def test_a_write_path_that_overlaps_a_running_issue_is_not_ready(self):
         claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(OTHER, "src/a.py"))
         self.assertEqual(self.why(claims=claims, running=(OTHER,)),
