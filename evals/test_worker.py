@@ -1393,6 +1393,14 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(args[args.index("--setting-sources") + 1], "user")
         self.assertIn("--strict-mcp-config", args)
 
+    def test_a_workers_own_engine_tools_need_no_permission(self):
+        # Declared through --mcp-config, the report tool asked for permission; the trio answered after the guard
+        # hook's 40s wait, so the worker was denied and "stopped without reporting" (drago#19 plan-4).
+        guard = Path(claude_adapter.__file__).resolve().parents[1] / "guard"
+        args = claude_adapter.argv(worker.Request("prompt", worker=True, plugin_dirs=(str(guard),)), "/fake", [])
+        self.assertEqual(args[args.index("--allowedTools") + 1], "mcp__engine")
+        self.assertLess(args.index("--allowedTools"), args.index("--"))
+
     def test_a_worker_keeps_its_plugins_mcp_servers_under_strict_mcp_config(self):
         # Claude Code 2.1.303 drops plugin MCP servers under --strict-mcp-config, so every worker lost the engine's
         # report tool and "stopped without reporting an outcome". The guard's servers travel in --mcp-config.
