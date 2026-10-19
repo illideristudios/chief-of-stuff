@@ -11,6 +11,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import decision_actions  # noqa: E402
 import model_port  # noqa: E402
 import policy  # noqa: E402
 import store  # noqa: E402
@@ -451,6 +452,42 @@ class TrioModelsTest(unittest.TestCase):
         # cursor:auto stops, then cursor:composer-2.5; the member lands on an entry no other member stopped on.
         self.assertEqual([(v["runtime"], v["model"]) for v in votes],
                          [("claude", "claude-sonnet-5-5"), ("agy", "gemini-4-argon-high"), ("codex", "gpt-6.1-sol")])
+
+    def test_a_timed_out_or_unparsed_vote_is_replaced_by_another_entry_once(self):
+        # #928: a Cursor timeout or an agy answer with no structure is an outage, not a concern.
+        for kind in ("unknown", "error"):
+            with self.subTest(kind=kind):
+                failing = lambda request: model_port.Failure(kind, "cursor timed out") if request.runtime == "cursor" else reply()  # noqa: E731
+                self.assertTrue(self.ask(self.port(failing)).unanimous)
+                votes = self.store.decisions(KEY)[-1].record["verdicts"]
+                self.assertEqual([v["runtime"] for v in votes], ["claude", "agy", "codex"])
+                self.assertEqual([r.runtime for r in self.requests], ["claude", "cursor", "agy", "codex"])
+
+    def test_a_replacement_that_also_fails_keeps_the_failed_vote(self):
+        got = self.ask(self.port(lambda request: model_port.Failure("unknown", "timed out")
+                                 if request.runtime in ("cursor", "agy") else reply()))
+        self.assertTrue(got.escalated)
+        self.assertEqual([r.runtime for r in self.requests], ["claude", "cursor", "agy", "codex"])
+        self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "")  # retryable, not yet the owner's
+
+    def test_a_call_gets_at_most_the_time_left_and_none_starts_once_it_is_gone(self):
+        # #927 review: the pass budget bounds every call, not only the start of a consult.
+        left = [trio_gate.TIMEOUT_S + 30.0]
+
+        def first_uses_it_all(request):
+            left[0] = 0.0
+            return reply()
+        got = trio_gate.consult(self.decision, self.policy, PERSONAS, self.port(first_uses_it_all), self.store,
+                                remaining=lambda: left[0])
+        self.assertTrue(got.escalated)
+        self.assertEqual([r.timeout_s for r in self.requests], [trio_gate.TIMEOUT_S])  # min(TIMEOUT_S, more than that); no further call
+        row = self.store.decisions(KEY)[-1]
+        self.assertEqual(row.decided_by, "")
+        self.assertTrue(decision_actions.retryable_failure(row.record))
+        left[0] = 30.0
+        trio_gate.consult(replace(self.decision, question="Short?"), self.policy, PERSONAS, self.port(), self.store,
+                          remaining=lambda: left[0])
+        self.assertEqual({r.timeout_s for r in self.requests}, {30.0})
 
     def test_with_no_entry_left_after_quota_stops_the_owner_decides(self):
         got = self.ask(self.port(lambda request: model_port.Failure("quota", "429 quota")))

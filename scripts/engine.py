@@ -50,6 +50,7 @@ from reconcile import HOLD_REROUTE, HOLD_STAGE_WRITE, OP_DECISION_COMMENT, OP_ME
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
+TRIO_PASS_BUDGET_S = 480  # #927: trio calls stop here in one pass; above TIMEOUT_S so a slow vote leaves room for two more
 
 
 def adopt_login_path(environ=os.environ) -> None:
@@ -168,8 +169,9 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
             resolved: policy.Policy, personas, model, *, context: str = "", instance: str = "",
             stage: str = "", attempt: int = 0,
             gate: bool = False,
-            clock: engine_clock.Clock = engine_clock.system) -> str | None:
-    """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
+            clock: engine_clock.Clock = engine_clock.system, until: datetime | None = None) -> str | None:
+    """The trio's adopted choice. A split, a missing trio, or no model escalates once. `until` bounds every model
+    call by the pass's trio budget (#927)."""
     decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
                                   stage=stage, attempt=attempt, gate=gate)
     earlier = store.decisions(key)
@@ -181,7 +183,8 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
             and datetime.fromisoformat(retry["retry_at"]) > clock()):
         return None
     outcome = trio_gate.decide(decision, earlier, resolved, personas,
-                               _metered(store, key, model) if model is not None else None, store, failures=failures)
+                               _metered(store, key, model) if model is not None else None, store, failures=failures,
+                               remaining=(lambda: (until - clock()).total_seconds()) if until is not None else None)
     rows = store.decisions(key)
     data = _resume(store, key)
     retries = data.get("trio_retries") or {}
@@ -297,7 +300,8 @@ def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at
     store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
 
 
-def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock,
+                   until: datetime | None = None) -> None:
     """#915: a plan's file_ownership proposal is a trio decision (topic `scope`). On approval the engine writes the
     issue's section through the forge and its store rows; a rejection drops it. A split waits for the owner as a real
     decision, and an unavailable trio is asked again next pass. Nothing is written unapproved."""
@@ -315,9 +319,11 @@ def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at:
         resolved = _resolved(policies, store, key, stage)
         if not scopes or _consultation_blocked(store, key, resolved, at, stage=stage):
             continue
+        if until is not None and clock() >= until:
+            return
         choice = _choice(store, key, "scope", f"Approve this file ownership for {key}? {listed}", ("approve", "reject"),
                          resolved, policies.personas, model, context=listed, stage=stage,
-                         attempt=int(proposal.get("attempt") or 0), clock=clock)
+                         attempt=int(proposal.get("attempt") or 0), clock=clock, until=until)
         if choice == "reject":
             store.update_resume(key, lambda data: data.pop("scope_proposal", None))
             store.add_log(key, f"file ownership proposal rejected: {listed}", at)
@@ -341,7 +347,9 @@ def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at:
             store.add_log(key, f"file ownership approved and written: {listed}", at)
 
 
-def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock,
+                until: datetime | None = None) -> None:
+    spent = lambda: until is not None and clock() >= until  # noqa: E731
     for item in store.items():
         if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
             continue
@@ -361,6 +369,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                 if verdict != "trio":
                     _settle_permission(store, key, ask, verdict, "the guard's rule" + (f": {why}" if why else ""), at)
                     continue
+            if spent():
+                break  # asked next pass; a permission ask is never denied for want of time
             stage = ask.stage or item.stage or workflow.start
             resolved = _resolved(policies, store, key, stage)
             if _consultation_blocked(store, key, resolved, at, stage=stage):
@@ -373,14 +383,15 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                 "ask", ask.question, f"ask-{ask.id}")
             options = ("allow", "deny") if permission is not None else tuple(ask.options)
             choice = _choice(store, key, topic, question, options, resolved, policies.personas,
-                             model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock)
+                             model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock,
+                             until=until)
             if choice:
                 store.answer_ask(key, ask.id, choice)
             elif permission is not None:
                 _settle_permission(store, key, ask, "deny", "the trio did not adopt an answer", at)
         for row, segment in replacements:
             resolved = _resolved(policies, store, key, segment.stage)
-            if _consultation_blocked(store, key, resolved, at, stage=segment.stage):
+            if spent() or _consultation_blocked(store, key, resolved, at, stage=segment.stage):
                 break
             prior = row.record.get("decision")
             if not isinstance(prior, dict):
@@ -389,7 +400,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
             context = decision_actions.replacement_context(row, segment)
             _choice(store, key, row.topic, row.question, tuple(prior.get("options") or ()),
                     resolved, policies.personas, model, context=context,
-                    instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock)
+                    instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock,
+                    until=until)
         _link_replacement_asks(store, key, replacements)
         _settle_asks(store, key)
 
@@ -808,8 +820,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         _deliver_comments(forge, store, item.issue_key, at)
 
-    _route_asks(store, policies, model, at, clock)
-    _settle_scopes(forge, store, policies, model, at, clock)
+    until = clock() + timedelta(seconds=TRIO_PASS_BUDGET_S)
+    _route_asks(store, policies, model, at, clock, until)
+    _settle_scopes(forge, store, policies, model, at, clock, until)
     if is_dataclass(facts):
         # The trio may have answered asks since collect gathered them; plan from the answers it just stored.
         asks = tuple(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt)

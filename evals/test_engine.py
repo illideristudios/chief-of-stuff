@@ -1810,6 +1810,27 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([w.decision_id[0] for w in waits], ["scope"])  # a real decision for the owner
         self.assertIn("scope_proposal", self.db.resume(KEY))  # kept until the owner answers
 
+    def test_trio_consults_stop_starting_once_the_pass_budget_is_spent(self):
+        # #927: consults run inside the pass, so a slow trio must not hold the pass (and worker collection) for long.
+        self._trio()
+        other = KEY.rpartition("#")[0] + "#2"
+        self.forge.rows.append({**self.forge.rows[0], "issue_key": other})
+        self.proposal()
+        self.db.update_resume(other, lambda data: data.__setitem__(
+            "scope_proposal", {"stage": "plan", "attempt": 1, "scopes": [["src/b.py", "write"]]}))
+        votes = self._votes([("adopt", "approve")] * 6)
+
+        def slow(request):
+            self.now += timedelta(seconds=engine.TRIO_PASS_BUDGET_S)  # each vote uses up the whole budget
+            return votes(request)
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {
+                **next(r for r in self.forge.rows if r["issue_key"] == issue_key), "stage_mark": None}):
+            self.run_pass(model=slow)
+        self.assertEqual(votes.n, 1)  # the first vote spends the budget: no further call, and the next consult waits
+        consulted = [key for key in (KEY, other) if self.db.decisions(key)]
+        self.assertEqual(len(consulted), 1)
+        self.assertTrue(decision_actions.retryable_failure(self.db.decisions(consulted[0])[-1].record))
+
     def _trio(self, **fields):
         self.p = policy.parse({
             "default_workflow": "standard",
