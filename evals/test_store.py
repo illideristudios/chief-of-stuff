@@ -279,8 +279,12 @@ class StoreTest(unittest.TestCase):
         self.assertIsNone(self.store.asks(KEY)[0].answer)
         self.store.answer_ask(KEY, ask_id, "Split")
         self.assertEqual(self.store.asks(KEY)[0].answer, "Split")
+        # House rule 11: the architect's ruling on #758 makes the same answer again a no-op (an idempotent retry);
+        # a different second answer is still refused, as #750 requires.
+        self.store.answer_ask(KEY, ask_id, "Split")
         with self.assertRaises(KeyError):
-            self.store.answer_ask(KEY, ask_id, "Split")
+            self.store.answer_ask(KEY, ask_id, "Keep")
+        self.assertEqual(self.store.asks(KEY)[0].answer, "Split")
 
     def test_the_store_rebuilds_from_the_forge_and_sync_never_touches_engine_data(self) -> None:
         snapshots = [{"issue_key": KEY, "title": "x", "stage": "review", "forge_state": "open",

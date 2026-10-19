@@ -580,7 +580,8 @@ class Store:
 
     def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
         """An operator's or the trio's adopted answer, bound to the named issue; worker tools never expose this write.
-        An answer outside the ask's options, or a second answer, is refused (#750)."""
+        An answer outside the ask's options, or a different second answer, is refused (#750); the same answer again
+        is a no-op, so a retried intake or relay is idempotent (architect ruling on #758)."""
         if not isinstance(answer, str) or not answer.strip():
             raise ValueError("an ask answer must not be empty")
         with self.session() as s:
@@ -588,7 +589,9 @@ class Store:
             if row is None or row.issue_key != issue_key:
                 raise KeyError(f"ask {ask_id} does not belong to {issue_key}")
             if row.answer is not None:
-                raise KeyError(f"ask {ask_id} is already answered")  # #750: a second answer is refused
+                if row.answer == answer:
+                    return
+                raise KeyError(f"ask {ask_id} is already answered")  # #750: a different second answer is refused
             if row.options and answer not in row.options:
                 raise ValueError(f"ask answer {answer!r} is not in options")
             row.answer = answer
