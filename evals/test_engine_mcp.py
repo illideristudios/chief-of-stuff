@@ -123,6 +123,44 @@ class MCPTest(unittest.TestCase):
         self.assertEqual(self.db.asks(KEY)[0].question, "stdio question")
 
 
+class ScopeProposalTest(unittest.TestCase):
+    """#915: a plan run proposes the implementation's file ownership through report; ownership.py checks it."""
+
+    def tools(self, stage):
+        from datetime import datetime, timezone
+        import engine_mcp
+        import guard_binding
+        env = {"CHIEF_ISSUE_KEY": KEY, "CHIEF_STAGE": stage, "CHIEF_ATTEMPT": "1", "CHIEF_SESSION_ID": "s",
+               "CHIEF_ROOT": str(self.root), "CHIEF_LAUNCHED_AT": datetime.now(timezone.utc).isoformat(),
+               "CHIEF_PYTHON": sys.executable}
+        return engine_mcp.EngineTools(guard_binding.Binding.from_env(env), self.db)
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        store.migrate(self.root / "store.db")
+        self.db = store.Store(self.root / "store.db")
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, title="A widget", stage="plan")
+
+    def test_a_plan_runs_proposal_is_kept_for_the_trio(self):
+        self.tools("plan").report("done", "Planned", file_ownership=[
+            {"path": "src/widget.py", "mode": "write"}, {"path": "docs/design.md", "mode": "read"}])
+        self.assertEqual(self.db.resume(KEY)["scope_proposal"],
+                         {"stage": "plan", "attempt": 1, "scopes": [["src/widget.py", "write"], ["docs/design.md", "read"]]})
+
+    def test_a_malformed_proposal_or_one_from_another_stage_is_refused_and_nothing_is_kept(self):
+        for entries in ([{"path": ".", "mode": "write"}], [{"path": "../x", "mode": "write"}], [],
+                        [{"path": "src/*.py", "mode": "write"}], [{"path": "src/a.py", "mode": "own"}]):
+            with self.subTest(entries=entries), self.assertRaises(ValueError):
+                self.tools("plan").report("done", "Planned", file_ownership=entries)
+        with self.assertRaisesRegex(ValueError, "only a plan run"):
+            self.tools("implement").report("done", "Built", file_ownership=[{"path": "src/a.py", "mode": "write"}])
+        self.assertEqual(self.db.reports(KEY), [])
+        self.assertNotIn("scope_proposal", self.db.resume(KEY) or {})
+
+
 class ChannelMigrationTest(unittest.TestCase):
     def test_upgrade_preserves_existing_store_and_adds_worker_channel(self):
         from alembic import command

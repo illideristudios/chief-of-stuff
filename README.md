@@ -185,7 +185,9 @@ The engine reads file scopes from each issue body on every pass and when `chief-
 | read-only | `docs/` |
 ```
 
-Bullets such as `- write: src/parser/, tests/parser/` use the same reader. Paths are literal repository-relative paths; `.` means the whole repository. Missing, empty or invalid declarations own the whole repository for writing. Overlapping writes in the same repository wait; read-only scopes do not conflict. Workers report results and cannot declare their own scopes. Worktree registrations are kept separately from file scopes in the ownership rows.
+Bullets such as `- write: src/parser/, tests/parser/` use the same reader. Paths are literal repository-relative paths; `.` means the whole repository. Missing, empty or invalid declarations wait as `needs file ownership`, without claiming any paths or taking a worker slot. Only an explicit `.` declares the whole repository. Overlapping writes in the same repository wait; read-only scopes do not conflict. Workers report results and cannot declare their own scopes. Worktree registrations are kept separately from file scopes in the ownership rows.
+
+`chief-of-stuff work` refuses to file a new issue without a valid section, including in preview. The Task and Bug issue forms require it; keep the supplied `## File ownership` heading and fill in the paths. Existing issues can be registered without a scope, but wait until their bodies are corrected. Add valid sections to open 1.0 issues before the engine takes over dispatch.
 
 An operator can answer a stored worker ask with `chief-of-stuff work "Issue title" --root . --issue 12 --answer-ask 7 --answer "Proceed" --commit`. The ask must belong to that issue; omitting `--commit` previews the answer. Workers have no answer-writing tool.
 

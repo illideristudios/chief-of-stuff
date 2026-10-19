@@ -246,7 +246,8 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                  mock.patch.object(forge, "for_workspace", side_effect=lambda root, **opts: factory(root, gh=gh, **opts)), \
                  mock.patch.object(sys, "stdout", io.StringIO()) as out:
                 with self.assertRaises(SystemExit) as done:
-                    cli.main(["work", "--root", str(root), "Add a flag", "--commit"])
+                    cli.main(["work", "--root", str(root), "Add a flag",
+                              "--body", "## File ownership\n- write: `src/`", "--commit"])
             self.assertEqual(done.exception.code, 0)
             self.assertIn("github:example/app#101", out.getvalue())
             db = store.Store(root / "store.db")

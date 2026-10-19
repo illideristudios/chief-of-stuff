@@ -410,12 +410,16 @@ class Store:
         return self._all(select(Ownership).where(Ownership.issue_key == issue_key).order_by(Ownership.path))
 
     def replace_file_ownership(self, issue_key: str, scopes: list[tuple[str, str]]) -> None:
-        """Replace the forge's declaration atomically, retaining engine worktree registrations.
+        """Replace the forge's declaration atomically once every segment for the issue has ended.
 
+        Retain engine worktree registrations. Check open segments under the same write lock as
+        the replacement, so a concurrent worker start cannot lose its launch scope.
         Older workers registered absolute tree paths as write rows; adopt those as tree rows too.
         Declared file paths are always repository-relative.
         """
         with self.session() as s:
+            if s.scalar(select(Segment.id).where(Segment.issue_key == issue_key, Segment.ended_at.is_(None)).limit(1)) is not None:
+                return
             for row in s.scalars(select(Ownership).where(Ownership.issue_key == issue_key)).all():
                 if row.mode == "tree" or Path(row.path).is_absolute():
                     row.mode = "tree"
@@ -576,7 +580,8 @@ class Store:
 
     def answer_ask(self, issue_key: str, ask_id: int, answer: str) -> None:
         """An operator's or the trio's adopted answer, bound to the named issue; worker tools never expose this write.
-        An answer outside the ask's options, or a second answer, is refused (#750)."""
+        An answer outside the ask's options, or a different second answer, is refused (#750); the same answer again
+        is a no-op, so a retried intake or relay is idempotent (architect ruling on #758)."""
         if not isinstance(answer, str) or not answer.strip():
             raise ValueError("an ask answer must not be empty")
         with self.session() as s:
@@ -584,7 +589,9 @@ class Store:
             if row is None or row.issue_key != issue_key:
                 raise KeyError(f"ask {ask_id} does not belong to {issue_key}")
             if row.answer is not None:
-                raise KeyError(f"ask {ask_id} is already answered")  # #750: a second answer is refused
+                if row.answer == answer:
+                    return
+                raise KeyError(f"ask {ask_id} is already answered")  # #750: a different second answer is refused
             if row.options and answer not in row.options:
                 raise ValueError(f"ask answer {answer!r} is not in options")
             row.answer = answer

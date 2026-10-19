@@ -393,6 +393,18 @@ class QuarantineTest(unittest.TestCase):
         self.assertIn("Owns: `src/a/`", dp.compose(root, "2026-09-18", long_item))
 
 
+
+class PlanScopeAssignmentTest(unittest.TestCase):
+    """#915 (§8): a plan assignment names the one file the run writes and asks for the scope proposal."""
+
+    def test_a_plan_assignment_names_its_plan_file(self):
+        row = SimpleNamespace(issue_key="github:example/project#12", title="A widget")
+        persona = SimpleNamespace(role="builder", rules=())
+        prompt = dp.compose_issue(row, "T", "B", "plan", persona)
+        self.assertIn("`docs/plans/issue-12.md`", prompt)
+        self.assertIn("file_ownership", prompt)
+        self.assertNotIn("docs/plans/", dp.compose_issue(row, "T", "B", "implement", persona))
+
 if __name__ == "__main__":
     unittest.main()
 

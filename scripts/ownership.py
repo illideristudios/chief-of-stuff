@@ -46,10 +46,11 @@ def cell(text: str, keys: set[str]) -> str | None:
     return next((row.paths for row in parse("\n".join(_section(text, HEADING))) if row.context in keys), None)
 
 
-def issue_scopes(body: str) -> list[tuple[str, str]]:
+def issue_scopes(body: str) -> list[tuple[str, str]] | None:
     """Issue `## File ownership`: `| Mode | Paths |` or `- write: paths` / `- read-only: paths`.
 
-    Reuse the tracker row reader. Missing, empty or malformed declarations conservatively own the repository.
+    Reuse the tracker row reader. Missing, empty or malformed declarations have no scope (None).
+    Only an explicit `.` path declares the whole repository.
     Paths are literal repository-relative paths, just as for the tracker's overlap rule.
     """
     scopes: dict[str, str] = {}
@@ -60,31 +61,36 @@ def issue_scopes(body: str) -> list[tuple[str, str]]:
         if line.strip().startswith("|"):
             cells = _cells(line)
             if len(cells) != 2:
-                return [(".", "write")]
+                return None
             if _is_separator(cells) or [c.lower() for c in cells] in (["mode", "paths"], ["context", "paths"]):
                 continue
         if not parse(line):
-            return [(".", "write")]
+            return None
     for row in parse("\n".join(lines)):
         mode = row.context.strip().lower()
         if mode == "mode" and row.paths.lower() == "paths":
             continue
         if mode not in ("write", "read", "read-only"):
-            return [(".", "write")]
+            return None
+        if not row.paths:
+            continue
+        tokens = re.findall(r"`([^`]+)`", row.paths) or row.paths.split(",")
+        if any(token.strip() != "." and _paths(token) == ["."] for token in tokens):
+            return None
         if "`" in row.paths and not re.fullmatch(r"\s*`[^`]+`(?:\s*,\s*`[^`]+`)*\s*", row.paths):
-            return [(".", "write")]
+            return None
         if any(token != token.strip() for token in re.findall(r"`([^`]+)`", row.paths)):
-            return [(".", "write")]
+            return None
         paths = _paths(row.paths)
         if not paths:
-            return [(".", "write")]
+            return None
         for path in paths:
             if (path.startswith("/") or (path != "." and any(part in ("", ".", "..") for part in path.split("/")))
                     or any(c in path for c in "*?[]`") or _paths(path) != [path]):
-                return [(".", "write")]
+                return None
             # A duplicate write cannot be narrowed by a later read row.
             scopes[path] = "write" if mode == "write" or scopes.get(path) == "write" else "read"
-    return list(scopes.items()) or [(".", "write")]
+    return list(scopes.items()) or None
 
 
 def read_only(paths: str) -> bool:
@@ -106,6 +112,28 @@ def overlaps(a: str, b: str) -> bool:
     """One path of `a` equals, contains or is contained in one of `b` (`src/a/` and `src/a/x.py` do; `src/a` and `src/ab` do not); `.` contains every path.
     ponytail: a glob character is read as part of the name, so `src/*.py` overlaps only a path spelled that way; match globs when a tracker writes them."""
     return any("." in (x, y) or x == y or x.startswith(y + "/") or y.startswith(x + "/") for x in _paths(a) for y in _paths(b))
+
+
+# #915 (§8): the plan stage's own files, one per issue, so plan runs never serialize on each other.
+PLAN_DIR = "docs/plans"
+
+
+def plan_path(issue_key: str) -> str:
+    """The one file an issue's plan run writes."""
+    return f"{PLAN_DIR}/issue-{issue_key.rpartition('#')[2]}.md"
+
+
+def proposal_scopes(entries) -> list[tuple[str, str]] | None:
+    """A plan's `file_ownership` proposal (#915), checked by the same parser as an issue's section. None when malformed:
+    no entries, a mode other than write or read, or any path the parser refuses. `.` is never proposed."""
+    try:
+        rows = [(str(entry["path"]).strip(), str(entry["mode"]).strip()) for entry in entries]
+    except (TypeError, KeyError, AttributeError):
+        return None
+    if not rows or any(mode not in ("write", "read") for _, mode in rows) or any(path in ("", ".") for path, _ in rows):
+        return None
+    parsed = issue_scopes(scope_section(rows))
+    return parsed if parsed and not any(path == "." for path, _ in parsed) else None
 
 
 def scope_section(scopes: list[tuple[str, str]]) -> str:
