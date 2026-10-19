@@ -176,15 +176,19 @@ On the engine path, file ownership is declared on the issue, because the forge i
 - **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
 - **The plan stage has its own scope.** A plan run writes only its own plan file, at a path fixed per issue under the workspace's plan directory, and reads everything. That implicit scope is the plan stage's declaration whenever the issue declares none, so plan runs never serialize on each other. A plan run that writes anywhere else is handled by the judged out-of-scope rule above.
 - **The plan proposes the implementation's scope.** The plan worker's report carries a proposed `## File ownership` section as a structured field, not as prose. Workers declare nothing, so the engine writes it onto the issue only after the trio approves it as a decision (topic `scope`), or the owner does. A trio split goes to the owner as a real decision. An unavailable trio is retried on a later pass. A proposal is never written unapproved, and the whole repository is never assumed.
+- **A plan with no proposal is rerun.** An issue held as "needs file ownership" with no proposal pending reruns its plan stage when a worker slot is free, so that its plan proposes the scope. This covers plans that ran before plans proposed scope. It happens at most `SCOPE_REPLANS` (2) times per issue, counted when a plan run launches, and then the issue stays held. The planner (`reconcile.py`) decides the re-plan as it decides every dispatch; the engine only executes it (#960).
 
 ```
 Pl(I) := issue I is at the plan stage      Sp(I) := the plan scope: I's own plan file (write) plus read-only everything
 Pr(I) := the plan's proposed File ownership section      Ap(I) := the trio or the owner approved Pr(I)
 S(I) := I declares a valid scope
+H(I) := I is held as "needs file ownership" with no proposal pending      n(I) := plan reruns launched for H(I)
 
 Pl(I) ∧ ¬S(I) → I runs with Sp(I)     [plan runs touch only their own file, so they never serialize]
 Ap(I) → the engine writes Pr(I) onto I, so S(I) holds   [workers declare nothing; the engine writes after approval]
 ¬Ap(I) → I stays undeclared, and the later stages wait   [no unapproved scope, no whole-repository default]
+H(I) ∧ n(I) < 2 ∧ a slot is free → the planner dispatches I's plan stage, so Pr(I) is proposed   [#960]
+H(I) ∧ n(I) ≥ 2 → I stays held
 ∴ planning runs in parallel, and implementation runs on approved, real scopes
 ```
 
