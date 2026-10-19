@@ -80,17 +80,23 @@ The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its th
 - **Every judgement is recorded.** Each member's vote names the runtime and model that cast it, so trio accuracy can be compared across models over time, as for workers (section 9).
 - **Consults are read-only on every host.** A trio consult is a judgement call through the model port. It runs in each host's read-only or no-tools mode (Claude's `--safe-mode`, a read-only sandbox elsewhere), never with write access. A host that offers no read-only mode is not launchable for the trio.
 - **Quota.** A quota stop moves that member to the next distinct entry. When no entry can run, the decision falls back to the owner as an exhausted retry.
+- **Outage.** Any other model failure, such as a timeout or an answer with no structure, moves that member to another entry once (#928). Only a second failure is kept as the member's vote, and it is still retried as an outage, never read as a concern. Each call has 120 seconds.
+- **Bounded per pass.** Consults run inside the engine pass, so no new consult starts once the pass has spent 180 seconds on them (#927). The rest wait for the next pass, and a permission ask is never denied for want of time.
 
 ```
 Mt := the trio's models come from [models.trio] (persona model only as fallback)
 D := the three members use distinct entries, preferring different runtimes or families
 U := a unanimous verdict reflects independent judgements      R := each vote records its runtime and model
 O := every consult runs read-only on its host
+F := a member's call failed (timeout or unparsed answer)       N := the member moves to another entry once
+B := the pass has spent its consult budget                     S := a new consult starts this pass
 
 Mt ∧ D → U          [owner 2026-10-18: "trio shouldn't be fixed models"]
 R → trio accuracy is measurable per model (section 9)
 O                   [a judgement call never writes]
-∴ the trio rotates like workers, stays diverse, and stays read-only
+F → N               [#928: an outage is not a concern]
+B → ¬S              [#927: consults never hold worker collection]
+∴ the trio rotates like workers, stays diverse, stays read-only, survives one host's outage, and never stalls the pass
 ```
 
 A person's actions on the board (answer, reverse, re-route) are intents, and the engine is their only executor.
