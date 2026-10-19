@@ -10,7 +10,7 @@ from decision_actions import DecisionUpdate, exhaust_retry, human_answer, identi
 from model_port import Failure, Model, Reply, Request, draw
 from policy import Persona, Policy, PolicyError
 
-TIMEOUT_S = 60
+TIMEOUT_S = 120  # #928: Cursor took 40s on a one-line decision; at 60s most of its votes timed out
 
 
 @dataclass(frozen=True)
@@ -118,17 +118,20 @@ def _members(model: Model, trio: Sequence[Persona]) -> tuple[list[Any], bool | N
 def _ask(model: Model, persona: Persona, described: dict, entry: Any, stopped: list,
          others: Sequence[Any]) -> tuple[Any, Any, bool]:
     """One member's answer. A quota stop moves the member to the next entry, one no other member holds when there is
-    one, so the trio stays diverse; (answer, entry, exhausted)."""
+    one, so the trio stays diverse; any other model failure (a timeout, an unparsed answer) moves it once (#928), so
+    an outage is not counted as a concern; (answer, entry, exhausted)."""
+    replaced = False
     while True:
         got = model(_request(described, persona, entry))
-        if entry is None or not (isinstance(got, Failure) and got.kind == "quota"):
+        if entry is None or not isinstance(got, Failure) or (got.kind != "quota" and replaced):
             return got, entry, False
         stopped.append(entry)
+        replaced = replaced or got.kind != "quota"
         drawn = dict(launchable=model.launchable, how=model.pick)
         following = (draw(model.rotation, 1, used=[*stopped, *others], **drawn)
                      or draw(model.rotation, 1, used=stopped, **drawn))
         if not following:
-            return got, entry, True
+            return got, entry, got.kind == "quota"
         entry = following[0]
 
 

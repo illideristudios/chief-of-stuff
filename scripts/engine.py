@@ -50,6 +50,7 @@ from reconcile import HOLD_REROUTE, HOLD_STAGE_WRITE, OP_DECISION_COMMENT, OP_ME
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
+TRIO_PASS_BUDGET_S = 180  # #927: no new trio consult starts after this long in one pass; the rest wait a pass
 
 
 def adopt_login_path(environ=os.environ) -> None:
@@ -297,7 +298,8 @@ def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at
     store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
 
 
-def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock,
+                   until: datetime | None = None) -> None:
     """#915: a plan's file_ownership proposal is a trio decision (topic `scope`). On approval the engine writes the
     issue's section through the forge and its store rows; a rejection drops it. A split waits for the owner as a real
     decision, and an unavailable trio is asked again next pass. Nothing is written unapproved."""
@@ -315,6 +317,8 @@ def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at:
         resolved = _resolved(policies, store, key, stage)
         if not scopes or _consultation_blocked(store, key, resolved, at, stage=stage):
             continue
+        if until is not None and clock() >= until:
+            return
         choice = _choice(store, key, "scope", f"Approve this file ownership for {key}? {listed}", ("approve", "reject"),
                          resolved, policies.personas, model, context=listed, stage=stage,
                          attempt=int(proposal.get("attempt") or 0), clock=clock)
@@ -341,7 +345,9 @@ def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at:
             store.add_log(key, f"file ownership approved and written: {listed}", at)
 
 
-def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock,
+                until: datetime | None = None) -> None:
+    spent = lambda: until is not None and clock() >= until  # noqa: E731
     for item in store.items():
         if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
             continue
@@ -361,6 +367,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                 if verdict != "trio":
                     _settle_permission(store, key, ask, verdict, "the guard's rule" + (f": {why}" if why else ""), at)
                     continue
+            if spent():
+                break  # asked next pass; a permission ask is never denied for want of time
             stage = ask.stage or item.stage or workflow.start
             resolved = _resolved(policies, store, key, stage)
             if _consultation_blocked(store, key, resolved, at, stage=stage):
@@ -380,7 +388,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                 _settle_permission(store, key, ask, "deny", "the trio did not adopt an answer", at)
         for row, segment in replacements:
             resolved = _resolved(policies, store, key, segment.stage)
-            if _consultation_blocked(store, key, resolved, at, stage=segment.stage):
+            if spent() or _consultation_blocked(store, key, resolved, at, stage=segment.stage):
                 break
             prior = row.record.get("decision")
             if not isinstance(prior, dict):
@@ -808,8 +816,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         _deliver_comments(forge, store, item.issue_key, at)
 
-    _route_asks(store, policies, model, at, clock)
-    _settle_scopes(forge, store, policies, model, at, clock)
+    until = clock() + timedelta(seconds=TRIO_PASS_BUDGET_S)
+    _route_asks(store, policies, model, at, clock, until)
+    _settle_scopes(forge, store, policies, model, at, clock, until)
     if is_dataclass(facts):
         # The trio may have answered asks since collect gathered them; plan from the answers it just stored.
         asks = tuple(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt)
