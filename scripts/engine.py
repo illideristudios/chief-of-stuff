@@ -169,8 +169,9 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
             resolved: policy.Policy, personas, model, *, context: str = "", instance: str = "",
             stage: str = "", attempt: int = 0,
             gate: bool = False,
-            clock: engine_clock.Clock = engine_clock.system) -> str | None:
-    """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
+            clock: engine_clock.Clock = engine_clock.system, until: datetime | None = None) -> str | None:
+    """The trio's adopted choice. A split, a missing trio, or no model escalates once. `until` bounds every model
+    call by the pass's trio budget (#927)."""
     decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
                                   stage=stage, attempt=attempt, gate=gate)
     earlier = store.decisions(key)
@@ -182,7 +183,8 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
             and datetime.fromisoformat(retry["retry_at"]) > clock()):
         return None
     outcome = trio_gate.decide(decision, earlier, resolved, personas,
-                               _metered(store, key, model) if model is not None else None, store, failures=failures)
+                               _metered(store, key, model) if model is not None else None, store, failures=failures,
+                               remaining=(lambda: (until - clock()).total_seconds()) if until is not None else None)
     rows = store.decisions(key)
     data = _resume(store, key)
     retries = data.get("trio_retries") or {}
@@ -321,7 +323,7 @@ def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at:
             return
         choice = _choice(store, key, "scope", f"Approve this file ownership for {key}? {listed}", ("approve", "reject"),
                          resolved, policies.personas, model, context=listed, stage=stage,
-                         attempt=int(proposal.get("attempt") or 0), clock=clock)
+                         attempt=int(proposal.get("attempt") or 0), clock=clock, until=until)
         if choice == "reject":
             store.update_resume(key, lambda data: data.pop("scope_proposal", None))
             store.add_log(key, f"file ownership proposal rejected: {listed}", at)
@@ -381,7 +383,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                 "ask", ask.question, f"ask-{ask.id}")
             options = ("allow", "deny") if permission is not None else tuple(ask.options)
             choice = _choice(store, key, topic, question, options, resolved, policies.personas,
-                             model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock)
+                             model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock,
+                             until=until)
             if choice:
                 store.answer_ask(key, ask.id, choice)
             elif permission is not None:
@@ -397,7 +400,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
             context = decision_actions.replacement_context(row, segment)
             _choice(store, key, row.topic, row.question, tuple(prior.get("options") or ()),
                     resolved, policies.personas, model, context=context,
-                    instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock)
+                    instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock,
+                    until=until)
         _link_replacement_asks(store, key, replacements)
         _settle_asks(store, key)
 
