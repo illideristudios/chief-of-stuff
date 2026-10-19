@@ -336,8 +336,14 @@ class CallTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 5)
         self.assertEqual(got.kind, "unknown")
         pid = int((artifacts / 'stdout').read_text().strip())
-        # A zombie may remain until the system reaps it; a running descendant may not.
-        status = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+        # A zombie may remain until the system reaps it; a running descendant may not. The kill lands
+        # asynchronously, so read the state once it has had time to (#955).
+        deadline = time.monotonic() + 2
+        while True:
+            status = subprocess.run(['ps', '-o', 'stat=', '-p', str(pid)], capture_output=True, text=True).stdout.strip()
+            if not status or status.startswith('Z') or time.monotonic() > deadline:
+                break
+            time.sleep(0.05)
         self.assertTrue(not status or status.startswith('Z'), status)
 
     def assert_auth_mode(self, names):
