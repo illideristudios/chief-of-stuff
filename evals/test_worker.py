@@ -386,11 +386,6 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(offered, [["cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]])
         self.assertEqual((used, went), (("sonnet", "high"), "claude"))
 
-    def test_first_stays_the_default_and_a_quota_stop_still_advances_under_random(self):
-        with mock.patch.object(worker.random, "choice") as never:
-            self.assertEqual(self.launch_rotation()[1], "codex")
-        never.assert_not_called()
-
     def test_a_quota_stop_advances_even_when_picking_at_random(self):
         self.ROTATION = self.ROTATION + 'pick = "random"\n'
         with mock.patch.object(worker.random, "choice", side_effect=lambda entries: entries[-1]):

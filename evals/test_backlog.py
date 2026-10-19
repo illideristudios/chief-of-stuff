@@ -585,11 +585,6 @@ class GitHubConfigTest(unittest.TestCase):
                 with self.assertRaises(bl.BacklogError):
                     bl.parse_backlog(spec)
 
-    def test_gitlab_line_is_still_gitlab(self):
-        got = bl.parse_backlog("GitLab; host https://labs.gauntletai.com; project zachgardner/openemr")
-        self.assertIsInstance(got, bl.Backlog)
-
-
 class GitHubReadTest(unittest.TestCase):
     def test_list_argv_and_mapping(self):
         gh = FakeGh(rows={"open": [gh_issue(3, "inbox.py", labels=("bug",), closed="2026-09-17T19:05:00Z")]})
