@@ -13,9 +13,21 @@ OTHER = "github:example/project#2"
 
 class ReadinessTest(unittest.TestCase):
     def why(self, **kwargs):
-        base = dict(claims=(), running=(), blockers=(), asks=(), reports=())
+        base = dict(claims=(readiness.Claim(KEY, "src/"),), running=(), blockers=(), asks=(), reports=())
         base.update(kwargs)
         return readiness.why_not(KEY, **base)
+
+    def test_two_undeclared_plan_runs_dispatch_together(self):
+        # #915 (§8): each plan run claims only its own plan file.
+        claims = (readiness.Claim(KEY, "docs/plans/issue-1.md", readiness.PLAN),
+                  readiness.Claim(OTHER, "docs/plans/issue-2.md", readiness.PLAN))
+        self.assertIsNone(self.why(claims=claims, running=(OTHER,), stage="plan"))
+
+    def test_the_plan_claim_admits_no_later_stage(self):
+        claims = (readiness.Claim(KEY, "docs/plans/issue-1.md", readiness.PLAN),)
+        for stage in ("implement", "fix", "review", ""):
+            with self.subTest(stage=stage):
+                self.assertEqual(self.why(claims=claims, stage=stage), "needs file ownership")
 
     def test_a_write_path_that_overlaps_a_running_issue_is_not_ready(self):
         claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(OTHER, "src/a.py"))
@@ -57,3 +69,24 @@ class ReadinessTest(unittest.TestCase):
     def test_a_blocked_report_with_no_ask_is_a_stop(self):
         self.assertEqual(self.why(reports=(readiness.Report(KEY, "blocked"),)), "worker stopped")
         self.assertIsNone(self.why(reports=(readiness.Report(KEY, "done"),)))
+
+
+class DeclaredScopeTest(unittest.TestCase):
+    def test_missing_scope_waits_even_if_other_issues_have_claims(self):
+        for claims in ((), (readiness.Claim(OTHER, "."),)):
+            with self.subTest(claims=claims):
+                self.assertEqual(readiness.why_not(KEY, claims=claims, running=(), blockers=(), asks=(), reports=()),
+                                 "needs file ownership")
+
+    def test_a_read_only_issue_is_declared_and_does_not_conflict(self):
+        self.assertIsNone(readiness.why_not(KEY, claims=(readiness.Claim(KEY, ".", "read"),
+                                                       readiness.Claim(OTHER, ".")),
+                                           running=(OTHER,), blockers=(), asks=(), reports=()))
+
+    def test_explicit_repository_write_conflicts_with_every_running_write(self):
+        for mine, theirs in ((".", "src/a.py"), ("docs/a.md", ".")):
+            with self.subTest(mine=mine, theirs=theirs):
+                self.assertEqual(readiness.why_not(KEY, claims=(readiness.Claim(KEY, mine),
+                                                               readiness.Claim(OTHER, theirs)),
+                                                   running=(OTHER,), blockers=(), asks=(), reports=()),
+                                 f"file ownership conflict with {OTHER}")

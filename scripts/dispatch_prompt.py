@@ -266,6 +266,10 @@ def compose_issue(row: Any, title: str, body: str, stage: str, persona: Any, *, 
         delivery = ("Commits: Commit the fixes and verify them with tests, then push the existing request branch "
                     "before reporting done; do not open a new request. Report its URL and head sha.\n")
     review = f"{CODE_REVIEW}\n{REVIEW_RULE}\n" if stage == "review" else ""
+    if stage == "plan":  # #915 (§8): the plan stage's own scope, and the proposal the trio approves
+        delivery = (f"Plan file: write the plan to `{ownership.plan_path(key)}` and change nothing else; that file "
+                    "is this stage's write scope. In report, propose the implementation's file ownership as "
+                    "file_ownership: repository-relative paths, each write or read, never `.`.\n")
     suite_gate = ("" if not require_green else
                   "Rule: Workspace [workers] require_green_tests is enabled: the engine holds a done report "
                   "as human review unless passed, failed, skipped and xfailed are all known, with passed > 0 "

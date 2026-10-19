@@ -14,6 +14,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from alembic import command
 from alembic.autogenerate import compare_metadata
 from alembic.migration import MigrationContext
 from sqlalchemy import create_engine, select
@@ -138,6 +139,47 @@ class StoreTest(unittest.TestCase):
         self.assertEqual({entry.message for entry in self.store.log(KEY)},
                          {"first", "second", *(f"w{n}" for n in range(len(writers)))})
 
+    def test_file_claim_replacement_keeps_every_open_segments_scope(self) -> None:
+        self.store.upsert_item(KEY)
+        self.store.replace_file_ownership(KEY, [("src", "write")])
+        self.store.set_ownership(KEY, "/tmp/worker-tree", "tree")
+        self.store.record_segment(KEY, "implement", 1, started_at="09:00")
+        self.store.record_segment(KEY, "review", 1, started_at="09:01", ended_at="09:02", outcome="done")
+        for pending in ([], [("docs", "read")]):
+            self.store.replace_file_ownership(KEY, pending)
+            self.assertEqual({(r.path, r.mode) for r in self.store.ownership(KEY)},
+                             {("src", "write"), ("/tmp/worker-tree", "tree")})
+        self.store.end_segment(KEY, "implement", 1, "09:03", "done")
+        self.store.replace_file_ownership(KEY, [("docs", "read")])
+        self.assertEqual({(r.path, r.mode) for r in self.store.ownership(KEY)},
+                         {("docs", "read"), ("/tmp/worker-tree", "tree")})
+
+    def test_scope_sync_waits_for_a_worker_start_transaction_before_replacing(self) -> None:
+        self.store.upsert_item(KEY)
+        self.store.replace_file_ownership(KEY, [("src", "write")])
+        other = store.Store(self.path)
+        self.addCleanup(other.engine.dispose)
+        started = threading.Event()
+        errors = []
+
+        def replace() -> None:
+            started.set()
+            try:
+                other.replace_file_ownership(KEY, [])
+            except BaseException as exc:
+                errors.append(exc)
+
+        with self.store.session() as session:
+            session.add(store.Segment(issue_key=KEY, stage="implement", attempt=1, started_at="09:00"))
+            session.flush()  # reserve the worker while another connection attempts the scope sync
+            thread = threading.Thread(target=replace)
+            thread.start()
+            self.assertTrue(started.wait(timeout=5))
+        thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual([(r.path, r.mode) for r in self.store.ownership(KEY)], [("src", "write")])
+
     def test_rework_is_more_segments_on_the_one_item_not_more_items(self) -> None:
         self.store.upsert_item(KEY, title="x")
         self.store.record_segment(KEY, "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
@@ -207,12 +249,42 @@ class StoreTest(unittest.TestCase):
                          [("architecture", "trio", {"votes": ["yes", "yes", "yes"]})])
         self.assertEqual([(e.at, e.message) for e in self.store.log(KEY)], [("09:00", "launched")])
 
+    def test_update_resume_changes_only_its_keys_from_the_current_value(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        self.store.set_resume(KEY, {"note": {"stage": "fix"}, "decision_comments": ["a"]})
+        seen = []
+
+        def drop_comments(data):
+            seen.append(dict(data))
+            data["decision_comments"] = []
+            data["interrupt"] = {"kind": "Ask"}
+
+        self.store.update_resume(KEY, drop_comments)
+        self.assertEqual(seen, [{"note": {"stage": "fix"}, "decision_comments": ["a"]}])
+        self.assertEqual(self.store.resume(KEY), {"note": {"stage": "fix"}, "decision_comments": [],
+                                                  "interrupt": {"kind": "Ask"}})
+
     def test_resume_state_round_trips(self) -> None:
         self.store.upsert_item(KEY, title="x")
         self.assertIsNone(self.store.resume(KEY))
         self.store.set_resume(KEY, {"next": "review", "waiting_on": ["ci"]})
         self.store.set_resume(KEY, {"next": "merge", "waiting_on": []})
         self.assertEqual(self.store.resume(KEY), {"next": "merge", "waiting_on": []})
+
+    def test_answer_ask_validates_options_and_single_answer(self) -> None:
+        self.store.upsert_item(KEY, title="x")
+        ask_id = self.store.add_ask(KEY, "implement", 1, "s1", "Which parser?", ["Split", "Keep"], "ctx")
+        with self.assertRaises(ValueError):
+            self.store.answer_ask(KEY, ask_id, "Rewrite")
+        self.assertIsNone(self.store.asks(KEY)[0].answer)
+        self.store.answer_ask(KEY, ask_id, "Split")
+        self.assertEqual(self.store.asks(KEY)[0].answer, "Split")
+        # House rule 11: the architect's ruling on #758 makes the same answer again a no-op (an idempotent retry);
+        # a different second answer is still refused, as #750 requires.
+        self.store.answer_ask(KEY, ask_id, "Split")
+        with self.assertRaises(KeyError):
+            self.store.answer_ask(KEY, ask_id, "Keep")
+        self.assertEqual(self.store.asks(KEY)[0].answer, "Split")
 
     def test_the_store_rebuilds_from_the_forge_and_sync_never_touches_engine_data(self) -> None:
         snapshots = [{"issue_key": KEY, "title": "x", "stage": "review", "forge_state": "open",
@@ -276,6 +348,29 @@ class MigrationTest(unittest.TestCase):
             engine.dispose()
             self.assertEqual(drift, [])
 
+    def test_the_log_operation_migration_backfills_kind_from_the_old_wording(self) -> None:
+        old = {"stage write failed: x": "stage_write", "stage write refused: x": "stage_write",
+               "decision comment failed: x": "decision_comment", "merge refused: x": "merge_refused",
+               "merged #1": "merge", "escalate: retry limit reached": "worker_run",
+               "dispatch failed: x": "worker_run", "wait: merge is not ready": "unknown",
+               "ask failed: x": "unknown", "wait failed: x": "unknown", "merge failed: x": "merge_refused",
+               "unrecognized worker failed: x": "unknown", "arbitrary refused operation": "unknown",
+               "worker implement attempt 1: failed": "worker_run", "review failed: x": "worker_run"}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            command.upgrade(store._config(path), "0005")  # the revision before 0006_log_operation
+            conn = sqlite3.connect(path)
+            conn.execute("insert into work_item (issue_key, title, stage, forge_state, review_state, merge_state, human_review, "
+                         "updated_at) values ('o/r#1', '', '', 'open', '', '', 0, '')")
+            for message in old:
+                conn.execute("insert into log_entry (issue_key, at, message) values ('o/r#1', 'now', ?)", (message,))
+            conn.commit()
+            conn.close()
+            store.migrate(path)
+            conn = sqlite3.connect(path)
+            kinds = dict(conn.execute("select message, kind from log_entry").fetchall())
+            conn.close()
+            self.assertEqual(kinds, old)
     def test_existing_human_review_segments_keep_history_when_schema_is_upgraded(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.db"

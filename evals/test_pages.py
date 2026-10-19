@@ -1252,9 +1252,9 @@ class _Renders:
         import render_board
         self.cond, self.gate = threading.Condition(), threading.Semaphore(0)
         self.inside, self.entered, self.most = [], [], {}
-        for target, fake in ((render_board, lambda root, day=None: self.render(f"{day}-board.html")),
+        for target, fake in ((render_board, lambda root, day=None, **inputs: self.render(f"{day}-board.html")),
                              (decision_page, lambda root, pages_dir, slug, day, source=None: self.render(f"decision-{slug}.html")),
-                             (issue_page, lambda root, pages_dir, n: self.render(f"issue-{n}.html"))):
+                             (issue_page, lambda root, pages_dir, n, **inputs: self.render(f"issue-{n}.html"))):
             patcher = mock.patch.object(target, "write", fake)
             patcher.start()
             self.addCleanup(patcher.stop)

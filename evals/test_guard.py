@@ -134,15 +134,99 @@ class GuardTest(unittest.TestCase):
     def test_unrelated_tools_are_ignored(self):
         self.assertEqual(self.hook("PreToolUse", tool_name="Read", tool_input={"file_path": "README.md"}), {})
 
-    def test_permission_is_an_ask_and_never_an_approval(self):
-        result = self.hook("PermissionRequest", tool_name="Bash", tool_input={"command": "touch /outside/file"})
-        self.assertEqual(result["hookSpecificOutput"]["decision"]["behavior"], "deny")
-        asks = self.db.asks(KEY)
-        self.assertEqual(len(asks), 1)
-        self.assertEqual((asks[0].stage, asks[0].attempt, asks[0].session_id, asks[0].answer),
-                         ("implement", 2, "session-two", None))
-        self.assertIn("touch /outside/file", asks[0].context)
-        self.assertNotIn("ask tool", json.dumps(result))  # already recorded; a second ask would duplicate it
+    def permission(self, tool="Bash", **given):
+        result = self.hook("PermissionRequest", tool_name=tool, tool_input=given, cwd=str(self.root))
+        return result["hookSpecificOutput"]["decision"]
+
+    def test_an_unjudgeable_permission_is_an_ask_the_trio_is_consulted_on_first(self):
+        # #874, then the #750 ruling (rule 11: it names the separate permission decision wrong): an outside write is an
+        # allow/deny ask that the engine's trio consult answers before any owner sees it; never an approval.
+        decision = self.permission(command="touch /outside/file")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("trio", decision["message"])
+        self.assertEqual(self.db.decisions(KEY), [])
+        ask, = self.db.asks(KEY)
+        self.assertEqual((ask.stage, ask.attempt, ask.session_id, ask.answer, ask.options),
+                         ("implement", 2, "session-two", None, ["allow", "deny"]))
+        self.assertIn("touch /outside/file", ask.context)
+        self.assertIn("not a known read-only command", ask.context)  # #874's why travels with the ask
+
+    def test_the_143_read_is_allowed_without_anyone(self):
+        command = ('rtk ls && git log --oneline -3 && rtk ls docs 2>/dev/null | head -50 && grep -rln "implement" '
+                   '--include=*.py --include=*.go --include=*.rs --include=*.ts . 2>/dev/null | grep -v _vendor | head -40')
+        self.assertEqual(self.permission(command=command), {"behavior": "allow"})
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_routine_reads_and_own_tree_git_writes_are_allowed_without_anyone(self):
+        # #890: the shapes the engines' workers actually asked about (names invented), each now judged by rule.
+        commands = (
+            "git add docs/plans/issue-7.md && git commit -q -m \"docs: plan the widget for issue 7\"",
+            "git commit -m \"Plan the widget page for #7\" -m \"Co-Authored-By: A Model <noreply@example.test>\"",
+            "git add PLAN-7.md",
+            "git ls-files; rtk read GOAL.md; sed -n 1,135p DESIGN.md",
+            "sed -n 1,130p DESIGN.md; echo ------; sed -n 440,480p DESIGN.md; rtk grep -n -i \"widget\" DESIGN.md",
+            "git branch -a | head -30; git worktree list; which python3 ffmpeg node 2>&1",
+            "find . -path ./node_modules -prune -o -path ./.git -prune -o -type f -print | grep -v '/obj/' | head -100",
+            "grep -rIl --exclude-dir=node_modules --exclude-dir=.git widget . | head",
+            "git switch -c widget-7",
+            "sed -n '10p;20,30p' notes.md",  # a `$` never reaches the sed rule: the gate's tokenizer refuses it first
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command), {"behavior": "allow"})
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_sed_scripts_that_write_or_run_and_history_rewrites_are_not_auto_allowed(self):
+        for command in ("sed -n '1p;w /tmp/x' notes.md", "sed -n 'e touch x' notes.md", "sed -n '1r /etc/hosts' a",
+                        "sed -i -n 1p notes.md", "git commit --amend -m x", "git commit --no-verify -m x",
+                        "git commit -qn -m x", "git -C ../other add x", "git -c core.hooksPath=x commit -m x",
+                        "git checkout -b x origin/main", "git worktree add ../x", "cat ../sibling/secret"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertTrue(all(ask.answer is None for ask in self.db.asks(KEY)))  # each waits for the trio, not allowed
+
+    def test_an_ask_records_the_worktree_so_the_engine_can_judge_it_again(self):
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.assertEqual(json.loads(ask.context)["cwd"], str(self.root))
+
+    def test_a_merge_chained_after_a_read_is_denied_with_the_reason(self):
+        decision = self.permission(command="git status && gh pr merge 12 --merge")
+        self.assertEqual(decision["behavior"], "deny")
+        self.assertIn("engine owns merges", decision["message"])
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_unparseable_commands_and_secret_reads_go_to_the_trio(self):
+        for command in ("cat $(whoami)", "cat ~/.ssh/id_ed25519", "echo x > /etc/hosts", "rm -rf build",
+                        "sed 'e touch /tmp/x' notes.txt", "rg --pre ./run pattern .", "find . -exec rm {} +"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertEqual((len(self.db.asks(KEY)), self.db.decisions(KEY)), (7, []))
+
+    def test_the_audits_four_holes_never_auto_allow(self):
+        # Architect audit on #875: each of these runs a program or reaches outside while looking like a read.
+        holes = {
+            "assignment prefix": "GIT_EXTERNAL_DIFF=./x git diff",
+            "pager prefix": "GH_PAGER=./x gh pr view 1",
+            "git executes": "git log --ext-diff",
+            "git textconv": "git diff --textconv",
+            "brace expansion": "cat {.,/etc}/passwd",
+            "redirect into .git": "ls > .git/config",
+        }
+        for hole, command in holes.items():
+            with self.subTest(hole=hole):
+                self.assertEqual(self.permission(command=command)["behavior"], "deny")
+        self.assertEqual(self.permission("Write", file_path=".git/hooks/pre-commit")["behavior"], "deny")
+        self.assertEqual(self.permission("Read", file_path=".git/HEAD"), {"behavior": "allow"})  # reading .git is fine
+        self.assertEqual((len(self.db.asks(KEY)), self.db.decisions(KEY)), (7, []))  # each hole is an ask, never an allow
+
+    def test_reads_and_edits_are_allowed_inside_the_worktree_only(self):
+        self.assertEqual(self.permission("Read", file_path=str(self.root / "README.md")), {"behavior": "allow"})
+        self.assertEqual(self.permission("Edit", file_path="scripts/x.py"), {"behavior": "allow"})
+        self.assertEqual(self.permission("Read", file_path="/Users/someone/.ssh/id_ed25519")["behavior"], "deny")
+        self.assertEqual(self.permission("Write", file_path="/etc/hosts")["behavior"], "deny")
+        self.assertEqual(self.permission("WebFetch", url="https://example.com")["behavior"], "deny")
+        self.assertEqual((len(self.db.asks(KEY)), len(self.db.decisions(KEY))), (3, 0))
 
     def test_stop_requires_this_exact_run_report_and_cannot_loop(self):
         self.assertEqual(self.hook("Stop")["decision"], "block")

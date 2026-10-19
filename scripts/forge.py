@@ -672,12 +672,14 @@ class Forge:
             raise ForgeError(f"merged requests: {exc}") from exc
 
     def landings(self, pipeline: Pipeline, keys: list[str], *,
-                 errors: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
+                 errors: dict[str, str] | None = None,
+                 heads: dict[str, str] | None = None) -> dict[str, tuple[bool | None, bool | None]]:
         """Prove the newest closing request's head landed in current main with a passing suite.
 
         Uses forge ancestry, so a stale local checkout or an original PR head is no landing proof.
         Missing bounded history or unreadable comparisons remain unknown.
         When provided, errors receives per-issue failure details for the planner's wait log.
+        heads receives the source head of each verified landing, even after branch deletion.
         """
         found = {key: (None, None) for key in keys}
         if pipeline.ref != "main" or not isinstance(pipeline.sha, str) or not pipeline.sha:
@@ -726,6 +728,8 @@ class Forge:
                     errors.update((key, f"landing comparison: {exc}") for key in mine)
             for key in mine:
                 found[key] = result
+                if heads is not None and result[0] is True:
+                    heads[key] = identity[1]
         return found
 
     def closing_request(self, issue_key: str, requests: list[merge_ready.Request] | None = None) -> merge_ready.Request:
@@ -853,6 +857,16 @@ class Forge:
 
     def protected_branches(self) -> tuple[str, ...]:
         """The repository's default branch, then its protected branches, for the worker guard. Unreadable raises."""
+        default, protected = self._branch_protection()
+        return tuple(dict.fromkeys((default, *protected)))
+
+    def default_branch_protected(self) -> bool:
+        """§13 (b): whether the forge itself protects the default branch; a non-Claude worker launches only then."""
+        default, protected = self._branch_protection()
+        return default in protected
+
+    def _branch_protection(self) -> tuple[str, tuple[str, ...]]:
+        """(default branch, protected branch names) as the forge reports them. Unreadable raises."""
         _, repo = home_of(self.home)
         try:
             if self.github:
@@ -877,10 +891,9 @@ class Forge:
                 names += [row["name"] for row in rows]
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
             raise ForgeError(f"protected branches: {exc}") from exc
-        found = tuple(dict.fromkeys(n for n in names if isinstance(n, str) and n.strip()))
-        if not found or not names[0].strip():
+        if not isinstance(names[0], str) or not names[0].strip():
             raise ForgeError("protected branches: the forge reported no default branch")
-        return found
+        return names[0], tuple(dict.fromkeys(n for n in names[1:] if isinstance(n, str) and n.strip()))
 
     # writes: preview unless commit
     def merge(self, number: int, commit: bool = False, issue_key: str | None = None, approval: str | None = None,
@@ -911,7 +924,7 @@ class Forge:
             if not got.issue.is_open:
                 raise ForgeError(f"{issue_key} is no longer open on the forge")
             if self.kanban and self.kanban.human_review_label in got.issue.labels:
-                raise ForgeError(f"{issue_key} is held for human review on the forge")
+                raise ForgeError(f"{issue_key} needs input on the forge")
             if stage_mark is not None and self.kanban:
                 try:  # same decode as snapshot: Project Status when configured, else labels
                     statuses = None
@@ -939,6 +952,58 @@ class Forge:
             raise ForgeError(f"{mark} not merged at {one.head}: {result or f'merge exited {code}'}")
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
+
+    def set_body(self, number: int, body: str, commit: bool = False) -> str:
+        """Replace an issue's body, as the approved file ownership section is written (#915). The error, or ""."""
+        if not commit:
+            return ""
+        if self.github:
+            _, repo = home_of(self.home)
+            code, _out, err = self.gh(["issue", "edit", str(number), "-R", repo, "--body-file", "-"], body)
+            return "" if code == 0 else f"gh: {err.strip() or f'exit {code}'}"
+        return backlog.set_description(self.home, number, body, token=self._token())
+
+    def comment(self, number: int, body: str, commit: bool = False) -> str:
+        """Post or preview a comment on an issue."""
+        if not commit:
+            return f"would comment on #{number}: {body}"
+        return backlog.comment(self.home, number, body, token=None if self.github else self._token(),
+                               commit=True, gh=self.gh).error
+    def request_base(self, number: int) -> str:
+        """The branch a request targets, which §13 requires the forge to protect before a non-Claude worker. Unreadable raises."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                code, out, err = self.gh(["pr", "view", str(number), "-R", repo, "--json", "baseRefName"])
+                if code:
+                    raise RuntimeError(err.strip() or f"gh exited {code}")
+                base = json.loads(out)["baseRefName"]
+            else:
+                got, _, err = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}", self._token(), backlog.TIMEOUT)
+                if err:
+                    raise RuntimeError(err)
+                base = got["target_branch"]
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"request base: {exc}") from exc
+        if not isinstance(base, str) or not base.strip():
+            raise ForgeError("request base: the forge reported no target branch")
+        return base
+
+    def merge_commit(self, number: int) -> str | None:
+        """The commit a merged request landed as on its target, for §13 (c)'s record of engine merges; None when the
+        forge does not say (the check then cannot vouch for that commit, which holds)."""
+        _, repo = home_of(self.home)
+        try:
+            if self.github:
+                code, out, _ = self.gh(["pr", "view", str(number), "-R", repo, "--json", "mergeCommit"])
+                return None if code else ((json.loads(out).get("mergeCommit") or {}).get("oid") or None)
+            got, _, err = backlog._call("GET", f"{self.home.api()}/merge_requests/{number}", self._token(), backlog.TIMEOUT)
+            if err or not isinstance(got, dict) or got.get("state") != "merged":
+                return None
+            # A merge commit, else a squash commit, else a fast-forward that landed the request's own head.
+            return got.get("merge_commit_sha") or got.get("squash_commit_sha") or got.get("sha") or None
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
+            return None
 
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:

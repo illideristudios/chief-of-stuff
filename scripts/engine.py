@@ -10,34 +10,53 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable
-from datetime import datetime
-from functools import partial
+from collections.abc import Callable, Collection
+from dataclasses import is_dataclass, replace
+from datetime import datetime, timedelta
+from functools import cache, partial
 from pathlib import Path
 from typing import Any
 
 import cleanup
+import claude_adapter
 import clock as engine_clock
+import decision_actions
 import dispatch_prompt
 import engine_facts
 import engine_merge
 import forge
+import guard_commands
+import host_adapter
 import issue_gate
 import limits_history
 import limits_probe
+import model_port
+import notify
 import ownership
 import policy
+import readiness
 import reconcile
+import runtimes
 import settings
+import shell_setup
 import slots
 import startup
 import store_access
 import supervisor
+import trio_gate
 import worker
 from forge_port import ForgeError
+from reconcile import HOLD_REROUTE, HOLD_STAGE_WRITE, OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
+
+
+def adopt_login_path(environ=os.environ) -> None:
+    """#871: under its LaunchAgent (the only place CHIEF_OF_STUFF_VERSION is set) the engine has launchd's short PATH, so
+    the `gh`, `glab` and `git` it runs itself are not found. Take the login shell's PATH; an unreadable one changes nothing."""
+    if environ.get("CHIEF_OF_STUFF_VERSION") and (path := shell_setup.login_path(dict(environ))):
+        environ["PATH"] = path
 
 
 def _resume(store: Any, key: str) -> dict:
@@ -59,6 +78,8 @@ def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
         if data.get("verified_landing") is True:
             continue
         data["verified_landing"] = True
+        if head := dict(facts.landing_heads).get(key):
+            data["verified_landing_head"] = head
         store.set_resume(key, data)
 
 
@@ -81,9 +102,297 @@ def _planning_inputs(store: Any, items: list) -> dict:
                           if (counts := reconcile.review_findings(states[key], history)) is not None},
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
+        "pending_asks": {item.issue_key: any(not ask.answer for ask in store.asks(item.issue_key)) for item in items},
         "quota_resets": {key: datetime.fromisoformat(quota["retry_at"]) for key, state in states.items()
                          if (quota := state.get("quota"))},
+        "usage": {key: nums for key, state in states.items() if (nums := _measured(state))},
+        "waived_gates": {key: tuple(state.get("waived_gates") or ())
+                         for key, state in states.items() if state.get("waived_gates")},
     }
+
+
+def _measured(state: dict) -> dict:
+    return {key: state[key] for key in ("spend_usd", "time_minutes", "quota_percent")
+            if type(state.get(key)) in (int, float)}
+
+
+def _interrupt(store: Any, key: str, kind: str, reason: str, at: str, *, scope: dict) -> None:
+    """Persist the issue's interrupt when it changes."""
+    data = _resume(store, key)
+    record = {"kind": kind, "reason": reason, **scope}
+    if data.get("interrupt") != record:
+        store.add_log(key, f"{kind}: {reason}", at)
+        data["interrupt"] = record
+        store.set_resume(key, data)
+
+
+def _add_spend(store: Any, key: str, amount: float) -> None:
+    if type(amount) not in (int, float) or not amount:
+        return
+    data = _resume(store, key)
+    data["spend_usd"] = float(data.get("spend_usd") or 0) + float(amount)
+    store.set_resume(key, data)
+
+
+def _metered(store: Any, key: str, model: model_port.Model):
+    inner = model.call if isinstance(model, model_port.Port) else model
+
+    def call(request: model_port.Request):
+        got = inner(request)
+        if isinstance(got, (model_port.Reply, model_port.Failure)):
+            _add_spend(store, key, got.cost_usd)
+        return got
+    return replace(model, call=call) if isinstance(model, model_port.Port) else call  # keep the trio's rotation
+
+
+def _resolved(policies: policy.Policies, store: Any, key: str, stage: str) -> policy.Policy:
+    room = _resume(store, key).get("room")
+    if room not in policies.rooms:
+        room = None
+    known = stage if stage in policies.stages else None
+    return policies.resolve(policies.stages[known].persona if known else None, known, room)
+
+
+def _workflow_for(policies: policy.Policies, store: Any, item: Any) -> policy.Workflow:
+    issue_type = _resume(store, item.issue_key).get("issue_type") or getattr(item, "issue_type", None)
+    return policies.workflow_for(issue_type)
+
+
+def _clear_waived_gates(store: Any, key: str) -> None:
+    data = _resume(store, key)
+    if data.pop("waived_gates", None) is not None:
+        store.set_resume(key, data)
+
+
+def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str, ...],
+            resolved: policy.Policy, personas, model, *, context: str = "", instance: str = "",
+            stage: str = "", attempt: int = 0,
+            gate: bool = False,
+            clock: engine_clock.Clock = engine_clock.system) -> str | None:
+    """The trio's adopted choice. A split, a missing trio, or no model escalates once."""
+    decision = trio_gate.Decision(key, topic, question, options, context=context, instance=instance,
+                                  stage=stage, attempt=attempt, gate=gate)
+    earlier = store.decisions(key)
+    retry_key = json.dumps([topic, question, instance, stage, attempt, context, options])
+    retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
+    prior = decision_actions.latest(earlier).get((topic, question, instance))
+    failures = max(retry.get("failures", 0), decision_actions.stamped_failures(prior, context, options, stage, attempt))
+    if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
+            and datetime.fromisoformat(retry["retry_at"]) > clock()):
+        return None
+    outcome = trio_gate.decide(decision, earlier, resolved, personas,
+                               _metered(store, key, model) if model is not None else None, store, failures=failures)
+    rows = store.decisions(key)
+    data = _resume(store, key)
+    retries = data.get("trio_retries") or {}
+    if len(rows) > len(earlier) and decision_actions.retryable_failure(rows[-1].record):
+        delay = min(3600, 60 * 2 ** min(failures, 6))
+        retries[retry_key] = {"failures": failures + 1,
+                              "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
+        data["trio_retries"] = retries
+        store.set_resume(key, data)
+        return None
+    if retry_key in retries:
+        retries.pop(retry_key)
+        if not retries:
+            data.pop("trio_retries", None)
+        store.set_resume(key, data)
+    return outcome.recommendation if outcome.unanimous else None
+
+
+def _clear_interrupt(store: Any, key: str, kind: str, *, scope: dict) -> None:
+    data = _resume(store, key)
+    record = data.get("interrupt", {})
+    if record.get("kind") == kind and all(record.get(name) == value for name, value in scope.items()):
+        data.pop("interrupt")
+        store.set_resume(key, data)
+
+
+def _consultation_blocked(store: Any, key: str, resolved: policy.Policy, at: str, *, stage: str) -> bool:
+    data = _resume(store, key)
+    kind = policy.breach(resolved, _measured(data))
+    if kind:
+        _interrupt(store, key, "limit", f"reached {kind} limit", at, scope={"stage": stage})
+        return True
+    _clear_interrupt(store, key, "limit", scope={"stage": stage})
+    quota = data.get("quota")
+    return bool(quota and datetime.fromisoformat(quota["retry_at"]) > datetime.fromisoformat(at))
+
+
+def _link_replacement_asks(store: Any, key: str, replacements: list) -> None:
+    for origin, segment in replacements:
+        pending = decision_actions.replacement_ask(origin, segment, store.decisions(key), store.asks(key))
+        if pending is None:
+            continue
+        spec, ask, prior = pending
+        ask_id = ask.id if ask is not None else store.add_ask(key, **spec)
+        update = decision_actions.link_ask(prior, ask_id)
+        if update != prior:
+            trio_gate.record(store, key, update)
+
+
+def _settle_asks(store: Any, key: str) -> None:
+    for ask in store.asks(key):
+        rows = store.decisions(key)
+        linked = decision_actions.recover_ask_link(rows, ask)
+        if linked is not None:
+            trio_gate.record(store, key, linked)
+            rows = store.decisions(key)
+        answer = decision_actions.committed_ask_answer(rows, ask)
+        if answer is not None:
+            store.answer_ask(key, ask.id, answer)
+        elif ask.answer:
+            settled = decision_actions.answer_ask(rows, ask)
+            if settled is not None:
+                trio_gate.record(store, key, settled)
+
+
+def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "implement",
+                              passed: Collection[str] = ()) -> None:
+    """Derive one interrupt per decision attempt, changing only decision-scoped state."""
+    key = item.issue_key
+    desired = {}
+    pending_rows = (decision_actions.owner_waits(store.decisions(key), store.segments(key), store.asks(key), start, passed)
+                    if item.forge_state != "closed" else ())
+    for pending in pending_rows:
+        scope = {"id": list(pending.decision_id), "stage": pending.stage, "attempt": pending.attempt}
+        desired[json.dumps(scope, sort_keys=True)] = {"kind": "ambiguity", "reason": pending.reason, "decision": scope}
+    data = _resume(store, key)
+    current = {json.dumps(i["decision"], sort_keys=True): i for i in data.get("decision_interrupts", ())}
+    for added in desired.keys() - current.keys():
+        store.add_log(key, f"ambiguity: {desired[added]['reason']}", at)
+    # The old singleton may contain a decision interrupt from an earlier engine version.
+    legacy = isinstance((data.get("interrupt") or {}).get("decision"), dict)
+    if current != desired or legacy:
+        if desired:
+            data["decision_interrupts"] = list(desired.values())
+        else:
+            data.pop("decision_interrupts", None)
+        if legacy:
+            data.pop("interrupt")
+        store.set_resume(key, data)
+
+
+def _permission(ask: Any) -> dict | None:
+    """The event a worker's permission ask records (#874), or None for any other ask."""
+    try:
+        event = json.loads(ask.context or "")
+    except (TypeError, ValueError):
+        return None
+    # Asks raised before #874 carry no options; they are permission requests all the same (#890 follow-up).
+    if (isinstance(event, dict) and "tool_name" in event and tuple(ask.options) in (("allow", "deny"), ())
+            and str(ask.question).startswith("Permission requested for ")):
+        return event
+    return None
+
+
+def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at: str) -> None:
+    """#890: a permission request is never an owner decision. The guard's rule or the trio answers it; a split,
+    unavailable or exhausted trio denies it, with the reason on the run's log. The answer is appended, never a delete."""
+    store.answer_ask(key, ask.id, answer)
+    row = decision_actions.ask_decision(store.decisions(key), ask)
+    if row is not None and not (row.answer or "").strip():
+        trio_gate.record(store, key, decision_actions.DecisionUpdate(
+            row.topic, row.question, answer, "guard", {**row.record, "recommendation": answer, "settled_by": why}))
+    store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
+
+
+def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+    """#915: a plan's file_ownership proposal is a trio decision (topic `scope`). On approval the engine writes the
+    issue's section through the forge and its store rows; a rejection drops it. A split waits for the owner as a real
+    decision, and an unavailable trio is asked again next pass. Nothing is written unapproved."""
+    for item in store.items():
+        key = item.issue_key
+        proposal = _resume(store, key).get("scope_proposal")
+        if item.forge_state == "closed" or not isinstance(proposal, dict):
+            continue
+        if any(row.mode != "tree" for row in store.ownership(key)):
+            store.update_resume(key, lambda data: data.pop("scope_proposal", None))  # declared meanwhile
+            continue
+        scopes = [(str(path), str(mode)) for path, mode in proposal.get("scopes") or ()]
+        listed = "; ".join(f"{mode}: {path}" for path, mode in scopes)
+        stage = str(proposal.get("stage") or "plan")
+        resolved = _resolved(policies, store, key, stage)
+        if not scopes or _consultation_blocked(store, key, resolved, at, stage=stage):
+            continue
+        choice = _choice(store, key, "scope", f"Approve this file ownership for {key}? {listed}", ("approve", "reject"),
+                         resolved, policies.personas, model, context=listed, stage=stage,
+                         attempt=int(proposal.get("attempt") or 0), clock=clock)
+        if choice == "reject":
+            store.update_resume(key, lambda data: data.pop("scope_proposal", None))
+            store.add_log(key, f"file ownership proposal rejected: {listed}", at)
+        elif choice == "approve":
+            number = int(key.rpartition("#")[2])
+            got = forge.issue(number)
+            if not got.ok or got.issue is None:
+                store.add_log(key, f"file ownership write failed: {got.error or 'issue not found'}", at)
+                continue
+            try:
+                body = ownership.with_issue_scopes(got.issue.body if isinstance(got.issue.body, str) else "", scopes)
+            except ValueError as exc:
+                store.add_log(key, f"file ownership write failed: {exc}", at)
+                continue
+            error = forge.set_body(number, body, commit=True)
+            if error:
+                store.add_log(key, f"file ownership write failed: {error}", at)
+                continue
+            store.replace_file_ownership(key, scopes)
+            store.update_resume(key, lambda data: data.pop("scope_proposal", None))
+            store.add_log(key, f"file ownership approved and written: {listed}", at)
+
+
+def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+    for item in store.items():
+        if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
+            continue
+        key = item.issue_key
+        workflow = _workflow_for(policies, store, item)
+        replacements = decision_actions.replacements(store.decisions(key), store.segments(key), workflow.start,
+                                                     tuple(edge.gate for edge in workflow.edges if edge.gate))
+        # Repair an interrupted ask/link write before accepting any direct answer.
+        _link_replacement_asks(store, key, replacements)
+        _settle_asks(store, key)
+        asks = store.asks(key)
+        for ask in (ask for ask in asks if not ask.answer):
+            permission = _permission(ask)
+            if permission is not None:
+                # Judged again by today's rule, so an ask raised under a narrower one is closed by its answer.
+                verdict, why = guard_commands.permission_judgement(permission, ())
+                if verdict != "trio":
+                    _settle_permission(store, key, ask, verdict, "the guard's rule" + (f": {why}" if why else ""), at)
+                    continue
+            stage = ask.stage or item.stage or workflow.start
+            resolved = _resolved(policies, store, key, stage)
+            if _consultation_blocked(store, key, resolved, at, stage=stage):
+                if permission is not None:
+                    _settle_permission(store, key, ask, "deny", "the trio is unavailable: a limit or a quota holds it", at)
+                    continue
+                break
+            row = decision_actions.ask_decision(store.decisions(key), ask)
+            topic, question, instance = decision_actions.identity(row) if row is not None else (
+                "ask", ask.question, f"ask-{ask.id}")
+            options = ("allow", "deny") if permission is not None else tuple(ask.options)
+            choice = _choice(store, key, topic, question, options, resolved, policies.personas,
+                             model, context=ask.context, instance=instance, stage=stage, attempt=ask.attempt, clock=clock)
+            if choice:
+                store.answer_ask(key, ask.id, choice)
+            elif permission is not None:
+                _settle_permission(store, key, ask, "deny", "the trio did not adopt an answer", at)
+        for row, segment in replacements:
+            resolved = _resolved(policies, store, key, segment.stage)
+            if _consultation_blocked(store, key, resolved, at, stage=segment.stage):
+                break
+            prior = row.record.get("decision")
+            if not isinstance(prior, dict):
+                _interrupt(store, key, "ambiguity", row.question, at, scope={"stage": segment.stage})
+                continue
+            context = decision_actions.replacement_context(row, segment)
+            _choice(store, key, row.topic, row.question, tuple(prior.get("options") or ()),
+                    resolved, policies.personas, model, context=context,
+                    instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock)
+        _link_replacement_asks(store, key, replacements)
+        _settle_asks(store, key)
+
 
 
 def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
@@ -99,13 +408,106 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
         fields["human_review"] = True
     elif release_hold:
         fields["human_review"] = False
-    store.upsert_item(key, **fields)
-    data = _resume(store, key)
-    data.pop("pending_stage", None)
+    def clear(data: dict) -> None:
+        data.pop("pending_stage", None)
+        if release_hold:
+            data.pop("launcher_hold", None)
+
+    with store.transaction():
+        store.upsert_item(key, **fields)
+        store.update_resume(key, clear)
     if release_hold:
-        data.pop("launcher_hold", None)
         store.add_log(key, f"hold released for {stage}", store.clock().isoformat())
-    store.set_resume(key, data)
+
+
+def _apply(store: Any, key: str, update: decision_actions.DecisionUpdate | None) -> None:
+    if update is not None:
+        trio_gate.record(store, key, update)
+
+
+def _settle(store: Any, key: str, step: Callable[..., Any], intent_id: int, *args: Any) -> bool:
+    """Record an intent's outcome only while it is still the issue's current one, with any older intent superseded
+    in the same transaction so it can never become current again."""
+    with store.transaction():
+        rows = store.decisions(key)
+        current = decision_actions.current_intent(rows)
+        if current is None or current.intent_id != intent_id:
+            return False
+        for update in decision_actions.supersede(rows):
+            _apply(store, key, update)
+        _apply(store, key, step(rows, intent_id, *args))
+    return True
+
+
+def _is_current(store: Any, key: str, intent_id: int) -> bool:
+    current = decision_actions.current_intent(store.decisions(key))
+    return current is not None and current.intent_id == intent_id
+
+
+def _apply_intent(forge: Any, store: Any, key: str) -> None:
+    """The one place a board intent is acted on (§6). Choose the issue's current intent and supersede the older
+    ones, then write its stage and record that it landed. A failed write raises and the intent stays pending."""
+    if decision_actions.current_intent(store.decisions(key)) is None:
+        return  # no write lock for an issue with nothing to apply
+    with store.transaction():
+        rows = store.decisions(key)
+        for update in decision_actions.supersede(rows):
+            _apply(store, key, update)
+        intent = decision_actions.current_intent(rows)
+        if decision_actions.replaces_engine_move(intent, store.item(key).stage):
+            store.update_resume(key, lambda data: data.pop("pending_stage", None))  # a person's intent replaces the engine's own move
+    if intent.status == "blocked":
+        return
+    item = store.item(key)
+    if intent.rerouted_to and item.stage != intent.rerouted_to:
+        if not _is_current(store, key, intent.intent_id):
+            return  # a newer intent arrived; the next pass applies it
+        _write_stage(forge, store, key, intent.rerouted_to, item.stage)
+    if intent.intent == "write":
+        _settle(store, key, decision_actions.advance, intent.intent_id)
+
+
+def _replaced(store: Any, key: str, planned: decision_actions.DecisionState | None) -> bool:
+    """Whether the issue's current intent changed, or first appeared, since planning chose its action."""
+    current = decision_actions.current_intent(store.decisions(key))
+    return (planned.intent_id if planned else None) != (current.intent_id if current else None)
+
+
+def _sync_decisions_with_action(store: Any, key: str, action: reconcile.Action) -> None:
+    """An answered decision shows blocked while its issue's action waits, and answered again once it does not."""
+    if isinstance(action, reconcile.Wait) and action.reason in (HOLD_REROUTE, HOLD_STAGE_WRITE):
+        return  # a pending move holds its own issue only; no sibling decision shows blocked for it
+    with store.transaction():
+        decisions = store.decisions(key)
+        if isinstance(action, reconcile.Wait) and action.reason == "decision pending":
+            # With no open decision, a blocked answer is what holds merge: restore it.
+            for update in decision_actions.restore_held(decisions):
+                _apply(store, key, update)
+            return
+        for state in decision_actions.states(decisions):
+            _apply(store, key, decision_actions.meet_action(state, action).update)
+
+
+def _deliver_comments(forge: Any, store: Any, key: str, at: str) -> None:
+    """Post the issue comments board actions recorded on their rows; each is sent once, keyed by its words."""
+    queued = decision_actions.pending_comments(store.decisions(key), _resume(store, key).get("decision_comments_sent", ()))
+    delivered, failure = [], ""
+    for body in queued:
+        try:
+            error = forge.comment(int(key.rpartition("#")[2]), body, commit=True)
+        except Exception as exc:
+            error = str(exc)
+        if error:
+            failure = error
+        else:
+            delivered.append(body)
+    if delivered:
+        store.update_resume(key, lambda data: data.__setitem__(
+            "decision_comments_sent", [*data.get("decision_comments_sent", []), *delivered]))
+    message = f"decision comment failed: {failure}"
+    logged = store.log(key)
+    if failure and (not logged or logged[-1].message != message):  # retried every pass; log only a change
+        store.add_log(key, message, at, OP_DECISION_COMMENT)
 
 
 def _restore_hold(forge: Any, store: Any, key: str) -> None:
@@ -250,7 +652,8 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
-             max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "") -> list[reconcile.Action]:
+             max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "",
+             model: model_port.Model | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -282,13 +685,13 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 body = got.issue.body if isinstance(got.issue.body, str) else ""
             except (ForgeError, OSError, ValueError, TypeError) as exc:
                 store.add_log(key, f"ownership read failed: {exc}", clock().isoformat())
-                # A failed per-issue fallback preserves prior claims; a new issue owns the repository.
-                if not any(row.mode != "tree" for row in store.ownership(key)):
-                    scopes[key] = [(".", "write")]
+                # A failed read preserves prior declarations; a new issue waits without a scope.
                 continue
         scopes[key] = ownership.issue_scopes(body)
+    running = {segment.issue_key for segment in store.segments() if segment.ended_at is None}
     for key, declared in scopes.items():
-        store.replace_file_ownership(key, declared)
+        if key not in running:
+            store.replace_file_ownership(key, declared or [])
     present = {row["issue_key"] for row in snapshots}
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
@@ -300,12 +703,53 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                    finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
 
+    # Collection judges each exited worker against its launch scope. Apply pending edits only
+    # after every segment for that issue ends, then give readiness the current declarations.
+    still_running = {segment.issue_key for segment in store.segments() if segment.ended_at is None}
+    refreshed = {key: declared for key, declared in scopes.items() if key in running and key not in still_running}
+    for key, declared in refreshed.items():
+        store.replace_file_ownership(key, declared or [])
+    if refreshed:
+        claims = tuple(claim for claim in facts.claims if claim.issue_key not in refreshed) + tuple(
+            readiness.Claim(key, path, mode) for key, declared in refreshed.items() for path, mode in declared or [])
+        if claims != facts.claims:
+            facts = replace(facts, claims=claims)
+    if is_dataclass(facts):
+        # §8 (#915): an undeclared issue's plan stage claims only its own plan file, so plan runs never serialize.
+        declared = {claim.issue_key for claim in facts.claims}
+        # Reads own nothing, so "reads everything" needs no claim; the plan mode holds only for a plan dispatch.
+        implicit = tuple(readiness.Claim(item.issue_key, ownership.plan_path(item.issue_key), readiness.PLAN)
+                         for item in store.items()
+                         if item.issue_key not in declared and item.forge_state != "closed"
+                         and (item.stage or _workflow_for(policies, store, item).start) == "plan")
+        if implicit:
+            facts = replace(facts, claims=facts.claims + implicit)
+
     now = clock()
     at = now.isoformat()
     _sync_suite_holds(forge, store, snapshots, at)
+    for item in store.items():
+        data = _resume(store, item.issue_key)
+        quota = data.get("quota")
+        if quota and datetime.fromisoformat(quota["retry_at"]) <= now and "quota_percent" in data:
+            data.pop("quota_percent")
+            # The planner stamps the evaluated stage, which need not be item.stage.
+            interrupt = data.get("interrupt") or {}
+            if (interrupt.get("kind"), interrupt.get("reason")) == ("limit", "reached quota limit"):
+                data.pop("interrupt")
+            store.set_resume(item.issue_key, data)
     # Retry label writes even when a successful merge closed the issue since the last pass.
     for item in store.items():
         key = item.issue_key
+        try:
+            _apply_intent(forge, store, key)
+        except Exception as exc:
+            message = f"stage write failed: {exc}"
+            last = next((entry for entry in reversed(store.log(key)) if entry.kind == OP_STAGE_WRITE), None)
+            if last is None or last.message != message:  # intervening wait logs do not repeat a refusal
+                store.add_log(key, message, at, OP_STAGE_WRITE)
+            continue
+        item = store.item(key) or item
         data = _resume(store, key)
         pending = data.get("pending_stage")
         release = pending if pending and pending.get("release_hold") else None
@@ -347,29 +791,52 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             store.set_resume(key, data)
         if pending:
             try:
-                if item.stage == pending["stage"]:
+                # A failed start keeps its segment to spend the retry budget; it does not consume a restart route.
+                claimed = ("attempt" not in pending or any(
+                    seg.stage == pending["stage"] and seg.attempt == pending["attempt"] and seg.outcome != "failed"
+                    for seg in store.segments(key)))
+                if not claimed or item.stage == pending["stage"]:
                     data.pop("pending_stage")
                     store.set_resume(key, data)
                 else:
                     _write_stage(forge, store, key, pending["stage"], pending["expected"])
             except Exception as exc:
                 message = f"stage write failed: {exc}"
-                logged = store.log(key)
-                if not logged or logged[-1].message != message:  # retried every pass; log only a change
-                    store.add_log(key, message, at)
+                last = next((entry for entry in reversed(store.log(key)) if entry.kind == OP_STAGE_WRITE), None)
+                if last is None or last.message != message:  # intervening wait logs do not repeat a refusal
+                    store.add_log(key, message, at, OP_STAGE_WRITE)
+    for item in store.items():
+        _deliver_comments(forge, store, item.issue_key, at)
 
+    _route_asks(store, policies, model, at, clock)
+    _settle_scopes(forge, store, policies, model, at, clock)
+    if is_dataclass(facts):
+        # The trio may have answered asks since collect gathered them; plan from the answers it just stored.
+        asks = tuple(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt)
+                     for item in store.items() for row in store.asks(item.issue_key))
+        if asks != facts.asks:
+            facts = replace(facts, asks=asks)
     items = [item for item in store.items()
              if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
     _remember_verified(store, facts)
+    inputs = _planning_inputs(store, items)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
-                             facts=facts, **_planning_inputs(store, items))
+                             facts=facts, **inputs)
+    intents = {key: decision_actions.current_intent(rows) for key, rows in inputs["decisions"].items()}  # what planning saw
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
+    claude_text = (root / "CLAUDE.md").read_text(encoding="utf-8") if (root / "CLAUDE.md").is_file() else ""
     for action in actions:
         key = action.issue_key
+        planned = intents.get(key)
+        if isinstance(action, (reconcile.Dispatch, reconcile.Review)) and _replaced(store, key, planned):
+            continue  # a newer intent arrived since planning; the next pass plans from it
+        op = (OP_MERGE_REFUSED if isinstance(action, reconcile.Merge)
+              else OP_WORKER_RUN if isinstance(action, (reconcile.Dispatch, reconcile.Review)) else "")
         try:
+            _sync_decisions_with_action(store, key, action)
             stage = None
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"
@@ -377,6 +844,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if policies.resolve(persona=persona, stage=stage).launch == "session":
                     # Interactive sessions are out of this PR; refuse rather than silently use the adapter.
                     raise RuntimeError(f"launch=session is not supported for {stage} ({persona})")
+                agent_name = worker.agent_for(claude_text, policies.personas.get(persona or policies.stages[stage].persona),
+                                              worker.stage_defaults(root, claude_text, stage))
                 launch_failed = False
 
                 def start():
@@ -409,16 +878,41 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         _fail_start(forge, store, key, stage, stages[key], action.attempt, board is not None, exc)
                         raise
 
+                restart = (stage != stages[key] and stage == _workflow_for(policies, store, by_key[key]).start
+                           and decision_actions.open_reversal(store.decisions(key), store.segments(key), stage))
+                if restart:
+                    # Persist the restart route before its durable segment consumes the
+                    # reversal, so a crash still retries/advances from workflow.start.
+                    data = _resume(store, key)
+                    data["pending_stage"] = {"stage": stage, "expected": stages[key], "attempt": action.attempt}
+                    store.set_resume(key, data)
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
-                                agent_type=persona, runtime="claude")
-                except Exception:
+                                agent_type=agent_name, runtime="claude")
+                except BaseException:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
-                                             runtime="claude", agent_type=persona)
+                                             runtime="claude", agent_type=agent_name)
+                    # A rejected claim or failed launch leaves no segment. A crash
+                    # after a durable claim must keep the route for recovery.
+                    # #750 ruling 2: a failed launch keeps _fail_start's stage move and hold, whose pending_stage
+                    # supersedes the route; only a claim refused before any launch rolls the route back.
+                    if restart and not launch_failed and not any(s.stage == stage and s.attempt == action.attempt
+                                                                 for s in store.segments(key)):
+                        data = _resume(store, key)
+                        data.pop("pending_stage", None)
+                        store.set_resume(key, data)
                     raise
+                _clear_waived_gates(store, key)
+                _clear_interrupt(store, key, "limit", scope={"stage": stage})
+                if planned is not None:
+                    # The intent's worker launched: a re-route is done, and a reversal's done phase is its restart.
+                    _settle(store, key, decision_actions.advance, planned.intent_id, stage, action.attempt)
+                if isinstance(action, reconcile.Dispatch) and stage == _workflow_for(policies, store, by_key[key]).start:
+                    for rev in decision_actions.restarted(store.decisions(key), stage, action.attempt):
+                        trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":
                     # Enter the hold before merging; a later pass observes the human's release.
@@ -427,21 +921,30 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                                          inputs=_planning_inputs(store, [by_key[key]]),
                                          hold_stages=board.hold_stages if board is not None else ()):
                     stage = "merge"
+                    _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Close):
                 worker.teardown_once(store, root, key, action.stage, action.attempt, teardown_command, at)
                 if action.suite_hold:
                     _arm_suite_hold(store, key, action.stage, action.attempt)
                 _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
                                action.reason, action.human_review, now)
-            elif isinstance(action, (reconcile.Ask, reconcile.Escalate)):
-                data = _resume(store, key)
-                record = {"kind": type(action).__name__, "reason": action.reason}
-                if isinstance(action, reconcile.Ask):
-                    record["gate"] = action.gate
-                if data.get("interrupt") != record:
-                    store.add_log(key, f"{record['kind'].lower()}: {action.reason}", at)
-                    data["interrupt"] = record  # M5/M6 delivers and resolves the interrupt.
+            elif isinstance(action, reconcile.Ask):
+                resolved = _resolved(policies, store, key, action.source)
+                if _consultation_blocked(store, key, resolved, at, stage=action.source):
+                    continue
+                choice = _choice(store, key, action.gate, action.reason, ("approve", "hold"),
+                                 resolved, policies.personas, model, context=action.context, stage=action.stage,
+                                 attempt=action.attempt, gate=True, clock=clock)
+                if choice == "approve":
+                    data = _resume(store, key)
+                    data["waived_gates"] = sorted(set(data.get("waived_gates") or ()) | {action.gate})
                     store.set_resume(key, data)
+            elif isinstance(action, (reconcile.Escalate, reconcile.Limit)):
+                kind = "exhausted" if isinstance(action, reconcile.Escalate) else "limit"
+                _interrupt(store, key, kind, action.reason, at, scope={"stage": action.stage})
+                if isinstance(action, reconcile.Escalate) and planned is not None and planned.intent == "run":
+                    # A spent retry limit blocks the intent's own decision, which keeps holding the issue.
+                    _settle(store, key, decision_actions.block, planned.intent_id, action.reason)
                 if isinstance(action, reconcile.Escalate):
                     # A permanent refusal or exhausted budget ends automatic release; removing the
                     # hold later works without editing the engine's resume records.
@@ -452,21 +955,65 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 if last != message:
                     store.add_log(key, message, at)
             if stage is not None and stage != stages[key]:
-                data = _resume(store, key)
-                data["pending_stage"] = {"stage": stage, "expected": stages[key]}
-                store.set_resume(key, data)
-                _write_stage(forge, store, key, stage, stages[key])
+                op = OP_STAGE_WRITE
+                pending = {"stage": stage, "expected": stages[key]}  # the engine's own move: it names no decision
+                with store.transaction():
+                    # A board intent accepted during the action owns the stage; the engine's own route to it does not.
+                    queued = _resume(store, key).get("pending_stage")
+                    mine = ((not queued or queued.get("stage") == stage)
+                            and decision_actions.current_intent(store.decisions(key)) is None)
+                    if mine:
+                        store.update_resume(key, lambda data: data.__setitem__("pending_stage", pending))
+                if mine:
+                    _write_stage(forge, store, key, stage, stages[key])
         except Exception as exc:
             if not isinstance(exc, HoldReleaseFailed):
-                store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at)
+                store.add_log(key, f"{type(action).__name__.lower()} failed: {exc}", at, op)
+    for item in store.items():
+        workflow, state = _workflow_for(policies, store, item), _resume(store, item.issue_key)
+        passed = reconcile.passed_gates(workflow, policies, state.get("room"), now, state.get("waived_gates") or ())
+        _sync_decision_interrupts(store, item, at, workflow.start, passed)
     completed = {item.issue_key for item in store.items()
                  if item.forge_state == "closed" and item.merge_state == "merged"
                  and reconcile.completion_wait(item.issue_key, facts) is None
                  and not any(segment.ended_at is None for segment in store.segments(item.issue_key))}
+    try:
+        notify.sync_workspace(root, now)
+    except Exception as exc:
+        print(f"engine: exception pings failed: {exc}", file=sys.stderr)
     if cleanup.execute(root, trees if trees.resolve() != root.resolve() else None, store, remove=True,
                        completed=completed):
         raise RuntimeError("cleanup failed; see the issue logs")
     return actions
+
+
+def _judge(request: model_port.Request, *, claude_as_profile: str = "") -> "model_port.Reply | model_port.Failure":
+    """The trio's model port (§6, #879): Claude through claude_adapter, the other hosts read-only through host_adapter."""
+    if request.runtime in ("", "claude"):
+        return claude_adapter.call(request, claude_as_profile=claude_as_profile)
+    return host_adapter.judge(request)
+
+
+@cache  # whether a CLI is installed does not change while the engine runs
+def _judges(runtime: str) -> bool:
+    """A host can sit in the trio only if it has a read-only judgement mode and its CLI is installed here."""
+    return runtime == "claude" or (runtime in runtimes.NAMES and bool(runtimes.get(runtime).judge_argv)
+                                   and host_adapter.available(runtime))
+
+
+def _note_policy(root: Path, data: dict, overlay: str) -> None:
+    """Log the merged policy's fingerprint when it differs from the one this workspace last ran (#827)."""
+    fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:12]
+    seen = supervisor.state_dir(root) / "policy.fingerprint"
+    try:
+        if seen.read_text().strip() == fingerprint:
+            return
+    except OSError:
+        pass
+    print(f"engine: policy changed: {fingerprint} ({'overlay ' + overlay if overlay else 'shipped policy'})",
+          file=sys.stderr, flush=True)
+    seen.parent.mkdir(parents=True, exist_ok=True)
+    seen.write_text(fingerprint + "\n")
 
 
 def _prepare_handoff(release: Path) -> Path | None:
@@ -532,6 +1079,7 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--interval must be a finite positive number")
     root = args.root.resolve()
     newer = None
+    adopt_login_path()
     try:
         if (installed := supervisor.current_release()) != supervisor.RELEASE:
             if (python := _prepare_handoff(installed)) is not None:
@@ -544,7 +1092,8 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError(f"{refused.refused}\n{refused.setup}")
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
-            policies = settings.load_policy()
+            policies = settings.workspace_policy(root, config.policy_overlay)
+            _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay)
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
             unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:
@@ -564,6 +1113,9 @@ def main(argv: list[str] | None = None) -> int:
                              clone=root / selected if selected else root,
                              claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
                              require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+            model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
+                                    rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
+                                    launchable=_judges)
             stop_pages = threading.Event()
             page_thread = None
             try:
@@ -575,7 +1127,7 @@ def main(argv: list[str] | None = None) -> int:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
-                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency,
+                                 launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency, model=model,
                                  require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
                     except Exception as exc:
                         failed = True

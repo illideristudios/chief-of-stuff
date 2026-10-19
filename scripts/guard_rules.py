@@ -13,7 +13,8 @@ def stop_allowed(reports, launched_at: datetime) -> bool:
 
 
 def permission_ask(event: dict) -> tuple[str, str]:
-    context = json.dumps({"tool_name": event.get("tool_name"), "tool_input": event.get("tool_input")})
+    # #890: the worktree is kept, so the engine can judge the ask again by the same rule.
+    context = json.dumps({"tool_name": event.get("tool_name"), "tool_input": event.get("tool_input"), "cwd": event.get("cwd")})
     return f"Permission requested for {event.get('tool_name', 'tool')}", context
 
 

@@ -46,7 +46,8 @@ class WorkerTest(unittest.TestCase):
         self.persona = self.p.personas["builder"]
         self.forge = SimpleNamespace(
             issue=lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Forge title", body="Issue body")),
-            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head"),
+            closing_request=lambda key: SimpleNamespace(branch="feature/existing", head="head", number=9),
+            request_base=lambda number: "trunk",
             protected_branches=lambda: ("trunk", "main"))
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
@@ -234,6 +235,168 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(record["identity"], "process-start")
         self.assertEqual(record["started_at"], NOW.isoformat())
         self.assertTrue(record["session_id"])
+
+    def launch_with_settings(self, settings, stage="implement", data=None):
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(settings)
+        if data is not None:
+            self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            used = self.launch(stage)
+        return used, start.call_args.args[0]
+
+    def test_launch_takes_the_first_claude_entry_of_the_stage_rotation(self):
+        # #851: 1.0 launches Claude only; earlier hosts are skipped and logged until 1.1 (#701).
+        used, request = self.launch_with_settings('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", '
+                                                  '"cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
+        self.assertEqual(used, ("sonnet", "high"))
+        self.assertEqual((request.model, request.effort), ("sonnet", "high"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "claude:sonnet@high"})
+        logged = " ".join(entry.message for entry in self.db.log(KEY))
+        for skipped in ("codex:gpt-6.1-sol@high", "cursor:auto", "agy:gemini-4-argon-high", "#701"):
+            self.assertIn(skipped, logged)
+
+    def test_launch_without_a_rotation_uses_the_persona_model(self):
+        used, request = self.launch_with_settings("[workers]\nmode = \"one-shot\"\n")
+        self.assertEqual(used, (self.persona.model, self.persona.effort or ""))
+        self.assertEqual(request.model, self.persona.model)
+
+    def test_a_quota_stop_advances_to_the_next_claude_entry(self):
+        used, request = self.launch_with_settings(
+            '[models.implement]\nrotation = ["claude:sonnet@high", "codex:x@high", "claude:opus@medium"]\n',
+            data={"quota": {"reset": "later", "retry_at": NOW.isoformat()}, "model": {"implement": "claude:sonnet@high"}})
+        self.assertEqual(used, ("opus", "medium"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "claude:opus@medium"})
+
+    def host_launched(self, protected=True):
+        """#700: a codex start through host_adapter, recorded and claimed like any other."""
+        self.forge.default_branch_protected = lambda: protected
+        entry = worker.ModelEntry("codex", "gpt-6.1-sol", "high")
+        with mock.patch.object(worker, "_model", return_value=entry), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.host_adapter, "start",
+                               side_effect=lambda runtime, request, run_dir, env: (self.start(request, run_dir), "")) as host, \
+             mock.patch.object(worker.claude_adapter, "start") as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = self.launch()
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, clock=lambda: NOW, launch=lambda: used)
+        return used, host, claude
+
+    def test_a_non_claude_entry_needs_the_forge_to_protect_the_default_branch(self):
+        with self.assertRaisesRegex(RuntimeError, "protects the default branch"):
+            self.host_launched(protected=False)
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_non_claude_start_goes_through_its_host_and_keeps_the_default_head(self):
+        used, host, claude = self.host_launched()
+        claude.assert_not_called()
+        self.assertEqual(host.call_args.args[0], "codex")
+        self.assertEqual(used, ("gpt-6.1-sol", "high", "codex"))
+        self.assertEqual(self.db.segments(KEY)[0].runtime, "codex")
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        # #860: every protected branch's head, not only the default's.
+        self.assertEqual((record["runtime"], record["branch_heads"]), ("codex", {"trunk": "d" * 40, "main": "d" * 40}))
+
+    def test_a_non_claude_entry_needs_the_branch_its_request_targets_protected(self):
+        # §13: chief-of-stuff's requests target develop while its default is main; both must be protected.
+        self.forge.request_base = lambda number: "release"
+        with self.assertRaisesRegex(RuntimeError, "the branch its request targets"):
+            self.host_launched()
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_non_claude_run_holds_when_the_default_branch_moved_outside_the_engine(self):
+        self.host_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "stdout").write_text("finished")
+        (run / "stderr").write_text("")
+        self.report(run)
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.host_adapter, "cleanup") as cleanup, \
+             mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        cleanup.assert_called_once()
+        moved.assert_called_once()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+        self.assertIn("trunk moved", " ".join(entry.message for entry in self.db.log(KEY)))
+
+    ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
+                '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
+
+    def launch_rotation(self, on_path=("codex", "agent", "agy"), protected=True, data=None):
+        """#701: a launch from the owner's mixed rotation; returns (used, the host the start went to)."""
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(self.ROTATION)
+        if data is not None:
+            self.db.set_resume(KEY, data)
+        self.forge.default_branch_protected = lambda: protected
+        went = []
+
+        def host(runtime, request, run_dir, env):
+            went.append(runtime)
+            return self.start(request, run_dir), ""
+
+        def claude(request, run_dir, **kwargs):
+            went.append("claude")
+            return self.start(request, run_dir)
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "resolve", side_effect=lambda b: f"/bin/{b}" if b in on_path else None), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.host_adapter, "start", side_effect=host), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=claude), \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            used = self.launch()
+        return used, went[0]
+
+    def test_the_first_launchable_entry_of_any_runtime_launches(self):
+        used, went = self.launch_rotation()
+        self.assertEqual((used, went), (("gpt-6.1-sol", "high", "codex"), "codex"))
+        self.assertEqual(self.db.resume(KEY)["model"], {"implement": "codex:gpt-6.1-sol@high"})
+
+    def test_a_host_whose_cli_is_missing_is_skipped_for_the_next_entry(self):
+        used, went = self.launch_rotation(on_path=("agent", "agy"))
+        self.assertEqual((used, went), (("auto", "", "cursor"), "cursor"))
+        self.assertIn("codex:gpt-6.1-sol@high", " ".join(e.message for e in self.db.log(KEY)))
+
+    def test_without_a_protected_default_branch_only_claude_launches(self):
+        used, went = self.launch_rotation(protected=False)
+        self.assertEqual((used, went), (("sonnet", "high"), "claude"))
+
+    def test_a_quota_stop_advances_across_runtimes(self):
+        used, went = self.launch_rotation(data={"quota": {"reset": "later", "retry_at": NOW.isoformat()},
+                                                "model": {"implement": "codex:gpt-6.1-sol@high"}})
+        self.assertEqual(went, "cursor")
+
+    def test_random_pick_chooses_only_among_launchable_entries(self):
+        # #877, Zach: "the goal of this is to be evaluate performance of all the different models over time".
+        self.ROTATION = self.ROTATION + 'pick = "random"\n'
+        offered = []
+
+        def last(entries):
+            offered.append([str(e) for e in entries])
+            return entries[-1]
+        with mock.patch.object(worker.random, "choice", side_effect=last):
+            used, went = self.launch_rotation(on_path=("agent", "agy"))  # codex is not installed here
+        self.assertEqual(offered, [["cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]])
+        self.assertEqual((used, went), (("sonnet", "high"), "claude"))
+
+    def test_first_stays_the_default_and_a_quota_stop_still_advances_under_random(self):
+        with mock.patch.object(worker.random, "choice") as never:
+            self.assertEqual(self.launch_rotation()[1], "codex")
+        never.assert_not_called()
+
+    def test_a_quota_stop_advances_even_when_picking_at_random(self):
+        self.ROTATION = self.ROTATION + 'pick = "random"\n'
+        with mock.patch.object(worker.random, "choice", side_effect=lambda entries: entries[-1]):
+            used, went = self.launch_rotation(data={"quota": {"reset": "later", "retry_at": NOW.isoformat()},
+                                                    "model": {"implement": "codex:gpt-6.1-sol@high"}})
+        self.assertEqual(went, "cursor")
 
     def test_a_successful_launch_clears_the_quota_wait(self):
         self.db.set_resume(KEY, {"quota": {"reset": "later", "retry_at": NOW.isoformat()}})
@@ -1237,6 +1400,34 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(forge_review.github_requests("example/project", "", gh)[0].branch, "feature/existing")
         self.assertIn("headRefName", gh.call_args.args[0][-1])
 
+    def test_collect_records_host_spend_and_elapsed_minutes(self):
+        run = self.launched()
+        self.report(run)
+        (run / "stdout").write_text(json.dumps({"is_error": False, "result": "done", "total_cost_usd": 0.25}))
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0, "ended_at": (NOW + timedelta(minutes=1)).isoformat()}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=5))
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.25)
+        self.assertEqual(self.db.resume(KEY)["time_minutes"], 1)
+        # A failed exit with total_cost_usd and a non-numeric prior spend still ends the segment and records spend.
+        self.db.record_segment(KEY, "review", 1, NOW.isoformat())
+        run2 = supervisor.state_dir(self.root) / "runs" / "1-review-1"
+        run2.mkdir(parents=True)
+        data = self.db.resume(KEY)
+        data["spend_usd"] = "corrupt"
+        data["runs"]["review-1"] = {"pid": 77, "runner_pid": 78, "session_id": "s2", "identity": "id",
+                                    "runner_identity": "rid", "run_dir": str(run2), "tree": str(self.tree),
+                                    "reviewed_head": "head"}
+        self.db.set_resume(KEY, data)
+        (run2 / "stdout").write_text(json.dumps({"is_error": True, "result": "boom", "total_cost_usd": 0.4}))
+        (run2 / "stderr").write_text("")
+        (run2 / "exit.json").write_text(json.dumps({"exit_code": 1}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=2))
+        self.assertEqual(self.db.segments(KEY)[-1].outcome, "failed")
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.4)
+
     def test_quota_reset_formats_and_backoff(self):
         from model_port import retry_at
         self.assertEqual(retry_at("resets at 5pm.", NOW), NOW + timedelta(hours=17))
@@ -1244,6 +1435,26 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(retry_at("reset at 2000-01-01T02:00:00Z", NOW), NOW + timedelta(hours=2))
         self.assertEqual(retry_at("unknown", NOW, 4), NOW + timedelta(minutes=8))
         self.assertEqual(retry_at("reset at 2000-99-99T02:00:00Z", NOW), NOW + timedelta(minutes=1))
+
+    def test_collection_retries_usage_once_when_segment_completion_fails(self):
+        run = self.launched()
+        self.report(run)
+        (run / "stdout").write_text(json.dumps({"is_error": False, "result": "done", "total_cost_usd": 0.25}))
+        (run / "stderr").write_text("")
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0, "ended_at": (NOW + timedelta(minutes=1)).isoformat()}))
+        with mock.patch.object(self.db, "end_segment", side_effect=RuntimeError("interrupted")):
+            with self.assertRaises(RuntimeError):
+                worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=5))
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.25)
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=10))
+        self.assertEqual(self.db.resume(KEY)["spend_usd"], 0.25)
+        self.assertEqual(self.db.resume(KEY)["time_minutes"], 1)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+
+    def test_observed_quota_exhaustion_records_a_limit_measurement(self):
+        self.finish("quota")
+        worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        self.assertEqual(self.db.resume(KEY)["quota_percent"], 100)
 
 
 class IdentityTest(unittest.TestCase):

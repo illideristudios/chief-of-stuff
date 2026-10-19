@@ -415,12 +415,11 @@ class BoardTest(unittest.TestCase):
     def cfg(self):
         return parse_coordinator(self.CLAUDE, today=TODAY)
 
-    def test_flow_sits_after_build_and_the_panels(self):
+    def test_flow_sits_after_build(self):
         html = rb.render(TODAY_TRACKER, self.cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
                          stage_log=[(YESTERDAY, YESTERDAY_TRACKER)])
-        build, panels, flow = html.index("<h2>Build</h2>"), html.index('class="panels"'), html.index("<h2>Flow · 24 hours</h2>")
-        self.assertLess(build, panels)
-        self.assertLess(panels, flow)
+        self.assertLess(html.index("<h2>Build</h2>"), html.index("<h2>Flow · 24 hours</h2>"))
+        self.assertNotIn('class="panels"', html)
         self.assertIn('title="implement Fri 22:00–Sat 01:00', html)
         self.assertIn("gantt-hold", html)
 

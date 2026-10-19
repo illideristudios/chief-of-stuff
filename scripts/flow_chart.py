@@ -12,13 +12,15 @@ A done task's last segment ends at its done time, not now.
 
 from __future__ import annotations
 
+
 import heapq
 from dataclasses import replace
 from datetime import datetime, timedelta
 
+from decision_actions import current_rows, state_of
 import gantt
-from clock import done_clock
-from fragment import esc
+from clock import done_clock, parse_stamp as _parse_store_dt
+from fragment import esc, issue_href
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
 # here as well, so `flow_chart.moves` still names it.
@@ -81,11 +83,11 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
           approved: frozenset[str] = frozenset(), ended: dict[str, tuple[datetime, str]] | None = None,
           home=None) -> list[tuple[str, gantt.Row]]:
     """(status, row) per task with a move, first moved first, then the queued tasks in tracker order. `tasks` are
-    tracker rows, later ones winning; `held` maps each held task's name to what holds it (task_forge.hold_causes); `ends` maps a task's item to its estimated end;
+    tracker rows, later ones winning; `held` maps each held task's name (or item when nameless) to what holds it (task_forge.hold_causes); `ends` maps a task's item to its estimated end;
     `durations` maps a queued task's item to how long it will take, and `slots` is how many run at once;
     `approved` names the tasks whose open change is approved, labelled `approved · merge ~HH:MM` by their end;
     `ended` maps a task's name to (time, word) — its change's forge merge or its closed issue's close time — which
-    ends its row (#220). Status is that word, `held` or the task's state word. Every bar's title names the worker
+    ends its row (#220). Status is that word, `needs input`, `approved`, or the task's state word (`running` when `open`). Every bar's title names the worker
     whose launch was running when it began (now, for a forecast or hold bar), else the task's owner cell, shown as
     the board shows it (#192, #193). `home` resolves issue keys as in the board's source cache."""
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
@@ -96,7 +98,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
 
     def key_of(m: Move) -> str:
         t = find.get(m.name.strip().casefold()) or (row_of(m.name)[0] if m.launch else None)
-        return t.name.strip().casefold() if t and t.name.strip() else m.name.casefold()
+        return (t.name.strip() or t.item.strip()).casefold() if t else m.name.casefold()
 
     terminal = {lane.stages[-1] for lane in lanes.values()}
     horizon = now + WINDOWS[-1][2]
@@ -139,7 +141,8 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             else:
                 stop = last.at
         finish = task and (ended or {}).get(task.name.strip())
-        is_held = bool(task and task.name.strip() in held)
+        hold_key = (task.name.strip() or task.item.strip()) if task else ""
+        is_held = bool(task and hold_key in held)
         boundary = last.at
         # A launcher stop ends its run but leaves the row at its prior working stage.
         mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
@@ -173,7 +176,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             status, note = "merged", f"merged {last.at:%H:%M}"
         elif is_held:
             segs.append(gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner(key, now, task)))
-            status, note = "needs input", f"needs input · {held[task.name.strip()]}"
+            status, note = "needs input", f"needs input · {held[hold_key]}"
         elif task and lane and last.stage in lane.stages and (end := ends.get(task.item)) and end > now:
             ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
             segs += _ahead(ahead, now, end, owner(key, now, task))
@@ -186,7 +189,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
             kind = task.kind if task else ""
             status = "approved" if is_approved else ("running" if kind == "open" else kind)
             note = "approved" if is_approved else last.stage
-        out.append((status, gantt.Row(ref_of(task, last.name), task.name.strip() if task else launch_row(last.name, ())[1],
+        out.append((status, gantt.Row(ref_of(task, last.name), task.label if task else launch_row(last.name, ())[1],
                                       note, tuple(segs))))
     # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.
     slots = max(1, slots)
@@ -210,7 +213,87 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
     # #226: rows group merged, approved, running, needs input, queued, earliest move first within a group.
     far_future = now + WINDOWS[-1][2] * 1000  # a row with no segments at all sorts last in its bucket
     return sorted(_merge_issues(out),
-                 key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
+                  key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
+
+
+def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> list[tuple[str, gantt.Row]]:
+    """Build one Gantt row per store issue with all its `(issue, stage, attempt)` segments (M6 item 1, Exit S2)."""
+    items = db.items()
+    all_segments = db.segments()
+    all_decisions = current_rows(db.decisions())  # rows are append-only: each decision's latest
+    segs_by_key: dict[str, list] = {}
+    for seg in all_segments:
+        segs_by_key.setdefault(seg.issue_key, []).append(seg)
+    open_decs_by_key: dict[str, list] = {}
+    for dec in all_decisions:
+        if state_of(dec).status in ("open", "blocked"):
+            open_decs_by_key.setdefault(dec.issue_key, []).append(dec)
+
+    out: list[tuple[str, gantt.Row]] = []
+    for item in items:
+        key = item.issue_key
+        raw_segs = segs_by_key.get(key, [])
+        if not raw_segs and item.forge_state == "closed":
+            continue
+        resume = db.resume(key)
+        runs = (resume.get("runs") or {}) if isinstance(resume, dict) else {}
+        g_segs: list[gantt.Segment] = []
+        for s in raw_segs:
+            start = _parse_store_dt(s.started_at, now)
+            if s.ended_at:
+                end = _parse_store_dt(s.ended_at, now)
+                kind = "done"
+            else:
+                end = now
+                kind = "running"
+            if end < start:
+                end = start
+            run_info = runs.get(f"{s.stage}-{s.attempt}") or {}
+            worker_title = str(run_info.get("runner") or s.agent_type or s.runtime or "")
+            g_segs.append(gantt.Segment(start, end, s.stage, kind, worker_title))
+
+        short_ref = f"#{key.rpartition('#')[2]}" if "#" in key else key
+        stage = item.stage or (raw_segs[-1].stage if raw_segs else "implement")
+        has_open_dec = bool(open_decs_by_key.get(key))
+        is_held = bool(item.human_review or has_open_dec)
+        if item.forge_state == "closed":
+            status, note = "merged", "closed"
+        elif is_held:
+            cause = "decision" if has_open_dec else stage
+            status, note = "needs input", f"needs input · {cause}"
+            if include_hold_bars:
+                g_segs.append(gantt.Segment(now, now + WINDOWS[-1][2], stage, "hold", ""))
+        elif item.review_state == "approved":
+            status, note = "approved", "approved"
+        elif any(s.ended_at is None for s in raw_segs):
+            status, note = "running", stage
+        elif raw_segs:
+            status, note = "running", stage
+        else:
+            status, note = "open", f"queued · {stage}"
+        row = gantt.Row(
+            ref=short_ref,
+            name=item.title or key,
+            note=note,
+            segments=tuple(g_segs),
+            href=issue_href(key),
+            ref_title=item.title or key,
+        )
+        out.append((status, row))
+    far_future = now + WINDOWS[-1][2] * 1000
+    return sorted(
+        out,
+        key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)),
+    )
+
+
+def from_store(db, start: datetime, end: datetime) -> list[gantt.Row]:
+    """Return Gantt rows from the store overlapping `[start, end]`, one row per issue with `(issue, stage, attempt)` segments."""
+    rows = [row for _, row in build_from_store(db, end, include_hold_bars=False)]
+    return [
+        r for r in rows
+        if not r.segments or any(g.end >= start and g.start <= end for g in r.segments)
+    ]
 
 
 def _merge_issues(rows: list[tuple[str, gantt.Row]]) -> list[tuple[str, gantt.Row]]:

@@ -30,7 +30,7 @@ New work goes on the engine path: the store, the forge adapter, the model port, 
 | Use Cases | the ownership rules and judgements of `audit_tasks.py`, `dispatch_prompt.py`, `one_shot.py`, `kanban.py`, `merge_ready.py`, `merge_approved.py`, `review_threads.py`, `task_forge.py`, `model_port.py` (the model port), `issue_gate.py` (issue first, then one store row), `trio_gate.py` (the decision trio, design 5a), `decision_actions.py` (a board decision's lifecycle: answer, reverse, re-route, and an answered decision whose action is blocked. The page server only validates and records a person's intent through it; the engine alone applies intents, see section 6), `engine_merge.py` (executes a planned merge, logged on the issue), `forge_port.py` (`ForgeError`, the forge failure boundary), `reconcile.py` (the engine's planner: what the state calls for), `readiness.py` (the Ready predicate over a pass's facts: file-ownership conflicts, dependency blockers and stop records), `completion.py` (judgements on a finished or abandoned run: done-on-main, the read-only rule, unlanded work and orphan recovery), `guard_rules.py` (the worker guard's Stop, permission-relay and session-start rules), the ready-task and stagnation judgements of `flow.py`, `performance.py`, `worker_health.py` (a worker's six health signals and the stall judgement, section 8) |
 | Interface Adapters, presenters | `fragment.py`, `columns.py`, `panels.py`, `gantt.py`, `flow_chart.py`, `render_board.py`, `decision_page.py`, `issue_page.py`, `source_page.py`, `module_graph.py`, `workers_page.py`, `page_reload.py`, and the page module of section 3 |
 | Interface Adapters, gateways | `store.py` (the issue-keyed store behind the ORM, and its `migrations/`), `forge.py` (the one forge adapter for GitHub and GitLab), `backlog.py`, `backlog_ref.py`, `board_sources.py`, `session_logs.py` (each runtime's session log, found and read into one shape), `workspace.py`, `settings.py`, `tracker_read.py`, `tracker_write.py`, `forge_review.py`, `one_shot_report.py`, `tree_claims.py`, `slots.py` (the worker concurrency cap, E21), `limits_history.py` (the account-wide limit readings behind the ORM, section 10), the git and forge fact gathering of `audit_tasks.py`, the mailbox storage of `inbox.py` |
-| Frameworks and Drivers | `claude_adapter.py` (the only module that spawns a host CLI), `git_trees.py`, `git_view.py`, the command line of `inbox.py`, the audit orchestration and command line of `audit_tasks.py`, `notify.py`, `notify_service.py`, `supervisor.py` (the engine venv and LaunchAgent), `startup.py` (the engine and `work` commands' workspace settings and forge), `store_access.py` (the migrated store, under the migrate lock), `kanban_cli.py` (the `kanban` command line), `pipeline_cli.py` (the `pipeline` command line: a pipeline's status, or a branch's head and latest pipeline, read through `forge.Forge`), `process_status.py`, `session_exec.py`, `spawn_session.py`, `probe_health.py`, `pages.py`, `chief_of_stuff.py`, `start_coordinator.py`, `hooks/hooks.json`, `board_guard.py`, `init_workspace.py`, `install_model_guidance.py`, `make_worktree.py`, `migrate_backlog.py`, `one_shot_result.py`, `shell_setup.py` (the login shell, and the only place the workspace's `[workers] teardown` and `teardown_list` commands run; Use Cases receive teardown as a passed-in function, never by import), `cleanup.py` (engine-owned worktree removal behind every finding-27 guard, E19; it runs the workspace teardown in a tree before its container-mount guard), `engine.py` (the workspace singleton loop that executes the reconcile plan), `engine_facts.py` (gathers one pass's git, worktree, process and forge facts into plain records for the planner), `work.py` (the issue-first intake command line), `worker.py` (worker launch through the adapter and completion collection), `worker_guard.py` (the worker guard's hook entry point), `guard_binding.py` (the worker's binding read from its environment), `engine_mcp.py` (the engine's report and ask MCP server), `guard/hooks/hooks.json`, `adopt_one_shots.py`, `sync_page_theme.py`, the command line and tick orchestration of `flow.py`, `performance_report.py`, `limits_probe.py` (unbilled reads of each runtime's limits, section 10), `limits_cli.py` (the `limits` command line) |
+| Frameworks and Drivers | `claude_adapter.py` and the other host adapters (section 13; host adapters are the only modules that spawn a host CLI), `git_trees.py`, `git_view.py`, the command line of `inbox.py`, the audit orchestration and command line of `audit_tasks.py`, `notify.py`, `notify_service.py`, `supervisor.py` (the engine venv and LaunchAgent), `startup.py` (the engine and `work` commands' workspace settings and forge), `store_access.py` (the migrated store, under the migrate lock), `kanban_cli.py` (the `kanban` command line), `pipeline_cli.py` (the `pipeline` command line: a pipeline's status, or a branch's head and latest pipeline, read through `forge.Forge`), `process_status.py`, `session_exec.py`, `spawn_session.py`, `probe_health.py`, `pages.py`, `chief_of_stuff.py`, `start_coordinator.py`, `hooks/hooks.json`, `board_guard.py`, `init_workspace.py`, `install_model_guidance.py`, `make_worktree.py`, `migrate_backlog.py`, `one_shot_result.py`, `shell_setup.py` (the login shell, and the only place the workspace's `[workers] teardown` and `teardown_list` commands run; Use Cases receive teardown as a passed-in function, never by import), `cleanup.py` (engine-owned worktree removal behind every finding-27 guard, E19; it runs the workspace teardown in a tree before its container-mount guard), `engine.py` (the workspace singleton loop that executes the reconcile plan), `engine_facts.py` (gathers one pass's git, worktree, process and forge facts into plain records for the planner), `work.py` (the issue-first intake command line), `worker.py` (worker launch through the adapter and completion collection), `worker_guard.py` (the worker guard's hook entry point), `guard_binding.py` (the worker's binding read from its environment), `engine_mcp.py` (the engine's report and ask MCP server), `guard/hooks/hooks.json`, `adopt_one_shots.py`, `sync_page_theme.py`, the command line and tick orchestration of `flow.py`, `performance_report.py`, `limits_probe.py` (unbilled reads of each runtime's limits, section 10), `limits_cli.py` (the `limits` command line) |
 
 ## 5. Enforcement
 
@@ -74,11 +74,31 @@ The engine never starts an architect run on its own (owner, 2026-10-17). The arc
 - **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
 - **A new architect run happens only when the owner asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
 
+The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its three personas keep their roles and judgement lenses from the policy, but each consult draws its models the way workers do.
+- **A rotation class.** The workspace's `[models.trio]` rotation, with its `pick` (`first` or `random`), supplies the model for each trio member. A persona's own `model` is only the fallback when no rotation is set.
+- **Three different models.** A consult draws three distinct launchable entries, preferring different runtimes or model families, so a unanimous verdict means three independent judgements, not one model asked three times. If fewer than three distinct entries can launch, it uses what it has and records that the trio was not fully diverse.
+- **Every judgement is recorded.** Each member's vote names the runtime and model that cast it, so trio accuracy can be compared across models over time, as for workers (section 9).
+- **Consults are read-only on every host.** A trio consult is a judgement call through the model port. It runs in each host's read-only or no-tools mode (Claude's `--safe-mode`, a read-only sandbox elsewhere), never with write access. A host that offers no read-only mode is not launchable for the trio.
+- **Quota.** A quota stop moves that member to the next distinct entry. When no entry can run, the decision falls back to the owner as an exhausted retry.
+
+```
+Mt := the trio's models come from [models.trio] (persona model only as fallback)
+D := the three members use distinct entries, preferring different runtimes or families
+U := a unanimous verdict reflects independent judgements      R := each vote records its runtime and model
+O := every consult runs read-only on its host
+
+Mt ∧ D → U          [owner 2026-10-18: "trio shouldn't be fixed models"]
+R → trio accuracy is measurable per model (section 9)
+O                   [a judgement call never writes]
+∴ the trio rotates like workers, stays diverse, and stays read-only
+```
+
 A person's actions on the board (answer, reverse, re-route) are intents, and the engine is their only executor.
 - **The page server records, never acts.** It validates an intent through `decision_actions` and appends it to the store. It never writes to the forge, never moves a card, and never pops, blocks or supersedes another intent.
 - **One current intent per issue.** Each pass, a pure function in `decision_actions` picks the newest pending intent for an issue and returns updates that mark every older pending intent superseded. A reverse is an intent like a re-route, so it supersedes too.
 - **The engine applies it.** It checks that the intent is still current, and only then writes the stage to the forge and records the outcome. A failed write leaves the intent pending for the next pass. Only a permanent failure blocks the intent's own decision.
 - **A pending intent holds its own issue only.** While it waits, the planner waits on that issue. It never marks sibling decisions blocked.
+- **Decisions are append-only.** A decision's identity is its topic, question and instance, and the newest row for that identity is its state. Every answer, trio verdict, reversal, intent phase (write, run, done), supersession, block and unblock is a new row. No row is ever updated in place. `store.add_decision` is the only writer, reached through `trio_gate.record` for trio verdicts. A trio verdict never appends over an identity whose newest row is the owner's answer: the human answer wins. A reversal is an intent whose done phase is the `restarted` row the engine already writes.
 
 ```
 I := an intent      C(I) := I is its issue's newest pending intent
@@ -130,6 +150,19 @@ On the engine path, file ownership is declared on the issue, because the forge i
   - **No new dispatch.** While the overlap lasts, readiness counts the widened scope, so it dispatches no new issue into those paths.
 - **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (owner, 2026-10-17).
 - **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
+- **The plan stage has its own scope.** A plan run writes only its own plan file, at a path fixed per issue under the workspace's plan directory, and reads everything. That implicit scope is the plan stage's declaration whenever the issue declares none, so plan runs never serialize on each other. A plan run that writes anywhere else is handled by the judged out-of-scope rule above.
+- **The plan proposes the implementation's scope.** The plan worker's report carries a proposed `## File ownership` section as a structured field, not as prose. Workers declare nothing, so the engine writes it onto the issue only after the trio approves it as a decision (topic `scope`), or the owner does. A trio split goes to the owner as a real decision. An unavailable trio is retried on a later pass. A proposal is never written unapproved, and the whole repository is never assumed.
+
+```
+Pl(I) := issue I is at the plan stage      Sp(I) := the plan scope: I's own plan file (write) plus read-only everything
+Pr(I) := the plan's proposed File ownership section      Ap(I) := the trio or the owner approved Pr(I)
+S(I) := I declares a valid scope
+
+Pl(I) ∧ ¬S(I) → I runs with Sp(I)     [plan runs touch only their own file, so they never serialize]
+Ap(I) → the engine writes Pr(I) onto I, so S(I) holds   [workers declare nothing; the engine writes after approval]
+¬Ap(I) → I stays undeclared, and the later stages wait   [no unapproved scope, no whole-repository default]
+∴ planning runs in parallel, and implementation runs on approved, real scopes
+```
 
 ```
 I := an issue      S(I) := I has a valid File ownership section
@@ -201,7 +234,7 @@ Review findings are not counted until review reports have one shape (issue #563)
 
 ## 10. Runtime limits
 
-Each runtime's limits are read without a billed call, recorded over time, and shown on the board: rolling windows, weekly caps and model caps. 1.0 reads claude's limits only, as the plan builds and tests only Claude (design 7). They feed the quota-breach interrupt (plan M5, items 3 and 4). codex, cursor and agy are recorded as unknown, with the reason "read in 1.1", until 1.1 adds their probes beside their adapters. A reading is one pass over every runtime the workspace can launch, each under the account it launches with: `limits_probe.read` is called once per runtime and account, and the results are recorded together. A limit that cannot be read is recorded as unknown with the reason, never as zero.
+Each runtime's limits are read without a billed call, recorded over time, and shown on the board: rolling windows, weekly caps and model caps. Today only claude's limits are read. They feed the quota-breach interrupt (plan M5, items 3 and 4). codex, cursor and agy workers now run (section 13, #857), but their limits are still recorded as unknown, with the reason "read in 1.1", until their probes land beside their adapters (#757). Until then, a quota stop on those hosts is caught only after it happens, by the host adapter's classification and the rotation's fallback (#851), never by a near-cap judgement in advance. A reading is one pass over every runtime the workspace can launch, each under the account it launches with: `limits_probe.read` is called once per runtime and account, and the results are recorded together. A limit that cannot be read is recorded as unknown with the reason, never as zero.
 
 `limits.py` (Entities) holds the reading record and the pure judgements over readings: the burn rate across a series of readings, and whether a limit is near its cap before its reset. A limit is near its cap when its used share, or the share its burn rate projects at its reset, reaches `warn_at`: the `[limits] warn_at` setting, a fraction between 0 and 1 that defaults to 0.8 and is validated by `settings.py`. It reads no file. `limits_probe.py` (Frameworks and Drivers) takes the reading, one function per runtime, only from sources that cost nothing: the runtime's local state or logs, or a status command that starts no model session. A runtime's session log is read through `session_logs.py`, the gateway the Workers page also reads, and is never parsed a second time. It never goes through `claude_adapter.py`, whose calls are billed and which serves the model port. An existing tool that already reads a runtime's usage is preferred to a new parser, and adopting one needs the owner's approval like any other dependency.
 
@@ -226,3 +259,53 @@ chief-of-stuff is independent of any deployment technology, hosting provider, co
 What a workspace builds, deploys or runs, and how, reaches chief-of-stuff only through that workspace's own configuration: the `## Coordinator` block (its human-only actions, `Health:` lines and the rest) and the Settings TOML (such as `[workers] teardown` and `teardown_list`). chief-of-stuff runs those commands as given and never interprets them. A rule or a fixture that needs an example of a workspace-specific action uses an invented name, never a real product.
 
 Two things are chief-of-stuff's subject, not a stack, and stay named: the host CLIs it coordinates (claude, codex, cursor and agy, in `runtimes.py`), and the forges it integrates with (GitHub and GitLab, behind `forge.py`). The repository's own CI tooling under `.github/` is how this project is tested, not something chief-of-stuff runs, and is outside this section.
+
+## 12. Parent and child workspaces
+
+One engine can work several workspaces at once (owner, 2026-10-17). A parent workspace lists child workspaces, and one engine runs them all. Issue #825.
+- **Children are unchanged.** Each child is a full workspace: its own `CLAUDE.md` (Coordinator and Architecture blocks), backlog and forge, store, review policy, settings and file-ownership rules. Everything sections 4 to 11 say of a workspace holds for each child on its own.
+- **The parent adds one table.** `[workspaces]` in the parent's settings maps a child's name to its path, relative to the parent root. A parent with its own Backlog is a workspace too, and is worked alongside its children. A child that cannot be read is reported and skipped, never fatal.
+- **One engine, one pass per child.** `chief-of-stuff engine --root <parent>` runs the per-workspace pass once for each child in every loop. The pass is reused unchanged. A failure in one child is logged in that child's store and never stops another.
+- **One slot pool.** The parent owns a slot pool that caps running workers across all children at its `[workers] max_concurrency`. Each child's own `max_concurrency` still caps that child. Runtime limits are already per account (section 10), so a near-cap judgement covers every child on that account.
+- **One engine per workspace still holds.** The parent engine takes each child's singleton lock. A child already run by its own engine is skipped with a warning. Installing a child's own supervisor while a parent runs it is refused. The parent has one supervisor service.
+- **One board index.** The parent board lists each child's board. Each child keeps its own board.
+- **Not covered here:** dependencies between issues in different children. They wait for a need.
+
+```
+Ch := a child is an unchanged full workspace      P := one engine runs the per-workspace pass for each child
+G := one parent slot pool caps workers across children      A := limits are per account (§10)
+X := a child's failure is contained to that child      O := each workspace has at most one engine
+S := several workspaces are worked at once without overrunning the machine or the account
+
+Ch ∧ P            [the existing pass is reused; owner 2026-10-17]
+G ∧ A → no overrun of the machine or the account
+X ∧ O             [per-child error boundary; child locks taken by the parent]
+Ch ∧ P ∧ G ∧ A ∧ X ∧ O → S
+∴ add [workspaces], the per-child loop and the parent slot pool; nothing in a child changes
+```
+
+## 13. Host adapters
+
+Engine workers can run on Claude, Codex, Cursor and Antigravity (owner, 2026-10-17, pulling #700 and #701 forward). Each host is an adapter behind the model port, as design decision 7 intended.
+- **One contract.** Every host adapter implements the same start, cancel and classify contract as `claude_adapter.py`, and writes the same run evidence in the run directory: `command.json`, the spawn record, `started.json` and `exit.json`. The engine, `worker.py` and recovery see no difference between hosts.
+- **The registry builds the command.** Each host's argv, prompt bootstrap and environment come from its `runtimes.py` entry (Entities). No adapter imports the one-shot launcher, which retires (#830). Process plumbing shared by the adapters lives in one place (DRY). Each host's argv and error classification stay in its own entry or adapter (SOLID).
+- **Outcomes reach the engine through the report tool.** The engine's `report` and `ask` MCP server is registered for every host at launch, with the same binding, and its configuration lives outside the worker tree. A worker that stops without a report is "stopped without reporting an outcome", whatever the host.
+- **The guard holds on every host.** The Claude plugin's PreToolUse gate does not load on other hosts, so a non-Claude worker gets a host-neutral guard with the same judgements:
+  - **Shims:** a `PATH` shim directory, placed first by the engine, wraps `git`, `gh` and `glab` and refuses what `guard_commands` refuses: merges, pushes to protected or ambiguous refs, and forge calls outside the allowlist. It reuses `guard_commands` rather than copying it. A shim, like the hook, is a guard rail. The forge and the engine are the boundary.
+  - **Branch protection:** a non-Claude entry launches only in a workspace whose forge protects its default branch and the branch its requests target, which can differ, for example `main` and `develop`. Otherwise the worker moves to the next entry in its rotation.
+  - **The engine checks after the run, on every protected branch.** It records each protected branch's head when a non-Claude run starts. At collect, every first-parent commit a protected branch gained during the run must be a merge the engine recorded, as structured data (request and merge commit), never inferred from log text or a time window. Any other commit, whether a worker's merge or a direct push, holds the run for human review, naming each commit and its branch. An unreadable branch holds too.
+- **Quota and outage** are classified per host into the model port's retryable kinds, never by guessing at success.
+
+```
+H := a host adapter implements the model port's contract and run evidence
+R := argv and environment come from runtimes.py      G := the shim reuses guard_commands' judgements
+B := the forge protects the default branch and the request target branch
+Rm(c) := commit c is a merge the engine recorded      P := every protected branch
+N := a non-Claude worker may launch      Ok := the run passes the post-run check
+
+H ∧ R            [design decision 7; #830 retires the one-shot argv]
+N → G ∧ B        [the guard holds on every host; an unprotected branch means the next entry]
+Ok ↔ ∀b ∈ P, ∀c ∈ first-parent(start(b)..end(b)): Rm(c)      [unreadable → ¬Ok; #860]
+¬Ok → held for human review, each commit named, never silent
+∴ other hosts run behind the same port, the same evidence and an equivalent guard
+```

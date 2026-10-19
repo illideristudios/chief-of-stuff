@@ -25,6 +25,19 @@ class ShellSetupTest(unittest.TestCase):
             source = {"SHELL": "/bin/zsh", "HOME": str(home), "PATH": "/usr/bin:/bin"}
             self.assertEqual(shell.resolve("fakecli", source=source), str(binary))
 
+    def test_login_path_is_the_login_shells_path_and_ignores_rc_chatter(self):
+        # #871: launchd's PATH is short; the engine takes this one instead.
+        with tempfile.TemporaryDirectory() as d:
+            home = Path(d) / "home"
+            home.mkdir()
+            (home / ".zshrc").write_text('echo "welcome back"\nexport PATH="/opt/extra/bin:$PATH"\n')
+            got = shell.login_path({"SHELL": "/bin/zsh", "HOME": str(home), "PATH": "/usr/bin:/bin"})
+            self.assertTrue(got.startswith("/opt/extra/bin:"), got)
+            self.assertNotIn("welcome", got)
+
+    def test_an_unreadable_login_path_is_empty(self):
+        self.assertEqual(shell.login_path({"SHELL": "/missing/shell"}), "")
+
     def test_shell_input_cannot_be_command_text(self):
         with self.assertRaises(shell.ShellError):
             shell.resolve("codex; echo leaked")

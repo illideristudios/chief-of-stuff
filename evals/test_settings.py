@@ -363,6 +363,49 @@ class SettingsTest(unittest.TestCase):
                 st.load(self.root, self.write(text))
 
 
+
+class PolicyOverlayTest(unittest.TestCase):
+    """#827: `[policy] overlay` names a workspace policy TOML merged over the shipped policy."""
+
+    def workspace(self, settings_text, overlay_text=None):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        (root / "settings.toml").write_text(settings_text)
+        if overlay_text is not None:
+            (root / "policy.toml").write_text(overlay_text)
+        return root
+
+    def test_architect_false_in_an_overlay_stops_architect_requests_for_that_workspace_only(self):
+        mine = self.workspace('[policy]\noverlay = "policy.toml"\n', "[stages.review.policy]\narchitect = false\n")
+        other = self.workspace("")
+        overlay = st.load(mine, "settings.toml").policy_overlay
+        self.assertEqual(overlay, "policy.toml")
+        self.assertFalse(st.workspace_policy(mine, overlay).resolve(stage="review").architect)
+        self.assertTrue(st.workspace_policy(other, st.load(other, "settings.toml").policy_overlay).resolve(stage="review").architect)
+
+    def test_no_overlay_is_the_shipped_policy(self):
+        root = self.workspace("")
+        self.assertEqual(st.load(root, "settings.toml").policy_overlay, "")
+        self.assertEqual(st.workspace_policy(root), st.load_policy())
+
+    def test_a_missing_overlay_file_is_refused_never_a_silent_fallback(self):
+        root = self.workspace('[policy]\noverlay = "policy.toml"\n')
+        with self.assertRaisesRegex(st.policy.PolicyError, "policy.toml"):
+            st.workspace_policy(root, st.load(root, "settings.toml").policy_overlay)
+
+    def test_an_unknown_key_in_the_overlay_is_refused(self):
+        root = self.workspace('[policy]\noverlay = "policy.toml"\n', "[stages.review.policy]\narchitekt = false\n")
+        with self.assertRaisesRegex(st.policy.PolicyError, "architekt"):
+            st.workspace_policy(root, "policy.toml")
+
+    def test_the_policy_table_takes_only_an_overlay_inside_the_workspace(self):
+        for text, words in (('[policy]\noverlay = "policy.toml"\narchitect = false\n', "architect"),
+                            ('[policy]\noverlay = "../elsewhere.toml"\n', "outside"),
+                            ('[policy]\noverlay = ""\n', "overlay")):
+            with self.subTest(text=text), self.assertRaisesRegex(st.SettingsError, words):
+                st.load(self.workspace(text), "settings.toml")
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -563,6 +606,12 @@ class ModelsTest(unittest.TestCase):
         (self.root / "s.toml").write_text(text)
         return st.load(self.root, "s.toml")
 
+    def test_a_trio_rotation_and_pick_are_read_like_any_class(self):
+        got = self.load('[models.trio]\nrotation = ["claude:claude-sonnet-5-5@high", "codex:gpt-6.1-sol@high", "cursor:auto"]\n'
+                        'pick = "random"\n')
+        self.assertEqual([e.runtime for e in got.models["trio"]], ["claude", "codex", "cursor"])
+        self.assertEqual(got.model_picks["trio"], "random")
+
     def test_absent_models_is_empty(self):
         self.assertEqual(self.load('[workers]\nmode = "one-shot"\n').models, {})
 
@@ -588,6 +637,21 @@ class ModelsTest(unittest.TestCase):
                 self.assertEqual([str(e) for e in self.load(f'[models.deep]\nrotation = ["{entry}"]\n').models["deep"]],
                                  [entry])
 
+    def test_pick_is_first_by_default_random_on_request_and_nothing_else(self):
+        # #877: "can we make it so they randomly select".
+        got = self.load('[models.deep]\nrotation = ["claude:opus"]\npick = "random"\n'
+                        '[models.review]\nrotation = ["claude:opus"]\n')
+        self.assertEqual(got.model_picks, {"deep": "random", "review": "first"})
+        for bad in ('[models.deep]\nrotation = ["claude:opus"]\npick = "best"\n',
+                    '[models.deep]\npick = "random"\n'):
+            with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
+                self.load(bad)
+
+    def test_an_entry_without_a_runtime_prefix_means_claude(self):
+        # #701: 1.0 configs that wrote a bare Claude model keep working.
+        rotation = self.load('[models.deep]\nrotation = ["opus@high", "codex:gpt-x"]\n').models["deep"]
+        self.assertEqual([str(entry) for entry in rotation], ["claude:opus@high", "codex:gpt-x"])
+
     def test_bad_tables_are_refused(self):
         for bad in (
             '[models]\ndeep = "claude:opus"\n',
@@ -595,7 +659,6 @@ class ModelsTest(unittest.TestCase):
             '[models.deep]\nrotation = []\n',
             '[models.deep]\nrotation = "claude:opus"\n',
             '[models.deep]\nrotation = ["gemini:pro"]\n',
-            '[models.deep]\nrotation = ["opus"]\n',
             '[models.deep]\nrotation = ["claude:"]\n',
             '[models.deep]\nrotation = ["claude:@high"]\n',
             '[models.deep]\nrotation = ["claude:opus@max"]\n',

@@ -60,6 +60,19 @@ def resolve(program: str, *, source: dict[str, str] | None = None) -> str | None
     return None
 
 
+def login_path(source: dict[str, str] | None = None) -> str:
+    """The login and interactive shell's PATH, or "" when it cannot be read (#871: launchd's PATH is short, E14).
+    Only the final output line counts, so rc chatter before it is never taken for the PATH."""
+    try:
+        out = subprocess.run([login_shell(source), "-lic", 'printf "\\n%s" "$PATH"'], env=clean_env(source),
+                             capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired, ShellError):
+        return ""
+    lines = out.stdout.splitlines()
+    path = lines[-1].strip() if out.returncode == 0 and lines else ""
+    return path if path and all(Path(part).is_absolute() for part in path.split(os.pathsep) if part) else ""
+
+
 def exec_login(command: list[str]) -> None:
     """Load login and interactive config, then replace the shell with exact argv."""
     os.execve(login_shell(), login_argv(command), clean_env())

@@ -35,12 +35,34 @@ def blocked(r: Request) -> list[str]:
     return [b for b in r.blockers if b != NO_PIPELINE]
 
 
+# GitHub's own order for the methods a repository allows (its merge button's default), never a choice of ours (#864).
+GITHUB_METHODS = (("allow_merge_commit", "--merge"), ("allow_squash_merge", "--squash"), ("allow_rebase_merge", "--rebase"))
+
+
+def allowed_method(repo: str, gh=backlog.run_gh) -> str:
+    """The `gh pr merge` flag for the first method the repository allows, or "error: <why>" when none is or the
+    settings are unreadable (Zach, 2026-10-18: "we shouldn't prefer a merge strategy")."""
+    code, out, err = gh(["api", f"repos/{repo}"])
+    if code:
+        return f"error: repository merge settings: {err.strip() or f'gh api exited {code}'}"
+    try:
+        settings = json.loads(out)
+    except ValueError as exc:
+        return f"error: repository merge settings: {exc}"
+    if not isinstance(settings, dict):
+        return "error: repository merge settings: not an object"
+    flag = next((flag for key, flag in GITHUB_METHODS if settings.get(key) is True), "")
+    return flag or "error: the repository allows no merge method"
+
+
 def merge_head(one: Request, home, github: bool, repo: str, gh=backlog.run_gh,
                call=backlog._call, token: str | None = None) -> tuple[int, str]:
     """Merge at the checked head; return the status code and merged/queued/unknown, or an error."""
     if github:
-        # ponytail: squash, as this plugin's own repo merges; a [workflow] merge_method when a workspace differs.
-        code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, "--squash", "--match-head-commit", one.head])
+        method = allowed_method(repo, gh)
+        if method.startswith("error: "):
+            return 1, method[len("error: "):]
+        code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, method, "--match-head-commit", one.head])
         if code:
             return code, err.strip()
     else:

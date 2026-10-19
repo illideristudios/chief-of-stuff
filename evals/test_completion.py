@@ -52,6 +52,25 @@ class CompletionTest(unittest.TestCase):
         verdict = completion.abandoned(False, report="done", on_main=False, tree=RISK, tree_name="tree", tree_claims=gone)
         self.assertEqual((verdict.outcome, verdict.human_review), ("done", True))
 
+    def test_final_done_holds_work_at_risk_even_when_head_and_suite_are_on_main(self):
+        gone = (orphans.Claim("worker", False, "has no process"),)
+        for tree in (TreeState("feature", 1, 0, 0), TreeState("feature", 0, 2, 1),
+                     TreeState("feature", None, 0, 0), TreeState("feature", 0, None, None)):
+            for tree_name in ("", "tree"):
+                with self.subTest(tree=tree, tree_name=tree_name):
+                    verdict = completion.abandoned(
+                        False, report="done", on_main=True, suite_on_main=True, tree=tree,
+                        tree_name=tree_name, tree_claims=gone, landing_required=True)
+                    self.assertEqual(verdict, completion.Verdict("done", completion.unlanded(tree), True))
+
+    def test_final_done_clears_a_clean_tree_with_no_work_at_risk(self):
+        for tree in (CLEAN, TreeState("feature", 0, 0, None), TreeState("feature", 0, 2, 0)):
+            with self.subTest(tree=tree):
+                verdict = completion.abandoned(
+                    False, report="done", on_main=True, suite_on_main=True, tree=tree,
+                    tree_name="tree", tree_claims=(orphans.Claim("worker", False),), landing_required=True)
+                self.assertEqual(verdict, completion.Verdict("done", ""))
+
     def test_a_gone_worker_whose_tree_could_not_be_read_is_held(self):
         self.assertEqual(completion.abandoned(False, tree_unreadable=True),
                          completion.Verdict("failed", "worker tree could not be read", True))

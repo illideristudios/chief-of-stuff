@@ -107,7 +107,20 @@ rotation = ["claude:sonnet@medium", "codex:<model-id>@medium", "claude:haiku"]
 rotation = ["codex:<model-id>@high", "claude:opus@high"]
 ```
 
-`chief-of-stuff models --root . --class implement` prints the suggested entry. `--after <entry>` prints the next one, or exits nonzero when the rotation is exhausted. `--not-family <runtime>` skips that runtime's entries, for an independent review. `chief-of-stuff worker --class implement` launches the suggested entry when no `--runtime` or `--model` is given; explicit flags win. Effort is passed to Claude, Codex and Antigravity workers; Cursor takes none, so an entry or `--effort` that sets one for Cursor is refused. A bad runtime, an empty or duplicate rotation, or a bad effort is refused. Without `[models]`, the coordinator follows `chief-of-stuff-models.md`.
+`chief-of-stuff models --root . --class implement` prints the suggested entry. `--after <entry>` prints the next one, or exits nonzero when the rotation is exhausted. `--not-family <runtime>` skips that runtime's entries, for an independent review. `chief-of-stuff worker --class implement` launches the suggested entry when no `--runtime` or `--model` is given; explicit flags win. Effort is passed to Claude, Codex and Antigravity workers; Cursor takes none, so an entry or `--effort` that sets one for Cursor is refused. A bad runtime, an empty or duplicate rotation, or a bad effort is refused. Without `[models]`, the coordinator follows `chief-of-stuff-models.md`. The engine launches each stage from its class's rotation (plan from `deep`, implement and fix from `implement`, review from `review`). It takes the first entry it can launch, of any runtime, and after a quota stop moves to the next one (#701). A Codex, Cursor or Antigravity entry is launchable only when its CLI is on the login PATH and the forge protects the default branch (§13); others are logged as skipped. With no launchable entry it uses the persona's model. An entry without a runtime prefix means Claude. Add `pick = "random"` to a class to launch a uniformly random launchable entry on each fresh start instead of the first, so every model gets a comparable sample of work (`chief-of-stuff performance` reports runs and outcomes per runtime and model); a quota stop still advances in rotation order.
+
+The decision trio draws its models from a `[models.trio]` rotation, with the same `pick`. A consult takes three distinct launchable entries, on three different runtimes when the rotation has them, so a unanimous verdict is three independent judgements. With fewer, it reuses what it has and records `diverse: false` on the decision. Each vote records the runtime and model that cast it. Every consult is read-only: Claude runs with no tools under `--safe-mode`, Codex in its `read-only` sandbox, Cursor in `--mode ask` and Antigravity in `--mode plan`, each in a fresh empty directory. A host with no read-only mode cannot sit in the trio. A quota stop moves that member to an entry no other member holds; when every entry has stopped, the owner decides. Without `[models.trio]`, each trio persona uses its own `model` from the policy.
+
+```
+R := a [models.trio] rotation is set      D := three distinct entries on three runtimes can launch
+W := a consult can write      Q := every entry stopped on quota      O := the owner decides
+
+R ∧ D → diverse: true; R ∧ ¬D → diverse: false          [#879]
+¬W                                                     [every host runs read-only, §6]
+Q → O                                                  [§6: an exhausted retry]
+¬R → each persona's own model
+∴ the trio rotates like workers, stays read-only, and falls back to the owner
+```
 
 Stage launch defaults live beside the model tables in the settings TOML:
 
@@ -145,6 +158,21 @@ A decision's page is `<pages dir>/decision-<slug>.json`, served as `http://127.0
 
 The board and `notify.py sync` also read precise deadlines from tracker `## Decisions` rows: put `deadline: <name> YYYY-MM-DD HH:MM` in the `item` column, or `deadline: <name> HH:MM` for a time on that tracker's date. A later decision for the same name updates its marker, task horizon, and future notification warnings. A decision without an exact time supplies no instant. Run notification sync after a precise deadline decision changes.
 
+## Workspace policy
+
+The engine runs the shipped policy, `assets/policy.toml`, unless the workspace names an overlay: set `[policy] overlay = "policy.toml"` in the workspace TOML, with the path relative to the workspace root. The overlay's keys are merged over the shipped policy. A table merges key by key, and a field is replaced whole. For example, `[stages.review.policy] architect = false` stops architect requests in that workspace only. An overlay changes keys of tables the shipped policy has: a persona, stage, room or workflow it does not have is refused by name, and so is an unknown key. A named overlay that is missing is refused at startup; the engine never falls back to the shipped policy. The engine, `init` and the board load the same merged policy, and the engine logs `engine: policy changed: <fingerprint>` when the merged policy differs from the one the workspace last ran.
+
+```
+O := the workspace names an overlay      F := the overlay file exists      K := every key and table it names is known
+P := the merged policy runs
+
+O ∧ F ∧ K → P              [#827: keys merged over the shipped policy]
+O ∧ ¬F → ¬P                [a refusal, never a silent fallback]
+O ∧ ¬K → ¬P                [refused by name]
+¬O → the shipped policy runs
+∴ a workspace runs a known policy or does not start
+```
+
 ## Engine issue ownership
 
 The engine reads file scopes from each issue body on every pass and when `chief-of-stuff work` starts an issue. Declare them in a `## File ownership` section:
@@ -157,7 +185,9 @@ The engine reads file scopes from each issue body on every pass and when `chief-
 | read-only | `docs/` |
 ```
 
-Bullets such as `- write: src/parser/, tests/parser/` use the same reader. Paths are literal repository-relative paths; `.` means the whole repository. Missing, empty or invalid declarations own the whole repository for writing. Overlapping writes in the same repository wait; read-only scopes do not conflict. Workers report results and cannot declare their own scopes. Worktree registrations are kept separately from file scopes in the ownership rows.
+Bullets such as `- write: src/parser/, tests/parser/` use the same reader. Paths are literal repository-relative paths; `.` means the whole repository. Missing, empty or invalid declarations wait as `needs file ownership`, without claiming any paths or taking a worker slot. Only an explicit `.` declares the whole repository. Overlapping writes in the same repository wait; read-only scopes do not conflict. Workers report results and cannot declare their own scopes. Worktree registrations are kept separately from file scopes in the ownership rows.
+
+`chief-of-stuff work` refuses to file a new issue without a valid section, including in preview. The Task and Bug issue forms require it; keep the supplied `## File ownership` heading and fill in the paths. Existing issues can be registered without a scope, but wait until their bodies are corrected. Add valid sections to open 1.0 issues before the engine takes over dispatch.
 
 An operator can answer a stored worker ask with `chief-of-stuff work "Issue title" --root . --issue 12 --answer-ask 7 --answer "Proceed" --commit`. The ask must belong to that issue; omitting `--commit` previews the answer. Workers have no answer-writing tool.
 
