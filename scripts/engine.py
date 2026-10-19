@@ -50,6 +50,7 @@ from reconcile import HOLD_REROUTE, HOLD_STAGE_WRITE, OP_DECISION_COMMENT, OP_ME
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
+SCOPE_REPLANS = 2  # plan reruns an issue may take to propose its missing file ownership
 TRIO_PASS_BUDGET_S = 480  # #927: trio calls stop here in one pass; above TIMEOUT_S so a slow vote leaves room for two more
 
 
@@ -298,6 +299,27 @@ def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at
         trio_gate.record(store, key, decision_actions.DecisionUpdate(
             row.topic, row.question, answer, "guard", {**row.record, "recommendation": answer, "settled_by": why}))
     store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
+
+
+def _replan_for_scope(store: Any, policies: policy.Policies, actions: list, free: int) -> list:
+    """An issue the planner holds on "needs file ownership", with no scope proposal pending, reruns its plan stage, whose
+    report proposes the scope the trio then approves (#915). Plans that ran before plans proposed scope otherwise wait
+    forever. Free worker slots and SCOPE_REPLANS per issue bound it."""
+    free -= sum(isinstance(action, (reconcile.Dispatch, reconcile.Review)) for action in actions)
+    out = []
+    for action in actions:
+        key = getattr(action, "issue_key", "")
+        data = _resume(store, key) if isinstance(action, reconcile.Wait) else {}
+        if (free > 0 and isinstance(action, reconcile.Wait) and action.reason == "needs file ownership"
+                and "plan" in policies.stages and not data.get("scope_proposal")
+                and data.get("scope_replans", 0) < SCOPE_REPLANS):
+            attempt = max((seg.attempt for seg in store.segments(key) if seg.stage == "plan"), default=0) + 1
+            store.update_resume(key, lambda d: d.__setitem__("scope_replans", d.get("scope_replans", 0) + 1))
+            out.append(reconcile.Dispatch(key, "plan", policies.stages["plan"].persona, attempt))
+            free -= 1
+            continue
+        out.append(action)
+    return out
 
 
 def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock,
@@ -837,6 +859,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
                              facts=facts, **inputs)
+    actions = _replan_for_scope(store, policies, actions, slots.free_slots(max_concurrency, slots.running(store)))
     intents = {key: decision_actions.current_intent(rows) for key, rows in inputs["decisions"].items()}  # what planning saw
     stages = {item.issue_key: item.stage for item in items}
     by_key = {item.issue_key: item for item in items}
