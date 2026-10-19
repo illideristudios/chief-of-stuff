@@ -365,6 +365,8 @@ def argv(request: Request, binary: str, lead: list[str]) -> list[str]:
                 root = json.dumps(str(path))[1:-1]  # escaped, so a path with " or \ stays valid JSON
                 servers.update(json.loads(declared.read_text().replace("${CLAUDE_PLUGIN_ROOT}", root)))
         out += ["--mcp-config", json.dumps({"mcpServers": servers})] if servers else []
+        # The engine's own tools: a permission ask for them goes to the trio and outlasts the guard hook's wait.
+        out += ["--allowedTools", "mcp__engine"] if "engine" in servers else []  # the engine's alone, as for Codex
     return out + ["--", request.prompt]
 
 
