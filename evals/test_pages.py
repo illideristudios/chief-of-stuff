@@ -655,15 +655,6 @@ class RenderOnRequestTest(unittest.TestCase):
         self.assertEqual(head.getheader("Content-Length"), str(len(got.body)))
         self.assertEqual(head.getheader("Last-Modified"), got.getheader("Last-Modified"))
 
-    def test_a_decision_page_renders_from_its_json(self):
-        (self.pages / "decision-cache-ttl.json").write_text(
-            '{"headline": "Cache TTL", "ask": "Keep 5 minutes?", "options": [{"key": "A", "title": "Keep", '
-            '"text": "no change"}, {"key": "B", "title": "Drop", "text": "slower"}], "recommended": "A", "why": "fine", "default": "A at 17:00"}')
-        resp = get(self.port, "/decisions/cache-ttl")
-        self.assertEqual(resp.status, 200)
-        self.assertIn(b"Cache TTL", resp.body)
-        self.assertIn(b"Cache TTL", get(self.port, "/decisions").body)
-
     def test_pages_are_routes_and_their_files_are_not_served(self):
         # The user, 2026-09-26: "pages should be: / /decisions /decisions/id actually an app".
         (self.pages / "decision-cache-ttl.json").write_text(

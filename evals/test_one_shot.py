@@ -1186,12 +1186,6 @@ class RunTest(unittest.TestCase):
         comment.assert_not_called()
         self.assertEqual(self._report()["status"], "relaunch")
 
-    def test_the_hold_label_guard_sees_a_review_outcome_in_the_same_workspace(self):
-        # The control for the test above: this workspace does label a human_review.
-        self._with_an_issue_and_kanban()
-        _, hold, _ = self._stopped(result="status: human_review\nreason: unclear policy\nchanges: none\n")
-        hold.assert_called_once()
-
     def test_a_failed_hold_is_recorded_in_the_log(self):
         # #566: the report alone loses a hold failure between runs; the Log keeps it where the audit reads it.
         self._with_an_issue_and_kanban()

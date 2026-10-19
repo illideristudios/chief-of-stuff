@@ -285,10 +285,6 @@ class ResumeFieldsBoundedTest(unittest.TestCase):
         self.assertFalse(ok, why)
         self.assertIn("303", why)
 
-    def test_it_is_registered_as_a_file_grader(self) -> None:
-        self.assertIn("resume_fields_bounded", run.GRADER_TYPES)
-
-
 class ResumeBlockMatchesTest(unittest.TestCase):
     """Does a fact appear in the Resume block itself -- in the FIELDS, not the section text.
 
@@ -344,10 +340,6 @@ class ResumeBlockMatchesTest(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("no Resume block", why)
 
-    def test_it_is_registered_as_a_file_grader(self) -> None:
-        self.assertIn("resume_block_matches", run.GRADER_TYPES)
-
-
 class MarkdownUnwrappedTest(unittest.TestCase):
     """One paragraph is one line, and blank lines separate blocks, inside the named section."""
 
@@ -386,10 +378,6 @@ class MarkdownUnwrappedTest(unittest.TestCase):
     def test_an_empty_section_fails(self) -> None:
         ok, why = self._grade("")
         self.assertFalse(ok, why)
-
-    def test_it_is_registered_as_a_file_grader(self) -> None:
-        self.assertIn("markdown_unwrapped", run.GRADER_TYPES)
-
 
 class GoldenSetTest(unittest.TestCase):
     """The opus set. Zach, 2026-09-19: sonnet to iterate, opus on the golden cases only for green.

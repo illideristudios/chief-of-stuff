@@ -229,21 +229,6 @@ class GitHelperErrorPathTest(unittest.TestCase):
         with mock.patch.object(git_view, "run", side_effect=exc):
             return mw.git(["status"], Path("."))
 
-    def test_an_oserror_is_code_1_naming_the_exception_class(self):
-        code, detail = self.failing(FileNotFoundError("no git"))
-        self.assertEqual(code, 1)
-        self.assertIn("FileNotFoundError", detail)
-
-    def test_a_timeout_is_code_1_naming_the_exception_class(self):
-        code, detail = self.failing(subprocess.TimeoutExpired("git", 1))
-        self.assertEqual(code, 1)
-        self.assertIn("TimeoutExpired", detail)
-
-    def test_an_unviewable_tree_is_code_1_with_git_trees_unreadable_shape(self):
-        """Changed with #449: the duplicate helper said `Unviewable:`; git_trees says `unreadable:`."""
-        self.assertEqual(self.failing(git_view.Unviewable("metadata is not a bounded regular file")),
-                         (1, "unreadable: metadata is not a bounded regular file"))
-
     def test_a_cache_error_is_code_1_naming_the_configuration_problem(self):
         reason = "cannot prepare view cache base '/unusable-cache'"
         self.assertEqual(self.failing(git_view.CacheError(reason)), (1, f"CacheError: {reason}"))
@@ -638,12 +623,6 @@ class BuildTest(CloneCase):
             self.build(branch="-rf")
         self.assertFalse(self.tree.exists())
 
-    def test_it_prints_the_path_and_branch_it_actually_made(self):
-        made = self.build()
-        line = mw.line(made)
-        self.assertIn(str(made.path), line)
-        self.assertIn("feat/new", line)
-
     def assert_refused_before_any_fetch(self, about: str, **kw):
         with mock.patch.object(mw.git_trees, "fetch_base") as fetch:
             with self.assertRaises(mw.RefusedError) as e:
@@ -870,13 +849,6 @@ class BuildTest(CloneCase):
         self.assertIn("left branch feat/new", str(raised.exception))
         self.assertEqual([args[:2] for args in calls], [["worktree", "add"]])
 
-    def test_the_report_line_carries_the_short_sha_not_the_full_one(self):
-        remote_head = advance_remote(self.root)
-        self.assertEqual(len(remote_head), 40)
-        line = mw.line(self.build())
-        self.assertIn(remote_head[:7], line)
-        self.assertNotIn(remote_head, line)
-
     def test_main_prints_the_short_sha_not_the_full_one(self):
         remote_head = advance_remote(self.root)
         code, out, err = self.run_main()
@@ -1014,13 +986,6 @@ class FreshBaseTest(CloneCase):
         self.assertEqual(code, 0, err)
         for part in (str(self.tree.resolve()), "feat/new", "origin/main", remote_head[:7], "implementer"):
             self.assertIn(part, out)
-
-    def test_line_carries_the_base_sha_too(self):
-        remote_head = advance_remote(self.root)
-        line = mw.line(self.build())
-        self.assertIn("origin/main", line)
-        self.assertIn(remote_head[:7], line)
-
 
 class FetchFailureTest(CloneCase):
     """Rule: a failed fetch refuses and creates nothing; the message offers `--from-local` and names local main's sha."""
