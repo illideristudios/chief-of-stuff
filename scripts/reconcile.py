@@ -520,7 +520,8 @@ def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment
         return action
     blockers = None if facts.blockers is None else dict(facts.blockers).get(item.issue_key, ())
     reason = readiness.why_not(item.issue_key, claims=facts.claims, running=running, blockers=blockers,
-                               asks=facts.asks, reports=facts.reports)
+                               asks=facts.asks, reports=facts.reports,
+                               stage=action.stage if isinstance(action, Dispatch) else "review")
     if reason == "dependency blockers unknown" and facts.blockers_error:
         reason = f"{reason}: {facts.blockers_error}"
     return Wait(item.issue_key, reason) if reason else action

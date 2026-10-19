@@ -114,6 +114,28 @@ def overlaps(a: str, b: str) -> bool:
     return any("." in (x, y) or x == y or x.startswith(y + "/") or y.startswith(x + "/") for x in _paths(a) for y in _paths(b))
 
 
+# #915 (§8): the plan stage's own files, one per issue, so plan runs never serialize on each other.
+PLAN_DIR = "docs/plans"
+
+
+def plan_path(issue_key: str) -> str:
+    """The one file an issue's plan run writes."""
+    return f"{PLAN_DIR}/issue-{issue_key.rpartition('#')[2]}.md"
+
+
+def proposal_scopes(entries) -> list[tuple[str, str]] | None:
+    """A plan's `file_ownership` proposal (#915), checked by the same parser as an issue's section. None when malformed:
+    no entries, a mode other than write or read, or any path the parser refuses. `.` is never proposed."""
+    try:
+        rows = [(str(entry["path"]).strip(), str(entry["mode"]).strip()) for entry in entries]
+    except (TypeError, KeyError, AttributeError):
+        return None
+    if not rows or any(mode not in ("write", "read") for _, mode in rows) or any(path in ("", ".") for path, _ in rows):
+        return None
+    parsed = issue_scopes(scope_section(rows))
+    return parsed if parsed and not any(path == "." for path, _ in parsed) else None
+
+
 def scope_section(scopes: list[tuple[str, str]]) -> str:
     """Canonical issue syntax, checked by intake before the migration proposes it."""
     return HEADING + '\n' + '\n'.join(f'- {mode}: `{path}`' for path, mode in scopes) + '\n'

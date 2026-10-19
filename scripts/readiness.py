@@ -12,11 +12,15 @@ from typing import Sequence
 import ownership
 
 
+# #915 (§8): an undeclared issue's plan stage writes its own plan file; that claim holds only for a plan dispatch.
+PLAN = "plan"
+
+
 @dataclass(frozen=True)
 class Claim:
     issue_key: str
     path: str
-    mode: str = "write"  # "write" or "read"; a read claim owns nothing
+    mode: str = "write"  # "write", "read" or PLAN; a read claim owns nothing
 
 
 @dataclass(frozen=True)
@@ -56,8 +60,12 @@ def _conflict(issue_key: str, claims: Sequence[Claim], running: Sequence[str]) -
 
 
 def why_not(issue_key: str, *, claims: Sequence[Claim], running: Sequence[str],
-            blockers: tuple[str, ...] | None, asks: Sequence[Ask], reports: Sequence[Report]) -> str | None:
-    """Why this item must not be dispatched, or None when it may."""
+            blockers: tuple[str, ...] | None, asks: Sequence[Ask], reports: Sequence[Report],
+            stage: str = "") -> str | None:
+    """Why this item must not be dispatched to `stage` now, or None when it may. The implicit plan claim counts only
+    for a plan dispatch: implement, fix and review run on the issue's written scope (§8)."""
+    if stage != PLAN:
+        claims = [c for c in claims if not (c.issue_key == issue_key and c.mode == PLAN)]
     if not any(c.issue_key == issue_key for c in claims):
         return "needs file ownership"
     mine_asks = [row for row in asks if row.issue_key == issue_key]

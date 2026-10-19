@@ -297,6 +297,50 @@ def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at
     store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
 
 
+def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
+    """#915: a plan's file_ownership proposal is a trio decision (topic `scope`). On approval the engine writes the
+    issue's section through the forge and its store rows; a rejection drops it. A split waits for the owner as a real
+    decision, and an unavailable trio is asked again next pass. Nothing is written unapproved."""
+    for item in store.items():
+        key = item.issue_key
+        proposal = _resume(store, key).get("scope_proposal")
+        if item.forge_state == "closed" or not isinstance(proposal, dict):
+            continue
+        if any(row.mode != "tree" for row in store.ownership(key)):
+            store.update_resume(key, lambda data: data.pop("scope_proposal", None))  # declared meanwhile
+            continue
+        scopes = [(str(path), str(mode)) for path, mode in proposal.get("scopes") or ()]
+        listed = "; ".join(f"{mode}: {path}" for path, mode in scopes)
+        stage = str(proposal.get("stage") or "plan")
+        resolved = _resolved(policies, store, key, stage)
+        if not scopes or _consultation_blocked(store, key, resolved, at, stage=stage):
+            continue
+        choice = _choice(store, key, "scope", f"Approve this file ownership for {key}? {listed}", ("approve", "reject"),
+                         resolved, policies.personas, model, context=listed, stage=stage,
+                         attempt=int(proposal.get("attempt") or 0), clock=clock)
+        if choice == "reject":
+            store.update_resume(key, lambda data: data.pop("scope_proposal", None))
+            store.add_log(key, f"file ownership proposal rejected: {listed}", at)
+        elif choice == "approve":
+            number = int(key.rpartition("#")[2])
+            got = forge.issue(number)
+            if not got.ok or got.issue is None:
+                store.add_log(key, f"file ownership write failed: {got.error or 'issue not found'}", at)
+                continue
+            try:
+                body = ownership.with_issue_scopes(got.issue.body if isinstance(got.issue.body, str) else "", scopes)
+            except ValueError as exc:
+                store.add_log(key, f"file ownership write failed: {exc}", at)
+                continue
+            error = forge.set_body(number, body, commit=True)
+            if error:
+                store.add_log(key, f"file ownership write failed: {error}", at)
+                continue
+            store.replace_file_ownership(key, scopes)
+            store.update_resume(key, lambda data: data.pop("scope_proposal", None))
+            store.add_log(key, f"file ownership approved and written: {listed}", at)
+
+
 def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock) -> None:
     for item in store.items():
         if item.forge_state == "closed" or _resume(store, item.issue_key).get("pending_stage"):
@@ -670,6 +714,16 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             readiness.Claim(key, path, mode) for key, declared in refreshed.items() for path, mode in declared or [])
         if claims != facts.claims:
             facts = replace(facts, claims=claims)
+    if is_dataclass(facts):
+        # §8 (#915): an undeclared issue's plan stage claims only its own plan file, so plan runs never serialize.
+        declared = {claim.issue_key for claim in facts.claims}
+        # Reads own nothing, so "reads everything" needs no claim; the plan mode holds only for a plan dispatch.
+        implicit = tuple(readiness.Claim(item.issue_key, ownership.plan_path(item.issue_key), readiness.PLAN)
+                         for item in store.items()
+                         if item.issue_key not in declared and item.forge_state != "closed"
+                         and (item.stage or _workflow_for(policies, store, item).start) == "plan")
+        if implicit:
+            facts = replace(facts, claims=facts.claims + implicit)
 
     now = clock()
     at = now.isoformat()
@@ -755,6 +809,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         _deliver_comments(forge, store, item.issue_key, at)
 
     _route_asks(store, policies, model, at, clock)
+    _settle_scopes(forge, store, policies, model, at, clock)
     if is_dataclass(facts):
         # The trio may have answered asks since collect gathered them; plan from the answers it just stored.
         asks = tuple(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt)
