@@ -1772,6 +1772,51 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(sorted((key, stage) for key, stage, *_ in self.launched), [(KEY, "plan"), (other, "plan")])
 
+    def planned_without_scope(self):
+        # An issue whose plan ran before #915/#820 asked plans to propose their file ownership.
+        self.plan_policy()
+        self.forge.rows[0].update(stage="plan", body="")
+        self.forge.snapshot = lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "plan", 1, started_at=NOW.isoformat(), ended_at=NOW.isoformat(), outcome="done")
+
+    def test_a_planned_issue_with_no_file_ownership_replans_to_propose_it(self):
+        self.planned_without_scope()
+        self.run_pass()
+        self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched], [(KEY, "plan", 2)])
+
+    def test_a_replan_that_failed_at_launch_does_not_spend_one(self):
+        self.planned_without_scope()
+        for attempt in range(2, 2 + reconcile.SCOPE_REPLANS):  # refused starts: recorded at one instant, failed
+            self.db.record_segment(KEY, "plan", attempt, started_at=NOW.isoformat(), ended_at=NOW.isoformat(),
+                                   outcome="failed")
+        self.run_pass()
+        self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched],
+                         [(KEY, "plan", 2 + reconcile.SCOPE_REPLANS)])
+
+    def test_an_issue_with_no_finished_plan_is_held_after_its_replans_fail(self):
+        # Architect review of #960: with no done plan, every launched plan run counts, so failures cannot loop.
+        later = (NOW + timedelta(minutes=1)).isoformat()
+        history = [SimpleNamespace(stage="plan", attempt=n, outcome="failed", started_at=NOW.isoformat(), ended_at=later)
+                   for n in range(1, 1 + reconcile.SCOPE_REPLANS)]
+        wait = reconcile.Wait(KEY, "needs file ownership")
+        got = reconcile._replan_for_scope(wait, SimpleNamespace(issue_key=KEY), history, reconcile.Facts(),
+                                          SimpleNamespace(stages={"plan": SimpleNamespace(persona="builder")}), ())
+        self.assertIs(got, wait)
+
+    def test_a_pending_scope_proposal_or_spent_replans_wait_instead(self):
+        self.planned_without_scope()
+        self.db.update_resume(KEY, lambda data: data.__setitem__("scope_proposal", {"stage": "plan", "attempt": 1,
+                                                                                    "scopes": []}))
+        self.run_pass()
+        self.db.update_resume(KEY, lambda data: data.pop("scope_proposal"))
+        for attempt in range(2, 2 + reconcile.SCOPE_REPLANS):  # re-plans already launched after the first done plan
+            self.db.record_segment(KEY, "plan", attempt, started_at=NOW.isoformat(),
+                                   ended_at=(NOW + timedelta(minutes=1)).isoformat(), outcome="done")
+        self.run_pass()
+        self.assertEqual(self.launched, [])
+        self.assertTrue(any(e.message == "wait: needs file ownership" for e in self.db.log(KEY)))
+
     def proposal(self, scopes=(("src/a.py", "write"), ("docs/design.md", "read"))):
         self.forge.rows[0]["body"] = "Fix the widget."
         self.db.sync_from_forge(self.forge.snapshots())

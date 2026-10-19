@@ -736,6 +736,9 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                          and (item.stage or _workflow_for(policies, store, item).start) == "plan")
         if implicit:
             facts = replace(facts, claims=facts.claims + implicit)
+        pending = tuple(item.issue_key for item in store.items() if _resume(store, item.issue_key).get("scope_proposal"))
+        if pending:
+            facts = replace(facts, scope_pending=pending)
 
     now = clock()
     at = now.isoformat()
