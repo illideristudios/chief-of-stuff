@@ -110,6 +110,12 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIn('CHIEF_ISSUE_KEY = "github:o/r#1"', joined)
         self.assertNotIn("OTHER", joined)
 
+    def test_codex_may_call_the_engine_tools_under_approval_never(self):
+        # Codex runs `-a never`, which refused every report call ("MCP tool call requires approval"), so no Codex
+        # run ever recorded an outcome. The engine's own channel is approved; other servers keep Codex's default.
+        extra, _ = host_adapter.register("codex", Request("p", session_id="s", cwd=str(self.dir)), BINDING)
+        self.assertIn('mcp_servers.engine.default_tools_approval_mode="approve"', extra)
+
     def test_cursor_gets_a_per_run_config_with_the_binding_kept_out_of_commits(self):
         tree = self.git_tree()
         request = Request("p", session_id="s", cwd=str(tree))

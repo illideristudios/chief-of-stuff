@@ -92,6 +92,8 @@ def register(runtime: str, request: Request, env: dict[str, str]) -> tuple[list[
         return ["-c", f"mcp_servers.engine.command={json.dumps(command)}",
                 "-c", f"mcp_servers.engine.args={json.dumps(args)}",
                 "-c", f"mcp_servers.engine.env={{{table}}}",
+                # `-a never` refuses any MCP call that needs approval, the report tool included.
+                "-c", 'mcp_servers.engine.default_tools_approval_mode="approve"',
                 *git_trees.codex_add_dir_args(Path(request.cwd))], ""
     if runtime == "cursor":
         tree = Path(request.cwd)

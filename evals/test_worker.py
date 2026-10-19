@@ -1393,6 +1393,25 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(args[args.index("--setting-sources") + 1], "user")
         self.assertIn("--strict-mcp-config", args)
 
+    def test_a_worker_keeps_its_plugins_mcp_servers_under_strict_mcp_config(self):
+        # Claude Code 2.1.303 drops plugin MCP servers under --strict-mcp-config, so every worker lost the engine's
+        # report tool and "stopped without reporting an outcome". The guard's servers travel in --mcp-config.
+        guard = Path(claude_adapter.__file__).resolve().parents[1] / "guard"
+        args = claude_adapter.argv(worker.Request("prompt", worker=True, plugin_dirs=(str(guard),)), "/fake", [])
+        config = json.loads(args[args.index("--mcp-config") + 1])
+        self.assertEqual(config["mcpServers"]["engine"],
+                         {"command": "${CHIEF_PYTHON}", "args": [f"{guard}/../scripts/engine_mcp.py"]})
+        self.assertLess(args.index("--mcp-config"), args.index("--"))
+
+    def test_a_plugin_path_with_a_quote_or_backslash_still_gives_valid_mcp_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plugin = Path(tmp) / 'odd "dir" \\ name'
+            plugin.mkdir()
+            (plugin / ".mcp.json").write_text('{"engine": {"command": "x", "args": ["${CLAUDE_PLUGIN_ROOT}/s.py"]}}')
+            args = claude_adapter.argv(worker.Request("p", worker=True, plugin_dirs=(str(plugin),)), "/fake", [])
+        config = json.loads(args[args.index("--mcp-config") + 1])
+        self.assertEqual(config["mcpServers"]["engine"]["args"], [f"{plugin}/s.py"])
+
     def test_forge_retains_request_head_branch(self):
         payload = [{"number": 1, "title": "Request", "url": "url", "headRefOid": "sha",
                     "headRefName": "feature/existing"}]
