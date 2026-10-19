@@ -472,7 +472,7 @@ class TrioModelsTest(unittest.TestCase):
 
     def test_a_call_gets_at_most_the_time_left_and_none_starts_once_it_is_gone(self):
         # #927 review: the pass budget bounds every call, not only the start of a consult.
-        left = [150.0]
+        left = [trio_gate.TIMEOUT_S + 30.0]
 
         def first_uses_it_all(request):
             left[0] = 0.0
@@ -480,7 +480,7 @@ class TrioModelsTest(unittest.TestCase):
         got = trio_gate.consult(self.decision, self.policy, PERSONAS, self.port(first_uses_it_all), self.store,
                                 remaining=lambda: left[0])
         self.assertTrue(got.escalated)
-        self.assertEqual([r.timeout_s for r in self.requests], [trio_gate.TIMEOUT_S])  # min(120, 150); no further call
+        self.assertEqual([r.timeout_s for r in self.requests], [trio_gate.TIMEOUT_S])  # min(TIMEOUT_S, more than that); no further call
         row = self.store.decisions(KEY)[-1]
         self.assertEqual(row.decided_by, "")
         self.assertTrue(decision_actions.retryable_failure(row.record))

@@ -10,7 +10,7 @@ from decision_actions import DecisionUpdate, exhaust_retry, human_answer, identi
 from model_port import Failure, Model, Reply, Request, draw
 from policy import Persona, Policy, PolicyError
 
-TIMEOUT_S = 120  # #928: Cursor took 40s on a one-line decision; at 60s most of its votes timed out
+TIMEOUT_S = 300  # #928: Cursor composer took 222s on a one-line decision (Zach 2026-10-19: "we need to bump timeout")
 
 
 @dataclass(frozen=True)

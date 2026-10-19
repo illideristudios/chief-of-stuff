@@ -50,7 +50,7 @@ from reconcile import HOLD_REROUTE, HOLD_STAGE_WRITE, OP_DECISION_COMMENT, OP_ME
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
-TRIO_PASS_BUDGET_S = 180  # #927: no new trio consult starts after this long in one pass; the rest wait a pass
+TRIO_PASS_BUDGET_S = 480  # #927: trio calls stop here in one pass; above TIMEOUT_S so a slow vote leaves room for two more
 
 
 def adopt_login_path(environ=os.environ) -> None:
