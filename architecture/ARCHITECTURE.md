@@ -80,17 +80,28 @@ The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its th
 - **Every judgement is recorded.** Each member's vote names the runtime and model that cast it, so trio accuracy can be compared across models over time, as for workers (section 9).
 - **Consults are read-only on every host.** A trio consult is a judgement call through the model port. It runs in each host's read-only or no-tools mode (Claude's `--safe-mode`, a read-only sandbox elsewhere), never with write access. A host that offers no read-only mode is not launchable for the trio.
 - **Quota.** A quota stop moves that member to the next distinct entry. When no entry can run, the decision falls back to the owner as an exhausted retry.
+- **Outage.** Any other model failure, such as a timeout or an answer with no structure, moves that member to another entry once (#928). A second failure is kept as the member's vote, and the decision is retried as an outage. A failure is never read as a concern. Each call has at most 300 seconds (owner, 2026-10-19: "we need to bump timeout").
+- **Bounded per pass.** Consults run inside the engine pass, so all of a pass's consults share one budget of 480 seconds (#927), more than one call's limit so a slow vote leaves time for the others. No model call starts once the budget is spent, and each call's limit is cut to what remains of it. A consult that runs out of time is an outage, asked again at its retry time like any other. A permission ask is never denied for want of time.
+- **Asked once.** A decision whose newest row waits on the owner, after a split or an exhausted retry, is not put to the trio again; later passes wait on it (#927). A retryable outage is asked again only at its retry time.
 
 ```
 Mt := the trio's models come from [models.trio] (persona model only as fallback)
 D := the three members use distinct entries, preferring different runtimes or families
 U := a unanimous verdict reflects independent judgements      R := each vote records its runtime and model
 O := every consult runs read-only on its host
+F := a member's call failed for a reason other than quota      N := the member moves to another entry once
+C := a failed call counts as a concern vote
+T := a pass's consults fit within its 480-second budget        W := the pass waits on consults beyond that budget
+Wo := a decision's newest row waits on the owner              K := the trio is consulted again on that decision
 
 Mt ∧ D → U          [owner 2026-10-18: "trio shouldn't be fixed models"]
 R → trio accuracy is measurable per model (section 9)
 O                   [a judgement call never writes]
-∴ the trio rotates like workers, stays diverse, and stays read-only
+F → N ∧ ¬C          [#928: an outage is not a concern]
+T                   [#927: no call starts after the budget; each call's limit is cut to what remains]
+T → ¬W
+Wo → ¬K             [#927: the owner is asked each question once]
+∴ the trio rotates like workers, stays diverse, stays read-only, survives one host's outage, never holds the pass, and asks the owner each question once
 ```
 
 A person's actions on the board (answer, reverse, re-route) are intents, and the engine is their only executor.
