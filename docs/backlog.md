@@ -52,3 +52,20 @@ python3 scripts/migrate_backlog.py --file-ownership --apply docs/reports/file-ow
 The command requires an architect approval on the current PR head and fetches the plan from that head to compare its exact contents. A later `Architect: CHANGES` for that head revokes approval. It rechecks approval before each write. Keep the PR head stable during apply. Issue titles and bodies are re-read; changed or closed issues are skipped. Regenerate and review a plan for changed issues and any issues opened since the snapshot. As with other GitHub issue edits, the final read and edit are separate API requests; avoid concurrent body edits during apply.
 
 Only the ownership section is replaced; other text is preserved. Writes use `gh issue edit --body-file`, with no shell interpolation. Reapplying an unchanged plan recognizes already-applied bodies. The apply report records writes, skips and failures; a skip or failure exits nonzero and does not prevent other unchanged issues being processed. No apply run is authorized before the architect approves the backfill PR.
+
+A GitLab workspace is named `gitlab:<host>/<group>/<project>=PATH`, the engine's issue-key prefix. Its issues are read and written through the GitLab backlog client: `backlog.issues`, then `read_one` and `set_description` at apply. Its plan is reviewed in an MR on that same GitLab project, so nothing derived from it leaves that host. The approver is that project's architect or the owner. `--approval-pr https://<host>/<group>/<project>/-/merge_requests/<n>` reads the MR head, its notes and the plan file at that head through the same client. A GitHub approval refuses a GitLab plan, and a GitLab approval refuses any workspace but its own project (#883).
+
+```console
+python3 scripts/migrate_backlog.py --file-ownership --workspace gitlab:labs.example.test/team/widgets=/path/to/clone --dry-run --report docs/reports/file-ownership.md
+python3 scripts/migrate_backlog.py --file-ownership --apply docs/reports/file-ownership.json --approval-pr https://labs.example.test/team/widgets/-/merge_requests/4 --plan-path docs/reports/file-ownership.json --report /tmp/file-ownership-results.json
+```
+
+```
+G := the workspace is on GitLab      M := the plan is approved on an MR in that project      H := the approval is a GitHub PR
+W := apply writes issue descriptions
+
+G ∧ M → W              [#883: the GitLab client writes]
+G ∧ H → ¬W             [cross-forge approval refused]
+¬G ∧ M → ¬W            [an MR approves only its own project]
+∴ a plan is written only under an approval on its own forge and project
+```
