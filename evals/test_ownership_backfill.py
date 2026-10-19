@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
@@ -228,6 +229,95 @@ class ApplyTest(unittest.TestCase):
             self.assertTrue(report.with_suffix('.json').exists())
             self.assertFalse(any(c.args[0][:2] == ['issue', 'edit'] for c in gh.call_args_list))
 
+
+
+GITLAB = 'gitlab:labs.example.test/team/widgets'  # invented: no Gauntlet-derived material enters this repo (#883)
+MR = 'https://labs.example.test/team/widgets/-/merge_requests/4'
+
+
+class GitLabTest(unittest.TestCase):
+    """#883: a GitLab workspace is read and written through the GitLab backlog client, and its plan is approved on an
+    MR in the same project; GitHub and GitLab approvals each refuse the other's plan."""
+
+    def setUp(self):
+        import base64
+        self.row = dict(number=3, title='Fix widget.py', body='Repair `widget.py`.')
+        self.plan = {'version': 1, 'workspaces': [mb.ownership_plan(GITLAB, [self.row], SOURCES, validator)]}
+        self.plan_text = json.dumps(self.plan, indent=2) + '\n'
+        self.head, self.notes, self.writes, self.state = 'c' * 40, [], [], 'opened'
+        content = base64.b64encode(self.plan_text.encode()).decode()
+
+        def get(url, token, timeout):
+            if url.endswith('/merge_requests/4'):
+                return {'sha': self.head}, {}, ''
+            if '/merge_requests/4/notes' in url:
+                return [{'body': body} for body in self.notes], {}, ''
+            if '/repository/files/docs%2Fownership-plan.json?ref=' + self.head in url:
+                return {'content': content}, {}, ''
+            return None, {}, f'unexpected {url}'
+
+        def read_one(home, number, token=None):
+            issue = SimpleNamespace(title=self.row['title'], body=self.row['body'], state=self.state)
+            return SimpleNamespace(ok=True, issue=issue, error='')
+
+        self.client = SimpleNamespace(Backlog=mb.bl.Backlog, token=lambda home: 'token', TIMEOUT=1, _get=get,
+                                      read_one=read_one,
+                                      set_description=lambda home, number, body, token=None: self.writes.append(
+                                          (home.project, number, body)) or '')
+
+    def apply(self, approval=MR):
+        gh = lambda args, body=None: self.fail(f'GitHub was called for a GitLab plan: {args}')  # noqa: E731
+        return mb.apply_ownership(self.plan, self.plan_text, approval, 'docs/ownership-plan.json', gh, validator,
+                                  gitlab=self.client)
+
+    def test_the_report_links_gitlab_issues_on_their_own_host(self):
+        report = mb.ownership_report(self.plan['workspaces'])
+        self.assertIn('https://labs.example.test/team/widgets/-/issues/3', report)
+        self.assertNotIn('github.com', report)
+
+    def test_an_approved_mr_on_the_same_project_writes_the_description_through_the_gitlab_client(self):
+        self.notes = [f'Architect: APPROVED {self.head}']
+        results = self.apply()
+        self.assertEqual(results[0]['status'], 'written')
+        (project, number, body), = self.writes
+        self.assertEqual((project, number), ('team/widgets', 3))
+        self.assertIn('## File ownership', body)
+
+    def test_an_unapproved_or_stale_mr_writes_nothing(self):
+        for notes in ([], ['Architect: APPROVED ' + 'd' * 40], [f'Architect: APPROVED {self.head}\nArchitect: CHANGES {self.head}']):
+            with self.subTest(notes=notes):
+                self.notes = notes
+                with self.assertRaisesRegex(ValueError, 'approval'):
+                    self.apply()
+        self.assertEqual(self.writes, [])
+
+    def test_a_closed_gitlab_issue_is_skipped(self):
+        self.notes, self.state = [f'Architect: APPROVED {self.head}'], 'closed'
+        self.assertEqual(self.apply()[0]['status'], 'skipped')
+        self.assertEqual(self.writes, [])
+
+    def test_cross_forge_and_cross_project_approvals_are_refused(self):
+        self.notes = [f'Architect: APPROVED {self.head}']
+        with self.assertRaisesRegex(ValueError, 'GitHub approval cannot approve a GitLab plan'):
+            self.apply('https://github.com/example/repo/pull/7')
+        with self.assertRaisesRegex(ValueError, 'approves only a plan for'):
+            self.apply('https://labs.example.test/team/other/-/merge_requests/4')
+        self.plan = {'version': 1, 'workspaces': [mb.ownership_plan('example/repo', [issue()], SOURCES, validator)]}
+        with self.assertRaisesRegex(ValueError, 'approves only a plan for'):
+            self.apply()
+        self.assertEqual(self.writes, [])
+
+    def test_a_dry_run_reads_a_gitlab_workspace_through_the_backlog_client(self):
+        fetched = mb.bl.Fetch(issues=(mb.bl.Issue(iid=3, title='Fix widget.py', state='opened', body='Repair `widget.py`.'),))
+        with tempfile.TemporaryDirectory() as d, patch.object(mb, 'ownership_sources', return_value=SOURCES), \
+                patch.object(mb, 'ownership_validator', return_value=validator), \
+                patch.object(mb.bl, 'issues', return_value=fetched) as read, \
+                patch.object(mb, 'ownership_gh', side_effect=AssertionError('gh used for GitLab')):
+            report = Path(d) / 'report.md'
+            self.assertEqual(mb.main(['--file-ownership', '--workspace', f'{GITLAB}=.', '--dry-run', '--report', str(report)]), 0)
+            self.assertEqual(read.call_args.args[0].project, 'team/widgets')
+            saved = json.loads(report.with_suffix('.json').read_text())
+            self.assertEqual(saved['workspaces'][0]['repo'], GITLAB)
 
 if __name__ == '__main__':
     unittest.main()
