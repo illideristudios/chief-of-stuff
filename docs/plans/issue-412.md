@@ -6,6 +6,23 @@ Two tracked issues with the same number must have distinct issue pages and sourc
 
 This stage changes only this plan. Implementation follows the steps below using failing Python regression tests first, as required by `CLAUDE.md`.
 
+## Decision logic
+
+```
+S := two tracked issues share a number but differ in host or project
+I := a page route carries host, full project path and number
+F := rendered filenames and cache, lock and freshness keys derive from I
+M := a page selects tasks, Flow rows, cached issue and changes by full identity
+H := the configured home project
+A := /issues/N redirects to H's qualified route
+O := the implementer edits architecture/ARCHITECTURE.md
+1.  S → collision            [issue #412 repro: routes match by trailing number]
+2.  I ∧ F ∧ M → ¬collision   [Route and identity contract; steps 3-6]
+3.  A is for H only          [a bare number names no project; never search all projects]
+4.  ¬O                       [memory architect-owns-docs, Zach 2026-10-14]
+∴   implement I, F and M together (fixing hrefs alone leaves cache collisions); keep A for H only; leave ARCHITECTURE.md to the architect
+```
+
 ## Evidence in the current code
 
 - `scripts/pages.py`: `ISSUE` accepts only `/issues/(number)[/source]`; `Handler._allowed` maps it to `issue-(number).html` or `issue-(number)-source.html`. `fresh` recovers only an integer from that filename. Locks, freshness records, stale content, and route-only file protection consequently share the numeric namespace.
@@ -34,7 +51,7 @@ Renderers accept `IssueRef` targets, keeping integer inputs as a compatibility w
 
 1. **Add identity and routing regressions.** Extend the existing issue/source/board/workers/server tests and add focused helper tests. Start with two same-number issues in different projects and then the same project path on two hosts. Give them different titles, states, changes, acceptance bullets, file lists, and worker histories so assertions detect mixed content, not merely different URLs.
 2. **Introduce `scripts/issue_routes.py`.** Keep this a small, pure presentation adapter with no filesystem, network, credential, server, or renderer dependencies. Reuse `backlog_ref.IssueRef` and `issue_ref`; provide reference/key-to-target resolution, route formatting/parsing, and rendered filename generation. Parse source-cache GitLab keys explicitly using their host/project/number structure. Reject malformed references rather than invoke a trailing-number fallback. Resolve home configuration consistently: persisted `sources.home` when available, with the workspace backlog as fallback at write/render boundaries when the cache has not been populated.
-3. **Separate storage identities.** Generate bounded filenames such as `issue-q-<sha256>.html` and `issue-q-<sha256>-source.html`, hashing an unambiguous serialization of `(host, full project, number)`. Use the full digest, not a truncated hash or lossy slug; the `q-` marker separates qualified filenames from numeric legacy names even for an all-digit digest. Keep `issue-N*.html` only for the unresolved bare namespace. Do not recover identity from a hash: pass the parsed target explicitly through `Handler._allowed` to `fresh` and the writers; verify that target and expected basename agree. Include the page kind in the filename as today. Register the new helper in the architecture document's presenter list and the existing classification test without adding dependency exemptions or making model modules import page code.
+3. **Separate storage identities.** Generate bounded filenames such as `issue-q-<sha256>.html` and `issue-q-<sha256>-source.html`, hashing an unambiguous serialization of `(host, full project, number)`. Use the full digest, not a truncated hash or lossy slug; the `q-` marker separates qualified filenames from numeric legacy names even for an all-digit digest. Keep `issue-N*.html` only for the unresolved bare namespace. Do not recover identity from a hash: pass the parsed target explicitly through `Handler._allowed` to `fresh` and the writers; verify that target and expected basename agree. Include the page kind in the filename as today. Classify the new helper in the existing classification test without adding dependency exemptions or making model modules import page code. The architecture agent alone edits `architecture/ARCHITECTURE.md` (it places the new script in §4 on its own branch); the implementer does not.
 4. **Update the server.** Replace numeric-only route parsing with the shared helper, implement the home aliases, and thread targets through lazy render dispatch. Extend `RENDERED` to recognize qualified filenames while continuing to protect old numeric filenames from direct requests and `/all` listings. Preserve checked-path containment, dotfile refusal, per-file locks, render slots, byte-digest freshness, HEAD/reload behavior, and last-good-page error handling. Those mechanisms should operate on distinct target filenames. Unknown or removed identities must remove/404 only their own file. Old numeric cached pages must never satisfy a qualified request or a home alias through a stale-file shortcut.
 5. **Update issue rendering.** Normalize the target once and select `mine` by full identity. Pass the effective home to `flow_chart.build`, compare each Flow reference by full identity, and use the matching key for the issue and changes. Continue building Flow from the full tracker context so workflow/change-only passes retain their existing association behavior; filter the result by identity. Derive log and worker history from the matching task set, preserving existing name-based log semantics. Pass the target to `_files` and the writer so source links, file anchors, and output paths preserve identity. Escape qualified labels wherever they enter HTML. Display a qualified label for non-home issues so two `#N` pages are distinguishable.
 6. **Update source rendering.** Normalize the target before both `render` and the writer's `_change`/notes selection. Match tracker tasks and cache entries by the same full identity as the issue page. Build its task backlink and output filename through the helper. Preserve current change ordering and empty/unavailable-diff behavior. A route target does not authorize a request to that host: notes still use an already associated change and existing configured credentials. The current notes function queries the configured home change project; do not make it fetch an unrelated same-number change for a foreign change. Where a selected change is outside that configuration, show notes unavailable without a forge call. Broadening forge collection or supporting foreign clones is outside this fix.
@@ -96,9 +113,9 @@ The planning stage owns only `docs/plans/issue-412.md`. The implementation stage
 | write | `evals/test_flow_board.py` |
 | write | `evals/test_workers_page.py` |
 | write | `evals/test_architecture.py` |
-| write | `architecture/ARCHITECTURE.md` |
 | write | `README.md` |
 | read | `CLAUDE.md` |
+| read | `architecture/ARCHITECTURE.md` |
 | read | `docs/plans/issue-412.md` |
 | read | `scripts/backlog_ref.py` |
 | read | `scripts/backlog.py` |
