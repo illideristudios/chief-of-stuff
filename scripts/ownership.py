@@ -8,8 +8,10 @@ accepted was refused at launch (#74).
 
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 
 from md import cells as _cells, is_separator as _is_separator, section as _section
 
@@ -166,30 +168,8 @@ def with_issue_scopes(body: str, scopes: list[tuple[str, str]]) -> str:
     return body.rstrip('\n') + ('\n\n' if body else '') + scope_section(scopes)
 
 
-def derive_scopes(title: str, body: str, sources: dict[str, str]) -> tuple[list[tuple[str, str]], str]:
-    """Conservative backfill from named, tracked code, never a repository fallback.
-
-    The driver supplies the repository's code. Unique basenames and referenced Python
-    definitions resolve to their actual files; companion tests come from that same tree.
-    Examples and plan citations are evidence to read, not implementation targets.
-    Anything ambiguous is returned for the owner, without granting a partial scope.
-    """
-    import ast
-    from pathlib import PurePosixPath
-
-    text = title + '\n' + body
-    text = re.sub(r'(?ms)^\s*(```|~~~).*?^\s*\1[^\n]*$', '', text)
-    # A broken declaration is not evidence for its own replacement.
-    text = re.sub(r'(?ms)^## File ownership\s*\n.*?(?=^## |\Z)', '', text)
-    read_task = bool(
-        re.match(r'(?i)^\s*read-only (?:audit|review|task)\b', title)
-        or (re.match(r'(?i)^\s*(?:audit|review|inspect)\b', title)
-            and re.search(r'(?i)\bread-only\b', text))
-        or re.search(r'(?im)^\s*(?:this task|this assignment|scope)\s*(?:is|:)\s*read-only\b', body)
-    )
-    files = set(sources)
-    symbols = {token.removesuffix('()') for token in re.findall(r'`([A-Za-z_]\w*\(\))`', text)}
-    symbols -= {PurePosixPath(p).stem for p in files} | {PurePosixPath(p).name for p in files}
+def _aliases(sources: dict[str, str], symbols: set[str]) -> dict[str, set[str]]:
+    """Every name a file or a referenced top-level Python definition can be cited by, to the paths that carry it."""
     aliases: dict[str, set[str]] = {}
     for path, code in sources.items():
         aliases.setdefault(PurePosixPath(path).name, set()).add(path)
@@ -204,21 +184,69 @@ def derive_scopes(title: str, body: str, sources: dict[str, str]) -> tuple[list[
             for node in tree.body:
                 if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name in symbols:
                     aliases.setdefault(node.name, set()).add(path)
+    return aliases
+
+
+def _is_read_task(title: str, body: str, text: str) -> bool:
+    return bool(
+        re.match(r'(?i)^\s*read-only (?:audit|review|task)\b', title)
+        or (re.match(r'(?i)^\s*(?:audit|review|inspect)\b', title)
+            and re.search(r'(?i)\bread-only\b', text))
+        or re.search(r'(?im)^\s*(?:this task|this assignment|scope)\s*(?:is|:)\s*read-only\b', body)
+    )
+
+
+def _named(line: str, files: set[str], aliases: dict[str, set[str]]) -> list[str]:
+    """The files and symbols a line cites. Bare symbols and explicit directory references must be code spans."""
+    tokens = set(re.findall(r'(?<![\w/])(?:[\w.-]+/)*[\w.-]+\.(?:py|md|json|toml|ya?ml|js|ts|css|html)\b', line))
+    for token in re.findall(r'`([^`]+)`', line):
+        token = re.sub(r':\d+(?:-\d+)?$', '', token).removesuffix('()')
+        if token in aliases or token in files or (token.endswith('/') and any(p.startswith(token) for p in files)):
+            tokens.add(token)
+    return sorted(tokens)
+
+
+def _line_mode(line: str, read_task: bool) -> tuple[str, bool]:
+    """(mode, forbidden): a reference line or a prohibition reads, anything else in a write task writes."""
+    reference = bool(re.match(r'(?i)^\s*(?:[-*]\s*)?(?:plan:|ledger:|reference:|see[ :]|read[ :])', line))
+    reference = reference or bool(re.search(r'(?i)\b(?:like|for example)\s+`', line))
+    forbidden = bool(re.search(r"(?i)\b(?:do not|don't|must not|never) (?:edit|change|modify|write|touch)\b", line))
+    return ('read' if read_task or reference or forbidden else 'write'), forbidden
+
+
+def _add_companion_tests(scopes: dict[str, str], files: set[str], prohibited: set[str]) -> None:
+    """A written Python module also writes its existing test file, unless the issue forbids that path."""
+    for path, mode in list(scopes.items()):
+        if mode != 'write' or not path.endswith('.py') or path.startswith('evals/'):
+            continue
+        for test in (f'evals/test_{PurePosixPath(path).stem}.py', f'tests/test_{PurePosixPath(path).stem}.py'):
+            if test in files and not any(overlaps(test, denied) for denied in prohibited):
+                scopes[test] = 'write'
+
+
+def derive_scopes(title: str, body: str, sources: dict[str, str]) -> tuple[list[tuple[str, str]], str]:
+    """Conservative backfill from named, tracked code, never a repository fallback.
+
+    The driver supplies the repository's code. Unique basenames and referenced Python
+    definitions resolve to their actual files; companion tests come from that same tree.
+    Examples and plan citations are evidence to read, not implementation targets.
+    Anything ambiguous is returned for the owner, without granting a partial scope.
+    """
+    text = title + '\n' + body
+    text = re.sub(r'(?ms)^\s*(```|~~~).*?^\s*\1[^\n]*$', '', text)
+    # A broken declaration is not evidence for its own replacement.
+    text = re.sub(r'(?ms)^## File ownership\s*\n.*?(?=^## |\Z)', '', text)
+    read_task = _is_read_task(title, body, text)
+    files = set(sources)
+    symbols = {token.removesuffix('()') for token in re.findall(r'`([A-Za-z_]\w*\(\))`', text)}
+    symbols -= {PurePosixPath(p).stem for p in files} | {PurePosixPath(p).name for p in files}
+    aliases = _aliases(sources, symbols)
     scopes: dict[str, str] = {}
     problems: set[str] = set()
     prohibited: set[str] = set()
     for line in text.splitlines():
-        reference = bool(re.match(r'(?i)^\s*(?:[-*]\s*)?(?:plan:|ledger:|reference:|see[ :]|read[ :])', line))
-        reference = reference or bool(re.search(r'(?i)\b(?:like|for example)\s+`', line))
-        forbidden = bool(re.search(r"(?i)\b(?:do not|don't|must not|never) (?:edit|change|modify|write|touch)\b", line))
-        mode = 'read' if read_task or reference or forbidden else 'write'
-        tokens = set(re.findall(r'(?<![\w/])(?:[\w.-]+/)*[\w.-]+\.(?:py|md|json|toml|ya?ml|js|ts|css|html)\b', line))
-        # Bare symbols and explicit directory references must be code spans.
-        for token in re.findall(r'`([^`]+)`', line):
-            token = re.sub(r':\d+(?:-\d+)?$', '', token).removesuffix('()')
-            if token in aliases or token in files or (token.endswith('/') and any(p.startswith(token) for p in files)):
-                tokens.add(token)
-        for token in sorted(tokens):
+        mode, forbidden = _line_mode(line, read_task)
+        for token in _named(line, files, aliases):
             if token in files:
                 matches = {token}
             elif token.endswith('/'):
@@ -247,10 +275,5 @@ def derive_scopes(title: str, body: str, sources: dict[str, str]) -> tuple[list[
     if not scopes or (not read_task and all(mode == 'read' for mode in scopes.values())):
         return [], 'no unambiguous implementation paths; the owner must supply the scope'
     if not read_task:
-        for path, mode in list(scopes.items()):
-            if mode != 'write' or not path.endswith('.py') or path.startswith('evals/'):
-                continue
-            for test in (f'evals/test_{PurePosixPath(path).stem}.py', f'tests/test_{PurePosixPath(path).stem}.py'):
-                if test in files and not any(overlaps(test, denied) for denied in prohibited):
-                    scopes[test] = 'write'
+        _add_companion_tests(scopes, files, prohibited)
     return sorted(scopes.items()), ''
