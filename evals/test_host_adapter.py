@@ -128,6 +128,21 @@ class HostAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(ShellError, "already has"):
             host_adapter.register("cursor", request, BINDING)
 
+    def test_a_cursor_retry_replaces_the_engines_config_from_an_earlier_run(self):
+        # drago 2026-10-19: seven Cursor retries failed to start because the earlier run's config was still there.
+        tree = self.git_tree()
+        host_adapter.register("cursor", Request("p", session_id="s1", cwd=str(tree)), BINDING)
+        retry = {**BINDING, "CHIEF_ATTEMPT": "2", "CHIEF_SESSION_ID": "s2"}
+        host_adapter.register("cursor", Request("p", session_id="s2", cwd=str(tree)), retry)
+        self.assertEqual(json.loads((tree / ".cursor" / "mcp.json").read_text())["mcpServers"]["engine"]["env"], retry)
+
+    def test_a_cursor_config_the_engine_did_not_write_is_never_replaced(self):
+        tree = self.git_tree()
+        (tree / ".cursor").mkdir()
+        (tree / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"theirs": {"command": "x"}}}))
+        with self.assertRaisesRegex(ShellError, "already has"):
+            host_adapter.register("cursor", Request("p", session_id="s", cwd=str(tree)), BINDING)
+
     def test_agy_adds_a_uniquely_named_entry_and_cleanup_removes_it(self):
         calls = []
         with mock.patch.object(host_adapter, "resolve", return_value="/b/agy"), \
