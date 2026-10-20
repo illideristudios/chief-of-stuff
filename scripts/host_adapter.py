@@ -98,10 +98,18 @@ def register(runtime: str, request: Request, env: dict[str, str]) -> tuple[list[
     if runtime == "cursor":
         tree = Path(request.cwd)
         config = tree / ".cursor" / "mcp.json"
+        ours = {"mcpServers": {"engine": {"command": command, "args": args, "env": binding}}}
         if config.exists():
-            raise ShellError("the worker tree already has .cursor/mcp.json; refusing to replace it")
+            try:
+                found = json.loads(config.read_text()).get("mcpServers")
+            except (ValueError, AttributeError, OSError):
+                found = None
+            earlier = found.get("engine") if isinstance(found, dict) and set(found) == {"engine"} else None
+            # A retry replaces the engine's own config from an earlier run; anything else in the tree is kept.
+            if not (isinstance(earlier, dict) and earlier.get("args") == args and earlier.get("env") != binding):
+                raise ShellError("the worker tree already has .cursor/mcp.json; refusing to replace it")
         config.parent.mkdir(exist_ok=True)
-        config.write_text(json.dumps({"mcpServers": {"engine": {"command": command, "args": args, "env": binding}}}))
+        config.write_text(json.dumps(ours))
         _exclude(tree, "/.cursor/mcp.json")
         return [], ""
     if runtime == "agy":
