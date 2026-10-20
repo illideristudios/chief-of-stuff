@@ -186,6 +186,28 @@ def _queued_rows(tasks, by_name: dict, moved: set, lanes: dict, held: dict, dura
     return out
 
 
+def _task_segments(task, mine: list[Move], key: str, runs: dict, first: dict, terminal: set, now: datetime,
+                   finish, is_held: bool) -> tuple[list[gantt.Segment], Move]:
+    """(done bars, last move) of one moved task, the bars clipped at its forge end when `finish` is set."""
+    stop = _stop(task, mine[-1], now)
+    boundary = mine[-1].at
+    # A launcher stop ends its run but leaves the row at its prior working stage.
+    mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
+    # #227: a held row's last stage bar ends at its own last move — no dangling bar reading as work
+    # in progress — and the hold bar alone carries it from now through the window.
+    segs = _stage_bars(mine, key, task, runs, first, terminal, stop, boundary, is_held)
+    if finish:
+        at = finish[0]
+        segs = [replace(g, end=min(g.end, at)) for g in segs if g.start < at]
+    return segs, mine[-1]
+
+
+def _ordered(rows: list[tuple[str, gantt.Row]], now: datetime) -> list[tuple[str, gantt.Row]]:
+    # #226: rows group merged, approved, running, needs input, queued, earliest move first within a group.
+    far_future = now + WINDOWS[-1][2] * 1000  # a row with no segments at all sorts last in its bucket
+    return sorted(rows, key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
+
+
 def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[str, datetime], now: datetime,
           durations: dict[str, timedelta] | None = None, slots: int = 1,
           approved: frozenset[str] = frozenset(), ended: dict[str, tuple[datetime, str]] | None = None,
@@ -217,21 +239,11 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
     for m in log:
         groups.setdefault(key_of(m), []).append(m)
     for key, mine in groups.items():
-        task, last = find.get(key) or find.get(mine[-1].name.strip().casefold()), mine[-1]
-        stop = _stop(task, last, now)
-        finish = task and (ended or {}).get(task.name.strip())
+        task = find.get(key) or find.get(mine[-1].name.strip().casefold())
         hold_key = (task.name.strip() or task.item.strip()) if task else ""
         is_held = bool(task and hold_key in held)
-        boundary = last.at
-        # A launcher stop ends its run but leaves the row at its prior working stage.
-        mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
-        last = mine[-1]
-        # #227: a held row's last stage bar ends at its own last move — no dangling bar reading as work
-        # in progress — and the hold bar alone carries it from now through the window.
-        segs = _stage_bars(mine, key, task, runs, first, terminal, stop, boundary, is_held)
-        if finish:
-            at = finish[0]
-            segs = [replace(g, end=min(g.end, at)) for g in segs if g.start < at]
+        finish = task and (ended or {}).get(task.name.strip())
+        segs, last = _task_segments(task, mine, key, runs, first, terminal, now, finish, is_held)
         status, note, ahead, slot_end = _standing(
             task, lanes.get(task.lane.strip()) if task else None, last, now, terminal, _owner(runs, key, now, task),
             finish=finish, held_cause=held[hold_key] if is_held else None, end=ends.get(task.item) if task else None,
@@ -241,10 +253,7 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
         out.append((status, gantt.Row(ref_of(task, last.name), task.label if task else launch_row(last.name, ())[1],
                                       note, tuple(segs + ahead))))
     out += _queued_rows(tasks, by_name, set(groups), lanes, held, durations, busy, slots, terminal, now, ref_of, runs)
-    # #226: rows group merged, approved, running, needs input, queued, earliest move first within a group.
-    far_future = now + WINDOWS[-1][2] * 1000  # a row with no segments at all sorts last in its bucket
-    return sorted(_merge_issues(out),
-                  key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
+    return _ordered(_merge_issues(out), now)
 
 
 def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> list[tuple[str, gantt.Row]]:
