@@ -95,12 +95,9 @@ def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
     return f'    <div class="card scroll"><table>\n<tr>{head}</tr>\n{body}</table></div>'
 
 
-def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
-           pending: int = 0, navigation: dict | None = None, db: PageData | None = None, *, claude_account: str = "") -> str:
-    """The page. `trees` is where one-shot trees sit; `cap` is `[workers] max_concurrency`."""
-    tasks = parse_tracker(tracker_text).tasks
-    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
-    row_of, task_of, fix_counts, last_stage, ended, need = launcher(tasks), {}, {}, {}, [], 0
+def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[list[str]], int]:
+    """From the tracker's Log: fix-loop counts by task, ENDED TODAY rows newest first, and the human-review count."""
+    task_of, fix_counts, last_stage, ended, need = {}, {}, {}, [], 0
     for line in map(str.strip, _section(tracker_text, "## Log")):
         if m := STAGE.match(line):
             t, name = row_of(m[3].strip())
@@ -124,10 +121,22 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(m[3])}</b>',
                           f"{int(m[1]):02d}:{m[2]}", _task(t, name), escape(summary), action])
     ended.reverse()  # newest first
-    running = []
+    return fix_counts, ended, need
+
+
+def _running_row(lead: str, task: str, started: datetime, now: datetime, tree: Path | None, account: str) -> list[str]:
+    last, tokens = activity(tree, account=account) if tree else (None, 0)
+    return [lead, task, panels.hm(started, now) if started else "",
+            f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""]
+
+
+def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, int], by_name: dict, now: datetime,
+                  trees: Path, account: str) -> tuple[list[list[str]], set[str]]:
+    """RUNNING rows from the board's worker sources, and the names they cover."""
+    running: list[list[str]] = []
     seen_running: set[str] = set()
     try:
-        session_logs.retain_activity(claude_account, [trees / w.tree for w in sources.workers if w.tree])
+        session_logs.retain_activity(account, [trees / w.tree for w in sources.workers if w.tree])
     except (ValueError, OSError):
         pass
     for w in sources.workers:
@@ -137,51 +146,71 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         t = by_name.get(w.task.strip().casefold()) or row_of(w.task)[0]
         key = (t.name.strip() if t and t.name.strip() else w.task.strip()).casefold()
         is_looping = fix_counts.get(key, 0) >= 2 or bool(t and t.stage.strip().casefold() == "looping")
-        last, tokens = activity(trees / w.tree, account=claude_account) if w.tree else (None, 0)
-        running.append([_worker_lead(w, is_looping), _task_stage(t, w.task),
-                        panels.hm(w.started, now) if w.started else "",
-                        f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""])
+        running.append(_running_row(_worker_lead(w, is_looping), _task_stage(t, w.task), w.started, now,
+                                    trees / w.tree if w.tree else None, account))
+    return running, seen_running
+
+
+def _store_rows(db: PageData, seen_running: set[str], now: datetime, trees: Path,
+                account: str) -> tuple[list[list[str]], list[list[str]], int, int]:
+    """RUNNING and ENDED TODAY rows from the store's segments, the human-review count and the running one-shot count."""
+    running: list[list[str]] = []
+    ended: list[list[str]] = []
+    need = store_shots = 0
+    all_segs = db.segments()
+    fix_by_issue: dict[str, int] = {}
+    for s in all_segs:
+        if s.stage.strip().casefold() == "fix":
+            fix_by_issue[s.issue_key] = fix_by_issue.get(s.issue_key, 0) + 1
+    for seg in all_segs:
+        item = db.item(seg.issue_key)
+        runner = getattr(seg, "runner", "") or f"{seg.stage}-{seg.attempt}"
+        title = item.title if item and item.title else seg.issue_key
+        num = seg.issue_key.rsplit("#", 1)[1] if "#" in seg.issue_key else seg.issue_key
+        task_link = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a> {escape(title)}'
+        if seg.ended_at is None:
+            if runner in seen_running:
+                continue
+            seen_running.add(runner)
+            store_shots += 1
+            started_dt = parse_stamp(seg.started_at, now)
+            w_obj = board_sources.Worker(runner, "one-shot", seg.runtime, seg.model, title, runner, started_dt, None)
+            is_looping = fix_by_issue.get(seg.issue_key, 0) >= 2
+            stage_chip = f' <span class="chip stage">{escape(seg.stage)}</span>' if seg.stage else ""
+            tree = trees / runner
+            running.append(_running_row(_worker_lead(w_obj, is_looping), f"{task_link}{stage_chip}", started_dt, now,
+                                        tree if tree.exists() else None, account))
+        else:
+            ended_dt = parse_stamp(seg.ended_at, now)
+            if ended_dt.date() != now.date():
+                continue
+            reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
+            summary = reports[-1].summary if reports else (seg.outcome or "")
+            done = seg.outcome == "done"
+            if seg.outcome == "human_review":
+                need += 1
+            state = "DONE" if done else "CRASHED"
+            action = (f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
+                      if done else '<span class="chip redispatch">re-dispatch</span>')
+            ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(runner)}</b>',
+                          f"{ended_dt:%H:%M}", task_link, escape(summary), action])
+    return running, ended, need, store_shots
+
+
+def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
+           pending: int = 0, navigation: dict | None = None, db: PageData | None = None, *, claude_account: str = "") -> str:
+    """The page. `trees` is where one-shot trees sit; `cap` is `[workers] max_concurrency`."""
+    tasks = parse_tracker(tracker_text).tasks
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    row_of = launcher(tasks)
+    fix_counts, ended, need = _tracker_ends(tracker_text, row_of)
+    running, seen_running = _session_rows(sources, row_of, fix_counts, by_name, now, trees, claude_account)
     store_shots = 0
     if db is not None:
-        all_segs = db.segments()
-        fix_by_issue: dict[str, int] = {}
-        for s in all_segs:
-            if s.stage.strip().casefold() == "fix":
-                fix_by_issue[s.issue_key] = fix_by_issue.get(s.issue_key, 0) + 1
-        for seg in all_segs:
-            item = db.item(seg.issue_key)
-            runner = getattr(seg, "runner", "") or f"{seg.stage}-{seg.attempt}"
-            title = item.title if item and item.title else seg.issue_key
-            num = seg.issue_key.rsplit("#", 1)[1] if "#" in seg.issue_key else seg.issue_key
-            task_link = f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a> {escape(title)}'
-            if seg.ended_at is None:
-                if runner in seen_running:
-                    continue
-                seen_running.add(runner)
-                store_shots += 1
-                started_dt = parse_stamp(seg.started_at, now)
-                w_obj = board_sources.Worker(runner, "one-shot", seg.runtime, seg.model, title, runner, started_dt, None)
-                is_looping = fix_by_issue.get(seg.issue_key, 0) >= 2
-                last, tokens = activity(trees / runner, account=claude_account) if (trees / runner).exists() else (None, 0)
-                stage_chip = f' <span class="chip stage">{escape(seg.stage)}</span>' if seg.stage else ""
-                running.append([_worker_lead(w_obj, is_looping), f"{task_link}{stage_chip}",
-                                panels.hm(started_dt, now),
-                                f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""])
-            else:
-                ended_dt = parse_stamp(seg.ended_at, now)
-                if ended_dt.date() != now.date():
-                    continue
-                reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
-                summary = reports[-1].summary if reports else (seg.outcome or "")
-                done = seg.outcome == "done"
-                if seg.outcome == "human_review":
-                    need += 1
-                state = "DONE" if done else "CRASHED"
-                ended_dt = parse_stamp(seg.ended_at, now)
-                action = (f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
-                          if done else '<span class="chip redispatch">re-dispatch</span>')
-                ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(runner)}</b>',
-                              f"{ended_dt:%H:%M}", task_link, escape(summary), action])
+        store_running, store_ended, store_need, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
+        running += store_running
+        ended += store_ended
+        need += store_need
     shots = sum(w.kind == "one-shot" for w in sources.workers) + store_shots
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
     if cap:
