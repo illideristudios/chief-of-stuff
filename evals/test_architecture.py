@@ -44,6 +44,7 @@ DRAWS_NOTHING = (
     "issue_gate",
     "trio_gate",
     "decision_actions",
+    "decision_escalation",
     "performance",
     "performance_report",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs",
@@ -71,6 +72,7 @@ DRAWS_NOTHING = (
     "engine_mcp",  # Frameworks and Drivers: MCP stdio tools over the store gateway.
     "work",
     "decision_actions",  # Use Cases: pure decision lifecycle transitions.
+    "decision_escalation",  # Use Cases: pure trio-retry, owner-wait and ask-link judgements.
 )
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
@@ -214,7 +216,8 @@ CIRCLES: dict[str, frozenset[str]] = {
     }),
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
-        "task_forge", "model_port", "issue_gate", "trio_gate", "decision_actions", "engine_merge", "forge_port",
+        "task_forge", "model_port", "issue_gate", "trio_gate", "decision_actions", "decision_escalation", "engine_merge",
+        "forge_port",
         "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance",
     }),
     "adapters": frozenset({
@@ -426,6 +429,11 @@ class DependencyRuleTest(unittest.TestCase):
 
     def test_decision_actions_reaches_no_adapter_or_io_module(self) -> None:
         self.assertEqual(forbidden_reach(SCRIPTS, "decision_actions",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
+
+    def test_decision_escalation_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_escalation",
                          {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages"},
                          frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", *HTTP})), [])
 
