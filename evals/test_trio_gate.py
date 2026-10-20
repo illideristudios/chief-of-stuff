@@ -248,12 +248,17 @@ class GateTest(unittest.TestCase):
         self.assertEqual(settled.record["recommendation"], OPTIONS[1])
         self.assertFalse(settled.record["unanimous"])
         self.assertEqual(settled.record["decision"]["instance"], f"ask-{ask_id}")
-        for field, value in (("context", "other"), ("options", ["New", "Old"]), ("id", ask_id + 1)):
-            from types import SimpleNamespace
+        from types import SimpleNamespace
+        for field, value in (("context", "other"), ("options", ["New", "Old"])):
             mismatched = SimpleNamespace(**{name: getattr(ask, name) for name in
                                            ("id", "question", "options", "context", "answer")})
             setattr(mismatched, field, value)
             self.assertIsNone(decision_escalation.answer_ask(self.store.decisions(KEY), mismatched))
+        other = SimpleNamespace(**{name: getattr(ask, name) for name in
+                                  ("id", "question", "options", "context", "answer")})
+        other.id = ask_id + 1
+        created = decision_escalation.answer_ask(self.store.decisions(KEY), other)
+        self.assertEqual(created.record["decision"]["instance"], f"ask-{ask_id + 1}")
         self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
         self.assertIsNone(decision_escalation.answer_ask(self.store.decisions(KEY), ask))
 
