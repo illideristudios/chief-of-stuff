@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import sys
 
-from decision_actions import ask_decision
+from decision_escalation import ask_decision
 from guard_binding import Binding
 from guard_commands import denial_reason, permission_judgement
 from guard_rules import permission_ask, resume_state, stop_allowed

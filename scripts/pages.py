@@ -401,6 +401,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         """Record a person's answer, reversal or re-route. A reversal or re-route is an intent on its own row, and
         the engine alone applies it: this request never touches the forge, a card, or another intent."""
         import decision_actions
+        import decision_escalation
         import sqlite3
         import store_access
         import trio_gate
@@ -434,7 +435,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if dec is None:
                     return (404, "no such decision")
                 # Rows are append-only: the form names the row it was rendered from, and a newer one refuses it.
-                if decision_actions.latest(db.decisions(dec.issue_key)).get(decision_actions.identity(dec)).id != dec.id:
+                if decision_escalation.latest(db.decisions(dec.issue_key)).get(decision_escalation.identity(dec)).id != dec.id:
                     return (409, "the decision changed since this page was rendered")
                 item = db.item(dec.issue_key)
                 data = db.resume(dec.issue_key) or {}
