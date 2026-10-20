@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import decision_actions as da  # noqa: E402
+import decision_escalation  # noqa: E402
 import policy  # noqa: E402
 import reconcile  # noqa: E402
 import settings  # noqa: E402
@@ -27,7 +28,7 @@ def make_decision(id=7, topic="design", question="Split the parser into two pass
                            decided_by=decided_by, created_at=ASKED_AT, record=dict(record))
 
 
-def appended(rows: list, update: da.DecisionUpdate) -> SimpleNamespace:
+def appended(rows: list, update: decision_escalation.DecisionUpdate) -> SimpleNamespace:
     """Append an update as the next row, as trio_gate.record does."""
     row = SimpleNamespace(id=max((r.id for r in rows), default=0) + 1, issue_key=KEY, topic=update.topic,
                           question=update.question, answer=update.answer, decided_by=update.decided_by,
@@ -63,7 +64,7 @@ class DecisionActionsTest(unittest.TestCase):
         self.assertEqual((tr.update.record["reversed"], tr.update.record["recommendation"], tr.update.record["intent"]),
                          (True, "Yes, split it", "run"))
         row = appended([answered()], tr.update)
-        self.assertTrue(da.is_reversed(row))
+        self.assertTrue(decision_escalation.is_reversed(row))
         self.assertTrue(any(isinstance(a, da.ForgeComment) and "reversed" in a.body.casefold() for a in tr.actions))
 
     def test_reroute_is_a_write_intent_on_the_decisions_own_row(self) -> None:
@@ -288,12 +289,12 @@ class CurrentIntentTest(unittest.TestCase):
     def test_a_reversals_done_phase_is_the_restarted_row(self):
         rows = [answered()]
         appended(rows, da.reverse_intent(rows[0], "No", stage="implement").update)
-        self.assertTrue(da.open_reversal(rows))
+        self.assertTrue(decision_escalation.open_reversal(rows))
         done = da.advance(rows, rows[-1].id, "implement", 2)
         self.assertEqual((done.record["restarted"], done.record["restart_attempt"], done.record.get("intent")),
                          ("implement", 2, None))
         appended(rows, done)
-        self.assertFalse(da.open_reversal(rows))
+        self.assertFalse(decision_escalation.open_reversal(rows))
         self.assertIsNone(da.current_intent(rows))
 
     def test_advance_and_block_apply_only_to_the_current_intent(self):
@@ -315,9 +316,9 @@ class HumanAnswerTest(unittest.TestCase):
 
     def test_a_persons_latest_answer_is_returned_for_its_decision_only(self):
         rows = [make_decision(id=1, decided_by="zach"), answered(id=2, decided_by="user", answer="Keep it")]
-        trio = da.DecisionUpdate("design", "Split the parser into two passes?", "Split", "trio", {})
+        trio = decision_escalation.DecisionUpdate("design", "Split the parser into two passes?", "Split", "trio", {})
         self.assertEqual(da.human_answer(rows, trio).answer, "Keep it")
-        self.assertIsNone(da.human_answer(rows, da.DecisionUpdate("design", "Another?", "Split", "trio", {})))
+        self.assertIsNone(da.human_answer(rows, decision_escalation.DecisionUpdate("design", "Another?", "Split", "trio", {})))
         self.assertIsNone(da.human_answer([answered(decided_by="trio")], trio))
 
 

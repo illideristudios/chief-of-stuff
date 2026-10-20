@@ -5,12 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Collection, Sequence
 
-from decision_escalation import (  # noqa: F401  re-exported: importers keep reaching these through here
-    MAX_TRIO_RETRIES, retryable_failure, DecisionUpdate, exhaust_retry, stamped_failures, is_reversed, is_restarted,
-    identity, latest, NeedsOwner, needs_owner, owner_waits, pending_decisions, open_reversal, reverse, restarted,
-    replacements, link_ask, preserve_ask_link, ask_decision, recover_ask_link, committed_ask_answer, answer_ask,
-    replacement_context, replacement_ask,
-)
+from decision_escalation import DecisionUpdate, identity, latest
 
 OPEN_STATES = frozenset({"open", "blocked"})
 CLOSED_STATES = frozenset({"answered", "reversed", "re-routed", "superseded"})

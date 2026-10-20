@@ -21,6 +21,7 @@ import cleanup
 import claude_adapter
 import clock as engine_clock
 import decision_actions
+import decision_escalation
 import dispatch_prompt
 import engine_facts
 import engine_merge
@@ -177,9 +178,9 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     earlier = store.decisions(key)
     retry_key = json.dumps([topic, question, instance, stage, attempt, context, options])
     retry = (_resume(store, key).get("trio_retries") or {}).get(retry_key, {})
-    prior = decision_actions.latest(earlier).get((topic, question, instance))
-    failures = max(retry.get("failures", 0), decision_actions.stamped_failures(prior, context, options, stage, attempt))
-    if (retry and prior is not None and not prior.answer and decision_actions.retryable_failure(prior.record)
+    prior = decision_escalation.latest(earlier).get((topic, question, instance))
+    failures = max(retry.get("failures", 0), decision_escalation.stamped_failures(prior, context, options, stage, attempt))
+    if (retry and prior is not None and not prior.answer and decision_escalation.retryable_failure(prior.record)
             and datetime.fromisoformat(retry["retry_at"]) > clock()):
         return None
     outcome = trio_gate.decide(decision, earlier, resolved, personas,
@@ -188,7 +189,7 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
     rows = store.decisions(key)
     data = _resume(store, key)
     retries = data.get("trio_retries") or {}
-    if len(rows) > len(earlier) and decision_actions.retryable_failure(rows[-1].record):
+    if len(rows) > len(earlier) and decision_escalation.retryable_failure(rows[-1].record):
         delay = min(3600, 60 * 2 ** min(failures, 6))
         retries[retry_key] = {"failures": failures + 1,
                               "retry_at": (clock() + timedelta(seconds=delay)).isoformat()}
@@ -224,12 +225,12 @@ def _consultation_blocked(store: Any, key: str, resolved: policy.Policy, at: str
 
 def _link_replacement_asks(store: Any, key: str, replacements: list) -> None:
     for origin, segment in replacements:
-        pending = decision_actions.replacement_ask(origin, segment, store.decisions(key), store.asks(key))
+        pending = decision_escalation.replacement_ask(origin, segment, store.decisions(key), store.asks(key))
         if pending is None:
             continue
         spec, ask, prior = pending
         ask_id = ask.id if ask is not None else store.add_ask(key, **spec)
-        update = decision_actions.link_ask(prior, ask_id)
+        update = decision_escalation.link_ask(prior, ask_id)
         if update != prior:
             trio_gate.record(store, key, update)
 
@@ -237,15 +238,15 @@ def _link_replacement_asks(store: Any, key: str, replacements: list) -> None:
 def _settle_asks(store: Any, key: str) -> None:
     for ask in store.asks(key):
         rows = store.decisions(key)
-        linked = decision_actions.recover_ask_link(rows, ask)
+        linked = decision_escalation.recover_ask_link(rows, ask)
         if linked is not None:
             trio_gate.record(store, key, linked)
             rows = store.decisions(key)
-        answer = decision_actions.committed_ask_answer(rows, ask)
+        answer = decision_escalation.committed_ask_answer(rows, ask)
         if answer is not None:
             store.answer_ask(key, ask.id, answer)
         elif ask.answer:
-            settled = decision_actions.answer_ask(rows, ask)
+            settled = decision_escalation.answer_ask(rows, ask)
             if settled is not None:
                 trio_gate.record(store, key, settled)
 
@@ -255,7 +256,7 @@ def _sync_decision_interrupts(store: Any, item: Any, at: str, start: str = "impl
     """Derive one interrupt per decision attempt, changing only decision-scoped state."""
     key = item.issue_key
     desired = {}
-    pending_rows = (decision_actions.owner_waits(store.decisions(key), store.segments(key), store.asks(key), start, passed)
+    pending_rows = (decision_escalation.owner_waits(store.decisions(key), store.segments(key), store.asks(key), start, passed)
                     if item.forge_state != "closed" else ())
     for pending in pending_rows:
         scope = {"id": list(pending.decision_id), "stage": pending.stage, "attempt": pending.attempt}
@@ -293,9 +294,9 @@ def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at
     """#890: a permission request is never an owner decision. The guard's rule or the trio answers it; a split,
     unavailable or exhausted trio denies it, with the reason on the run's log. The answer is appended, never a delete."""
     store.answer_ask(key, ask.id, answer)
-    row = decision_actions.ask_decision(store.decisions(key), ask)
+    row = decision_escalation.ask_decision(store.decisions(key), ask)
     if row is not None and not (row.answer or "").strip():
-        trio_gate.record(store, key, decision_actions.DecisionUpdate(
+        trio_gate.record(store, key, decision_escalation.DecisionUpdate(
             row.topic, row.question, answer, "guard", {**row.record, "recommendation": answer, "settled_by": why}))
     store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
 
@@ -355,7 +356,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
             continue
         key = item.issue_key
         workflow = _workflow_for(policies, store, item)
-        replacements = decision_actions.replacements(store.decisions(key), store.segments(key), workflow.start,
+        replacements = decision_escalation.replacements(store.decisions(key), store.segments(key), workflow.start,
                                                      tuple(edge.gate for edge in workflow.edges if edge.gate))
         # Repair an interrupted ask/link write before accepting any direct answer.
         _link_replacement_asks(store, key, replacements)
@@ -378,8 +379,8 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
                     _settle_permission(store, key, ask, "deny", "the trio is unavailable: a limit or a quota holds it", at)
                     continue
                 break
-            row = decision_actions.ask_decision(store.decisions(key), ask)
-            topic, question, instance = decision_actions.identity(row) if row is not None else (
+            row = decision_escalation.ask_decision(store.decisions(key), ask)
+            topic, question, instance = decision_escalation.identity(row) if row is not None else (
                 "ask", ask.question, f"ask-{ask.id}")
             options = ("allow", "deny") if permission is not None else tuple(ask.options)
             choice = _choice(store, key, topic, question, options, resolved, policies.personas,
@@ -397,7 +398,7 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
             if not isinstance(prior, dict):
                 _interrupt(store, key, "ambiguity", row.question, at, scope={"stage": segment.stage})
                 continue
-            context = decision_actions.replacement_context(row, segment)
+            context = decision_escalation.replacement_context(row, segment)
             _choice(store, key, row.topic, row.question, tuple(prior.get("options") or ()),
                     resolved, policies.personas, model, context=context,
                     instance=prior.get("instance", ""), stage=segment.stage, attempt=segment.attempt, clock=clock,
@@ -432,7 +433,7 @@ def _write_stage(forge: Any, store: Any, key: str, stage: str, expected: str,
         store.add_log(key, f"hold released for {stage}", store.clock().isoformat())
 
 
-def _apply(store: Any, key: str, update: decision_actions.DecisionUpdate | None) -> None:
+def _apply(store: Any, key: str, update: decision_escalation.DecisionUpdate | None) -> None:
     if update is not None:
         trio_gate.record(store, key, update)
 
@@ -895,7 +896,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         raise
 
                 restart = (stage != stages[key] and stage == _workflow_for(policies, store, by_key[key]).start
-                           and decision_actions.open_reversal(store.decisions(key), store.segments(key), stage))
+                           and decision_escalation.open_reversal(store.decisions(key), store.segments(key), stage))
                 if restart:
                     # Persist the restart route before its durable segment consumes the
                     # reversal, so a crash still retries/advances from workflow.start.
@@ -927,7 +928,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     # The intent's worker launched: a re-route is done, and a reversal's done phase is its restart.
                     _settle(store, key, decision_actions.advance, planned.intent_id, stage, action.attempt)
                 if isinstance(action, reconcile.Dispatch) and stage == _workflow_for(policies, store, by_key[key]).start:
-                    for rev in decision_actions.restarted(store.decisions(key), stage, action.attempt):
+                    for rev in decision_escalation.restarted(store.decisions(key), stage, action.attempt):
                         trio_gate.record(store, key, rev)
             elif isinstance(action, reconcile.Merge):
                 if board is not None and board.holds("merge") and stages[key] != "merge":

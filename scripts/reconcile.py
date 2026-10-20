@@ -8,6 +8,7 @@ from typing import Literal, Mapping, Protocol, Sequence
 
 import completion
 import decision_actions
+import decision_escalation
 import readiness
 import worker_health
 from model_port import RETRYABLE
@@ -234,10 +235,10 @@ def _gate(key: str, edge: Edge, policies: Policies, room: str | None, now: datet
         context = f"{latest.stage}-{latest.attempt}" if latest is not None else ""
         row = next((d for d in reversed(decisions)
                     if d.topic == edge.gate and d.question == "gate requires Zach's approval"), None)
-        if row is not None and not decision_actions.is_reversed(row):
+        if row is not None and not decision_escalation.is_reversed(row):
             record = getattr(row, "record", None)
             prior = record.get("decision") if isinstance(record, dict) and isinstance(record.get("decision"), dict) else None
-            if not decision_actions.retryable_failure(record) and not (isinstance(record, dict) and record.get("restarted")) and (
+            if not decision_escalation.retryable_failure(record) and not (isinstance(record, dict) and record.get("restarted")) and (
                     prior is None or prior.get("context", "") == context):
                 if (getattr(row, "answer", None) or "").strip() != "approve":
                     return Wait(key, "decision pending")
@@ -281,7 +282,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
            latest_segment: Segment | None = None) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
-    if decision_actions.pending_decisions(decisions, tuple(e.gate for e in workflow.edges if e.gate), history, workflow.start):
+    if decision_escalation.pending_decisions(decisions, tuple(e.gate for e in workflow.edges if e.gate), history, workflow.start):
         return Wait(key, "decision pending")
     if item.review_state == "changes_requested":
         return Wait(key, "changes requested on the forge")
@@ -413,7 +414,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
         return Wait(key, "human review" if item.human_review else "stage is outside the workflow")
-    if decision_actions.open_reversal(decisions, history, workflow.start):
+    if decision_escalation.open_reversal(decisions, history, workflow.start):
         return _work(key, workflow.start, workflow, history, policies, room)
     # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
     completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)

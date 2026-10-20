@@ -16,6 +16,7 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import decision_actions
+import decision_escalation
 import engine
 import issue_gate
 import model_port
@@ -1470,7 +1471,7 @@ class EngineTest(unittest.TestCase):
 
     def state(self, row):
         """A decision's current state: its identity's latest row."""
-        return decision_actions.state_of(decision_actions.latest(self.db.decisions(KEY))[decision_actions.identity(row)])
+        return decision_actions.state_of(decision_escalation.latest(self.db.decisions(KEY))[decision_escalation.identity(row)])
 
     def test_answered_decision_meeting_a_blocked_action_records_blocked_status(self):
         # M6 item 2 & #288: engine calls decision_actions when a planned action meets an answered decision.
@@ -1851,7 +1852,7 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
             self.run_pass(model=self._votes([("adopt", "approve"), ("concern", "reject"), ("adopt", "approve")]))
         self.assertFalse(getattr(self.forge, "bodies", []))
-        waits = decision_actions.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY))
+        waits = decision_escalation.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY))
         self.assertEqual([w.decision_id[0] for w in waits], ["scope"])  # a real decision for the owner
         self.assertIn("scope_proposal", self.db.resume(KEY))  # kept until the owner answers
 
@@ -1874,7 +1875,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(votes.n, 1)  # the first vote spends the budget: no further call, and the next consult waits
         consulted = [key for key in (KEY, other) if self.db.decisions(key)]
         self.assertEqual(len(consulted), 1)
-        self.assertTrue(decision_actions.retryable_failure(self.db.decisions(consulted[0])[-1].record))
+        self.assertTrue(decision_escalation.retryable_failure(self.db.decisions(consulted[0])[-1].record))
 
     def _trio(self, **fields):
         self.p = policy.parse({
@@ -1951,7 +1952,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.asks(KEY)[0].answer, "deny")
         latest = self.db.decisions(KEY)[-1]
         self.assertEqual((latest.answer, latest.decided_by), ("deny", "guard"))
-        self.assertEqual(decision_actions.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY)), [])
+        self.assertEqual(decision_escalation.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY)), [])
         self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
         self.assertTrue(any("the trio did not adopt an answer" in e.message for e in self.db.log(KEY)))
 
@@ -1970,7 +1971,7 @@ class EngineTest(unittest.TestCase):
                 self.run_pass(model=port)
                 answer = next(a.answer for a in self.db.asks(KEY) if a.id == ask_id)
                 self.assertEqual(answer, "deny")
-                self.assertEqual(decision_actions.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY)), [])
+                self.assertEqual(decision_escalation.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY)), [])
                 self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
 
     def test_an_unavailable_trio_denies_a_permission(self):
@@ -2029,7 +2030,6 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(model.n, 3)
 
     def test_a_reversed_decision_restarts_once_and_reconsults(self):
-        import decision_actions
         self._trio()
         self.forge.rows = [{"issue_key": KEY, "title": "Parser", "stage": "review", "forge_state": "open",
                             "review_state": "approved", "merge_state": "ready", "human_review": False}]
@@ -2040,7 +2040,7 @@ class EngineTest(unittest.TestCase):
         self.db.add_decision(KEY, topic="ask", question="Which parser?", answer="Split the parser",
                              decided_by="trio", record={"decision": {"options": ["Split the parser", "Keep the parser"],
                                                                     "context": "parser constraints"}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "ask", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question,
                              answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
         model = self._votes([("adopt", "Keep the parser")] * 3)
@@ -2361,12 +2361,11 @@ class EngineTest(unittest.TestCase):
     def test_a_failed_restart_launch_keeps_its_stage_move_and_hold(self):
         # #750 ruling 2 (rule 11; replaces the rollback test): every failed start keeps the stage move, human review
         # and the hold, and its pending_stage supersedes the restart route, which never drops silently.
-        import decision_actions
         self._merge_gate()
         self.p.stages["review"] = policy.Place("review", "critic")
         self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
                              record={"decision": {"options": ["Split", "Keep"]}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         with mock.patch.object(self, "launch", side_effect=RuntimeError("launch failed")):
             self.run_pass()
@@ -2395,7 +2394,6 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["plan"])
 
     def test_answering_split_asks_directly_releases_only_the_matching_decision(self):
-        import decision_actions
         self._merge_gate()
         self.p.stages["review"] = policy.Place("review", "critic")
         first, second = [self.db.add_ask(KEY, "review", 1, "s1", "Which parser?", ["Split", "Keep"], ctx)
@@ -2404,7 +2402,7 @@ class EngineTest(unittest.TestCase):
         self.run_pass(model=model)
         self.db.answer_ask(KEY, first, "Keep")
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "decision pending")])
-        rows = decision_actions.latest(self.db.decisions(KEY))
+        rows = decision_escalation.latest(self.db.decisions(KEY))
         self.assertEqual(rows[("ask", "Which parser?", f"ask-{first}")].answer, "Keep")
         self.assertIsNone(rows[("ask", "Which parser?", f"ask-{second}")].answer)
         self.db.answer_ask(KEY, second, "Split")
@@ -2436,7 +2434,6 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.asks(KEY)[0].answer, "Keep")
 
     def test_an_old_ask_answer_does_not_settle_its_split_replacement(self):
-        import decision_actions
         self._trio()
         self.db.clock = lambda: self.now
         self.db.upsert_item(KEY, stage="implement")
@@ -2446,7 +2443,7 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         self.finish("review")
         self.findings()
-        rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "ask", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         self.run_pass()
         self.finish("implement", 2)
@@ -2509,12 +2506,11 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY).get("interrupt"), interrupt)
 
     def test_failed_reversal_claim_does_not_leave_a_pending_stage(self):
-        import decision_actions
         self._merge_gate()
         self.p.stages["review"] = policy.Place("review", "critic")
         self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
                              record={"decision": {"options": ["Split", "Keep"]}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         for failure in (ValueError("slot taken"), RuntimeError("launch failed")):
             with self.subTest(failure=failure), mock.patch.object(engine.slots, "claim", side_effect=failure):
@@ -2527,12 +2523,11 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.forge.rows[0]["stage"], "implement")
 
     def test_reversal_launch_exit_rolls_back_stage_without_losing_resume(self):
-        import decision_actions
         self._merge_gate()
         self.p.stages["review"] = policy.Place("review", "critic")
         self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split",
                              record={"decision": {"options": ["Split", "Keep"]}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         with mock.patch.object(self, "launch", side_effect=SystemExit("launch exited")):
             with self.assertRaisesRegex(SystemExit, "launch exited"):
@@ -2865,12 +2860,11 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(sum(e.message == "limit: reached quota limit" for e in self.db.log(KEY)), 2)
 
     def test_reversal_crash_after_claim_recovers_replacement_after_completion(self):
-        import decision_actions
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
         self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
             "decision": {"options": ["Split", "Keep"], "context": "original"}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         # Durable worker and segment exist; crash prevented appending the restarted row.
         self.launch(KEY, "implement", 1, "builder")
@@ -2885,7 +2879,6 @@ class EngineTest(unittest.TestCase):
         self.assertIn("implement-1", self.db.decisions(KEY)[-1].record["decision"]["context"])
 
     def assert_reversal_claim_crash_recovers(self, stage, outcome):
-        import decision_actions
         import tomllib
         # Use the shipped plan -> implement -> review route; isolate the restart
         # from its separate out-of-band architect requirement.
@@ -2899,7 +2892,7 @@ class EngineTest(unittest.TestCase):
         self.findings()
         self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
             "decision": {"options": ["Split", "Keep"], "context": "original"}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         model = self._votes([("adopt", "Keep")] * 3)
         claim = engine.slots.claim
@@ -2945,11 +2938,10 @@ class EngineTest(unittest.TestCase):
         self.assert_reversal_claim_crash_recovers("merge", "done")
 
     def test_reversed_gate_waits_for_reworked_source_attempt(self):
-        import decision_actions
         self._merge_gate()
         model = self._votes([("adopt", "approve")] * 6)
         self.run_pass(model=model)
-        rev = decision_actions.reverse(self.db.decisions(KEY), "merge", "gate requires Zach's approval")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "merge", "gate requires Zach's approval")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         self.run_pass(model=model)
         self.assertEqual(model.n, 3)
@@ -2963,12 +2955,11 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.decisions(KEY)[-1].record["decision"]["context"], "review-2")
 
     def test_replacement_split_is_settled_until_a_human_answers(self):
-        import decision_actions
         self._trio()
         self.db.upsert_item(KEY, stage="implement")
         self.db.add_decision(KEY, topic="ask", question="Which parser?", answer="Split", record={
             "decision": {"options": ["Split", "Keep"], "context": "original"}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "ask", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "ask", "Which parser?")
         self.db.add_decision(KEY, topic=rev.topic, question=rev.question, record=rev.record)
         model = self._votes([("concern", "Keep")] * 6)
         self.run_pass(model=model)
@@ -2991,13 +2982,12 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(model.n, 3)
 
     def _retryable_replacement(self):
-        import decision_actions
         self._trio()
         self.db.clock = lambda: self.now
         self.db.upsert_item(KEY, stage="implement")
         self.db.add_decision(KEY, topic="design", question="Which parser?", answer="Split", record={
             "decision": {"options": ["Split", "Keep"], "context": "original", "instance": "parser"}})
-        rev = decision_actions.reverse(self.db.decisions(KEY), "design", "Which parser?")
+        rev = decision_escalation.reverse(self.db.decisions(KEY), "design", "Which parser?")
         self.db.add_decision(KEY, rev.topic, rev.question, rev.answer, rev.decided_by, rev.record)
         self.run_pass()
         self.finish("implement")
@@ -3038,7 +3028,6 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("trio_retries", self.db.resume(KEY))
 
     def test_replacement_adoption_commits_its_link_before_answering_the_ask(self):
-        import decision_actions
         ask_id = self._linked_retryable_replacement()
         model = self._votes([("adopt", "Keep")] * 3)
         with mock.patch.object(self.db, "answer_ask", side_effect=SystemExit("crash before ask answer")):
@@ -3053,12 +3042,11 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         ask, = self.db.asks(KEY)
         self.assertEqual(ask.answer, "Keep")
-        self.assertEqual(decision_actions.identity(decision_actions.ask_decision(self.db.decisions(KEY), ask)),
+        self.assertEqual(decision_escalation.identity(decision_escalation.ask_decision(self.db.decisions(KEY), ask)),
                          ("design", "Which parser?", "parser"))
         self.assertEqual(model.n, 3)
 
     def test_recovery_links_a_historical_ask_to_its_committed_adoption_without_a_model(self):
-        import decision_actions
         ask_id = self._linked_retryable_replacement()
         prior = self.db.decisions(KEY)[-1]
         record = {key: value for key, value in prior.record.items() if key != "answer_ask_id"}
@@ -3067,10 +3055,10 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         ask, = self.db.asks(KEY)
         self.assertEqual((ask.id, ask.answer), (ask_id, "Keep"))
-        row = decision_actions.ask_decision(self.db.decisions(KEY), ask)
+        row = decision_escalation.ask_decision(self.db.decisions(KEY), ask)
         self.assertEqual(row.answer, "Keep")
         self.assertEqual(row.record["answer_ask_id"], ask_id)
-        self.assertEqual({decision_actions.identity(row) for row in self.db.decisions(KEY)},
+        self.assertEqual({decision_escalation.identity(row) for row in self.db.decisions(KEY)},
                          {("design", "Which parser?", "parser")})
 
     def test_replacement_loop_settles_adoption_when_a_sibling_ask_is_limit_blocked(self):

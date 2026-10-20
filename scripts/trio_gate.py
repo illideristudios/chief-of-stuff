@@ -6,7 +6,8 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any, Callable, Mapping, Sequence
 
-from decision_actions import DecisionUpdate, exhaust_retry, human_answer, identity, preserve_ask_link, retryable_failure
+from decision_actions import human_answer
+from decision_escalation import DecisionUpdate, exhaust_retry, identity, preserve_ask_link, retryable_failure
 from model_port import Failure, Model, Reply, Request, draw
 from policy import Persona, Policy, PolicyError
 

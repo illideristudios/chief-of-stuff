@@ -12,6 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 import decision_actions  # noqa: E402
+import decision_escalation  # noqa: E402
 import model_port  # noqa: E402
 import policy  # noqa: E402
 import store  # noqa: E402
@@ -236,13 +237,12 @@ class GateTest(unittest.TestCase):
         })
 
     def test_direct_answer_settlement_belongs_to_decision_actions(self):
-        import decision_actions
         ask_id = self.store.add_ask(KEY, "implement", 1, "session", self.decision.question, list(OPTIONS), "ctx")
         decision = replace(self.decision, topic="ask", instance=f"ask-{ask_id}", context="ctx")
         self.consult([reply("concern")] * 3, decision=decision)
         self.store.answer_ask(KEY, ask_id, OPTIONS[1])
         ask, = self.store.asks(KEY)
-        settled = decision_actions.answer_ask(self.store.decisions(KEY), ask)
+        settled = decision_escalation.answer_ask(self.store.decisions(KEY), ask)
         self.assertEqual((settled.topic, settled.question, settled.answer, settled.decided_by),
                          ("ask", ask.question, OPTIONS[1], "user"))
         self.assertEqual(settled.record["recommendation"], OPTIONS[1])
@@ -253,25 +253,24 @@ class GateTest(unittest.TestCase):
             mismatched = SimpleNamespace(**{name: getattr(ask, name) for name in
                                            ("id", "question", "options", "context", "answer")})
             setattr(mismatched, field, value)
-            self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), mismatched))
+            self.assertIsNone(decision_escalation.answer_ask(self.store.decisions(KEY), mismatched))
         self.store.add_decision(KEY, settled.topic, settled.question, settled.answer, settled.decided_by, settled.record)
-        self.assertIsNone(decision_actions.answer_ask(self.store.decisions(KEY), ask))
+        self.assertIsNone(decision_escalation.answer_ask(self.store.decisions(KEY), ask))
 
     def test_needs_owner_reads_only_the_latest_row_for_a_decision_attempt(self):
-        import decision_actions as actions
-        row = actions.DecisionUpdate("plan", "Gate?", None, "zach", {
+        row = decision_escalation.DecisionUpdate("plan", "Gate?", None, "zach", {
             "error": "gate unavailable", "decision": {
                 "stage": "implement", "attempt": 1, "context": "implement-1"}})
-        expected = actions.NeedsOwner(("plan", "Gate?", ""), "implement", 1, "gate unavailable")
-        self.assertEqual(actions.needs_owner([row]), expected)
+        expected = decision_escalation.NeedsOwner(("plan", "Gate?", ""), "implement", 1, "gate unavailable")
+        self.assertEqual(decision_escalation.needs_owner([row]), expected)
         # Split, hold and exhaustion need no special eligibility rule.
         for record in ({}, {"recommendation": "hold"}, {"retry_exhausted": 8}, None):
             pending = replace(row, record=record)
-            self.assertIsNotNone(actions.needs_owner([pending]))
+            self.assertIsNotNone(decision_escalation.needs_owner([pending]))
         for settled in (replace(row, answer="approve"), replace(row, decided_by="trio"),
                         replace(row, decided_by="")):
-            self.assertIsNone(actions.needs_owner([row, settled]))
-        self.assertIsNone(actions.needs_owner([]))
+            self.assertIsNone(decision_escalation.needs_owner([row, settled]))
+        self.assertIsNone(decision_escalation.needs_owner([]))
 
     def test_a_new_context_cannot_reuse_an_unanswered_exhaustion(self):
         decision = replace(self.decision, context="implement-1")
@@ -301,7 +300,6 @@ class GateTest(unittest.TestCase):
         self.assertEqual(row.record["recommendation"], "hold")
 
     def test_invalid_options_are_escalated_and_deduplicated_by_the_use_case(self):
-        import decision_actions as actions
         decision = replace(self.decision, options=(), topic="ask", instance="ask-1",
                            context="ctx", stage="implement", attempt=1)
         self.store.add_decision(KEY, decision.topic, decision.question, record={
@@ -313,38 +311,36 @@ class GateTest(unittest.TestCase):
         self.assertEqual(model.requests, [])
         self.assertEqual(len(self.store.decisions(KEY)), 2)
         row = self.store.decisions(KEY)[-1]
-        self.assertIsNotNone(actions.needs_owner([row]))
+        self.assertIsNotNone(decision_escalation.needs_owner([row]))
         self.assertEqual(row.record["answer_ask_id"], 17)
         self.assertFalse(row.record["unanimous"])
         self.assertEqual(row.record["decision"], {**asdict(decision), "options": [], "tags": ["design"]})
         self.assertIn("at least two", row.record["error"])
 
     def test_replacement_ask_specification_and_link_are_decision_updates(self):
-        import decision_actions
         from types import SimpleNamespace
         origin = SimpleNamespace(topic="design", question=self.decision.question, record={
             "decision": {"options": list(OPTIONS), "context": "original", "instance": "parser"}})
         segment = SimpleNamespace(stage="implement", attempt=2)
-        context = decision_actions.replacement_context(origin, segment)
+        context = decision_escalation.replacement_context(origin, segment)
         record = {"decision": {**origin.record["decision"], "context": context}, "unanimous": False}
         row = SimpleNamespace(topic=origin.topic, question=origin.question, answer=None,
                               decided_by="zach", record=record)
-        spec, existing, pending = decision_actions.replacement_ask(origin, segment, [row], [])
-        self.assertIsInstance(pending, decision_actions.DecisionUpdate)
+        spec, existing, pending = decision_escalation.replacement_ask(origin, segment, [row], [])
+        self.assertIsInstance(pending, decision_escalation.DecisionUpdate)
         self.assertIsNone(existing)
         self.assertEqual(spec, dict(stage="implement", attempt=2, session_id="", question=row.question,
                                     options=list(OPTIONS), context=context))
-        update = decision_actions.link_ask(pending, 42)
-        self.assertIsInstance(update, decision_actions.DecisionUpdate)
+        update = decision_escalation.link_ask(pending, 42)
+        self.assertIsInstance(update, decision_escalation.DecisionUpdate)
         self.assertEqual((update.topic, update.question, update.answer, update.decided_by),
                          (row.topic, row.question, None, "zach"))
         self.assertEqual(update.record, {**record, "answer_ask_id": 42})
         self.assertNotIn("answer_ask_id", row.record)
 
     def test_decision_actions_reverse_and_restarted_manage_board_reversals(self):
-        import decision_actions
         self.consult([reply()] * 3)
-        rev = decision_actions.reverse(self.store.decisions(KEY), self.decision.topic, self.decision.question)
+        rev = decision_escalation.reverse(self.store.decisions(KEY), self.decision.topic, self.decision.question)
         self.store.add_decision(KEY, topic=rev.topic, question=rev.question,
                                 answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
         first, second = self.store.decisions(KEY)
@@ -354,16 +350,15 @@ class GateTest(unittest.TestCase):
         self.assertEqual(second.record["recommendation"], "Split the parser")
         self.assertEqual(second.record["decision"]["options"], list(OPTIONS))
         with self.assertRaisesRegex(ValueError, "adopted"):
-            decision_actions.reverse(self.store.decisions(KEY), self.decision.topic, self.decision.question)
-        restarted = decision_actions.restarted(self.store.decisions(KEY), "implement")
+            decision_escalation.reverse(self.store.decisions(KEY), self.decision.topic, self.decision.question)
+        restarted = decision_escalation.restarted(self.store.decisions(KEY), "implement")
         self.assertEqual(len(restarted), 1)
         self.store.add_decision(KEY, topic=restarted[0].topic, question=restarted[0].question,
                                 answer=restarted[0].answer, decided_by=restarted[0].decided_by,
                                 record=restarted[0].record)
-        self.assertEqual(decision_actions.restarted(self.store.decisions(KEY), "implement"), [])
+        self.assertEqual(decision_escalation.restarted(self.store.decisions(KEY), "implement"), [])
 
     def test_decide_reuses_matching_decision_and_reconsults_on_new_options_context_reversal_or_retryable_failure(self):
-        import decision_actions
         model = FakeModel([reply()] * 12)
         got = trio_gate.decide(self.decision, self.store.decisions(KEY), self.policy, PERSONAS, model, self.store)
         self.assertEqual((got.recommendation, got.unanimous, len(model.requests)), ("Split the parser", True, 3))
@@ -376,7 +371,7 @@ class GateTest(unittest.TestCase):
                                FakeModel([reply(choice="Keep the parser")] * 3), self.store)
         self.assertEqual((got.recommendation, got.unanimous), ("Keep the parser", True))
         # A reversed or restarted row is unsettled and reconsults the trio.
-        rev = decision_actions.reverse(self.store.decisions(KEY), refined.topic, refined.question)
+        rev = decision_escalation.reverse(self.store.decisions(KEY), refined.topic, refined.question)
         self.store.add_decision(KEY, topic=rev.topic, question=rev.question,
                                 answer=rev.answer, decided_by=rev.decided_by, record=rev.record)
         got = trio_gate.decide(refined, self.store.decisions(KEY), self.policy, PERSONAS,
@@ -483,7 +478,7 @@ class TrioModelsTest(unittest.TestCase):
         self.assertEqual([r.timeout_s for r in self.requests], [trio_gate.TIMEOUT_S])  # min(TIMEOUT_S, more than that); no further call
         row = self.store.decisions(KEY)[-1]
         self.assertEqual(row.decided_by, "")
-        self.assertTrue(decision_actions.retryable_failure(row.record))
+        self.assertTrue(decision_escalation.retryable_failure(row.record))
         left[0] = 30.0
         trio_gate.consult(replace(self.decision, question="Short?"), self.policy, PERSONAS, self.port(), self.store,
                           remaining=lambda: left[0])

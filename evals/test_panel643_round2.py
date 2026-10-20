@@ -11,6 +11,7 @@ from urllib.parse import urlencode
 from evals import test_m6_store_board as fixtures
 from evals import test_notify as notices
 import decision_actions as da
+import decision_escalation
 import notify
 import pages
 import reconcile
@@ -20,7 +21,7 @@ KEY, NOW = fixtures.KEY, fixtures.NOW
 
 def current(db, row):
     """A decision's state: its identity's latest row (rows are append-only)."""
-    return da.state_of(da.latest(db.decisions(row.issue_key))[da.identity(row)])
+    return da.state_of(decision_escalation.latest(db.decisions(row.issue_key))[decision_escalation.identity(row)])
 
 
 def decide(db, key, topic, question, answer=None, **record):
