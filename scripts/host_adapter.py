@@ -98,10 +98,23 @@ def register(runtime: str, request: Request, env: dict[str, str]) -> tuple[list[
     if runtime == "cursor":
         tree = Path(request.cwd)
         config = tree / ".cursor" / "mcp.json"
+        ours = {"mcpServers": {"engine": {"command": command, "args": args, "env": binding}}}
         if config.exists():
-            raise ShellError("the worker tree already has .cursor/mcp.json; refusing to replace it")
+            try:
+                found = json.loads(config.read_text()).get("mcpServers")
+            except (ValueError, AttributeError, OSError):
+                found = None
+            earlier = found.get("engine") if isinstance(found, dict) and set(found) == {"engine"} else None
+            given = earlier.get("args") if isinstance(earlier, dict) else None
+            bound = earlier.get("env") if isinstance(earlier, dict) else None
+            # The engine's own channel from an earlier run (any release's engine_mcp.py, a CHIEF_ binding) is
+            # replaced on a retry; a second registration of this run, or anything else in the tree, is kept.
+            ours_before = (isinstance(given, list) and len(given) == 1 and Path(str(given[0])).name == "engine_mcp.py"
+                           and isinstance(bound, dict) and any(str(key).startswith("CHIEF_") for key in bound))
+            if not (ours_before and bound != binding):
+                raise ShellError("the worker tree already has .cursor/mcp.json; refusing to replace it")
         config.parent.mkdir(exist_ok=True)
-        config.write_text(json.dumps({"mcpServers": {"engine": {"command": command, "args": args, "env": binding}}}))
+        config.write_text(json.dumps(ours))
         _exclude(tree, "/.cursor/mcp.json")
         return [], ""
     if runtime == "agy":
