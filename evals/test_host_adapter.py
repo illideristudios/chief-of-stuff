@@ -136,6 +136,16 @@ class HostAdapterTest(unittest.TestCase):
         host_adapter.register("cursor", Request("p", session_id="s2", cwd=str(tree)), retry)
         self.assertEqual(json.loads((tree / ".cursor" / "mcp.json").read_text())["mcpServers"]["engine"]["env"], retry)
 
+    def test_a_cursor_retry_after_a_release_install_replaces_the_older_versions_config(self):
+        # Architect review of #973: the earlier run's args name another release's engine_mcp.py.
+        tree = self.git_tree()
+        (tree / ".cursor").mkdir()
+        older = {"command": sys.executable, "args": ["/v/0.129.99-abc/scripts/engine_mcp.py"], "env": BINDING}
+        (tree / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"engine": older}}))
+        retry = {**BINDING, "CHIEF_SESSION_ID": "s2"}
+        host_adapter.register("cursor", Request("p", session_id="s2", cwd=str(tree)), retry)
+        self.assertEqual(json.loads((tree / ".cursor" / "mcp.json").read_text())["mcpServers"]["engine"]["env"], retry)
+
     def test_a_cursor_config_the_engine_did_not_write_is_never_replaced(self):
         tree = self.git_tree()
         (tree / ".cursor").mkdir()
