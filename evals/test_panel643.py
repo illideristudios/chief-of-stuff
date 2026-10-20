@@ -11,6 +11,7 @@ from urllib.parse import quote, urlencode
 from evals import test_m6_store_board as fixtures
 from evals import test_notify as notices
 import decision_actions as da
+import decision_escalation
 import issue_page
 import notify
 import pages
@@ -29,7 +30,7 @@ OTHER = "github:example/other#12"
 
 def current(db, row):
     """A decision's state: its identity's latest row (rows are append-only)."""
-    return da.state_of(da.latest(db.decisions(row.issue_key))[da.identity(row)])
+    return da.state_of(decision_escalation.latest(db.decisions(row.issue_key))[decision_escalation.identity(row)])
 
 
 def comments(db):
@@ -107,7 +108,7 @@ class PanelTest(unittest.TestCase):
         self.assertEqual((saved.status, saved.rerouted_to, saved.intent), ("reversed", "implement", "run"))
         # The reversal is appended on the decision's own identity, in develop's reversal shape.
         self.assertEqual(len(self.db.decisions(KEY)), 2)
-        self.assertTrue(da.is_reversed(self.db.decisions(KEY)[-1]))
+        self.assertTrue(decision_escalation.is_reversed(self.db.decisions(KEY)[-1]))
 
     def test_record_update_supersedes_old_resume_status(self):
         dec = self.db.add_decision(KEY, "design", "Choose")
