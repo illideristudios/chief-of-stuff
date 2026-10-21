@@ -333,3 +333,21 @@ Ok ↔ ∀b ∈ P, ∀c ∈ first-parent(start(b)..end(b)): Rm(c)      [unreadab
 ¬Ok → held for human review, each commit named, never silent
 ∴ other hosts run behind the same port, the same evidence and an equivalent guard
 ```
+
+## 14. Release installation
+
+One install puts one release everywhere chief-of-stuff runs. `chief-of-stuff install` copies the release and moves `current`, and the same install brings the Claude Code plugin to that release (owner, 2026-10-21, on finding the plugin at 0.129.69 while the engines ran 0.129.113: "that's not functionally complete").
+- **The plugin installs from the installed release.** The `chief-of-stuff` marketplace's source is the `current` release pointer, never a git worktree, so the plugin can only be at a release that was installed.
+- **The install updates the plugin.** After `current` moves, the install refreshes the marketplace and updates the plugin in every scope it is installed in. The `claude plugin` commands run through `claude_adapter.py`, because host adapters are the only modules that spawn a host CLI (section 4).
+- **A plugin left behind is reported, never silent.** When Claude Code is missing or the update fails, the engines keep the new release, and the install reports the plugin's version beside the release's. It never reports the release as installed everywhere. A running Claude session loads the new plugin when it restarts, and the install says so.
+
+```
+I := an install of release r completes        Pc := `current` points at r
+M := the marketplace source is `current`      U := the install refreshes the marketplace and updates every plugin scope, through claude_adapter
+Pl := every installed plugin scope is at r    F := the install reports the plugin's version beside r
+
+I → Pc            [chief_of_stuff.install]
+M ∧ Pc ∧ U → Pl   [this section]
+¬Pl → F           [this section; owner, 2026-10-21]
+∴ I → Pl ∨ F: no install leaves the plugin silently behind the engines
+```
