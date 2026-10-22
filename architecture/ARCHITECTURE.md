@@ -175,17 +175,27 @@ On the engine path, file ownership is declared on the issue, because the forge i
 - **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (owner, 2026-10-17).
 - **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
 - **The plan stage has its own scope.** A plan run writes only its own plan file, at a path fixed per issue under the workspace's plan directory, and reads everything. That implicit scope is the plan stage's declaration whenever the issue declares none, so plan runs never serialize on each other. A plan run that writes anywhere else is handled by the judged out-of-scope rule above.
-- **The plan proposes the implementation's scope.** The plan worker's report carries a proposed `## File ownership` section as a structured field, not as prose. Workers declare nothing, so the engine writes it onto the issue only after the trio approves it as a decision (topic `scope`), or the owner does. A trio split goes to the owner as a real decision. An unavailable trio is retried on a later pass. A proposal is never written unapproved, and the whole repository is never assumed.
+- **The plan proposes the implementation's scope.** The plan worker's report carries a proposed `## File ownership` section as a structured field, not as prose. Workers declare nothing, so the engine writes it onto the issue only after the trio approves it as a decision (topic `scope`), or the owner does. An unavailable trio is retried on a later pass. A unanimous rejection drops the proposal. A proposal is never written unapproved, and the whole repository is never assumed.
+- **A trio split replans once before it reaches the owner** (owner, 2026-10-22; #1005). When the trio splits on a plan's scope proposal, the engine writes no owner decision. It records the split as waiting on a replan, drops the proposal, and reruns the issue's plan stage. That plan's assignment carries each dissenting member's persona and reasoning, so the next proposal answers the dissent. A split on a proposal made by that rerun goes to the owner as a real decision, asked once (section 6).
+  - **Only cast votes split.** A split is cast votes that disagree. A failed vote is an outage under section 6, never a concern, so it never makes a split and never triggers a replan. This rule waits on that one being built (#928).
+  - **Bounded.** The dissent replan is one of the issue's scope replans and counts against the same bound, `SCOPE_REPLANS` in `reconcile.py`. A split with no replan left goes to the owner.
+  - **Where it lives.** Whether a split replans or goes to the owner is a pure judgement in `reconcile.py`, beside that bound, over the issue's plan segments and its scope decisions. `trio_gate.py` stays free of topics: the `Decision` the engine hands it names who a split waits on, the owner unless the judgement says replan. The rerun is the existing scope replan in `reconcile.py`, not a new dispatch path, and `dispatch_prompt.py` writes the dissent into the plan's assignment.
 
 ```
 Pl(I) := issue I is at the plan stage      Sp(I) := the plan scope: I's own plan file (write) plus read-only everything
 Pr(I) := the plan's proposed File ownership section      Ap(I) := the trio or the owner approved Pr(I)
 S(I) := I declares a valid scope
+Sx(p) := the trio split on proposal p, by cast votes      Rr(p) := p was made by a plan rerun after a split
+Lf(I) := I has a scope replan left under SCOPE_REPLANS    Re(I) := the engine reruns I's plan with the dissent
+Ow(p) := p goes to the owner as a decision                Fv := a trio vote failed
 
 Pl(I) ∧ ¬S(I) → I runs with Sp(I)     [plan runs touch only their own file, so they never serialize]
 Ap(I) → the engine writes Pr(I) onto I, so S(I) holds   [workers declare nothing; the engine writes after approval]
 ¬Ap(I) → I stays undeclared, and the later stages wait   [no unapproved scope, no whole-repository default]
-∴ planning runs in parallel, and implementation runs on approved, real scopes
+Sx(p) ∧ ¬Rr(p) ∧ Lf(I) → Re(I) ∧ ¬Ow(p)    [owner 2026-10-22, #1005: replan with the dissent]
+Sx(p) ∧ (Rr(p) ∨ ¬Lf(I)) → Ow(p), once     [#1005; section 6, asked once]
+Fv → ¬Sx(p)                                [section 6, #928: an outage is not a concern]
+∴ planning runs in parallel, implementation runs on approved, real scopes, and the owner sees a scope split only after a plan informed by the dissent split again
 ```
 
 ```
