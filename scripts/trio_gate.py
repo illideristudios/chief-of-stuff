@@ -141,10 +141,12 @@ def _ask(model: Model, persona: Persona, described: dict, entry: Any, stopped: l
 
 
 def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona], model: Model, store: Any,
-            failures: int = 0, remaining: Callable[[], float] | None = None) -> Outcome:
+            failures: int = 0, remaining: Callable[[], float] | None = None,
+            escalate_outage: bool = False) -> Outcome:
     """Consult all three under a resolved policy, then record adoption or escalation on the existing issue.
 
-    `failures` is the count of earlier outages; a retryable result carries the new count, and the cap, in its row."""
+    `failures` is the count of earlier outages; a retryable result carries the new count, and the cap, in its row.
+    `escalate_outage` records that one outage as the owner wait (#927, topic scope), so a later pass does not consult."""
     decision.validate()
     trio = select(policy, personas, decision.tags)
     described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
@@ -176,6 +178,11 @@ def consult(decision: Decision, policy: Policy, personas: Mapping[str, Persona],
         update = DecisionUpdate(update.topic, update.question, None, "zach", {
             **update.record, "retry_exhausted": failures + 1,
             "error": f"trio unavailable: every [models.trio] entry stopped on quota: {decision.question}"})
+    elif escalate_outage and retryable_failure(update.record):
+        # One row, already the owner wait. No retry row and no later consult (#927).
+        update = DecisionUpdate(update.topic, update.question, None, "zach", {
+            **update.record, "retry_exhausted": failures + 1,
+            "error": f"trio unavailable: {decision.question}"})
     elif retryable_failure(update.record):
         update = DecisionUpdate(update.topic, update.question, update.answer, "",
                                 {**update.record, "failures": failures + 1})
@@ -212,7 +219,7 @@ def _settled(decision: Decision, earlier: Sequence[Any]) -> Outcome | None:
 
 def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas: Mapping[str, Persona],
            model: Model | None, store: Any, failures: int = 0,
-           remaining: Callable[[], float] | None = None) -> Outcome:
+           remaining: Callable[[], float] | None = None, escalate_outage: bool = False) -> Outcome:
     """Reuse a settled decision for these options and context, or consult the trio once."""
     try:
         decision.validate()
@@ -221,7 +228,7 @@ def decide(decision: Decision, earlier: Sequence[Any], policy: Policy, personas:
             return settled
         if model is None:
             raise ValueError(decision.question)
-        return consult(decision, policy, personas, model, store, failures, remaining)
+        return consult(decision, policy, personas, model, store, failures, remaining, escalate_outage)
     except (PolicyError, ValueError) as exc:
         described = {**asdict(decision), "options": list(decision.options), "tags": list(decision.tags)}
         update = preserve_ask_link(earlier, DecisionUpdate(

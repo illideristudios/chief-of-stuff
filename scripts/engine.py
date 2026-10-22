@@ -185,7 +185,8 @@ def _choice(store: Any, key: str, topic: str, question: str, options: tuple[str,
         return None
     outcome = trio_gate.decide(decision, earlier, resolved, personas,
                                _metered(store, key, model) if model is not None else None, store, failures=failures,
-                               remaining=(lambda: (until - clock()).total_seconds()) if until is not None else None)
+                               remaining=(lambda: (until - clock()).total_seconds()) if until is not None else None,
+                               escalate_outage=topic == "scope")
     rows = store.decisions(key)
     data = _resume(store, key)
     retries = data.get("trio_retries") or {}
@@ -304,8 +305,8 @@ def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at
 def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock,
                    until: datetime | None = None) -> None:
     """#915: a plan's file_ownership proposal is a trio decision (topic `scope`). On approval the engine writes the
-    issue's section through the forge and its store rows; a rejection drops it. A split waits for the owner as a real
-    decision, and an unavailable trio is asked again next pass. Nothing is written unapproved."""
+    issue's section through the forge and its store rows; a rejection drops it. A split or an outage waits for the
+    owner as one open decision (#927), and a pass that finds it does not consult again. Nothing is written unapproved."""
     for item in store.items():
         key = item.issue_key
         proposal = _resume(store, key).get("scope_proposal")
@@ -322,7 +323,19 @@ def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at:
             continue
         if until is not None and clock() >= until:
             return
-        choice = _choice(store, key, "scope", f"Approve this file ownership for {key}? {listed}", ("approve", "reject"),
+        question = f"Approve this file ownership for {key}? {listed}"
+        newest = next((row for row in reversed(store.decisions(key))
+                       if row.topic == "scope" and row.question == question), None)
+        if newest is not None and not (isinstance(newest.answer, str) and newest.answer.strip()):
+            # An open scope row is the wait. A legacy retryable outage (decided_by "") becomes that wait once.
+            record = newest.record if isinstance(newest.record, dict) else {}
+            if not newest.decided_by and decision_escalation.retryable_failure(record):
+                trio_gate.record(store, key, decision_escalation.DecisionUpdate(
+                    newest.topic, newest.question, None, "zach", {
+                        **record, "retry_exhausted": record.get("failures") or True,
+                        "error": record.get("error") or newest.question}))
+            continue
+        choice = _choice(store, key, "scope", question, ("approve", "reject"),
                          resolved, policies.personas, model, context=listed, stage=stage,
                          attempt=int(proposal.get("attempt") or 0), clock=clock, until=until)
         if choice == "reject":
@@ -710,36 +723,41 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
 
-    facts = worker.collect(store, root, clock, trees,
-                   gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
-                                  now=clock(), require_green=require_green),
-                   finish=partial(_finish_worker, forge, store, policies=policies),
-                   require_green=require_green, teardown_command=teardown_command)
+    finish = partial(_finish_worker, forge, store, policies=policies)
 
-    # Collection judges each exited worker against its launch scope. Apply pending edits only
-    # after every segment for that issue ends, then give readiness the current declarations.
-    still_running = {segment.issue_key for segment in store.segments() if segment.ended_at is None}
-    refreshed = {key: declared for key, declared in scopes.items() if key in running and key not in still_running}
-    for key, declared in refreshed.items():
-        store.replace_file_ownership(key, declared or [])
-    if refreshed:
-        claims = tuple(claim for claim in facts.claims if claim.issue_key not in refreshed) + tuple(
-            readiness.Claim(key, path, mode) for key, declared in refreshed.items() for path, mode in declared or [])
-        if claims != facts.claims:
-            facts = replace(facts, claims=claims)
-    if is_dataclass(facts):
-        # §8 (#915): an undeclared issue's plan stage claims only its own plan file, so plan runs never serialize.
-        declared = {claim.issue_key for claim in facts.claims}
-        # Reads own nothing, so "reads everything" needs no claim; the plan mode holds only for a plan dispatch.
-        implicit = tuple(readiness.Claim(item.issue_key, ownership.plan_path(item.issue_key), readiness.PLAN)
-                         for item in store.items()
-                         if item.issue_key not in declared and item.forge_state != "closed"
-                         and (item.stage or _workflow_for(policies, store, item).start) == "plan")
-        if implicit:
-            facts = replace(facts, claims=facts.claims + implicit)
-        pending = tuple(item.issue_key for item in store.items() if _resume(store, item.issue_key).get("scope_proposal"))
-        if pending:
-            facts = replace(facts, scope_pending=pending)
+    def collect_facts(running_before):
+        gathered = worker.collect(store, root, clock, trees,
+                       gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
+                                      now=clock(), require_green=require_green),
+                       finish=finish,
+                       require_green=require_green, teardown_command=teardown_command)
+        # Collection judges each exited worker against its launch scope. Apply pending edits only
+        # after every segment for that issue ends, then give readiness the current declarations.
+        still_running = {segment.issue_key for segment in store.segments() if segment.ended_at is None}
+        refreshed = {key: declared for key, declared in scopes.items() if key in running_before and key not in still_running}
+        for key, declared in refreshed.items():
+            store.replace_file_ownership(key, declared or [])
+        if refreshed:
+            claims = tuple(claim for claim in gathered.claims if claim.issue_key not in refreshed) + tuple(
+                readiness.Claim(key, path, mode) for key, declared in refreshed.items() for path, mode in declared or [])
+            if claims != gathered.claims:
+                gathered = replace(gathered, claims=claims)
+        if is_dataclass(gathered):
+            # §8 (#915): an undeclared issue's plan stage claims only its own plan file, so plan runs never serialize.
+            declared = {claim.issue_key for claim in gathered.claims}
+            # Reads own nothing, so "reads everything" needs no claim; the plan mode holds only for a plan dispatch.
+            implicit = tuple(readiness.Claim(item.issue_key, ownership.plan_path(item.issue_key), readiness.PLAN)
+                             for item in store.items()
+                             if item.issue_key not in declared and item.forge_state != "closed"
+                             and (item.stage or _workflow_for(policies, store, item).start) == "plan")
+            if implicit:
+                gathered = replace(gathered, claims=gathered.claims + implicit)
+            pending = tuple(item.issue_key for item in store.items() if _resume(store, item.issue_key).get("scope_proposal"))
+            if pending:
+                gathered = replace(gathered, scope_pending=pending)
+        return gathered
+
+    facts = collect_facts(running)
 
     now = clock()
     at = now.isoformat()
@@ -827,6 +845,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     until = clock() + timedelta(seconds=TRIO_PASS_BUDGET_S)
     _route_asks(store, policies, model, at, clock, until)
     _settle_scopes(forge, store, policies, model, at, clock, until)
+    # #927: a worker can exit while the trio consults. Close it in this pass, or /workers keeps it running.
+    if any(segment.ended_at is None for segment in store.segments()):
+        later = collect_facts({segment.issue_key for segment in store.segments() if segment.ended_at is None})
+        if is_dataclass(later):
+            facts = later
     if is_dataclass(facts):
         # The trio may have answered asks since collect gathered them; plan from the answers it just stored.
         asks = tuple(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt)
