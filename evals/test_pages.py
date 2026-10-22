@@ -1213,6 +1213,18 @@ class AnswerTest(unittest.TestCase):
                 self.assertEqual(post(self.port, path, body, host=host, origin=origin).status, status)
         self.assertIsNone(self.answer())
 
+    def test_a_decision_linked_out_of_the_pages_dir_is_refused(self):
+        """#1009: a path built from the request resolves inside the pages dir or is refused, so a symlink out of it is
+        no decision: not served, not read, not answered."""
+        outside = self.root / "outside.json"
+        outside.write_text(self.json.read_text())
+        before = outside.read_bytes()
+        link = self.pages / "decision-linked.json"
+        link.symlink_to(outside)
+        self.assertEqual(get(self.port, "/decisions/linked").status, 404)
+        self.assertEqual(post(self.port, "/decisions/linked", b"key=B", origin=self.origin).status, 404)
+        self.assertEqual((outside.read_bytes(), link.is_symlink()), (before, True))
+
     def test_an_unreadable_decision_takes_no_answer(self):
         self.json.write_text("{")
         self.assertEqual(post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin).status, 409)
