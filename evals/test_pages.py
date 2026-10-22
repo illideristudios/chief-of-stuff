@@ -612,6 +612,33 @@ class RenderOnRequestTest(unittest.TestCase):
         self.assertIn(b"Draft release notes", get(self.port, "/").body)
         self.assertTrue((self.pages / "decisions.html").is_file())
 
+    def test_decisions_route_lists_store_decisions_and_matches_board_badge(self):
+        import store
+        db_path = self.root / "store.db"
+        store.migrate(db_path)
+        db = store.Store(db_path)
+        try:
+            now_iso = datetime.now(ZoneInfo(ZONE)).isoformat(timespec="seconds")
+            db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
+            db.add_decision("github:example/repo#42", "scope", "First store ask", asked_at=now_iso)
+            db.add_decision("github:example/repo#42", "design", "Second store ask", asked_at=now_iso)
+            db.add_decision("github:example/repo#42", "permission", "Answered store ask",
+                            answer="allow", decided_by="trio", asked_at=now_iso,
+                            record={"status": "answered", "answered_at": now_iso})
+        finally:
+            db.engine.dispose()
+        board = get(self.port, "/").body.decode()
+        decisions = get(self.port, "/decisions").body.decode()
+        self.assertIn('<span class="badge" title="2 pending">2</span>', board)
+        self.assertIn('<span class="badge" title="2 pending">2</span>', decisions)
+        self.assertIn("2 pending", decisions)
+        self.assertIn("PENDING · 2", decisions)
+        self.assertIn("1 completed today", decisions)
+        self.assertIn("COMPLETED · 1", decisions)
+        for text in ("First store ask", "Second store ask", "Answered store ask", "github:example/repo#42"):
+            with self.subTest(text=text):
+                self.assertIn(text, decisions)
+
     def test_an_unchanged_page_is_served_as_written(self):
         get(self.port, "/")
         before = self.board().stat().st_mtime_ns
