@@ -360,6 +360,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 d = decision_page.parse(json.loads(source.read_text()))
             except decision_page.BAD as e:
                 return self.send_error(409, f"the decision does not read: {e}")
+            if decision_page.is_answered(d, m[1], getattr(self.server, "root", None)):
+                return self.send_error(409, "the decision is already answered")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
                 return self.send_error(400, "an answer is one of the options' keys, or words")
             d["answer"] = {"key": key or None, "words": words, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
