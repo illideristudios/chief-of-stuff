@@ -303,7 +303,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = f"{path}.html"
         elif path.startswith("/decisions/"):
             m = ROUTE.fullmatch(path)
-            if not m or not (Path(self.directory) / f"decision-{m[1]}.json").is_file():
+            source = self._page(f"decision-{m[1]}.json") if m else None
+            if source is None or not source.is_file():
                 self.send_error(404, "no such decision")
                 return False
             self.path = f"/decision-{m[1]}.html"
@@ -331,10 +332,19 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self.banner and prior is not None:
                     with contextlib.suppress(OSError):
                         unrecord_look(pages, prior)
-        if name.startswith("issue-") and not self.banner and not (Path(self.directory) / name).is_file():
+        if name.startswith("issue-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
             self.send_error(404, "no task names this issue")  # issue_page.write removes the page then
             return False
         return True
+
+    def _page(self, name: str) -> Path | None:
+        """`name` resolved in the pages directory, or None when it resolves outside it (a `..`, a symlink out). Every
+        path built from the request goes through here: the realpath-and-prefix guard CodeQL's py/path-injection knows."""
+        base = os.path.realpath(self.directory)
+        checked = os.path.realpath(os.path.join(base, name))
+        if not checked.startswith(base + os.sep):
+            return None
+        return Path(checked)
 
     def _poke(self):
         """Wake the refresher when the cache is older than its interval; the GET never waits for it."""
@@ -491,7 +501,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
             return self._post_store_decision(form)
         m = ROUTE.fullmatch(route_path)
-        source = Path(self.directory) / f"decision-{m[1]}.json" if m else None
+        source = self._page(f"decision-{m[1]}.json") if m else None
         if source is None or not source.is_file():
             return self.send_error(404, "no such decision")
         try:
@@ -522,8 +532,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             for page in Path(self.directory).iterdir():
                 if RENDERED.fullmatch(page.name):
                     RENDERED_AT[str(page)] = 0, None, ""
+        # The slug read back from the directory, not the request, so no request data reaches the header (CodeQL's
+        # py/http-response-splitting); None only if the file vanished since, and the list is then the place to go.
+        slug = next((p.name[len("decision-"):-len(".json")] for p in Path(self.directory).iterdir()
+                     if p.name == f"decision-{m[1]}.json"), None)
         self.send_response(303)
-        self.send_header("Location", "/decisions" if form.get("back") == ["/decisions"] else f"/decisions/{m[1]}")
+        self.send_header("Location", "/decisions" if slug is None or form.get("back") == ["/decisions"] else f"/decisions/{slug}")
         self.send_header("Content-Length", "0")
         self.end_headers()
 
