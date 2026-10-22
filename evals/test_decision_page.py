@@ -151,6 +151,26 @@ class RenderTest(unittest.TestCase):
         self.assertNotIn("References", page)
 
 
+class WriteIfChangedTest(unittest.TestCase):
+    """write_if_changed keeps an unchanged page's mtime (#330) by comparing exact bytes (#338)."""
+
+    def test_a_page_that_differs_only_by_trailing_whitespace_is_rewritten(self):
+        # Must fail against a mutant that compares with rstrip(): trailing spaces are a real change.
+        path = Path(tempfile.mkdtemp()) / "page.html"
+        path.write_bytes(b"<p>x</p>\n")
+        os.utime(path, (1_000_000, 1_000_000))
+        dp.write_if_changed(path, "<p>x</p>\n  ")
+        self.assertEqual(path.read_bytes(), b"<p>x</p>\n  ")
+        self.assertNotEqual(path.stat().st_mtime, 1_000_000)
+
+    def test_exact_same_bytes_keep_the_mtime(self):
+        path = Path(tempfile.mkdtemp()) / "page.html"
+        path.write_bytes(b"<p>x</p>\n")
+        os.utime(path, (1_000_000, 1_000_000))
+        dp.write_if_changed(path, "<p>x</p>\n")
+        self.assertEqual(path.stat().st_mtime, 1_000_000)
+
+
 class ParseTest(unittest.TestCase):
     def test_holds_and_references_must_be_lists(self):
         # #228 review: a hold is read on every board and task page, so a wrong type is an unreadable decision, not a crash.

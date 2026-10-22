@@ -10,12 +10,12 @@ from __future__ import annotations
 from pathlib import Path
 
 from orphans import Claim
-from process_status import process_exists, registrations, running_trees
 
 Claims = dict[Path, list[Claim]]
 
 
-def registry_claims(root: Path) -> Claims:
+def registry_claims(root: Path, registrations, process_exists) -> Claims:
+    """`registrations` and `process_exists` come from the driver (`process_status`)."""
     out: Claims = {}
     for pid, record in registrations(root).items():
         live = process_exists(pid)
@@ -24,6 +24,9 @@ def registry_claims(root: Path) -> Claims:
     return out
 
 
-def one_shot_claims(trees: Path) -> Claims:
-    """A dead launcher claims nothing: its task's File ownership row still speaks for the tree."""
+def one_shot_claims(trees: Path, running_trees) -> Claims:
+    """A dead launcher claims nothing: its task's File ownership row still speaks for the tree.
+
+    `running_trees` comes from the driver (`process_status`).
+    """
     return {path.resolve(): [Claim(task, True)] for path, task in running_trees(trees).items()}

@@ -120,14 +120,14 @@ class RunnerCalendarTest(unittest.TestCase):
     def test_command_uses_given_mcp_config_and_allows_calendar_tool(self) -> None:
         case = run.Case("c", Path("/c"), {"prompt": "x"})
         cfg = run.calendar_mcp_config(Path("/r/events.json"), Path("/r/calls.jsonl"), "America/Chicago")
-        cmd = run.command(case, "baseline", "sonnet", "x", mcp_config=cfg)
+        cmd = run.claude_options(case.spec, mcp_config=cfg)
         self.assertEqual(json.loads(cmd[cmd.index("--mcp-config") + 1]), cfg)
         allowed = cmd[cmd.index("--allowedTools") + 1 : cmd.index("--disallowedTools")]
         self.assertIn(run.CALENDAR_TOOL, allowed)
         self.assertIn("--strict-mcp-config", cmd)
 
     def test_command_without_calendar_has_empty_mcp_config(self) -> None:
-        cmd = run.command(run.Case("c", Path("/c"), {"prompt": "x"}), "baseline", "sonnet", "x")
+        cmd = run.claude_options({})
         self.assertEqual(json.loads(cmd[cmd.index("--mcp-config") + 1]), {"mcpServers": {}})
         self.assertNotIn(run.CALENDAR_TOOL, cmd)
 

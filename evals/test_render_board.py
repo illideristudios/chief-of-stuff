@@ -662,13 +662,9 @@ class CliTest(unittest.TestCase):
         self.assertIn(">ANSWERED · B<", (pages / "decision-cache-size.html").read_text())
         self.assertIn(">PENDING<", (pages / "decision-deploy-window.html").read_text())
         self.assertEqual((pages / "decision-broken.html").exists(), False)
-        # The board's DECISIONS panel lists the same pending entries as decisions.html, the unreadable one apart.
-        self.assertIn('<a class="panels-link" href="/decisions">decisions page</a><b class="panels-count">1</b>', board)
-        self.assertIn('<a class="panels-name" href="/decisions/deploy-window">Decide deploy-window</a>', board)
-        # #349: the artboard's label. Its six tiles have no DECISIONS; the pending count is the tab bar's badge.
-        self.assertNotIn('<span class="panels-label">DECISIONS</span>', board)
-        self.assertIn('<span class="badge" title="1 pending">1</span>', board)
-        self.assertIn('decision-broken.json', board)
+        # #208: detail stays on the Decisions page; the board's tab retains its pending count.
+        self.assertIn('<a href="/decisions" data-tone="pending">Decisions<span class="badge" title="1 pending">1</span></a>', board)
+        self.assertNotIn('id="decisions"', board)
 
     def test_summary_line_counts_long_items(self) -> None:
         root = Path(tempfile.mkdtemp())
@@ -1452,13 +1448,12 @@ Coordinator: coordinator. Board: board-7.
 class SectionOrderTest(unittest.TestCase):
     """The page's sections appear in the Flow artboard's order (#259).
 
-    Tabs, header, tiles, BUILD, the MERGE ORDER / DECISIONS / WORKERS panels, then the Flow charts (this tracker
-    has no stage history, so none; test_board_flow_design.py pins their place after the panels).
+    Tabs, header, tiles, BUILD, then the Flow charts (this tracker
+    has no stage history, so none; test_board_flow_design.py pins their place after BUILD).
     Due next, Blocked, the 24-hour day strip, Lanes and Sessions are not in the design, so none is drawn.
     """
 
-    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>",
-             '<div class="panels">']
+    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>"]
 
     def setUp(self) -> None:
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
@@ -1473,8 +1468,8 @@ class SectionOrderTest(unittest.TestCase):
         # This tracker has no stage history, so the two Flow charts are not drawn (test_board_flow_design.py pins them).
         h2, ids, sections = outline(self.html)
         self.assertEqual(h2, ["Build"])
-        self.assertEqual(ids, ["flow", "merge", "decisions", "workers"])
-        self.assertEqual(sections, 4)
+        self.assertEqual(ids, ["flow"])
+        self.assertEqual(sections, 1)
 
 
 class InlineMarksTest(unittest.TestCase):
@@ -1957,7 +1952,7 @@ class LaneColumnsTest(unittest.TestCase):
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         html = rb.render(TRACKER_LANED, cfg, NOW, lanes=self.LANES)
         self.assertIn('<section id="flow"><h2>Build</h2>', html)
-        build = html.split('<section id="flow">')[1].split('<div class="panels">')[0]
+        build = html.split('<section id="flow">')[1].split('</figure></section>')[0]
         self.assertIn("Cut the release", build)
         self.assertNotIn("Console", build)
         self.assertNotIn("columns-foot", html)
@@ -1965,7 +1960,7 @@ class LaneColumnsTest(unittest.TestCase):
         # A tracker with no lanes has no stage columns, and its tasks are not drawn in BUILD at all.
         plain = rb.render(TRACKER, cfg, NOW)
         self.assertIn('<figure class="columns"', plain)
-        self.assertNotIn("<table", plain.split('<section id="flow">')[1].split('<div class="panels">')[0])
+        self.assertNotIn("<table", plain.split('<section id="flow">')[1].split('</figure></section>')[0])
         self.assertNotIn('class="columns-card', plain)  # the bare word is also in the page's CSS
 
 
