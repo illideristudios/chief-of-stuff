@@ -163,6 +163,16 @@ def _issue_identity(name: str, source: bool = False):
     return bytes.fromhex(token[1:]).decode() if token.startswith("k") else int(token)
 
 
+def inside(pages_dir: Path | str, name: str) -> Path | None:
+    """`name` resolved in pages_dir, or None when it resolves outside it (a `..`, a symlink out): the realpath-and-prefix
+    guard CodeQL's py/path-injection recognises, for every path built from a request."""
+    base = os.path.realpath(pages_dir)
+    checked = os.path.realpath(os.path.join(base, name))
+    if not checked.startswith(base + os.sep):
+        return None
+    return Path(checked)
+
+
 def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()) -> str:
     """Re-render the page `name` when a source is newer than its last render, or differs in bytes from what that
     render consumed, inside one of `slots`. Returns the render error, or "". On an error the last good file stays
@@ -177,11 +187,9 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
     # directly in pages_dir, and everything after uses the checked path (and the name taken from it), not the raw one.
     if not RENDERED.fullmatch(name):
         return ""
-    base = os.path.realpath(pages_dir)
-    checked = os.path.realpath(os.path.join(base, name))
-    if not checked.startswith(base + os.sep):
+    target = inside(pages_dir, name)
+    if target is None:
         return ""
-    target = Path(checked)
     name = target.name
     key = str(pages_dir / name)  # what the handler's page_lock and RENDERED_AT use, so the locks and records agree
     try:
@@ -338,13 +346,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return True
 
     def _page(self, name: str) -> Path | None:
-        """`name` resolved in the pages directory, or None when it resolves outside it (a `..`, a symlink out). Every
-        path built from the request goes through here: the realpath-and-prefix guard CodeQL's py/path-injection knows."""
-        base = os.path.realpath(self.directory)
-        checked = os.path.realpath(os.path.join(base, name))
-        if not checked.startswith(base + os.sep):
-            return None
-        return Path(checked)
+        """`inside` this server's pages directory: every path the handler builds from the request goes through here."""
+        return inside(self.directory, name)
 
     def _poke(self):
         """Wake the refresher when the cache is older than its interval; the GET never waits for it."""
