@@ -1019,8 +1019,42 @@ class AnswerTest(unittest.TestCase):
         page = get(self.port, "/decisions/cache-ttl").body.decode()
         self.assertIn(">ANSWERED · B<", page)
         self.assertIn("answered, saved", page)
+        for absent in ("<form", 'type="radio"', 'name="words"', "<button"):
+            self.assertNotIn(absent, page)
         listing = get(self.port, "/decisions").body.decode()
         self.assertIn('<div class="row pend saved">', listing)
+
+    def test_an_answered_decision_refuses_a_second_answer(self):
+        first = post(self.port, "/decisions/cache-ttl", b"key=B&words=first", origin=self.origin)
+        self.assertEqual(first.status, 303)
+        again = post(self.port, "/decisions/cache-ttl", b"key=A&words=second", origin=self.origin)
+        self.assertEqual(again.status, 409)
+        self.assertIn(b"already answered", again.body)
+        saved = self.answer()
+        self.assertEqual((saved["key"], saved["words"]), ("B", "first"))
+        d = json.loads(self.json.read_text())
+        d["answer"] = "A"
+        self.json.write_text(json.dumps(d))
+        refused = post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin)
+        self.assertEqual(refused.status, 409)
+        self.assertEqual(json.loads(self.json.read_text())["answer"], "A")
+
+    def test_a_decision_answered_in_the_tracker_refuses_a_page_post(self):
+        self.tracker.write_text(self.tracker.read_text().replace(
+            "| time | item | Robin's words |\n|---|---|---|\n",
+            "| time | item | Robin's words |\n|---|---|---|\n"
+            "| 18:54 | decision-cache-ttl | let's go ahead and fix the toml issues preventing page rendering please |\n",
+            1))
+        page = get(self.port, "/decisions/cache-ttl").body.decode()
+        self.assertIn(">ANSWERED<", page)
+        self.assertIn('<div class="card answered">', page)
+        self.assertNotIn("<form", page)
+        self.assertNotIn('type="radio"', page)
+        before = self.json.read_text()
+        refused = post(self.port, "/decisions/cache-ttl", b"key=B&words=override", origin=self.origin)
+        self.assertEqual(refused.status, 409)
+        self.assertIsNone(self.answer())
+        self.assertEqual(self.json.read_text(), before)
 
     def test_a_write_in_is_saved_with_the_words_and_goes_back_to_the_list(self):
         resp = post(self.port, "/decisions/cache-ttl", "words=neither — ask the owner&back=/decisions".encode(),
