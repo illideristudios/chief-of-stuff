@@ -14,7 +14,8 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
             hold_stages: Sequence[str]) -> bool:
     """Re-plan with shared store inputs and current policies, then log one attempt without retrying.
 
-    Resume data holds issue_type, room and attempt-keyed review_findings; absent findings remain unknown.
+    Resume data holds issue_type and room; findings come from the latest review's report, and without one they
+    remain unknown.
     `inputs` is the same issue context `engine._planning_inputs` builds for the pass; `hold_stages` is the
     board's stages that wait for a human.
     """

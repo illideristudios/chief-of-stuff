@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Literal, Mapping, Protocol, Sequence
@@ -38,6 +39,12 @@ class Segment(Protocol):
     started_at: datetime | str
     ended_at: datetime | str | None
     outcome: str | None
+
+
+class Report(Protocol):
+    stage: str
+    attempt: int
+    findings: object
 
 
 class Decision(Protocol):
@@ -84,20 +91,25 @@ def suite_hold_action(item: WorkItem, hold: object, history: Sequence[Segment], 
     return "accept" if observed is False else "wait"
 
 
-def review_findings(state: Mapping[str, object], history: Sequence[Segment]) -> dict[str, int] | None:
-    """Severity counts from the latest completed review, or None when unknown or stale."""
-    latest = max((s for s in history if s.stage == "review" and s.ended_at),
-                 key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
-    record = state.get("review_findings")
-    # TODO #639: replace this attempt-keyed resume bridge with structured findings from the latest review.
+def latest_review(history: Sequence[Segment]) -> Segment | None:
+    """The newest completed review segment, whatever its outcome."""
+    return max((s for s in history if s.stage == "review" and s.ended_at),
+               key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
+
+
+def review_findings(history: Sequence[Segment], reports: Sequence[Report]) -> dict[str, int] | None:
+    """Severity counts from the latest done review's newest report, or None when unknown or stale.
+
+    `reports` are the latest review attempt's segment reports, oldest first; no findings counts as zero.
+    """
+    latest = latest_review(history)
+    report = reports[-1] if reports else None
     # Forge approval and threads have no severity counts; neither means a worker reported zero findings.
-    if latest is None or latest.outcome != "done" or not isinstance(record, dict):
+    if (latest is None or latest.outcome != "done" or report is None
+            or report.stage != "review" or report.attempt != latest.attempt or not isinstance(report.findings, list)
+            or any(not isinstance(f, dict) or f.get("severity") not in SEVERITIES for f in report.findings)):
         return None
-    counts = record.get("counts")
-    if (record.get("attempt") != latest.attempt or not isinstance(counts, dict)
-            or any(k not in SEVERITIES or type(v) is not int or v < 0 for k, v in counts.items())):
-        return None
-    return counts
+    return dict(Counter(f["severity"] for f in report.findings))
 
 
 @dataclass(frozen=True)
