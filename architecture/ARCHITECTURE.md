@@ -26,8 +26,8 @@ New work goes on the engine path: the store, the forge adapter, the model port, 
 
 | Circle | Modules |
 |---|---|
-| Entities | `tracker.py`, `md.py`, `clock.py`, `runtimes.py`, `policy.py`, `findings.py`, `ownership.py`, `orphans.py`, `estimate.py`, `tracker_log.py`, `tree_state.py`, the finding types of `audit_tasks.py`, the message format of `inbox.py`, `guard_commands.py` (the worker guard's pure shell-command judgements), `limits.py` (runtime limit readings and their judgements, section 10) |
-| Use Cases | the ownership rules and judgements of `audit_tasks.py`, `dispatch_prompt.py`, `one_shot.py`, `kanban.py`, `merge_ready.py`, `merge_approved.py`, `review_threads.py`, `task_forge.py`, `model_port.py` (the model port), `issue_gate.py` (issue first, then one store row), `trio_gate.py` (the decision trio, design 5a), `decision_actions.py` (a board decision's lifecycle: answer, reverse, re-route, and an answered decision whose action is blocked. The page server only validates and records a person's intent through it; the engine alone applies intents, see section 6), `engine_merge.py` (executes a planned merge, logged on the issue), `forge_port.py` (`ForgeError`, the forge failure boundary), `reconcile.py` (the engine's planner: what the state calls for), `readiness.py` (the Ready predicate over a pass's facts: file-ownership conflicts, dependency blockers and stop records), `completion.py` (judgements on a finished or abandoned run: done-on-main, the read-only rule, unlanded work and orphan recovery), `guard_rules.py` (the worker guard's Stop, permission-relay and session-start rules), the ready-task and stagnation judgements of `flow.py`, `performance.py`, `worker_health.py` (a worker's six health signals and the stall judgement, section 8) |
+| Entities | `tracker.py`, `md.py`, `clock.py`, `runtimes.py`, `policy.py`, `findings.py`, `orphans.py`, `estimate.py`, `tracker_log.py`, `tree_state.py`, the finding types of `audit_tasks.py`, the message format of `inbox.py`, `guard_commands.py` (the worker guard's pure shell-command judgements), `limits.py` (runtime limit readings and their judgements, section 10) |
+| Use Cases | the judgements of `audit_tasks.py`, `dispatch_prompt.py`, `one_shot.py`, `kanban.py`, `merge_ready.py`, `merge_approved.py`, `review_threads.py`, `task_forge.py`, `model_port.py` (the model port), `issue_gate.py` (issue first, then one store row), `trio_gate.py` (the decision trio, design 5a), `decision_actions.py` (a board decision's lifecycle: answer, reverse, re-route, and an answered decision whose action is blocked. The page server only validates and records a person's intent through it; the engine alone applies intents, see section 6), `engine_merge.py` (executes a planned merge, logged on the issue), `forge_port.py` (`ForgeError`, the forge failure boundary), `reconcile.py` (the engine's planner: what the state calls for), `readiness.py` (the Ready predicate over a pass's facts: dependency blockers and stop records), `completion.py` (judgements on a finished or abandoned run: done-on-main, the read-only rule, unlanded work and orphan recovery), `guard_rules.py` (the worker guard's Stop, permission-relay and session-start rules), the ready-task and stagnation judgements of `flow.py`, `performance.py`, `worker_health.py` (a worker's six health signals and the stall judgement, section 8) |
 | Interface Adapters, presenters | `fragment.py`, `columns.py`, `panels.py`, `gantt.py`, `flow_chart.py`, `render_board.py`, `decision_page.py`, `issue_page.py`, `source_page.py`, `module_graph.py`, `workers_page.py`, `page_reload.py`, and the page module of section 3 |
 | Interface Adapters, gateways | `store.py` (the issue-keyed store behind the ORM, and its `migrations/`), `forge.py` (the one forge adapter for GitHub and GitLab), `backlog.py`, `backlog_ref.py`, `board_sources.py`, `session_logs.py` (each runtime's session log, found and read into one shape), `workspace.py`, `settings.py`, `tracker_read.py`, `tracker_write.py`, `forge_review.py`, `one_shot_report.py`, `tree_claims.py`, `slots.py` (the worker concurrency cap, E21), `limits_history.py` (the account-wide limit readings behind the ORM, section 10), the git and forge fact gathering of `audit_tasks.py`, the mailbox storage of `inbox.py` |
 | Frameworks and Drivers | `claude_adapter.py` and the other host adapters (section 13; host adapters are the only modules that spawn a host CLI), `git_trees.py`, `git_view.py`, the command line of `inbox.py`, the audit orchestration and command line of `audit_tasks.py`, `notify.py`, `notify_service.py`, `supervisor.py` (the engine venv and LaunchAgent), `startup.py` (the engine and `work` commands' workspace settings and forge), `store_access.py` (the migrated store, under the migrate lock), `kanban_cli.py` (the `kanban` command line), `pipeline_cli.py` (the `pipeline` command line: a pipeline's status, or a branch's head and latest pipeline, read through `forge.Forge`), `process_status.py`, `session_exec.py`, `spawn_session.py`, `probe_health.py`, `pages.py`, `chief_of_stuff.py`, `start_coordinator.py`, `hooks/hooks.json`, `board_guard.py`, `init_workspace.py`, `install_model_guidance.py`, `make_worktree.py`, `migrate_backlog.py`, `one_shot_result.py`, `shell_setup.py` (the login shell, and the only place the workspace's `[workers] teardown` and `teardown_list` commands run; Use Cases receive teardown as a passed-in function, never by import), `cleanup.py` (engine-owned worktree removal behind every finding-27 guard, E19; it runs the workspace teardown in a tree before its container-mount guard), `engine.py` (the workspace singleton loop that executes the reconcile plan), `engine_facts.py` (gathers one pass's git, worktree, process and forge facts into plain records for the planner), `work.py` (the issue-first intake command line), `worker.py` (worker launch through the adapter and completion collection), `worker_guard.py` (the worker guard's hook entry point), `guard_binding.py` (the worker's binding read from its environment), `engine_mcp.py` (the engine's report and ask MCP server), `guard/hooks/hooks.json`, `adopt_one_shots.py`, `sync_page_theme.py`, the command line and tick orchestration of `flow.py`, `performance_report.py`, `limits_probe.py` (unbilled reads of each runtime's limits, section 10), `limits_cli.py` (the `limits` command line) |
@@ -153,7 +153,7 @@ A module has one reason to change. `inbox.py` and `audit_tasks.py`, the two larg
 | `inbox.py` | The mailbox storage: send, list, read, ack, drain and wait | Interface Adapters, gateways |
 | `inbox.py` | The command line | Frameworks and Drivers |
 | `audit_tasks.py` | The finding types | Entities |
-| `audit_tasks.py` | The ownership rules and the pure judgements | Use Cases |
+| `audit_tasks.py` | The pure judgements | Use Cases |
 | `audit_tasks.py` | Gathering facts from git and the forge | Interface Adapters, gateways |
 | `audit_tasks.py` | The audit orchestration and the command line | Frameworks and Drivers |
 | `flow.py` | The ready-task and stagnation judgements | Use Cases |
@@ -161,58 +161,22 @@ A module has one reason to change. `inbox.py` and `audit_tasks.py`, the two larg
 
 Each module keeps re-exporting the names its callers import until they import from the new modules. Where the module boundaries and their names fall is decided when the work is assigned. On the engine path, `flow.py`'s ready-task judgement lands in `readiness.py`, and its stagnation judgement lands in `worker_health.py`, beside the silence signal it shares a rule with. The audit's done-on-main, read-only, unlanded and orphan judgements land in `completion.py`.
 
-On the engine path, file ownership is declared on the issue, because the forge is the source of truth and the store rebuilds from it.
-- **Where it is declared.** An issue states the paths it owns and their mode (write, or read-only) in a section of its body.
-- **Who reads it.** `ownership.py` (Entities) parses that section, the same reader that parses the tracker's File ownership rows.
-- **Who writes the store rows.** The engine's forge sync in `engine.py` writes them into `store.Ownership` each pass, and so does intake through `work.py` and `issue_gate.py`. `engine_facts.py` reads them back for the planner.
-- **Workers declare nothing.** They report what they changed, and `completion.py` judges that report against the issue's declared scope. A read-only run that changed anything is held for human review, with the paths named. They never grant themselves a scope.
-- **The engine handles a write outside the declared scope by judgement, with no automatic human hold** (owner, 2026-10-17). Real fixes often touch a test, a README or a shared helper nobody listed, but a change with no reason to be there is a defect.
-  - **Widen.** When a write run changed paths outside its declared write paths, the engine widens the issue's scope to what the run actually changed. It writes the widened scope to the issue's `## File ownership` section and to the store, so later readiness checks use the truth.
-  - **Judge.** The review panel judges each out-of-scope path against the issue's outcome. The engine hands it the list of paths as an explicit check, so no extra model call is needed. A path the change needs, such as its test, its documentation or a helper it uses, is justified and stays. A path with no reason in the issue is a finding of at least Medium severity, "unjustified change outside scope", and it is fixed like any other: the fix stage reverts it, or the PR shows why it belongs. The architect's dispositions apply. A person is involved through the existing escalations: the three-round ping, or human review when the panel or the architect rules that a person must decide. The scope narrows again once a revert lands.
-  - **No overlap.** If the widened scope overlaps no other in-flight issue's write scope, the run proceeds to review normally.
-  - **Overlap.** If it does overlap, the engine orders the two issues' merges, so the one that finishes first lands first. The other rebases onto it and is reviewed again on its new head, which the merge gate already requires (a review of the current head, then main's CI). A conflict the rebase cannot settle goes back to the fix stage like any other finding, and a person is involved only through the existing three-round ping.
-  - **No new dispatch.** While the overlap lasts, readiness counts the widened scope, so it dispatches no new issue into those paths.
-- **Every issue declares its scope.** An issue whose `## File ownership` section is missing or malformed is not dispatched: readiness holds it as "needs file ownership", and nothing is inferred for it. The whole repository is never a default. An issue that truly needs it declares it explicitly, with the path `.`, and then conflicts with every running write in that repository (owner, 2026-10-17).
-- **Intake writes the section.** `issue_gate.py` refuses to file an issue without a valid section, and the repository's issue forms carry it as a required field, so an issue made by hand declares its scope too. Open issues filed before this rule get the section added before the engine takes over dispatch.
-- **The plan stage has its own scope.** A plan run writes only its own plan file, at a path fixed per issue under the workspace's plan directory, and reads everything. That implicit scope is the plan stage's declaration whenever the issue declares none, so plan runs never serialize on each other. A plan run that writes anywhere else is handled by the judged out-of-scope rule above.
-- **The plan proposes the implementation's scope.** The plan worker's report carries a proposed `## File ownership` section as a structured field, not as prose. Workers declare nothing, so the engine writes it onto the issue only after the trio approves it as a decision (topic `scope`), or the owner does. A trio split goes to the owner as a real decision. An unavailable trio is retried on a later pass. A proposal is never written unapproved, and the whole repository is never assumed.
+On the engine path, the engine has no authorized files (Zach, 2026-10-23, issue #1039: file ownership broke the flow). This replaces the file-ownership rules of 2026-10-17.
+- **No declared scope.** An issue names no paths, and nothing holds an issue for lacking them. Intake files an issue without a scope section, and the issue forms ask for none.
+- **No scope decisions.** A plan proposes no scope, and the engine raises no `scope` decision and no file-ownership ask, so no issue waits on the trio or the owner for a scope.
+- **No write gates.** No worker is refused a write for being outside a list, and no run is judged against a declared scope.
+- **Overlap surfaces at merge.** Each worker runs in its own worktree, so two issues that edit one file meet as a merge conflict. The merge gate already requires a review of the current head, then main's CI, so the later branch rebases and is reviewed again on its new head. A conflict the rebase cannot settle goes back to the fix stage like any other finding, and a person is involved only through the existing three-round ping.
+- **Worktree claims stay** only where they lock a tree for its own task. A claim never gates a write.
 
 ```
-Pl(I) := issue I is at the plan stage      Sp(I) := the plan scope: I's own plan file (write) plus read-only everything
-Pr(I) := the plan's proposed File ownership section      Ap(I) := the trio or the owner approved Pr(I)
-S(I) := I declares a valid scope
+F := the engine has authorized files (declared scopes, scope decisions, ownership write gates)
+Sd := a scope decision is raised      Hs := an issue is held for its scope      G := a write is refused for its path
+C := two in-flight issues edit one file      M := C is settled at merge: rebase, re-review, and the fix stage on a conflict
 
-Pl(I) ∧ ¬S(I) → I runs with Sp(I)     [plan runs touch only their own file, so they never serialize]
-Ap(I) → the engine writes Pr(I) onto I, so S(I) holds   [workers declare nothing; the engine writes after approval]
-¬Ap(I) → I stays undeclared, and the later stages wait   [no unapproved scope, no whole-repository default]
-∴ planning runs in parallel, and implementation runs on approved, real scopes
-```
-
-```
-I := an issue      S(I) := I has a valid File ownership section
-W(I) := I declares the whole repository, with the path "."
-D(I) := I may be dispatched      R(I) := I conflicts with every running write in its repository
-
-∀I: ¬S(I) → ¬D(I)      [owner 2026-10-17: never allow the whole-repo fallback generally]
-∀I: W(I) → S(I) ∧ R(I)  [the whole repository only when declared]
-intake refuses ¬S       [issue_gate.py; the issue forms]
-∴ the engine serializes a repository only for an issue that asked for the whole of it, and an undeclared issue waits instead of blocking everyone
-
-O(r) := run r changed only paths inside its declared write scope
-Wd(r) := the engine widens r's issue scope to the paths r changed (issue section and store)
-X(r) := the widened scope overlaps another in-flight write scope
-Q(r) := the merges are ordered and r is re-reviewed on its rebased head
-H(r) := r is held for human review
-J(p) := out-of-scope path p is justified by the issue's outcome (judged by the review panel)
-F(p) := p is a Medium+ finding, fixed by reverting it or justifying it in the PR
-
-∀r: ¬O(r) → Wd(r)              [owner 2026-10-17: the orchestrator handles it]
-∀p: J(p) → p stays             [a test, docs or a helper the change needs]
-∀p: ¬J(p) → F(p)               [owner 2026-10-17: no excuse → rework, or human review]
-H(r) only through the existing escalations   [the three-round ping, or a panel or architect ruling]
-∀r: Wd(r) ∧ X(r) → Q(r)        [merge gate: review of the current head, then main's CI]
-∀r: Wd(r) → readiness uses the widened scope   [no new dispatch into those paths]
-∴ justified edits flow through; unjustified ones are reworked, or go to a person; no parallel run is overwritten unnoticed
+1.  ¬F                  [Zach, 2026-10-23; #1039]
+2.  Sd ∨ Hs ∨ G → F     [each exists only to carry F]
+3.  C → M               [separate worktrees; merge gate: review of the current head, then main's CI]
+∴   ¬Sd ∧ ¬Hs ∧ ¬G, and overlapping edits are settled at merge instead of before dispatch
 ```
 
 On the engine path, abort and recovery never delete a worker's work. They quarantine it.
@@ -287,7 +251,7 @@ Two things are chief-of-stuff's subject, not a stack, and stay named: the host C
 ## 12. Parent and child workspaces
 
 One engine can work several workspaces at once (owner, 2026-10-17). A parent workspace lists child workspaces, and one engine runs them all. Issue #825.
-- **Children are unchanged.** Each child is a full workspace: its own `CLAUDE.md` (Coordinator and Architecture blocks), backlog and forge, store, review policy, settings and file-ownership rules. Everything sections 4 to 11 say of a workspace holds for each child on its own.
+- **Children are unchanged.** Each child is a full workspace: its own `CLAUDE.md` (Coordinator and Architecture blocks), backlog and forge, store, review policy and settings. Everything sections 4 to 11 say of a workspace holds for each child on its own.
 - **The parent adds one table.** `[workspaces]` in the parent's settings maps a child's name to its path, relative to the parent root. A parent with its own Backlog is a workspace too, and is worked alongside its children. A child that cannot be read is reported and skipped, never fatal.
 - **One engine, one pass per child.** `chief-of-stuff engine --root <parent>` runs the per-workspace pass once for each child in every loop. The pass is reused unchanged. A failure in one child is logged in that child's store and never stops another.
 - **One slot pool.** The parent owns a slot pool that caps running workers across all children at its `[workers] max_concurrency`. Each child's own `max_concurrency` still caps that child. Runtime limits are already per account (section 10), so a near-cap judgement covers every child on that account.
