@@ -24,6 +24,7 @@ import store  # noqa: E402
 import test_forge as tf  # noqa: E402
 import test_merge_approved as tma  # noqa: E402
 import test_merge_ready as tmr  # noqa: E402
+from evals import test_engine as te  # noqa: E402
 import test_reconcile as tr  # noqa: E402
 
 
@@ -54,7 +55,7 @@ class ExecutorTest(unittest.TestCase):
         self.db.record_segment(self.key, "review", 1,
                                (datetime.fromisoformat(self.at) - timedelta(minutes=2)).isoformat(),
                                self.at, "done")
-        self.db.set_resume(self.key, {"review_findings": {"attempt": 1, "counts": {}}})
+        te.review_report(self.db, self.key)
 
     def planned(self):
         item = next(i for i in self.db.items() if i.issue_key == self.key)
@@ -104,10 +105,10 @@ class ExecutorTest(unittest.TestCase):
         merges = self.db.resume(self.key)["merges"]
         self.assertEqual([(m["sha"], m["at"]) for m in merges], [("c" * 40, self.at)])
         self.assertIsInstance(merges[0]["request"], int)
-        self.assertEqual(self.db.resume(self.key)["review_findings"], {"attempt": 1, "counts": {}})
+        self.assertIn("review-1", self.db.resume(self.key)["runs"])
 
     def test_room_policy_changed_after_planning_is_rechecked(self):
-        self.db.set_resume(self.key, {"room": "lab", "review_findings": {"attempt": 1, "counts": {}}})
+        self.db.set_resume(self.key, {**self.db.resume(self.key), "room": "lab"})
         self.planned()
         self.p.rooms["lab"] = policy.Place("lab", policy={"architect": True})
         self.refused("architect")
@@ -119,7 +120,7 @@ class ExecutorTest(unittest.TestCase):
 
     def test_changed_review_severity_policy_is_rechecked(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "important"})
-        self.db.set_resume(self.key, {"review_findings": {"attempt": 1, "counts": {"minor": 1}}})
+        te.review_report(self.db, self.key, counts={"minor": 1})
         self.planned()
         self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "minor"})
         self.refused("blocking review findings")
@@ -131,7 +132,7 @@ class ExecutorTest(unittest.TestCase):
 
     def test_new_blocking_findings_after_planning_refuse_merge(self):
         self.planned()
-        self.db.set_resume(self.key, {"review_findings": {"attempt": 1, "counts": {"important": 1}}})
+        te.review_report(self.db, self.key, counts={"important": 1})
         self.refused("blocking review findings")
 
     def test_an_expired_merge_approval_is_rechecked_at_execution_time(self):
@@ -316,7 +317,7 @@ class ExecutorTest(unittest.TestCase):
 
     def test_issue_type_without_engine_review_requires_current_forge_approval(self):
         self.p.workflows["short"] = policy.Workflow("short", "merge", issue_types=("bug",))
-        self.db.set_resume(self.key, {"issue_type": "bug", "review_findings": {"attempt": 1, "counts": {}}})
+        self.db.set_resume(self.key, {**self.db.resume(self.key), "issue_type": "bug"})
         self.forge = replace(self.forge, approver="robin")
         self.planned()
         self.gh.prs[0]["reviews"] = []

@@ -101,7 +101,8 @@ def _planning_inputs(store: Any, items: list) -> dict:
         "issue_types": {item.issue_key: states[item.issue_key].get("issue_type")
                         or getattr(item, "issue_type", None) for item in items},
         "open_findings": {key: counts for key, history in segments.items()
-                          if (counts := reconcile.review_findings(states[key], history)) is not None},
+                          if (counts := reconcile.review_findings(history, _review_reports(store, key, history)))
+                          is not None},
         "rooms": {key: state.get("room") for key, state in states.items()},
         "decisions": {item.issue_key: store.decisions(item.issue_key) for item in items},
         "pending_asks": {item.issue_key: any(not ask.answer for ask in store.asks(item.issue_key)) for item in items},
@@ -111,6 +112,12 @@ def _planning_inputs(store: Any, items: list) -> dict:
         "waived_gates": {key: tuple(state.get("waived_gates") or ())
                          for key, state in states.items() if state.get("waived_gates")},
     }
+
+
+def _review_reports(store: Any, key: str, history: list) -> list:
+    """The latest review attempt's reports from its recorded session; reconcile counts their findings."""
+    latest = reconcile.latest_review(history)
+    return store.segment_reports(key, "review", latest.attempt) if latest else []
 
 
 def _measured(state: dict) -> dict:

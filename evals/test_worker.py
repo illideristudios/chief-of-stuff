@@ -917,9 +917,6 @@ class WorkerTest(unittest.TestCase):
 
     def test_releasing_a_review_suite_hold_accepts_the_review(self):
         forge = self.suite_run(stage="review")
-        data = self.db.resume(KEY)
-        data["review_findings"] = {"attempt": 1, "counts": {}}
-        self.db.set_resume(KEY, data)
         def hold(number):
             forge.rows[0]["human_review"] = True
             return ""
