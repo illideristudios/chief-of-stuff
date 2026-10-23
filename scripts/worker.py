@@ -33,6 +33,14 @@ _runners: dict[str, Any] = {}
 TASK_CLASS = {"plan": "deep", "implement": "implement", "fix": "implement", "review": "review"}
 
 
+class StartFailed(RuntimeError):
+    """A refused start after model selection, carrying the entry this attempt actually chose."""
+
+    def __init__(self, chosen: ModelEntry, error: Exception):
+        super().__init__(str(error))
+        self.chosen = chosen
+
+
 def _resume(store: Any, key: str) -> dict:
     data = store.resume(key)
     return dict(data) if isinstance(data, dict) else {}
@@ -374,75 +382,78 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 
     chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat(), launchable,
                     how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "first"))
-    request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
-                      cwd=str(tree), worker=True, agent=agent,
-                      plugin_dirs=plugin_dirs)
-    host: dict[str, Any] = {}
-    if chosen.runtime == "claude":
-        runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
-    else:
-        # §13: no guard plugin on these hosts, so the forge must protect the default and the request's target, and
-        # every protected branch's head is kept so collect can see a merge or push outside the engine (#860).
-        if not _guarded(forge, issue_key):
-            raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch "
-                               "and the branch its request targets")
-        host = {"runtime": chosen.runtime, "branch_heads": host_adapter.branch_heads(tree, forge.protected_branches())}
-        runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
     try:
-        deadline = time.monotonic() + 5
-        while not (run_dir / "started.json").exists():
-            if runner.poll() is not None or time.monotonic() >= deadline:
-                raise RuntimeError("could not verify worker start: adapter did not start a host")
-            time.sleep(0.01)
-        pid = json.loads((run_dir / "started.json").read_text())["pid"]
-        while True:
-            identity = process_status.identity(pid, session_id, host=True)
-            if identity is None:
-                # A host that re-exec'd or forked carries the session id under another pid (#901).
-                identity = next(filter(None, (process_status.identity(other, session_id, host=True)
-                                              for other in process_status.carriers(session_id)
-                                              if other not in (pid, runner.pid))), None)
-            runner_identity = process_status.identity(runner.pid, session_id)
-            if identity is not None and runner_identity is not None and runner.poll() is None:
-                break
-            if runner.poll() is not None or time.monotonic() >= deadline:
-                raise RuntimeError("could not verify worker start: process exited or identity mismatched")
-            time.sleep(0.01)
-        record = {"pid": pid, "session_id": session_id, "identity": identity,
-                  "runner_pid": runner.pid, "runner_identity": runner_identity,
-                  "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
-                  "starting_head": starting_head, **host}
-        if stage == "review":
-            record["reviewed_head"] = request_head.head
-        _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
-    except Exception as start_error:
+        request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
+                          cwd=str(tree), worker=True, agent=agent,
+                          plugin_dirs=plugin_dirs)
+        host: dict[str, Any] = {}
+        if chosen.runtime == "claude":
+            runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
+        else:
+            # §13: no guard plugin on these hosts, so the forge must protect the default and the request's target, and
+            # every protected branch's head is kept so collect can see a merge or push outside the engine (#860).
+            if not _guarded(forge, issue_key):
+                raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch "
+                                   "and the branch its request targets")
+            host = {"runtime": chosen.runtime, "branch_heads": host_adapter.branch_heads(tree, forge.protected_branches())}
+            runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
         try:
-            claude_adapter.cancel(runner)
-        except Exception as cancel_error:
+            deadline = time.monotonic() + 5
+            while not (run_dir / "started.json").exists():
+                if runner.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("could not verify worker start: adapter did not start a host")
+                time.sleep(0.01)
+            pid = json.loads((run_dir / "started.json").read_text())["pid"]
+            while True:
+                identity = process_status.identity(pid, session_id, host=True)
+                if identity is None:
+                    # A host that re-exec'd or forked carries the session id under another pid (#901).
+                    identity = next(filter(None, (process_status.identity(other, session_id, host=True)
+                                                  for other in process_status.carriers(session_id)
+                                                  if other not in (pid, runner.pid))), None)
+                runner_identity = process_status.identity(runner.pid, session_id)
+                if identity is not None and runner_identity is not None and runner.poll() is None:
+                    break
+                if runner.poll() is not None or time.monotonic() >= deadline:
+                    raise RuntimeError("could not verify worker start: process exited or identity mismatched")
+                time.sleep(0.01)
+            record = {"pid": pid, "session_id": session_id, "identity": identity,
+                      "runner_pid": runner.pid, "runner_identity": runner_identity,
+                      "run_dir": str(run_dir), "started_at": clock().isoformat(), "tree": str(tree), "branch": branch,
+                      "starting_head": starting_head, **host}
+            if stage == "review":
+                record["reviewed_head"] = request_head.head
+            _save_run(store, issue_key, stage, attempt, record, model=str(chosen))
+        except Exception as start_error:
             try:
-                store.add_log(issue_key, f"worker cancel failed: {cancel_error}", clock().isoformat())
-            except Exception:
-                pass
-        finally:
-            try:
-                process_status.stop_session(session_id)  # #901: a host outside the runner's group, or orphaned by it
-            except Exception as stop_error:
+                claude_adapter.cancel(runner)
+            except Exception as cancel_error:
                 try:
-                    store.add_log(issue_key, f"worker host stop failed: {stop_error}", clock().isoformat())
+                    store.add_log(issue_key, f"worker cancel failed: {cancel_error}", clock().isoformat())
                 except Exception:
                     pass
-            host_adapter.cleanup(host)
-            # The process is already up. collect() never sees a segment slots.claim drops on this failure.
-            for error in teardown(root, tree, tree.name, teardown_command):
+            finally:
                 try:
-                    store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
-                except Exception:
-                    pass
-        raise start_error
-    _runners[str(run_dir)] = runner
-    if chosen.runtime != "claude":
-        return chosen.model, chosen.effort or "", chosen.runtime  # slots records who actually ran it (§9)
-    return chosen.model, chosen.effort or ""
+                    process_status.stop_session(session_id)  # #901: a host outside the runner's group, or orphaned by it
+                except Exception as stop_error:
+                    try:
+                        store.add_log(issue_key, f"worker host stop failed: {stop_error}", clock().isoformat())
+                    except Exception:
+                        pass
+                host_adapter.cleanup(host)
+                # The process is already up. collect() never sees a segment slots.claim drops on this failure.
+                for error in teardown(root, tree, tree.name, teardown_command):
+                    try:
+                        store.add_log(issue_key, f"worker teardown failed: {error}", clock().isoformat())
+                    except Exception:
+                        pass
+            raise start_error
+        _runners[str(run_dir)] = runner
+        if chosen.runtime != "claude":
+            return chosen.model, chosen.effort or "", chosen.runtime  # slots records who actually ran it (§9)
+        return chosen.model, chosen.effort or ""
+    except Exception as exc:
+        raise StartFailed(chosen, exc) from exc
 
 
 def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.system,

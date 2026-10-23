@@ -365,24 +365,24 @@ class WorkerTest(unittest.TestCase):
 
     def test_failed_rotation_pick_keeps_the_selected_entry_and_original_cause(self):
         self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", '
-                         '"cursor:composer-2.5@medium"]\npick = "random"\n')
+                         '"cursor:composer-2.5"]\npick = "random"\n')
         error = OSError("host refused")
         with mock.patch.object(worker.random, "choice", side_effect=lambda entries: entries[-1]) as choose:
             with self.assertRaisesRegex(worker.StartFailed, "host refused") as caught:
                 self.launch_rotation(start_error=error)
         choose.assert_called_once()
-        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5", "medium"))
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5"))
         self.assertIs(caught.exception.__cause__, error)
         self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
 
     def test_failed_quota_fallback_keeps_the_new_host_instead_of_previous_model(self):
         self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", '
-                         '"cursor:composer-2.5@medium"]\n')
+                         '"cursor:composer-2.5"]\n')
         with self.assertRaises(worker.StartFailed) as caught:
             self.launch_rotation(data={"quota": {"retry_at": NOW.isoformat()},
                                        "model": {"implement": "claude:sonnet@high"}},
                                  start_error=OSError("host refused"))
-        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5", "medium"))
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5"))
 
     def test_failure_before_selection_does_not_borrow_the_previous_model(self):
         self.db.set_resume(KEY, {"model": {"implement": "claude:opus@high"}})
@@ -391,6 +391,20 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "forge unavailable"):
                 self.launch()
         choose.assert_not_called()
+
+    def test_failed_claude_start_retains_model_and_effort(self):
+        with mock.patch.object(self, "start", side_effect=OSError("spawn refused")):
+            with self.assertRaisesRegex(worker.StartFailed, "spawn refused") as caught:
+                self.launch_with_settings('[models.implement]\nrotation = ["claude:sonnet@high"]\n')
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("claude", "sonnet", "high"))
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+
+    def test_launch_does_not_wrap_process_control_exceptions(self):
+        for exception in (KeyboardInterrupt, SystemExit):
+            with self.subTest(exception=exception), mock.patch.object(self, "start", side_effect=exception):
+                self.db.set_resume(KEY, {})
+                with self.assertRaises(exception):
+                    self.launch_with_settings('[models.implement]\nrotation = ["claude:sonnet@high"]\n')
 
     def test_a_host_whose_cli_is_missing_is_skipped_for_the_next_entry(self):
         used, went = self.launch_rotation(on_path=("agent", "agy"))

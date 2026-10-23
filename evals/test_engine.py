@@ -1227,6 +1227,8 @@ class EngineTest(unittest.TestCase):
             restore.assert_called_once_with(1)
         self.assertTrue(self.db.items()[0].human_review)
         self.assertEqual([(s.attempt, s.outcome) for s in self.db.segments(KEY)], [(1, "failed"), (2, "failed")])
+        unknown = self.db.segments(KEY)[-1]
+        self.assertEqual((unknown.runtime, unknown.model, unknown.effort), ("", "", ""))
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 2})
         self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
@@ -1240,9 +1242,10 @@ class EngineTest(unittest.TestCase):
             self.forge.rows[0]["stage"] = "review"
             self.db.set_resume(KEY, {})
         (self.root / "CLAUDE.md").write_text(
-            "## Coordinator\n- Settings: `cos.toml`\n- Agent: worker-type task\n")
+            "## Coordinator\n- User: Robin\n- Settings: `cos.toml`\n- Agent: worker-type task\n")
         (self.root / "cos.toml").write_text(
-            f'[models.{"review" if review else "implement"}]\nrotation = ["cursor:composer-2.5@medium"]\n'
+            '[lanes]\nbuild = { stages = ["implement", "review"] }\n'
+            f'[models.{"review" if review else "implement"}]\nrotation = ["cursor:composer-2.5"]\n'
             f'[stages.{stage}]\nagent = "worker-type"\n')
         tree = self.trees / "worker"
         tree.mkdir()
@@ -1265,6 +1268,7 @@ class EngineTest(unittest.TestCase):
             return SimpleNamespace(pid=78, poll=lambda: 1), ""
 
         with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch("notify.sync_workspace"))
             stack.enter_context(mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=tree)))
             stack.enter_context(mock.patch.object(worker.make_worktree, "git", return_value=(0, "head")))
             stack.enter_context(mock.patch.object(worker.host_adapter, "resolve", return_value="/fake/agent"))
@@ -1291,14 +1295,17 @@ class EngineTest(unittest.TestCase):
             self.assertEqual(config.read_text(), '{"mcpServers":{"custom":{}}}')
         attempt = 1 if review else 2
         failed = [s for s in self.db.segments(KEY) if s.stage == stage and s.attempt == attempt]
-        self.assertEqual(len(failed), 1)
+        self.assertEqual(len(failed), 1, [e.message for e in self.db.log(KEY)])
         seg = failed[0]
         self.assertEqual((seg.runtime, seg.model, seg.effort, seg.agent_type),
-                         ("cursor", "composer-2.5", "medium", "worker-type"))
+                         ("cursor", "composer-2.5", "", "worker-type"))
         self.assertEqual((seg.started_at, seg.ended_at, seg.outcome), (NOW.isoformat(), NOW.isoformat(), "failed"))
         self.assertEqual(slots.running(self.db), 0)
         self.assertTrue(self.db.item(KEY).human_review)
-        self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": stage, "attempt": attempt})
+        if restore_error:
+            self.assertEqual(self.db.resume(KEY)["pending_hold"], {"stage": stage, "attempt": attempt, "retry": True})
+        else:
+            self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": stage, "attempt": attempt})
         messages = " ".join(entry.message for entry in self.db.log(KEY))
         self.assertIn("identity mismatched" if verification else "refusing to replace it", messages)
         if restore_error:
@@ -1309,7 +1316,7 @@ class EngineTest(unittest.TestCase):
         rows = table(self.db.segments(KEY), since=NOW.date(), until=NOW.date(), by="day", zone=ZoneInfo("UTC"))
         cursor = next(r for r in rows if r.runtime == "cursor")
         self.assertEqual((cursor.model, cursor.effort, cursor.runs, cursor.completed, cursor.median_minutes),
-                         ("composer-2.5", "medium", 1, 0, 0))
+                         ("composer-2.5", "", 1, 0, 0))
         self.assertEqual(next(r for r in rows if r.runtime == "claude").runs, 1)
 
     def test_cursor_config_refusal_retains_identity_after_previous_claude_attempt(self):

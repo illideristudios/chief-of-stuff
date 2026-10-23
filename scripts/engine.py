@@ -871,9 +871,10 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 agent_name = worker.agent_for(claude_text, policies.personas.get(persona or policies.stages[stage].persona),
                                               worker.stage_defaults(root, claude_text, stage))
                 launch_failed = False
+                failed_entry = None
 
                 def start():
-                    nonlocal launch_failed
+                    nonlocal launch_failed, failed_entry
                     # slots.claim has already reserved this attempt before any hold is removed.
                     if by_key[key].human_review:
                         data = _resume(store, key)
@@ -899,6 +900,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                         # slots drops a failed reservation. Keep the actual failed start so its
                         # attempt spends the retry budget, and replace the hold before returning.
                         launch_failed = True
+                        if isinstance(exc, worker.StartFailed):
+                            failed_entry = exc.chosen
                         _fail_start(forge, store, key, stage, stages[key], action.attempt, board is not None, exc)
                         raise
 
@@ -913,12 +916,15 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
-                                agent_type=agent_name, runtime="claude")
+                                agent_type=agent_name)
                 except BaseException:
                     # claim removes the reservation on failure; retain a real launch failure only.
                     if launch_failed:
                         store.record_segment(key, stage, action.attempt, at, at, "failed",
-                                             runtime="claude", agent_type=agent_name)
+                                             runtime=failed_entry.runtime if failed_entry else "",
+                                             model=failed_entry.model if failed_entry else "",
+                                             effort=(failed_entry.effort or "") if failed_entry else "",
+                                             agent_type=agent_name)
                     # A rejected claim or failed launch leaves no segment. A crash
                     # after a durable claim must keep the route for recovery.
                     # #750 ruling 2: a failed launch keeps _fail_start's stage move and hold, whose pending_stage
