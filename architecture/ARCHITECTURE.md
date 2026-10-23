@@ -180,6 +180,7 @@ On the engine path, file ownership is declared on the issue, because the forge i
   - **Only cast votes split.** A split is cast votes that disagree. A failed vote is an outage under section 6, never a concern, so it never makes a split and never triggers a replan. This rule waits on that one being built (#928).
   - **Bounded.** The dissent replan is one of the issue's scope replans and counts against the same bound, `SCOPE_REPLANS` in `reconcile.py`. A split with no replan left goes to the owner.
   - **Where it lives.** Whether a split replans or goes to the owner is a pure judgement in `reconcile.py`, beside that bound, over the issue's plan segments and its scope decisions. `trio_gate.py` stays free of topics: the `Decision` the engine hands it names who a split waits on, the owner unless the judgement says replan. The rerun is the existing scope replan in `reconcile.py`, not a new dispatch path, and `dispatch_prompt.py` writes the dissent into the plan's assignment.
+- **A plan with no proposal is rerun.** An issue held as "needs file ownership" with no proposal pending reruns its plan stage when a worker slot is free, so that its plan proposes the scope. This covers plans that ran before plans proposed scope. It happens at most `SCOPE_REPLANS` (2) times per issue, counted when a plan run launches, and then the issue stays held. The planner (`reconcile.py`) decides the re-plan as it decides every dispatch; the engine only executes it (#960).
 
 ```
 Pl(I) := issue I is at the plan stage      Sp(I) := the plan scope: I's own plan file (write) plus read-only everything
@@ -188,10 +189,14 @@ S(I) := I declares a valid scope
 Sx(p) := the trio split on proposal p, by cast votes      Rr(p) := p was made by a plan rerun after a split
 Lf(I) := I has a scope replan left under SCOPE_REPLANS    Re(I) := the engine reruns I's plan with the dissent
 Ow(p) := p goes to the owner as a decision                Fv := a trio vote failed
+H(I) := I is held as "needs file ownership" with no proposal pending      n(I) := scope replans launched for I
 
 Pl(I) ∧ ¬S(I) → I runs with Sp(I)     [plan runs touch only their own file, so they never serialize]
 Ap(I) → the engine writes Pr(I) onto I, so S(I) holds   [workers declare nothing; the engine writes after approval]
 ¬Ap(I) → I stays undeclared, and the later stages wait   [no unapproved scope, no whole-repository default]
+Lf(I) ↔ n(I) < SCOPE_REPLANS (2)           [#960; #1005: the dissent replan counts against the same bound]
+H(I) ∧ Lf(I) ∧ a slot is free → the planner dispatches I's plan stage, so Pr(I) is proposed   [#960]
+H(I) ∧ ¬Lf(I) → I stays held                [#960]
 Sx(p) ∧ ¬Rr(p) ∧ Lf(I) → Re(I) ∧ ¬Ow(p)    [owner 2026-10-22, #1005: replan with the dissent]
 Sx(p) ∧ (Rr(p) ∨ ¬Lf(I)) → Ow(p), once     [#1005; section 6, asked once]
 Fv → ¬Sx(p)                                [section 6, #928: an outage is not a concern]
