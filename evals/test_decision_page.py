@@ -177,6 +177,16 @@ class ParseTest(unittest.TestCase):
         with self.assertRaisesRegex(dp.DecisionError, "status"):
             dp.parse(decision(sides=[{"label": "x", "status": "maybe", "text": "y"}]))
 
+    def test_blocked_is_a_reason_or_absent(self):
+        # #288: the field names what carrying out the answer waits on. A wrong shape is an unreadable decision.
+        dp.parse(decision(blocked="permission check refused chief-of-stuff worker"))
+        dp.parse(decision(blocked={"reason": "permission check refused chief-of-stuff worker", "at": "2026-09-26T10:06:00-05:00"}))
+        dp.parse(decision(blocked=""))
+        dp.parse(decision(blocked=None))
+        for bad in (1, ["permission"], {"at": "2026-09-26T10:06:00-05:00"}, {"reason": "  "}):
+            with self.subTest(bad=bad), self.assertRaisesRegex(dp.DecisionError, "blocked"):
+                dp.parse(decision(blocked=bad))
+
 
 GH = GitHubBacklog(repo="o/app")
 GL = Backlog(host="https://gl.example", project="grp/app")
@@ -1115,6 +1125,116 @@ class ModuleGraphTest(unittest.TestCase):
         for raw in ("drift=", "excluded=", "views="):
             with self.subTest(raw=raw):
                 self.assertNotIn(raw, text)
+
+
+REASON = "permission check refused chief-of-stuff worker"
+
+
+class BlockedActionTest(unittest.TestCase):
+    """#288: a recorded answer does not close the decision while carrying it out is blocked."""
+
+    def saved(self) -> dict:
+        return decision(headline="Launch the worker?", holds=["#9"], references=[],
+                        answer={"key": "A", "words": "launch it", "at": "2026-09-26T10:05:00-05:00"})
+
+    def ctx(self, **over) -> dp.Context:
+        base = {"now": NOW, "rows": (row("10:05", "option A of decision-launch-worker", '"launch it"'),),
+                "blocked_by_slug": (("launch-worker", REASON),)}
+        base.update(over)
+        return dp.Context(**base)
+
+    def test_an_answered_decision_stays_pending_and_names_the_block(self):
+        pages = pages_dir(**{"launch-worker": self.saved()})
+        ctx = self.ctx()
+        self.assertEqual([slug for slug, *_ in dp.entries(pages, ctx)], ["launch-worker"])
+        page = dp.render(dp.parse(json.loads((pages / "decision-launch-worker.json").read_text())),
+                         "2026-09-26", ctx=ctx, slug="launch-worker")
+        self.assertIn(">BLOCKED · A<", page)
+        self.assertNotIn(">ANSWERED", page)
+        self.assertIn(f"Action blocked — waits on: {REASON}", page)
+        self.assertIn("launch it", page)
+        listing = dp.index(pages, ctx, "2026-09-26")[0]
+        pending, _, done = listing.partition("COMPLETED")
+        self.assertIn('class="row pend blocked"', pending)
+        self.assertIn("Answered · A", pending)
+        self.assertIn(f"Blocked · waits on {REASON}", pending)
+        self.assertNotIn("launch-worker", done)
+        self.assertIn("0 completed today", listing)
+
+    def test_a_json_block_reads_without_a_log_line(self):
+        d = self.saved()
+        d["blocked"] = REASON
+        page = dp.render(dp.parse(d), "2026-09-26", slug="launch-worker")
+        self.assertIn(">BLOCKED · A<", page)
+        self.assertIn(f"Action blocked — waits on: {REASON}", page)
+        self.assertNotRegex(page, r'class="chip answered"')
+
+    def test_unblocking_moves_the_decision_to_completed(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "CLAUDE.md").write_text(BLOCK.format(board=BOARD))
+        (root / "daily").mkdir()
+        (root / "daily" / "2026-09-26-tracker.md").write_text(
+            "# Tracker\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Launch worker | Launch the worker | unassigned | open | 10:00 |  | S | build | implement | #9 | Checklist: launch |\n\n"
+            "## Decisions\n\n| time | item | Robin's words |\n|---|---|---|\n"
+            '| 10:05 | option A of decision-launch-worker | "launch it" |\n\n## Log\n\n- 10:00 asked decision-launch-worker\n')
+        pages = root / "pages"
+        pages.mkdir()
+        (pages / "decision-launch-worker.json").write_text(json.dumps(self.saved()))
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            code = dp.main(["--root", str(root), "--name", "launch-worker", "--date", "2026-09-26", "--blocked", REASON])
+        self.assertEqual(code, 0, err.getvalue())
+        blocked = json.loads((pages / "decision-launch-worker.json").read_text())["blocked"]
+        self.assertEqual(blocked["reason"], REASON)
+        page = (pages / "decision-launch-worker.html").read_text()
+        self.assertIn(">BLOCKED · A<", page)
+        listing = (pages / "decisions.html").read_text()
+        self.assertIn('class="row pend blocked"', listing.split("COMPLETED")[0])
+        with redirect_stdout(out), redirect_stderr(err):
+            code = dp.main(["--root", str(root), "--name", "launch-worker", "--date", "2026-09-26", "--unblock"])
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertNotIn("blocked", json.loads((pages / "decision-launch-worker.json").read_text()))
+        page = (pages / "decision-launch-worker.html").read_text()
+        self.assertIn(">ANSWERED · A<", page)
+        self.assertNotIn(">BLOCKED", page)
+        pending, _, done = (pages / "decisions.html").read_text().partition("COMPLETED")
+        self.assertNotIn("row pend blocked", pending)
+        self.assertIn("Launch the worker?", done)
+
+    def test_a_later_launch_clears_a_log_block(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "CLAUDE.md").write_text(BLOCK.format(board=BOARD))
+        (root / "daily").mkdir()
+        tracker = root / "daily" / "2026-09-26-tracker.md"
+        pages = root / "pages"
+        pages.mkdir()
+        (pages / "decision-launch-worker.json").write_text(json.dumps(self.saved()))
+        task = ("| Launch worker | Launch the worker | unassigned | open | 10:00 |  | S | build | implement | #9 | Checklist: launch |\n")
+        head = ("# Tracker\n\n## Tasks\n\n"
+                "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+                "|---|---|---|---|---|---|---|---|---|---|---|\n" + task +
+                "\n## Decisions\n\n| time | item | Robin's words |\n|---|---|---|\n"
+                '| 10:05 | option A of decision-launch-worker | "launch it" |\n\n## Log\n\n')
+        tracker.write_text(head + "- 09:00 stage: Launch worker → implement\n"
+                            f"- 10:06 decision-launch-worker blocked: {REASON}\n")
+        ctx = dp.decision_context(root, date(2026, 9, 26), NOW)
+        self.assertEqual(ctx.blocked("launch-worker"), REASON)
+        self.assertEqual([slug for slug, *_ in dp.entries(pages, ctx)], ["launch-worker"])
+        for line in ("- 10:20 stage: Launch worker → review\n",
+                     "- 10:20 one-shot worker01 started: claude, worktree `trees/lw`, task Launch worker\n"):
+            with self.subTest(line=line):
+                tracker.write_text(head + f"- 10:06 decision-launch-worker blocked: {REASON}\n" + line)
+                cleared = dp.decision_context(root, date(2026, 9, 26), NOW)
+                self.assertEqual(cleared.blocked("launch-worker"), "")
+                self.assertEqual(list(dp.entries(pages, cleared)), [])
+                listing = dp.index(pages, cleared, "2026-09-26")[0]
+                self.assertIn("Launch the worker?", listing.split("COMPLETED")[1])
+        done_task = task.replace("| open |", "| done 10:30 |")
+        tracker.write_text(head.replace(task, done_task) + f"- 10:06 decision-launch-worker blocked: {REASON}\n")
+        self.assertEqual(dp.decision_context(root, date(2026, 9, 26), NOW).blocked("launch-worker"), "")
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 """Render one decision's full context as a page in the pages dir, and print its local URL.
 
     python3 decision_page.py --root R --name <slug> [--from decision.json] [--date YYYY-MM-DD]
+        [--blocked REASON | --unblock]
 
 The decision is read from `<pages dir>/decision-<slug>.json` unless `--from` names another file: a
 file, because Claude Code refuses JSON piped through a heredoc. The page is `<pages dir>/decision-<slug>.html`, served by pages.py at `http://127.0.0.1:<port>/decisions/<slug>`.
@@ -12,7 +13,8 @@ server thing"). The JSON holds:
     topic, asked (HH:MM), answer (a key, or what the user saved on the page: {key or null, words, at}), yes, sources,
     sections [{heading, text: paragraph or [paragraph]}], sides [{label, status: open|done, text}],
     timeline [{when, text, kind}], references [{label, value, kind, status, at}],
-    architecture {summary, not_drawn, nodes [{id, name, state, detail, hot}], edges [{from, to, label, state, hot}]}
+    architecture {summary, not_drawn, nodes [{id, name, state, detail, hot}], edges [{from, to, label, state, hot}]},
+    blocked (what carrying out the answer waits on: a reason, or {reason, at}; absent once it runs)
                                                                                      optional
 
 What the JSON leaves out the page reads from the workspace (decision_context): `asked` from the first
@@ -51,6 +53,7 @@ from module_graph import section as _graph
 from notify_service import atomic_write
 from settings import Graph, SettingsError, load as load_settings
 from tracker import decision_rows, issue_key, parse_tracker
+import tracker_log
 from workspace import ConfigError, daily_trackers, pages_address, read_config
 
 NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -75,6 +78,24 @@ def write_if_changed(path: Path, text: str) -> None:
 
 class DecisionError(ValueError):
     """The JSON does not describe a decision the user can make from the page."""
+
+
+def blocked_reason(d: dict | None) -> str:
+    """What carrying out the answer waits on, from the decision's `blocked` field, or "" when nothing does.
+
+    A string is the reason. A dict carries `reason` and may carry `at`. None and "" are not blocked.
+    Anything else is refused: a blocked decision the board cannot name is the bug this field exists to show (#288)."""
+    if not d or d.get("blocked") in (None, ""):
+        return ""
+    raw = d["blocked"]
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, dict):
+        reason = str(raw.get("reason") or "").strip()
+        if not reason:
+            raise DecisionError("blocked needs a reason")
+        return reason
+    raise DecisionError("blocked is not a reason")
 
 
 def parse(data: dict) -> dict:
@@ -118,6 +139,7 @@ def parse(data: dict) -> dict:
             for end in (e.get("from"), e.get("to")):
                 if end not in ids:
                     raise DecisionError(f"edge {e.get('label')!r} names node {end!r}, which is not drawn")
+    blocked_reason(data)
     return data
 
 
@@ -382,7 +404,18 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
                 f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer">'
                 f'<button type="submit">save</button></span>\n      </label>')
     fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
-    done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
+    # An answer is recorded before the action runs. While that action is blocked the page says so (#288).
+    waiting = ""
+    if page or answer_key(d) or (ctx and ctx.answer(slug)):
+        waiting = ctx.blocked(slug, d) if ctx else blocked_reason(d)
+    if waiting:
+        recorded = _saved_html(d, fmt) if page else ""
+        if not recorded and ctx and ctx.answer(slug):
+            recorded = f'<span>{escape(answer_label(ctx, slug, d))}</span>'
+        done = (f'    <div class="card answered blocked">{recorded}'
+                f'<p>Action blocked — waits on: {md(waiting)}</p></div>\n')
+    else:
+        done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
     right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts)) + "\n    </form>"))
     right.append(_section("Recommendation", f'    <div class="card"><p>{md(d["why"])}</p></div>'))
     right.append(_section("If you don't answer", f'    <div class="card default"><p>{md(d["default"])}</p></div>'))
@@ -410,7 +443,12 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     answered = bool(chosen or row or page)
     eyebrow = " · ".join([escape(x) for x in ("Decision", d.get("topic"), _day(day), asked) if x]
                          + ['<a href="/decisions">decisions</a>', '<a href="/">board</a>'])
-    chip = f"ANSWERED · {escape(chosen)}" if chosen else "ANSWERED" if answered else "PENDING"
+    if waiting and answered:
+        chip, chip_cls = (f"BLOCKED · {escape(chosen)}" if chosen else "BLOCKED"), " blocked"
+    elif answered:
+        chip, chip_cls = (f"ANSWERED · {escape(chosen)}" if chosen else "ANSWERED"), " answered"
+    else:
+        chip, chip_cls = "PENDING", ""
     yes = f"\n    <p>{md(d['yes'])}</p>" if d.get("yes") else ""
     where = _figure(d["architecture"], link) if d.get("architecture") else ""
     where = _section("Where it sits", where) if where else ""
@@ -423,7 +461,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}"
             f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{md(d['headline'])}</h1>\n    </div>\n"
-            f'    <span class="chip{" answered" if answered else ""}">{chip}</span>\n  </header>\n\n'
+            f'    <span class="chip{chip_cls}">{chip}</span>\n  </header>\n\n'
             f'  <div class="card ask">\n    <span class="cap">ask</span>\n'
             f"    <strong>{md(d['ask'])}</strong>{yes}\n  </div>\n\n"
             + where
@@ -462,9 +500,11 @@ def decision_context(root: Path, day: date, now: datetime | None = None) -> Cont
         settings = None
     kanban = settings and settings.kanban
     pages = root / cfg.pages_dir if cfg.pages_dir else tracker.parent
-    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks, board_sources.load(pages),
+    logged = tuple(sorted(log, key=lambda x: x[0]))
+    return Context(now, tuple(rows), logged, tasks, board_sources.load(pages),
                    kanban.human_review_label if kanban else "", cfg.user, cfg.backlog,
-                   settings and settings.graph, pages)
+                   settings and settings.graph, pages,
+                   blocked_by_slug=_log_blocks(logged, tasks, pages, cfg.backlog))
 
 
 def context(root: Path, day: str) -> Context | None:
@@ -481,7 +521,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--from", dest="source", help="the decision as JSON; default <pages dir>/decision-<slug>.json")
     ap.add_argument("--name", required=True, help="the page's slug: lowercase letters, digits and dashes")
     ap.add_argument("--date", default=date.today().isoformat(), help="the day shown on the page")
+    ap.add_argument("--blocked", help="what carrying out the recorded answer waits on")
+    ap.add_argument("--unblock", action="store_true", help="clear a blocked action once it has run")
     args = ap.parse_args(argv)
+    if args.unblock and args.blocked is not None:
+        print("decision: pass either --blocked or --unblock", file=sys.stderr)
+        return 2
+    if args.blocked is not None and not args.blocked.strip():
+        print("decision: --blocked needs what the action waits on", file=sys.stderr)
+        return 2
     if not NAME.fullmatch(args.name):
         print(f"decision: name {args.name!r} is not lowercase letters, digits and dashes", file=sys.stderr)
         return 2
@@ -490,8 +538,25 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ConfigError) as e:
         print(f"decision: no page — {e}", file=sys.stderr)
         return 1
+    if args.blocked is not None or args.unblock:
+        dest = pages_dir / f"decision-{args.name}.json"
+        if not dest.is_file():
+            if not args.source:
+                print(f"decision: no decision-{args.name}.json to mark", file=sys.stderr)
+                return 2
+            pages_dir.mkdir(parents=True, exist_ok=True)
+            dest.write_text(Path(args.source).read_text())
+        try:
+            block_decision(pages_dir, args.name, "" if args.unblock else args.blocked.strip())
+        except (OSError, json.JSONDecodeError) as e:
+            print(f"decision: {e}", file=sys.stderr)
+            return 2
     try:
-        write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
+        ctx = context(Path(args.root), args.date) if args.blocked is not None or args.unblock else None
+        if ctx:
+            write_all(pages_dir, ctx, args.date, Path(args.root))
+        else:
+            write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
     except (OSError, json.JSONDecodeError, DecisionError, KeyError, TypeError, AttributeError) as e:
         print(f"decision: {e}", file=sys.stderr)
         return 2
@@ -578,6 +643,7 @@ class Context:
     forge: Backlog | GitHubBacklog | None = None
     graph: Graph | None = None    # the settings' [graph], which draws MODULE GRAPH into pages/.graphs
     pages: Path | None = None
+    blocked_by_slug: tuple[tuple[str, str], ...] = ()  # slug -> what the Log says the action waits on (#288)
 
     def when(self, at: datetime) -> str:
         at = at.astimezone(self.now.tzinfo)
@@ -596,6 +662,12 @@ class Context:
         """The latest Decisions row naming the page."""
         page = f"decision-{slug}"
         return next((r for r in reversed(self.rows) if page in PAGE_REF.findall(r.item)), None)
+
+    def blocked(self, slug: str, d: dict | None = None) -> str:
+        """What carrying out `slug` waits on: its JSON `blocked`, else the latest Log line that still holds."""
+        if d is not None and d.get("blocked") not in (None, ""):
+            return blocked_reason(d)
+        return next((reason for name, reason in self.blocked_by_slug if name == slug), "")
 
     def key(self, row: Row, keys: list[str]) -> str:
         """The option key the user's words name, else the one the item names."""
@@ -656,12 +728,13 @@ def entries(pages_dir: Path, ctx: Context) -> list[tuple[str, dict | None, datet
     out = []
     for source in pages_dir.glob("decision-*.json"):
         slug = source.stem.removeprefix("decision-")
-        if ctx.answer(slug):
-            continue
         try:
             d, why = parse(json.loads(source.read_text())), ""
         except BAD as e:
             d, why = None, str(e)
+        # A recorded answer closes the decision only once its action is not blocked (#288).
+        if ctx.answer(slug) and not ctx.blocked(slug, d):
+            continue
         out.append((slug, d, ctx.asked(slug, d or {}, source.stat().st_mtime), why))
     return sorted(out, key=lambda e: (e[1] is None, -e[2].timestamp() if e[2] else 0, e[0]))
 
@@ -687,6 +760,116 @@ def held_refs(pending: list[tuple[str, dict | None, datetime | None, str]], ctx:
     return out
 
 
+def blocked_refs(pending: list[tuple[str, dict | None, datetime | None, str]], ctx: Context) -> dict[str, str]:
+    """Issue and change keys an answered-but-blocked decision holds, mapped to what the action waits on (#288)."""
+    keys = lambda text: ref_keys(text, ctx.sources.home)  # noqa: E731
+    out: dict[str, str] = {}
+    for slug, d, _, _ in pending:
+        reason = ctx.blocked(slug, d)
+        if not reason or d is None:
+            continue
+        for ref in ctx.holding(slug, d, keys):
+            out[ref] = reason
+    return out
+
+
+def _decision_json(pages_dir: Path | None, slug: str) -> dict | None:
+    """The parsed decision, or None when the file is missing or unreadable."""
+    if not pages_dir:
+        return None
+    source = pages_dir / f"decision-{slug}.json"
+    try:
+        data = json.loads(source.read_text()) if source.is_file() else None
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return parse(data)
+    except BAD:
+        return None
+
+
+def _held_tasks(slug: str, tasks, pages: Path | None, home) -> list:
+    """Tasks the decision holds: its page is named on the row, or its issue is one the JSON holds."""
+    page = f"decision-{slug}"
+    raw = _decision_json(pages, slug)
+    issue_keys = set()
+    if raw:
+        texts = [str(h) for h in raw.get("holds") or []]
+        texts += [str(r.get("value") or "") for r in raw.get("references") or [] if isinstance(r, dict)]
+        issue_keys = {k for text in texts for k in ref_keys(text, home) if not k.startswith("!")}
+    held = []
+    for task in tasks:
+        named = page in PAGE_REF.findall(f"{task.item} {task.issue} {task.name}")
+        keyed = bool(task.issue.strip()) and issue_key(task.issue, home) in issue_keys
+        if named or keyed:
+            held.append(task)
+    return held
+
+
+def _log_blocks(log: tuple[tuple[datetime, str], ...], tasks, pages: Path | None, home) -> tuple[tuple[str, str], ...]:
+    """Slug -> reason from the latest blocked line, dropped once a later stage or start moves the held task,
+    or that task is done (#288)."""
+    latest: dict[str, tuple[datetime, str]] = {}
+    moves: list[tuple[datetime, str]] = []
+    for when, text in log:
+        line = f"- {text}"
+        if m := tracker_log.DECISION_BLOCKED.match(line):
+            latest[m[3]] = (when, m[4].strip())
+        elif m := tracker_log.STAGE.match(line):
+            moves.append((when, m[3].strip()))
+        elif m := tracker_log.STARTED.match(line):
+            moves.append((when, m[4].strip()))
+    out = []
+    for slug, (at, reason) in latest.items():
+        held = _held_tasks(slug, tasks, pages, home)
+        names = {t.name.strip() for t in held if t.name.strip()}
+        if any(t.kind == "done" for t in held) or any(moved > at and name in names for moved, name in moves):
+            continue
+        out.append((slug, reason))
+    return tuple(out)
+
+
+def answer_label(ctx: Context, slug: str, d: dict) -> str:
+    """The option key the answer names, else the user's words."""
+    page = saved(d)
+    if page and str(page.get("key") or "").strip():
+        return str(page["key"])
+    if page and str(page.get("words") or "").strip():
+        return str(page["words"]).strip()
+    row = ctx.answer(slug)
+    if row:
+        key = ctx.key(row, [o["key"] for o in d.get("options") or []])
+        return key or row.words.strip()
+    return answer_key(d)
+
+
+def block_decision(pages_dir: Path, slug: str, reason: str, now: datetime | None = None) -> Path:
+    """Set or clear `blocked` on `decision-<slug>.json`. An empty reason clears it."""
+    path = pages_dir / f"decision-{slug}.json"
+    data = json.loads(path.read_text())
+    if str(reason or "").strip():
+        stamp = now or datetime.now().astimezone()
+        data["blocked"] = {"reason": reason.strip(), "at": stamp.isoformat(timespec="seconds")}
+    else:
+        data.pop("blocked", None)
+    path.write_text(json.dumps(data, indent=2) + "\n")
+    return path
+
+
+def answered_today(tracker_text: str, pages_dir: Path, ctx: Context) -> int:
+    """Decision rows in `tracker_text`, leaving out a page whose action is still blocked (#288)."""
+    n = 0
+    for _time, item, _words in decision_rows(tracker_text):
+        page = next(iter(PAGE_REF.findall(item)), "")
+        slug = page.removeprefix("decision-") if page else ""
+        if slug and ctx.blocked(slug, _decision_json(pages_dir, slug)):
+            continue
+        n += 1
+    return n
+
+
 def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) -> tuple[str, list[tuple[str, dict | None, datetime | None, str]]]:
     """`decisions.html` (Decisions.dc.html) and its pending entries (`entries`, read here unless given), which the
     board's DECISIONS panel lists too."""
@@ -703,19 +886,29 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
         holds = ctx.holding(slug, d)
         age = f'<span class="age">{span(ctx.now - asked)}</span>' if asked else ""
         topic = f'<span class="topic">{escape(d["topic"])}</span>' if d.get("topic") else ""
-        if saved(d):
+        why_blocked = ctx.blocked(slug, d)
+        if why_blocked:
+            label = answer_label(ctx, slug, d)
+            opts = f'<span class="stack">Answered · {escape(label)}</span>'
+            tail = f'<span class="blocked-reason">Blocked · waits on {escape(why_blocked)}</span>'
+            row_cls = "row pend blocked"
+        elif saved(d):
             opts = f'<span class="stack">{_saved_html(d, ctx.when)}</span>'
+            tail = f'<span class="fallback">{_md(d["default"])}</span>'
+            row_cls = "row pend saved"
         else:
             opts = "".join(f'<label class="o"><input type="radio" name="key" value="{escape(o["key"])}"><span class="key">{escape(o["key"])}</span>'
                            f'{escape(o.get("title", ""))}{"<span class=\"tag\">recommended</span>" if o["key"] == d["recommended"] else ""}</label>'
                            for o in d["options"])
             opts = _answer_form(slug, "stack", opts + '<span class="wi"><input type="text" name="words" placeholder="write in" aria-label="write in">'
                                 '<button type="submit">save</button></span>', "/decisions") + "</form>"
+            tail = f'<span class="fallback">{_md(d["default"])}</span>'
+            row_cls = "row pend"
         refs = "".join(f"<span>{ctx.ref(r)} {escape(ctx.where(r))}</span>" for r in holds)
-        rows.append(f'      <div class="row pend{" saved" if saved(d) else ""}">\n        <span class="stack">{when}{age}</span>\n'
+        rows.append(f'      <div class="{row_cls}">\n        <span class="stack">{when}{age}</span>\n'
                     f'        <span class="stack"><span class="line"><a class="headline" href="/decisions/{escape(slug)}">{escape(d["headline"])}</a>{topic}</span>'
                     f'<span class="q">{_md(d["ask"])}</span></span>\n        {opts}\n'
-                    f'        <span class="stack holds">{refs}</span>\n        <span class="fallback">{_md(d["default"])}</span>\n      </div>')
+                    f'        <span class="stack holds">{refs}</span>\n        {tail}\n      </div>')
     try:
         today = date.fromisoformat(day)
     except ValueError:
@@ -728,6 +921,9 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
             d = parse(json.loads(source.read_text())) if source and source.is_file() else None
         except BAD:
             d = None
+        slug = page.removeprefix("decision-") if page else ""
+        if slug and ctx.blocked(slug, d):
+            continue
         took, key, answer, refs = "", "", "", refs_in(row.item)
         if d:
             slug = page.removeprefix("decision-")
@@ -803,7 +999,7 @@ def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None)
 HEAD_OPEN = f'<link rel="stylesheet" href="{FONTS}">\n<style>\n'
 PAGE_CSS = """/* The board's parchment scheme (render_board.py) and the architecture review's state encoding (frank-lloyd-aight
    docs/review-page.md). Okabe-Ito colours the timeline stages, as on the board Gantt. */
-:root{--bg:#f4efe1;--surface:#fbf8ef;--fg:#2f2630;--muted:#6e6470;--line:#ddd3bd;--brass:#a7843e;--dl:#c9533a;--link:#8a6c30;--ref-bg:#efe7d3;--deployed:#2b3542;--inflight:#a8660f;--inflight-soft:#f6ead6;--designed:#2c58a0;--designed-soft:#dfe8f6;--ext:#8a8f98;--ext-soft:#f1eee6;--ext-ink:#5f6b7b;--stage-implement:#0072B2;--stage-pr:#56B4E9;--stage-review:#009E73;--stage-triage:#E69F00;--stage-fix:#D55E00;--stage-verify:#CC79A7;--stage-merge:#000000;--now:#4f6b3a}
+:root{--bg:#f4efe1;--surface:#fbf8ef;--fg:#2f2630;--muted:#6e6470;--line:#ddd3bd;--brass:#a7843e;--dl:#c9533a;--link:#8a6c30;--ref-bg:#efe7d3;--deployed:#2b3542;--inflight:#a8660f;--inflight-soft:#f6ead6;--designed:#2c58a0;--designed-soft:#dfe8f6;--ext:#8a8f98;--ext-soft:#f1eee6;--ext-ink:#5f6b7b;--stage-implement:#0072B2;--stage-pr:#56B4E9;--stage-review:#009E73;--stage-triage:#E69F00;--stage-fix:#D55E00;--stage-verify:#CC79A7;--stage-merge:#000000;--now:#4f6b3a;--stop:#D55E00}
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--bg:#1c1813;--surface:#262019;--fg:#efe6d2;--muted:#b3a791;--line:#3d352a;--brass:#d4b06a;--dl:#f08566;--link:#e2c27f;--ref-bg:#342b1f;--deployed:#d9d2c4;--inflight:#e8ad55;--inflight-soft:#35281a;--designed:#8fb3f0;--designed-soft:#1f2735;--ext:#8f8a80;--ext-soft:#2d2822;--ext-ink:#c4bdb0;--stage-implement:#3D95D6;--stage-pr:#56B4E9;--stage-review:#009E73;--stage-triage:#E69F00;--stage-fix:#D55E00;--stage-verify:#CC79A7;--stage-merge:#efe6d2;--now:#a8c67e}}
 :root[data-theme="dark"]{color-scheme:dark;--bg:#1c1813;--surface:#262019;--fg:#efe6d2;--muted:#b3a791;--line:#3d352a;--brass:#d4b06a;--dl:#f08566;--link:#e2c27f;--ref-bg:#342b1f;--deployed:#d9d2c4;--inflight:#e8ad55;--inflight-soft:#35281a;--designed:#8fb3f0;--designed-soft:#1f2735;--ext:#8f8a80;--ext-soft:#2d2822;--ext-ink:#c4bdb0;--stage-implement:#3D95D6;--stage-pr:#56B4E9;--stage-review:#009E73;--stage-triage:#E69F00;--stage-fix:#D55E00;--stage-verify:#CC79A7;--stage-merge:#efe6d2;--now:#a8c67e}
 *{box-sizing:border-box}
@@ -827,6 +1023,7 @@ header.top>div{flex:1 1 auto;min-width:0}
 .chip,.pill{display:inline;line-height:normal;vertical-align:baseline;font-family:inherit;text-transform:none;font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px;white-space:nowrap}
 header .chip{color:var(--link);border:1px solid var(--brass);margin-bottom:4px}
 header .chip.answered{color:var(--surface);background:#009E73;border-color:#009E73}
+header .chip.blocked{color:var(--surface);background:var(--stop);border-color:var(--stop)}
 .ask{border-top:3px solid var(--brass);display:flex;flex-direction:column;gap:4px}
 .ask strong{font-size:16px}
 .ask p{color:var(--muted)}
@@ -860,8 +1057,11 @@ label.opt,label.o{cursor:pointer} label.o:hover{border-color:var(--brass)}
 .wi button{font:inherit;font-size:13px;color:var(--link);background:var(--ref-bg);border:1px solid var(--brass);border-radius:3px;padding:3px 12px;cursor:pointer}
 .d.wi input[type=text]{margin-right:6px}
 .answered{border-left:3px solid var(--now);display:flex;flex-direction:column;gap:2px;margin-bottom:8px}
+.card.answered.blocked{border-left-color:var(--stop)}
 span.saved{font:11.5px ui-monospace,monospace;color:var(--now)}
 .row.saved{border-left:3px solid var(--now)}
+.row.pend.blocked{border-left:3px solid var(--stop)}
+.blocked-reason{color:var(--stop);font-weight:700}
 .default{border-left:3px solid var(--muted)}
 .refs{display:grid;grid-template-columns:70px minmax(0,1fr) auto;gap:5px 10px;font-size:13px;align-items:baseline}
 .refs .st{color:var(--muted);font-size:12px}
