@@ -88,12 +88,17 @@ class HoldCauseTest(unittest.TestCase):
         self.tasks = {t.name: t for t in parse_tracker(TRACKER).tasks}
         self.kanban = replace(KANBAN, hold_stages=("triage",))
 
-    def cause(self, name: str, refs=frozenset(), kanban=None, workers=frozenset(), task=None) -> str:
+    def cause(self, name: str, refs=frozenset(), kanban=None, workers=frozenset(), task=None, blocked_refs=None) -> str:
         return task_forge.hold_cause(task or self.tasks[name], kanban or self.kanban, None, workers=workers,
-                                     pending_refs=refs, home=None, lane=LANES["build"])
+                                     pending_refs=refs, home=None, lane=LANES["build"], blocked_refs=blocked_refs)
 
     def test_a_pending_decision_on_the_issue_comes_first(self) -> None:
         self.assertEqual(self.cause("Write README", {"#7"}), "decision")
+
+    def test_an_answered_decision_whose_action_is_blocked_names_the_reason(self) -> None:
+        # #288: the hold says what the action waits on, ahead of the plain "decision" hold.
+        reason = "permission check refused chief-of-stuff worker"
+        self.assertEqual(self.cause("Write README", {"#7"}, blocked_refs={"#7": reason}), f"action blocked: {reason}")
 
     def test_else_a_kanban_hold_stage_names_the_stage(self) -> None:
         self.assertEqual(self.cause("Write README"), "triage")
@@ -703,6 +708,55 @@ class EpicsOnTheBoardTest(unittest.TestCase):
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         self.assertIn('title="milestones: 1 late">1 late</span>', rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=sources))
         self.assertNotIn("milestones:", rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=SOURCES))
+
+
+REASON = "permission check refused chief-of-stuff worker"
+
+
+class BlockedDecisionOnTheBoard(unittest.TestCase):
+    """#288: an answered decision whose launch was refused stays on the board and says what it waits on."""
+
+    def test_a_refused_launch_keeps_the_decision_open_and_flags_the_task(self) -> None:
+        day = "2026-09-26"
+        root = Path(tempfile.mkdtemp())
+        (root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            "- Timezone: America/Chicago\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+            "- Settings: `cos.toml`\n")
+        (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "merge"], gates = ["merge"] }\n')
+        (root / "daily").mkdir()
+        (root / "daily" / f"{day}-tracker.md").write_text(
+            f"# Tracker {day}\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Launch worker | Launch the worker | unassigned | open | 10:00 |  | S | build | implement | #9 | Checklist: launch |\n\n"
+            "## Decisions\n\n| time | item | Robin's words |\n|---|---|---|\n"
+            "| 10:05 | option A of decision-launch-worker | \"A\" |\n\n## Log\n\n- 10:06 opened the decision\n")
+        pages = root / "pages"
+        pages.mkdir()
+        ask = {"headline": "Launch the worker?", "ask": "Launch it?",
+               "options": [{"key": "A", "title": "Launch"}, {"key": "B", "title": "Wait"}],
+               "recommended": "A", "why": "The user said yes.", "default": "Wait.",
+               "holds": ["#9"], "answer": {"key": "A", "words": "launch it", "at": "2026-09-26T10:05:00-05:00"},
+               "blocked": {"reason": REASON, "at": "2026-09-26T10:06:00-05:00"}}
+        (pages / "decision-launch-worker.json").write_text(json.dumps(ask))
+        out, *_ = rb.write(root, day)
+        board = out.read_text()
+        listing = (pages / "decisions.html").read_text()
+        page = (pages / "decision-launch-worker.html").read_text()
+        self.assertIn("BLOCKED · A — waits on permission check refused chief-of-stuff worker", board)
+        self.assertIn("0 answered today", board)
+        self.assertIn("action blocked: permission check refused chief-of-stuff worker", board)
+        self.assertIn('<div class="columns-tag columns-flag" data-cat="hold">NEEDS INPUT</div>', board)
+        tiles = dict(re.findall(r'<span class="panels-label">([A-Z ]+)</span><b class="panels-count">(\d+)</b>', board))
+        self.assertEqual(tiles["NEEDS INPUT"], "1")
+        pending, _, done = listing.partition("COMPLETED")
+        self.assertIn('class="row pend blocked"', pending)
+        self.assertIn(f"Blocked · waits on {REASON}", pending)
+        self.assertNotIn("Launch the worker?", done)
+        self.assertIn(">BLOCKED · A<", page)
+        self.assertNotIn(">ANSWERED", page)
+        self.assertIn(f"Action blocked — waits on: {REASON}", page)
 
 
 if __name__ == "__main__":

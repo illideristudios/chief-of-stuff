@@ -22,7 +22,7 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, task_changes, went_held, worker_names  # noqa: E402
-from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, issue_number, parse_tracker  # noqa: E402
+from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
 import board_sources  # noqa: E402
@@ -186,6 +186,9 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         issue = issue_key(task.issue, sources.home) if changes or url else task.issue.strip()
         refs = ((issue, page(issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
+        cause = held.get(task, "")
+        if cause.startswith("action blocked:"):
+            marks += (columns.Mark(cause, "hold"),)
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
                             flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
@@ -260,13 +263,33 @@ def merge_order(sources: board_sources.Sources) -> panels.Panel:
                         f"{approved} approved · {len(rows) - approved} in review", foot=f"+ {rest} more" if rest > 0 else "")
 
 
-def decision_panel(pending: list[tuple[str, dict | None, datetime | None, str]], answered: int, now: datetime) -> panels.Panel:
+def _blocked_facts(d: dict, reason: str) -> str:
+    """The DECISIONS row for an answered decision whose action is still blocked (#288)."""
+    answer = d.get("answer")
+    if isinstance(answer, dict):
+        label = str(answer.get("key") or "").strip() or str(answer.get("words") or "").strip()
+    else:
+        label = str(answer or "").strip()
+    return f"BLOCKED · {label} — waits on {reason}" if label else f"BLOCKED — waits on {reason}"
+
+
+def decision_panel(pending: list[tuple[str, dict | None, datetime | None, str]], answered: int, now: datetime,
+                   blocked: dict[str, str] | None = None) -> panels.Panel:
     """The pending decisions (decision_page.entries, as decisions.html lists them) and how many were answered today."""
     when = decision_page.Context(now).when
-    rows = tuple(panels.Row(f"decision-{slug}.json", f"unreadable: {why}") if d is None else panels.Row(
-        d["headline"], " · ".join([*([f"asked {when(asked)}"] if asked else []),
-                                   f"recommended {d['recommended']}", f"default: {d['default']}"]), href=f"/decisions/{slug}")
-        for slug, d, asked, why in pending)
+    blocked = blocked or {}
+
+    def row(slug: str, d: dict | None, asked: datetime | None, why: str) -> panels.Row:
+        if d is None:
+            return panels.Row(f"decision-{slug}.json", f"unreadable: {why}")
+        reason = blocked.get(slug) or decision_page.blocked_reason(d)
+        if reason:
+            return panels.Row(d["headline"], _blocked_facts(d, reason), href=f"/decisions/{slug}")
+        return panels.Row(d["headline"], " · ".join([*([f"asked {when(asked)}"] if asked else []),
+                                                     f"recommended {d['recommended']}", f"default: {d['default']}"]),
+                          href=f"/decisions/{slug}")
+
+    rows = tuple(row(slug, d, asked, why) for slug, d, asked, why in pending)
     return panels.Panel("decisions", "DECISIONS", "decisions", sum(d is not None for _, d, _, _ in pending), rows,
                         link=("decisions page", "/decisions"), foot=f"{answered} answered today")
 
@@ -298,7 +321,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            kanban: Kanban | None = None, sources: board_sources.Sources = board_sources.EMPTY, answered: int = 0,
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
-           look_log: list[tuple[date, str]] | None = None) -> str:
+           look_log: list[tuple[date, str]] | None = None, blocked: dict[str, str] | None = None,
+           blocked_refs: dict[str, str] | None = None) -> str:
     """The board page, the Flow artboard's sections: header, tiles, BUILD (the stage columns), the MERGE ORDER,
     DECISIONS and WORKERS panels, and the Flow charts. `stage_log` is (day, tracker text) for the earlier days the
     Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
@@ -324,7 +348,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     stages = {t: effective_stage(t, sources, lanes or {}) for t in tasks}
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
-    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs)
+    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, blocked_refs)
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols)}</section>\n')
@@ -369,7 +393,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
     tiles = flow_tiles(len(tasks), len(held),
                        sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned))
-    panels_html = panels.panels([merge_order(sources), decision_panel(pending, answered, now), worker_panel(sources, now)])
+    panels_html = panels.panels([merge_order(sources), decision_panel(pending, answered, now, blocked), worker_panel(sources, now)])
 
     return f"""<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -458,12 +482,16 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
     trackers = [(d, path) for d, path in daily_trackers(root, cfg) if min(reach, since_day) <= d < tracker_day]
     stage_log = [(d, path.read_text()) for d, path in trackers if reach <= d]
     look_log = [(d, path.read_text()) for d, path in trackers if d < reach]
+    refs = decision_page.held_refs(pending, ctx)
+    blocked_refs = decision_page.blocked_refs(pending, ctx)
+    blocked = {slug: ctx.blocked(slug, d) for slug, d, _, _ in pending if ctx.blocked(slug, d)}
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
-                  sources=board_sources.load(out.parent), answered=len(decision_rows(tracker_text)),
+                  sources=board_sources.load(out.parent),
+                  answered=decision_page.answered_today(tracker_text, out.parent, ctx),
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone), stage_log=stage_log,
-                  slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
-                  looked=looked, look_log=look_log)
+                  slots=settings.workers.max_concurrency or 1, pending_refs=refs,
+                  looked=looked, look_log=look_log, blocked=blocked, blocked_refs=blocked_refs)
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 

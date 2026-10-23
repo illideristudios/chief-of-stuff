@@ -17,16 +17,21 @@ from tracker_log import Move
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
-               home, lane) -> str:
-    """What holds the task, or "" when nothing does, at `stage` (its own cell when None): `decision` when a pending
-    decision holds its issue (`pending_refs`, keyed as issue_key keys it under `home`), else the stage when [kanban] holds it there, else the person a waiting task waits on.
-    The one place a hold is decided, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree (#228). Nothing
-    holds a finished task: done, or at its `lane`'s last stage, where a merged change puts it (#240)."""
+               home, lane, blocked_refs: Mapping[str, str] | None = None) -> str:
+    """What holds the task, or "" when nothing does, at `stage` (its own cell when None): `action blocked: …` when an
+    answered decision's action is blocked on its issue (`blocked_refs`), else `decision` when a pending decision holds
+    it (`pending_refs`, keyed as issue_key keys it under `home`), else the stage when [kanban] holds it there, else the
+    person a waiting task waits on. The one place a hold is decided, so the BUILD flag, the NEEDS INPUT tile and the
+    Flow note agree (#228). Nothing holds a finished task: done, or at its `lane`'s last stage, where a merged change
+    puts it (#240)."""
     stage = task.stage.strip() if stage is None else stage
     if task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1]):
         return ""
-    if task.issue.strip() and issue_key(task.issue, home) in pending_refs:
-        return "decision"
+    if task.issue.strip() and (key := issue_key(task.issue, home)):
+        if blocked_refs and key in blocked_refs:
+            return f"action blocked: {blocked_refs[key]}"
+        if key in pending_refs:
+            return "decision"
     if kanban is not None and kanban.holds(stage):
         return stage
     if task.kind == "waiting" and task.shown_owner and task.shown_owner not in workers:
@@ -58,13 +63,14 @@ def effective_stage(task: Task, sources: board_sources.Sources, lanes: dict) -> 
 
 
 def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources.Sources, lanes: dict,
-                pending_refs: Container[str]) -> dict[Task, str]:
+                pending_refs: Container[str], blocked_refs: Mapping[str, str] | None = None) -> dict[Task, str]:
     """Each held task to its `hold_cause` at its effective stage, decided once: the BUILD flag, the NEEDS INPUT tile and
     the Flow note all read it (#228)."""
     workers = worker_names(sources)
     return {t: cause for t in tasks
             if (cause := hold_cause(t, kanban, effective_stage(t, sources, lanes), workers=workers,
-                                    pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip())))}
+                                    pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip()),
+                                    blocked_refs=blocked_refs))}
 
 
 def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[str, datetime | None], home,
