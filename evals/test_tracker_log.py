@@ -129,6 +129,23 @@ class RoundTripTest(unittest.TestCase):
         self.assertEqual(tl.approved_closes(text), {"Open branch work"})
         self.assertEqual(tl.moves(text, DAY, CT), [])
 
+    def test_a_decision_blocked_line_reads_back_its_slug_and_reason(self):
+        # #288: the coordinator records what an answered decision's action waits on; the pages read the latest line.
+        line = tl.decision_blocked_line("10:06", "launch-worker", "permission check refused chief-of-stuff worker")
+        self.assertEqual(tl.DECISION_BLOCKED.match(line).groups(),
+                         ("10", "06", "launch-worker", "permission check refused chief-of-stuff worker"))
+        for pattern in (tl.STAGE, tl.STARTED, tl.ENDED, tl.RELAUNCH, tl.HOLD_FAILED, tl.APPROVED_CLOSE):
+            self.assertIsNone(pattern.match(line), line)
+        earlier = tl.decision_blocked_line("10:06", "launch-worker", "permission check refused chief-of-stuff worker")
+        later = tl.decision_blocked_line("10:20", "launch-worker", "the user has not approved the launch")
+        other = tl.decision_blocked_line("10:07", "cache-warmup", "disk full")
+        text = "\n".join(("# Tracker", "", "## Log", "", earlier, other, later, ""))
+        self.assertEqual(tl.blocked_decisions(text), {
+            "launch-worker": "the user has not approved the launch",
+            "cache-warmup": "disk full",
+        })
+        self.assertEqual(tl.moves(text, DAY, CT), [])
+
 
 class WordingTest(unittest.TestCase):
     """One line of each kind, byte for byte as `chief-of-stuff log --stage` and the one-shot launcher wrote it

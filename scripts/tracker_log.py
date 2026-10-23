@@ -1,6 +1,6 @@
 """The tracker's `## Log` lines that scripts write and the pages read back: a task's stage move, a one-shot's
-start, end and relaunch, a run relaunching after its wait ran out, a hold the launcher could not apply, and a
-closure the user approved.
+start, end and relaunch, a run relaunching after its wait ran out, a hold the launcher could not apply, a
+closure the user approved, and a decision whose action is blocked.
 
 `chief-of-stuff log --stage` and the one-shot launcher write them with the formatters here; the Flow charts, the
 board's workers, the Workers page and the issue page read them with the patterns here. Both sides live in one
@@ -38,6 +38,8 @@ STARTED_DETAIL = re.compile(r"^-\s+(\d{1,2}:\d{2}) one-shot (\S+) started: (.*?)
 # the user approved. Each names its task last, as a started line does, and matches no pattern above.
 HOLD_FAILED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): review hold failed: (.*), task (.+?)\s*$")
 APPROVED_CLOSE = re.compile(r"^- (\d{1,2}):(\d{2}) forge closure approved by the user: (.*), task (.+?)\s*$")
+# The coordinator's line when an answered decision's action was refused. The latest line for a slug wins.
+DECISION_BLOCKED = re.compile(r"^- (\d{1,2}):(\d{2}) decision-([a-z0-9]+(?:-[a-z0-9]+)*) blocked: (.*)\s*$")
 
 
 def stage_line(at: str, name: str, stage: str) -> str:
@@ -81,6 +83,11 @@ def hold_failed_line(at: str, name: str, task: str, error: str) -> str:
     return f"- {at} one-shot {name}: review hold failed: {error}, task {task}"
 
 
+def decision_blocked_line(at: str, slug: str, reason: str) -> str:
+    """The coordinator's line when carrying out `decision-<slug>` is blocked on `reason` (#288)."""
+    return f"- {at} decision-{slug} blocked: {reason}"
+
+
 def approved_close_line(at: str, task: str, why: str) -> str:
     """The coordinator's record that the user approved `task` done because its issue closed on the forge (#547);
     the audit does not reopen a task this line names."""
@@ -116,6 +123,16 @@ def hold_failures(text: str) -> dict[str, str]:
 def approved_closes(text: str) -> set[str]:
     """The tasks whose done state the Log records as a user-approved forge closure (#547)."""
     return {m[4] for line in _log_lines(text) if (m := APPROVED_CLOSE.match(line))}
+
+
+def blocked_decisions(text: str) -> dict[str, str]:
+    """Slug -> what the latest `decision-<slug> blocked:` line in `## Log` says it waits on (#288)."""
+    out: dict[str, str] = {}
+    for line in _log_lines(text):
+        m = DECISION_BLOCKED.match(line)
+        if m:
+            out[m[3]] = m[4].strip()
+    return out
 
 
 def moves(text: str, day: date, zone: ZoneInfo) -> list[Move]:
