@@ -44,7 +44,8 @@ def assert_settled(case: unittest.TestCase, page: str) -> None:
     """An answered decision page shows the recorded answer and nothing that can post another."""
     case.assertIn('<div class="card answered">', page)
     case.assertIn('<div class="options">', page)
-    for absent in ("<form", 'type="radio"', 'name="words"', "Your own answer", "<button",
+    case.assertIn('<div class="opt">', page)
+    for absent in ("<label", "<form", 'type="radio"', 'name="words"', "Your own answer", "<button",
                    "Answer here or in chat", "<script"):
         case.assertNotIn(absent, page)
 
@@ -654,6 +655,36 @@ class DerivedPageTest(unittest.TestCase):
         self.assertIn("“B, from the tracker”", card)
         self.assertNotIn("old", card)
         self.assertNotIn(">ANSWERED · A<", page)
+        # A free-form row, and a keyed row without words, take nothing from the superseded page save.
+        ctx = dp.Context(NOW, rows=(row("01:15", "decision-x", '"something else"'),))
+        page = dp.render(dp.parse(decision(answer=saved)), "2026-09-26", ctx=ctx, slug="x")
+        card = page[page.index('<div class="card answered">'):page.index("</div>", page.index('<div class="card answered">'))]
+        self.assertIn(">ANSWERED<", page)
+        self.assertIn("“something else”", card)
+        self.assertNotIn('class="key"', card)
+        self.assertNotIn("old", card)
+        ctx = dp.Context(NOW, rows=(row("01:15", "option B of decision-x", ""),))
+        page = dp.render(dp.parse(decision(answer=saved)), "2026-09-26", ctx=ctx, slug="x")
+        card = page[page.index('<div class="card answered">'):page.index("</div>", page.index('<div class="card answered">'))]
+        self.assertIn('<span class="key">B</span>', card)
+        self.assertNotIn("old", card)
+        self.assertNotIn("class=\"words\"", card)
+
+    def test_the_decisions_list_shows_a_string_answer_without_a_form(self):
+        d = dp.parse(decision(answer="B"))
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "decision-x.json").write_text(json.dumps(d))
+            page, _ = dp.index(Path(tmp), dp.Context(NOW), "2026-09-26")
+        self.assertIn('<span class="key">B</span>Follow the plan', page)
+        self.assertNotIn("<form", page)
+
+    def test_is_answered_reads_the_page_and_the_trackers_and_fails_loudly(self):
+        self.assertTrue(dp.is_answered(dp.parse(decision(answer="B"))))
+        self.assertFalse(dp.is_answered(dp.parse(decision()), "x", None))
+        self.assertIsNone(dp.tracker_answer(None, "x"))
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaises((OSError, dp.ConfigError)):
+                dp.tracker_answer(Path(tmp), "x")
 
 
 def board_css() -> str:

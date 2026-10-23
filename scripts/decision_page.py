@@ -330,25 +330,20 @@ def answer_key(d: dict) -> str:
 
 
 def tracker_answer(root: Path | None, slug: str) -> Row | None:
-    """The latest Decisions row naming `decision-<slug>` across the workspace's daily trackers, or None."""
+    """The latest Decisions row naming `decision-<slug>` across the workspace's daily trackers, or None. A tracker
+    that cannot be read raises (OSError, ConfigError, ValueError): the caller decides whether that fails closed."""
     if root is None or not slug:
         return None
-    try:
-        cfg = read_config(root)
-        rows = [Row(d, leading(t, d, cfg.zone), item, words)
-                for d, path in daily_trackers(root, cfg)
-                for t, item, words in decision_rows(path.read_text())]
-    except (OSError, ConfigError):
-        return None
+    cfg = read_config(root)
+    rows = [Row(d, leading(t, d, cfg.zone), item, words)
+            for d, path in daily_trackers(root, cfg)
+            for t, item, words in decision_rows(path.read_text())]
     return Context(datetime.now(cfg.zone), tuple(rows)).answer(slug)
 
 
-def is_answered(d: dict, slug: str = "", root: Path | None = None, ctx: Context | None = None) -> bool:
+def is_answered(d: dict, slug: str = "", root: Path | None = None) -> bool:
     """True when `d` carries an answer or a tracker Decisions row names `decision-<slug>`."""
-    if d.get("answer"):
-        return True
-    row = ctx.answer(slug) if ctx is not None else tracker_answer(root, slug)
-    return row is not None
+    return bool(d.get("answer")) or tracker_answer(root, slug) is not None
 
 
 def _saved_html(d: dict, when) -> str:
@@ -367,7 +362,6 @@ def _answered_html(d: dict, when, chosen: str = "", row: Row | None = None, link
     title = next((o.get("title", "") for o in d["options"] if o["key"] == chosen), "")
     key = f'<span><span class="key">{escape(chosen)}</span>{escape(title)}</span>' if chosen else ""
     raw = row.words.strip().strip('"“”').strip() if row is not None else ""
-    raw = raw or str((saved(d) or {}).get("words") or "").strip()
     words = f'<span class="words">“{_md(raw, link)}”</span>' if raw else ""
     stamp = f'<span class="saved">answered {when(row.when)}</span>' if row and row.when else '<span class="saved">answered</span>'
     return f"{key}{words}{stamp}"
@@ -408,7 +402,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
     # A Decisions row outranks a page-saved answer, as index() does.
     row = ctx.answer(slug) if ctx else None
-    chosen = (ctx.key(row, keys) if row else "") or answer_key(d)
+    chosen = ctx.key(row, keys) if row else answer_key(d)
     answered = bool(chosen or row or page)
     opts = []
     for o in d["options"]:
@@ -417,8 +411,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             opts.append(f'      <div class="opt"><span class="k">{escape(o["key"])}</span>'
                         f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </div>')
         else:
-            on = " checked" if page and page.get("key") == o["key"] else ""
-            opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"{on}> {escape(o["key"])}</span>'
+            opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value="{escape(o["key"])}"> {escape(o["key"])}</span>'
                         f'<b>{escape(o["title"])}{tag}</b>\n        <span class="d">{md(o.get("text", ""))}</span>\n      </label>')
     # The write-in is the next option: same look, key "" (a words-only save), the next letter after the real ones.
     wi_key = chr(ord("A") + len(d["options"]))
@@ -426,8 +419,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
         done = f'    <div class="card answered">{_answered_html(d, fmt, chosen, row, link)}</div>\n'
         options = done + '    <div class="options">\n' + "\n".join(opts) + "\n    </div>"
     else:
-        on = " checked" if page and page.get("key") == "" else ""
-        opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""{on}> {wi_key}</span>'
+        opts.append(f'      <label class="opt"><span class="k"><input type="radio" name="key" value=""> {wi_key}</span>'
                     f'<b>Your own answer</b>\n        <span class="d wi"><input type="text" name="words" aria-label="Your own answer">'
                     f'<button type="submit">save</button></span>\n      </label>')
         options = "    " + _answer_form(slug, "options", "\n" + "\n".join(opts)) + "\n    </form>"
@@ -750,6 +742,9 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
         topic = f'<span class="topic">{escape(d["topic"])}</span>' if d.get("topic") else ""
         if saved(d):
             opts = f'<span class="stack">{_saved_html(d, ctx.when)}</span>'
+        elif key := answer_key(d):
+            title = next((o.get("title", "") for o in d["options"] if o["key"] == key), "")
+            opts = f'<span class="stack"><span><span class="key">{escape(key)}</span>{escape(title)}</span></span>'
         else:
             opts = "".join(f'<label class="o"><input type="radio" name="key" value="{escape(o["key"])}"><span class="key">{escape(o["key"])}</span>'
                            f'{escape(o.get("title", ""))}{"<span class=\"tag\">recommended</span>" if o["key"] == d["recommended"] else ""}</label>'
@@ -987,7 +982,7 @@ ANSWER_JS = """<script>
 document.querySelectorAll('form[action^="/decisions/"]').forEach(function (f) {
   function send() {
     fetch(f.action, {method: 'POST', body: new URLSearchParams(new FormData(f))})
-      .then(function (r) { if (r.ok) location.reload(); });
+      .then(function (r) { if (r.ok || r.status === 409) location.reload(); });
   }
   f.addEventListener('change', function (e) { if (e.target.name === 'key' && e.target.value) send(); });
   f.addEventListener('submit', function (e) { e.preventDefault(); send(); });
