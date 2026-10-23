@@ -930,6 +930,46 @@ class ReconcileTest(unittest.TestCase):
         self.assertFalse(self.plan(history=open_seg, facts=replace(absent, require_green=False))[0].suite_hold)
 
 
+@dataclass(frozen=True)
+class Report:
+    findings: list
+    attempt: int = 1
+    stage: str = "review"
+
+
+class ReviewFindingsTest(unittest.TestCase):
+    """Counts come from the latest done review's newest report, never a resume bridge (#1032)."""
+
+    def test_the_latest_reviews_newest_report_is_counted_by_severity(self):
+        found = [{"severity": "minor"}, {"severity": "important"}, {"severity": "minor"}]
+        history = [Segment("review")]
+        self.assertEqual(reconcile.review_findings(history, [Report([{"severity": "critical"}]), Report(found)]),
+                         {"minor": 2, "important": 1})
+        self.assertEqual(reconcile.review_findings(history, [Report([])]), {})
+
+    def test_an_unknown_or_stale_review_has_no_counts(self):
+        done = [Segment("review")]
+        later = [Segment("review"), Segment("review", 2, started_at=NOW - timedelta(minutes=30), ended_at=NOW)]
+        for history, reports in (([], [Report([])]),
+                                 ([Segment("review", outcome="failed")], [Report([])]),
+                                 ([Segment("review", ended_at=None)], [Report([])]),
+                                 (done, []),
+                                 (done, [Report([], attempt=2)]),
+                                 (done, [Report([], stage="implement")]),
+                                 (later, [Report([])]),
+                                 (done, [Report([{"severity": "nit"}])]),
+                                 (done, [Report([{}])]),
+                                 (done, [Report(["minor"])]),
+                                 (done, [Report(None)])):
+            with self.subTest(history=history, reports=reports):
+                self.assertIsNone(reconcile.review_findings(history, reports))
+
+    def test_latest_review_is_the_newest_completed_review_segment(self):
+        older, newer = Segment("review"), Segment("review", 2, started_at=NOW - timedelta(minutes=30), ended_at=NOW)
+        self.assertEqual(reconcile.latest_review([newer, older, Segment("implement", 3)]), newer)
+        self.assertIsNone(reconcile.latest_review([Segment("review", ended_at=None), Segment("implement")]))
+
+
 class SuiteHoldTest(unittest.TestCase):
     def test_opt_in_holds_unknown_zero_passed_or_nonzero_failure_counts(self):
         green = {"passed": 4, "failed": 0, "skipped": 0, "xfailed": 0}

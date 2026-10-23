@@ -37,6 +37,19 @@ OTHER = "github:example/project#2"
 SCOPE = "## File ownership\n- write: `.`"
 
 
+def review_report(db, key, attempt=1, counts=None):
+    """Store a done review's report under its run's session, with `counts` findings by severity (#1032)."""
+    data = db.resume(key) or {}
+    runs = data.get("runs") or {}
+    session = (runs.get(f"review-{attempt}") or {}).get("session_id")
+    if not session:
+        session = "review-session"
+        db.set_resume(key, {**data, "runs": {**runs, f"review-{attempt}": {"session_id": session}}})
+    db.add_report(key, "review", attempt, session, "done", "reviewed",
+                  [{"severity": severity, "title": "finding", "evidence": "seen"}
+                   for severity, n in (counts or {}).items() for _ in range(n)])
+
+
 def owned_issue(*args, **kwargs):
     return {**tf.gh_issue(*args, **kwargs), "body": SCOPE}
 
@@ -170,8 +183,7 @@ class EngineTest(unittest.TestCase):
         self.now += timedelta(minutes=1)
 
     def findings(self, attempt=1, counts=None):
-        self.db.set_resume(KEY, {**(self.db.resume(KEY) or {}),
-                                 "review_findings": {"attempt": attempt, "counts": counts or {}}})
+        review_report(self.db, KEY, attempt, counts)
 
     def test_dispatch_review_merge_end_to_end(self):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
@@ -928,10 +940,13 @@ class EngineTest(unittest.TestCase):
         self.finish("implement")
         self.run_pass()
         self.finish("review")
-        for resume in (None, {"review_findings": {"attempt": 0, "counts": {}}},
-                       {"review_findings": {"attempt": 1, "counts": {"minor": -1}}}):
-            with self.subTest(resume=resume):
-                self.db.set_resume(KEY, resume)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "review findings are unknown")])
+        session = self.db.resume(KEY)["runs"]["review-1"]["session_id"]
+        # A foreign session, another attempt, then this session's report with a severity outside SEVERITIES.
+        for session_id, attempt, found in (("foreign", 1, []), (session, 2, []),
+                                           (session, 1, [{"severity": "nit", "title": "t", "evidence": "e"}])):
+            with self.subTest(session_id=session_id, attempt=attempt, found=found):
+                self.db.add_report(KEY, "review", attempt, session_id, "done", "reviewed", found)
                 self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "review findings are unknown")])
         self.assertEqual(self.forge.merges, [])
 
@@ -2107,7 +2122,7 @@ class EngineTest(unittest.TestCase):
         self._trio(quota_percent=80)
         self.db.upsert_item(KEY, stage="implement")
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "done")
-        self.db.set_resume(KEY, {"quota_percent": 100, "review_findings": {"attempt": 1, "counts": {}},
+        self.db.set_resume(KEY, {"quota_percent": 100,
                                  "quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
         self.assertEqual(self.run_pass(max_concurrency=0), [reconcile.Limit(KEY, "quota", "reached quota limit")])
         self.assertEqual(self.db.resume(KEY)["interrupt"]["stage"], "review")
@@ -2533,7 +2548,7 @@ class EngineTest(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "launch exited"):
                 self.run_pass()
         self.assertNotIn("pending_stage", self.db.resume(KEY))
-        self.assertEqual(self.db.resume(KEY)["review_findings"], {"attempt": 1, "counts": {}})
+        self.assertIn("review-1", self.db.resume(KEY)["runs"])
         self.assertFalse(any(s.stage == "implement" for s in self.db.segments(KEY)))
         self.assertEqual(self.forge.writes, [])
         self.run_pass()
@@ -2612,7 +2627,8 @@ class EngineTest(unittest.TestCase):
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
         self.db.record_segment(KEY, "review", 1, (NOW + timedelta(minutes=1)).isoformat(),
                                (NOW + timedelta(minutes=2)).isoformat(), "done")
-        self.db.set_resume(KEY, {"review_findings": {"attempt": 1, "counts": {}}})
+        self.db.set_resume(KEY, {})
+        review_report(self.db, KEY)
         gate_model = self._votes([("adopt", "approve")] * 3)
         self.assertEqual(self.run_pass(model=gate_model), [reconcile.Ask(KEY, "merge", "gate requires Zach's approval")])
         self.assertEqual(self.db.resume(KEY)["waived_gates"], ["merge"])
@@ -2800,8 +2816,8 @@ class EngineTest(unittest.TestCase):
         self.db.set_resume(KEY, {**self.db.resume(KEY), "spend_usd": 1})
         model = self._votes([("adopt", "approve")] * 3)
         self.assertEqual(self.run_pass(model=model), [reconcile.Limit(KEY, "spend", "reached spend limit")])
-        self.db.set_resume(KEY, {"review_findings": {"attempt": 1, "counts": {}},
-                                 "quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
+        self.db.set_resume(KEY, {"quota": {"retry_at": (NOW + timedelta(hours=1)).isoformat()}})
+        review_report(self.db, KEY)
         self.assertEqual(self.run_pass(model=model), [reconcile.Wait(KEY, "quota reset pending")])
         self.assertEqual(model.n, 0)
 
