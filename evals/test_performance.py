@@ -41,6 +41,15 @@ def seg(**fields: object) -> SimpleNamespace:
 
 
 class PerformanceTableTest(unittest.TestCase):
+    def test_failed_start_is_attributed_to_its_host_model_and_effort(self) -> None:
+        rows = performance.table([
+            seg(runtime="claude", model="opus", effort="high", ended_at="2026-10-09T10:01:00+00:00", outcome="done"),
+            seg(runtime="cursor", model="composer-2.5", effort="medium", attempt=2,
+                ended_at="2026-10-09T10:00:00+00:00", outcome="failed"),
+        ], since=date(2026, 10, 9), until=date(2026, 10, 9), by="day", zone=UTC)
+        self.assertEqual([(r.runtime, r.model, r.effort, r.runs, r.completed, r.median_minutes) for r in rows],
+                         [("claude", "opus", "high", 1, 1, 1), ("cursor", "composer-2.5", "medium", 1, 0, 0)])
+
     def test_counts_runs_completed_human_review_and_relaunched_per_day_and_key(self) -> None:
         rows = performance.table([
             seg(runtime="claude", model="opus", effort="high", agent_type="implementer",

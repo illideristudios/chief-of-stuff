@@ -186,8 +186,10 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
              mock.patch.object(claude_adapter, "command", return_value=["/fake"]), \
              mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=OSError("spawn failed")):
-            with self.assertRaisesRegex(OSError, "spawn failed"):
+            with self.assertRaisesRegex(worker.StartFailed, "spawn failed") as caught:
                 self.launch()
+        self.assertIsInstance(caught.exception.__cause__, OSError)
+        self.assertEqual(caught.exception.chosen.runtime, "claude")
         self.assertEqual(self.db.segments(), [])
         self.assertFalse(self.db.resume(KEY).get("runs"))
         with mock.patch.object(worker.make_worktree, "build") as rebuild, \
@@ -328,7 +330,7 @@ class WorkerTest(unittest.TestCase):
     ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
                 '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
 
-    def launch_rotation(self, on_path=("codex", "agent", "agy"), protected=True, data=None):
+    def launch_rotation(self, on_path=("codex", "agent", "agy"), protected=True, data=None, start_error=None):
         """#701: a launch from the owner's mixed rotation; returns (used, the host the start went to)."""
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
         (self.root / "chief-of-stuff.toml").write_text(self.ROTATION)
@@ -339,6 +341,8 @@ class WorkerTest(unittest.TestCase):
 
         def host(runtime, request, run_dir, env):
             went.append(runtime)
+            if start_error is not None:
+                raise start_error
             return self.start(request, run_dir), ""
 
         def claude(request, run_dir, **kwargs):
@@ -358,6 +362,35 @@ class WorkerTest(unittest.TestCase):
         used, went = self.launch_rotation()
         self.assertEqual((used, went), (("gpt-6.1-sol", "high", "codex"), "codex"))
         self.assertEqual(self.db.resume(KEY)["model"], {"implement": "codex:gpt-6.1-sol@high"})
+
+    def test_failed_rotation_pick_keeps_the_selected_entry_and_original_cause(self):
+        self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", '
+                         '"cursor:composer-2.5@medium"]\npick = "random"\n')
+        error = OSError("host refused")
+        with mock.patch.object(worker.random, "choice", side_effect=lambda entries: entries[-1]) as choose:
+            with self.assertRaisesRegex(worker.StartFailed, "host refused") as caught:
+                self.launch_rotation(start_error=error)
+        choose.assert_called_once()
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5", "medium"))
+        self.assertIs(caught.exception.__cause__, error)
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_failed_quota_fallback_keeps_the_new_host_instead_of_previous_model(self):
+        self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", '
+                         '"cursor:composer-2.5@medium"]\n')
+        with self.assertRaises(worker.StartFailed) as caught:
+            self.launch_rotation(data={"quota": {"retry_at": NOW.isoformat()},
+                                       "model": {"implement": "claude:sonnet@high"}},
+                                 start_error=OSError("host refused"))
+        self.assertEqual(caught.exception.chosen, worker.ModelEntry("cursor", "composer-2.5", "medium"))
+
+    def test_failure_before_selection_does_not_borrow_the_previous_model(self):
+        self.db.set_resume(KEY, {"model": {"implement": "claude:opus@high"}})
+        with mock.patch.object(worker, "_model") as choose, \
+             mock.patch.object(self.forge, "issue", side_effect=OSError("forge unavailable")):
+            with self.assertRaisesRegex(OSError, "forge unavailable"):
+                self.launch()
+        choose.assert_not_called()
 
     def test_a_host_whose_cli_is_missing_is_skipped_for_the_next_entry(self):
         used, went = self.launch_rotation(on_path=("agent", "agy"))

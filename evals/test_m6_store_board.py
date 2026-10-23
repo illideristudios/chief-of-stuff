@@ -326,6 +326,14 @@ class StorePagesAndRoutesTest(unittest.TestCase):
         self.db.add_decision(KEY2, "design", "Approve cache eviction policy?")
 
     def test_server_routes_full_issue_key_and_workers_from_store(self) -> None:
+        # Reopen before the HTTP route reads failed-start evidence: it must survive a restart.
+        for attempt, end, outcome in ((1, NOW, "failed"), (2, NOW + timedelta(seconds=20), "failed"),
+                                       (3, NOW + timedelta(minutes=2), "done")):
+            self.db.record_segment(KEY, "plan", attempt, NOW.isoformat(), end.isoformat(), outcome,
+                                   runtime="cursor", model="composer-2.5")
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db")
+        self.addCleanup(self.db.engine.dispose)
         sources = replace(
             bs.EMPTY,
             issues={
@@ -356,6 +364,9 @@ class StorePagesAndRoutesTest(unittest.TestCase):
             self.assertEqual(status, 200, route)
             self.assertIn("Upload size limit", body)
             self.assertIn("implement", body)
+            self.assertIn('cursor composer-2.5 · plan · attempt 1</span><span>failed to start · 0m', body)
+            self.assertIn('cursor composer-2.5 · plan · attempt 2</span><span>failed · 0m', body)
+            self.assertIn('cursor composer-2.5 · plan · attempt 3</span><span>done · 2m', body)
 
         for route in (f"/issues/{encoded_key}/source", "/issues/12/source"):
             status, body = fetch(route)

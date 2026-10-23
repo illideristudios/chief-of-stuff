@@ -1230,6 +1230,100 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "implement", "attempt": 2})
         self.assertEqual(self.run_pass(), [reconcile.Escalate(KEY, "retry limit reached for implement")])
 
+    def assert_cursor_start_failure(self, *, review=False, verification=False, restore_error=False):
+        worker = engine.worker
+        stage = "review" if review else "implement"
+        self.pending_release(held=False)
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "failed",
+                               runtime="claude", model="opus", effort="high")
+        if review:
+            self.forge.rows[0]["stage"] = "review"
+            self.db.set_resume(KEY, {})
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- Settings: `cos.toml`\n- Agent: worker-type task\n")
+        (self.root / "cos.toml").write_text(
+            f'[models.{"review" if review else "implement"}]\nrotation = ["cursor:composer-2.5@medium"]\n'
+            f'[stages.{stage}]\nagent = "worker-type"\n')
+        tree = self.trees / "worker"
+        tree.mkdir()
+        (tree / ".cursor").mkdir()
+        config = tree / ".cursor" / "mcp.json"
+        config.write_text('{"mcpServers":{"custom":{}}}')
+        self.forge.default_branch_protected = lambda: True
+        self.forge.protected_branches = lambda: ("main",)
+        self.forge.request_base = lambda n: "main"
+        self.forge.closing_request = lambda key: SimpleNamespace(number=10, branch="feature/work", head="head")
+        self.forge.issue = lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(
+            title="Build a thing", body=SCOPE))
+
+        def launch(key, stage, attempt, persona):
+            return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root,
+                                 trees=self.trees, policies=self.p, forge=self.forge, clock=lambda: NOW)
+
+        def unverified(runtime, request, run_dir, **kwargs):
+            (run_dir / "started.json").write_text(json.dumps({"pid": 77}))
+            return SimpleNamespace(pid=78, poll=lambda: 1), ""
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=tree)))
+            stack.enter_context(mock.patch.object(worker.make_worktree, "git", return_value=(0, "head")))
+            stack.enter_context(mock.patch.object(worker.host_adapter, "resolve", return_value="/fake/agent"))
+            stack.enter_context(mock.patch.object(worker.host_adapter, "branch_heads", return_value={"main": "head"}))
+            cancel = stack.enter_context(mock.patch.object(worker.claude_adapter, "cancel"))
+            stop = stack.enter_context(mock.patch.object(worker.process_status, "stop_session"))
+            cleanup = stack.enter_context(mock.patch.object(worker.host_adapter, "cleanup"))
+            teardown = stack.enter_context(mock.patch.object(worker, "teardown", return_value=()))
+            if verification:
+                stack.enter_context(mock.patch.object(worker.host_adapter, "start", side_effect=unverified))
+                stack.enter_context(mock.patch.object(worker.process_status, "identity", return_value=None))
+                stack.enter_context(mock.patch.object(worker.process_status, "carriers", return_value=()))
+            if restore_error:
+                stack.enter_context(mock.patch.object(self.forge, "add_human_hold", return_value="forge offline"))
+            stack.enter_context(mock.patch.object(self, "launch", side_effect=launch))
+            self.run_pass()
+        if verification:
+            cancel.assert_called_once()
+            stop.assert_called_once()
+            cleanup.assert_called_once()
+            teardown.assert_called_once()
+        else:
+            cancel.assert_not_called()
+            self.assertEqual(config.read_text(), '{"mcpServers":{"custom":{}}}')
+        attempt = 1 if review else 2
+        failed = [s for s in self.db.segments(KEY) if s.stage == stage and s.attempt == attempt]
+        self.assertEqual(len(failed), 1)
+        seg = failed[0]
+        self.assertEqual((seg.runtime, seg.model, seg.effort, seg.agent_type),
+                         ("cursor", "composer-2.5", "medium", "worker-type"))
+        self.assertEqual((seg.started_at, seg.ended_at, seg.outcome), (NOW.isoformat(), NOW.isoformat(), "failed"))
+        self.assertEqual(slots.running(self.db), 0)
+        self.assertTrue(self.db.item(KEY).human_review)
+        self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": stage, "attempt": attempt})
+        messages = " ".join(entry.message for entry in self.db.log(KEY))
+        self.assertIn("identity mismatched" if verification else "refusing to replace it", messages)
+        if restore_error:
+            self.assertIn("forge offline", messages)
+        # Consumers receive the engine's persisted row, including the earlier host's separate group.
+        from performance import table
+        from zoneinfo import ZoneInfo
+        rows = table(self.db.segments(KEY), since=NOW.date(), until=NOW.date(), by="day", zone=ZoneInfo("UTC"))
+        cursor = next(r for r in rows if r.runtime == "cursor")
+        self.assertEqual((cursor.model, cursor.effort, cursor.runs, cursor.completed, cursor.median_minutes),
+                         ("composer-2.5", "medium", 1, 0, 0))
+        self.assertEqual(next(r for r in rows if r.runtime == "claude").runs, 1)
+
+    def test_cursor_config_refusal_retains_identity_after_previous_claude_attempt(self):
+        self.assert_cursor_start_failure()
+
+    def test_cursor_verification_failure_retains_identity_and_cleanup(self):
+        self.assert_cursor_start_failure(verification=True)
+
+    def test_review_cursor_failure_retains_identity(self):
+        self.assert_cursor_start_failure(review=True)
+
+    def test_cursor_identity_survives_a_second_failure_restoring_the_hold(self):
+        self.assert_cursor_start_failure(restore_error=True)
+
     def test_launch_failure_creates_the_owned_hold_used_by_the_next_pass(self):
         gh = tf.FakeGh(issues=[owned_issue(1, "Retry", ["stage: doing", "bug"])])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
