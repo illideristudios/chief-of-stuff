@@ -54,10 +54,11 @@ CEILING = {  # `## ` section -> bytes, heading line included
 # done-gate clause out) is 14,136 B, leaving 64 B under its 14,200 B ceiling (room for a description tweak that names the notification).
 # #565: naming workers after their issue adds two sentences; the skill measures 14,354 B under a 14,400 B ceiling.
 # stage 4 of the page-theme plan: the decision-page skill gains the theme contract (it names the vendored
-# `${CLAUDE_PLUGIN_ROOT}/assets/page-theme.css` the server reads and forbids styling from the JSON), one paragraph;
-# it measures 2,766 B under a 2,800 B ceiling.
-SKILL_CEILING = {"decision-page": 2_800, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 9_250, "coordinator-sessions": 8_950, "dispatch": 14_400}  # measured size rounded up to 50 B
-SKILLS_TOTAL = 45_500  # all SKILL.md files, bytes; the sum of the ceilings above (measured 45,228 B)
+# `${CLAUDE_PLUGIN_ROOT}/assets/page-theme.css` the server reads and forbids styling from the JSON), one paragraph.
+# #288: recording a blocked action (`--blocked` / `--unblock`) adds one paragraph; the skill measures 3,043 B
+# under a 3,050 B ceiling.
+SKILL_CEILING = {"decision-page": 3_050, "optional-features": 4_950, "tracker-rows": 5_150, "review-pipeline": 9_250, "coordinator-sessions": 8_950, "dispatch": 14_400}  # measured size rounded up to 50 B
+SKILLS_TOTAL = 45_750  # all SKILL.md files, bytes; the sum of the ceilings above (measured 45,505 B)
 DESCRIPTION_CAP = 300  # frontmatter description characters, not bytes
 SKILL_POINTER = re.compile(r"\$\{CLAUDE_PLUGIN_ROOT\}/skills/([^/\s`]+)/SKILL\.md")
 DECISION_PAGE_POINTER = "Before writing a decision page, Read ${CLAUDE_PLUGIN_ROOT}/skills/decision-page/SKILL.md"

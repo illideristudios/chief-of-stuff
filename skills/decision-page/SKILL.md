@@ -16,3 +16,5 @@ The JSON holds `headline`, `topic` (the area it is in, in a word or two), `ask`,
 - `Options:` each choice and what it costs.
 - `Recommendation:` yours, and why.
 - `If no answer:` what happens by default, and when.
+
+When carrying out an answer is refused, record the wait before re-rendering the board: `chief-of-stuff decision-page --root . --name <slug> --blocked "<what it waits on>"`, or a Log line `- HH:MM decision-<slug> blocked: <what it waits on>`. `--unblock` once the action runs.
