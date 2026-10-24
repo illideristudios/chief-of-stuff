@@ -1523,6 +1523,31 @@ class SameHostProjectTest(unittest.TestCase):
         self.assertIn(("Backlog", "https://gl.example", "g/other"), asked)
 
 
+class ForeignDoneIssueTest(unittest.TestCase):
+    """#416: a done task whose open issue is in another project must not be told to close the home issue of that number."""
+
+    def done_line(self, cell: str, claude: str) -> str:
+        import backlog as bl
+        tmp, root = issue_workspace(claude)
+        self.addCleanup(tmp.cleanup)
+        tracker = root / "daily" / "2026-09-17-tracker.md"
+        tracker.write_text(tracker.read_text().replace("| #7 |", f"| {cell} |"))
+        with patch.object(bl, "issues", lambda cfg, state="opened", **_kw: bl.Fetch(issues=(bl.Issue(2, "t", bl.OPEN),))):
+            report = al.audit(root, "2026-09-17", gh=FakeGh(LIVE))
+        return next(str(f) for f in report.issues if str(f).startswith("issue: Done open"))
+
+    def test_a_sibling_gitlab_project_is_closed_by_its_url(self):
+        cell = "https://gl.example/g/other/-/issues/2"
+        line = self.done_line(cell, GITLAB_CLAUDE)
+        self.assertIn(f"backlog --close {cell} --commit", line)
+        self.assertNotIn("--close 2", line)
+
+    def test_a_github_issue_outside_the_backlog_is_named_by_its_url(self):
+        line = self.done_line("x/y#2", ISSUE_CLAUDE)
+        self.assertIn("https://github.com/x/y/issues/2", line)
+        self.assertNotIn("--close 2", line)
+
+
 class IssueAuditTest(unittest.TestCase):
     def setUp(self):
         tmp, self.root = issue_workspace()
