@@ -439,7 +439,7 @@ DISPATCH_RULES = {
         "Routine one-shot dispatch is authorized by the setting or the user's task-specific request.",
         'That request is the approval, so do not ask again; the launch follows the interactive launch steps and registers its session.',
         "In an interactive workspace, a user's request for one-shot applies to that task only.",
-        "When the Settings TOML has `[models]`, it chooses the model: run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included. Pass `--class <class>` only to launch that first entry.",
+        "When the Settings TOML has `[models]`, read the tracker Log, then run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included. Pass `--class <class>` only to launch that first entry.",
         'Each `[models.<class>]` table holds a `rotation` of `runtime:model-id@effort` entries: the first is the suggested model, the rest the fallback order, and `@effort` is optional.',
         "Class names are the workspace's own, such as `deep`, `implement`, `fast` and `review`.",
         "Launch an entry as `--runtime <runtime> --model <model-id>`, plus `--effort <effort>` when the entry has one, with that entry's model ID verbatim.",
