@@ -182,7 +182,10 @@ def fetch(root: Path, change: Change, github: bool, git=subprocess.run) -> str:
     ref = f"refs/remotes/origin/{dest}/{change.number}"
     try:
         for _ in range(2):
-            done = run_git(root, ["fetch", "-q", "--no-tags", "origin",
+            # Disable configured ref mappings, pruning, and maintenance: an explicit
+            # destination alone still permits opportunistic remote-tracking updates.
+            done = run_git(root, ["fetch", "-q", "--no-tags", "--refmap=", "--no-prune", "--no-prune-tags",
+                                  "--no-auto-maintenance", "--no-write-commit-graph", "origin",
                                   f"+refs/{source}/{change.number}/head:{ref}"], 60, git)
             if done.returncode == 0 or "cannot lock ref" not in done.stderr:
                 break

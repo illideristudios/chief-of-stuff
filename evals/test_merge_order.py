@@ -292,6 +292,39 @@ class CommandTest(unittest.TestCase):
 
 
 class RealGitTest(unittest.TestCase):
+    def test_fetch_ignores_configured_ref_updates_and_pruning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source, checkout = root / "source", root / "checkout"
+            source.mkdir()
+            checkout.mkdir()
+            def git(where, *args):
+                return subprocess.run(["git", "-C", str(where), *args], capture_output=True, text=True, check=True).stdout.strip()
+            git(source, "init", "-q")
+            git(source, "config", "user.name", "Eval")
+            git(source, "config", "user.email", "eval@example.test")
+            (source / "file").write_text("base\n")
+            git(source, "add", ".")
+            git(source, "commit", "-qm", "base")
+            head = git(source, "rev-parse", "HEAD")
+            git(source, "update-ref", "refs/pull/1/head", head)
+            git(source, "update-ref", "refs/merge-requests/2/head", head)
+            git(checkout, "init", "-q")
+            git(checkout, "remote", "add", "origin", str(source))
+            # A broad mapping could otherwise update a ref outside the command's namespace.
+            git(checkout, "config", "remote.origin.fetch", "+refs/*:refs/remotes/surprise/*")
+            git(checkout, "config", "fetch.prune", "true")
+            git(checkout, "config", "fetch.pruneTags", "true")
+            git(checkout, "config", "fetch.writeCommitGraph", "true")
+            for github, n, dest in ((True, 1, "pr"), (False, 2, "mr")):
+                c = dataclasses.replace(change(n, ["file"]), head=head)
+                self.assertEqual(mo.fetch(checkout, c, github), "")
+                self.assertEqual(git(checkout, "rev-parse", f"refs/remotes/origin/{dest}/{n}"), head)
+            refs = git(checkout, "for-each-ref", "--format=%(refname)").splitlines()
+            self.assertEqual(refs, ["refs/remotes/origin/mr/2", "refs/remotes/origin/pr/1"])
+            self.assertFalse((checkout / ".git/index").exists())
+            self.assertFalse((checkout / ".git/objects/info/commit-graph").exists())
+
     def test_conflicting_and_clean_heads_preserve_head_index_and_worktree(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
