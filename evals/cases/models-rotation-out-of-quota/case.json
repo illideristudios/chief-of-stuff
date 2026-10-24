@@ -11,11 +11,11 @@
     }
   },
   "description": "#111: the implement rotation's first entry (claude:haiku@high) is out of quota per today's Log. The dispatch advances to the next entry, claude:opus@low, with its effort, and the Log records the entry used and why.",
-  "prompt": "Dispatch the CSV export fix. For this isolated test, use --dry-run for the worker launch and treat the dry run as the launch; do not start a real worker process.",
+  "prompt": "Dispatch the CSV export fix. Read the tracker Log before you choose a model. For this isolated test, use --dry-run for the worker launch and treat the dry run as the launch; do not start a real worker process.",
   "graders": [
     {
       "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
-      "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead.",
+      "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead, never with `--class`.",
       "type": "tool_used",
       "tool": "Read",
       "input_match": "\"file_path\": \"[^\"\\n]*skills/dispatch/SKILL\\.md\"",
@@ -24,26 +24,26 @@
     },
     {
       "name": "advances the rotation with --after",
-      "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead.",
+      "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead, never with `--class`.",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "(?:chief-of-stuff|chief_of_stuff\\.py)\\s+models\\b(?=.*--class[ =]implement\\b)(?=.*--after[ =]\\S*haiku)",
+      "input_match": "(?:(?:chief-of-stuff|chief_of_stuff\\.py)\\s+models\\b|python3\\s+(?:\\$\\{?\\w+\\}?|\\S*chief_of_stuff\\.py)\\s+models\\b)(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--class[ =](?:\\\\\\\"|')?implement(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--after[ =](?:\\\\\\\"|')?[^\\\"']*haiku)",
       "min": 1
     },
     {
       "name": "launches the rotation's next entry, with its effort",
-      "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead.",
+      "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead, never with `--class`.",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|spawn_session\\.py)(?=.*--dry-run)(?=.*--model[ =]opus\\b)(?=.*--effort[ =]low\\b)",
+      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|\\$\\{?\\w+\\}?(?:\\\\\")?\\s+worker|spawn_session\\.py)(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--task(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--dry-run(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--model[ =](?:\\\\\\\"|')?opus(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--effort[ =](?:\\\\\\\"|')?low(?![\\w.-]))",
       "min": 1
     },
     {
       "name": "never launches the out-of-quota entry",
-      "rule": "When the chosen model is unavailable or out of quota, advance the rotation",
+      "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead, never with `--class`.",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|spawn_session\\.py)(?:.*--model[ =]haiku\\b|(?!.*--model).*--class)",
+      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|\\$\\{?\\w+\\}?(?:\\\\\")?\\s+worker|spawn_session\\.py)(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--task(?![\\w.-]))(?:(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--model[ =](?:\\\\\\\"|')?(?:haiku|claude-haiku-4-5)(?![\\w.-]))|(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--class[ =](?:\\\\\\\"|')?implement(?![\\w.-]))(?!(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--model(?![\\w.-]))(?!(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--runtime(?![\\w.-])))",
       "max": 0
     },
     {

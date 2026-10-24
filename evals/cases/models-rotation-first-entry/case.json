@@ -11,11 +11,11 @@
     }
   },
   "description": "#111: the Settings TOML has [models]. An implementation dispatch launches the implement rotation's first entry, effort included, over the older markdown guidance, which would suggest Sonnet.",
-  "prompt": "Dispatch the CSV export fix. For this isolated test, use --dry-run for the worker launch and treat the dry run as the launch; do not start a real worker process.",
+  "prompt": "Dispatch the CSV export fix. Read the tracker Log before you choose a model. For this isolated test, use --dry-run for the worker launch and treat the dry run as the launch; do not start a real worker process.",
   "graders": [
     {
       "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
-      "rule": "When the Settings TOML has `[models]`, it chooses the model: run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included, or pass `--class <class>` to the worker call.",
+      "rule": "When the Settings TOML has `[models]`, read the tracker file's Log section, then run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included. Pass `--class <class>` only to launch that first entry.",
       "type": "tool_used",
       "tool": "Read",
       "input_match": "\"file_path\": \"[^\"\\n]*skills/dispatch/SKILL\\.md\"",
@@ -24,7 +24,7 @@
     },
     {
       "name": "chooses through the models command, not by reading the TOML",
-      "rule": "When the Settings TOML has `[models]`, it chooses the model: run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included, or pass `--class <class>` to the worker call.",
+      "rule": "When the Settings TOML has `[models]`, read the tracker file's Log section, then run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included. Pass `--class <class>` only to launch that first entry.",
       "type": "tool_used",
       "tool": "Bash",
       "input_match": "(?:chief-of-stuff|chief_of_stuff\\.py)\\s+(?:models|worker)\\b.*--class[ =]implement\\b",
@@ -32,18 +32,18 @@
     },
     {
       "name": "launches the implement rotation's first entry",
-      "rule": "When the Settings TOML has `[models]`, it chooses the model: run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included, or pass `--class <class>` to the worker call.",
+      "rule": "When the Settings TOML has `[models]`, read the tracker file's Log section, then run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included. Pass `--class <class>` only to launch that first entry.",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|spawn_session\\.py)(?=.*--dry-run)(?:(?=.*--model[ =]haiku\\b)(?=.*--effort[ =]high\\b)|(?!.*--model)(?=.*--class[ =]implement\\b))",
+      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|\\$\\{?\\w+\\}?(?:\\\\\")?\\s+worker|spawn_session\\.py)(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--task(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--dry-run(?![\\w.-]))(?:(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--model[ =](?:\\\\\\\"|')?haiku(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--effort[ =](?:\\\\\\\"|')?high(?![\\w.-]))|(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--class[ =](?:\\\\\\\"|')?implement(?![\\w.-]))(?!(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--model(?![\\w.-]))(?!(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--runtime(?![\\w.-]))(?!(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--effort(?![\\w.-])))",
       "min": 1
     },
     {
       "name": "launches no other model",
-      "rule": "When the Settings TOML has `[models]`, it chooses the model",
+      "rule": "When the Settings TOML has `[models]`, read the tracker file's Log section, then run `chief-of-stuff models --root . --class <class>` for the task's class and launch the entry it prints, effort included. Pass `--class <class>` only to launch that first entry.",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|spawn_session\\.py).*--model[ =](?!haiku\\b)",
+      "input_match": "(?:chief-of-stuff\\s+worker|chief_of_stuff\\.py\\s+worker|\\$\\{?\\w+\\}?(?:\\\\\")?\\s+worker|spawn_session\\.py)(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--task(?![\\w.-]))(?:(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--model[ =](?!(?:\\\\\\\"|')?haiku(?![\\w.-]))))",
       "max": 0
     },
     {
