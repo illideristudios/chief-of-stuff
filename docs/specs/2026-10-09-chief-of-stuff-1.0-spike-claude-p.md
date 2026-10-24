@@ -35,3 +35,24 @@ Run 2026-10-09 against CLI 2.1.296, model alias `haiku` (resolves to claude-haik
 - Sessions live in local disk state, so concurrent resumes and cleanup are the engine's job.
 - Cost is an estimate.
 - `--safe-mode` may drop auth setups other than OAuth that were not tested.
+
+## Addendum 2026-10-10: hooks under `claude -p`, and plugin dependencies
+
+Claude Code 2.1.296, model haiku, run in a scratch directory with a throwaway plugin loaded by `--plugin-dir`. Nothing from the spike ships.
+
+**Command hooks run in `claude -p` workers (observed).**
+- `SessionStart`, `UserPromptSubmit` and `PreToolUse` command hooks all fired in a `-p` run (a log line from each hook, in that order).
+- A `PreToolUse` hook returning `permissionDecision: deny` blocked `Bash`. The worker reported the reason and did not run the command, even with `--allowedTools Bash`.
+- Hook stdout reaches the model as context. The worker saw `SessionStart:startup hook success: [...]` and `UserPromptSubmit hook success: [...]` lines and could read the values out of them. A datetime-inject-style clock hook therefore works for workers, and so does session-start state injection (design decisions 9 and 11).
+- **Hooks fail open (observed).** With the `PreToolUse` hook exiting 1, `Bash` ran and returned its output. The design's rule stands: the engine verifies before merge and does not rely on a hook to stop anything. Only an explicit deny decision blocks.
+- Not tested: function hooks (the TypeScript mod form) and their `.catch` handler. Design decision 9 chose Python command hooks, so this only matters if a mod is ever used.
+
+**Plugin dependencies (from the docs, not run).**
+- `dependencies` in `plugin.json` is an array of `"name"`, `"name@marketplace"` or `{ "name", "marketplace", "version" }`, where `version` is a node-semver range.
+- `claude plugin install A` installs and enables A's declared dependencies at the same scope. A dependency that is installed but disabled gets enabled. `claude plugin enable A` fails and prints the install command if a dependency is missing.
+- A dependency from a different marketplace is not installed unless the user already has it installed and enabled at that scope, or the root marketplace's `marketplace.json` lists it in `allowCrossMarketplaceDependenciesOn`. If it is declared in `plugin.json` rather than the marketplace entry, the install completes without it and A fails to load.
+- Disabling B while A is enabled is refused. Uninstalling B while A depends on it is not documented.
+- Consequence for the clock: `datetime-inject` lives in the `ai-additions` marketplace and chief-of-stuff in its own. Depending on it needs `allowCrossMarketplaceDependenciesOn: ["ai-additions"]` in chief-of-stuff's `marketplace.json`, or the engine ships its own tiny clock hook in the worker guard plugin. The second needs no cross-marketplace dependency and no owner approval of a new dependency; the first is a new dependency on a plugin the owner maintains and needs the owner's yes.
+- **Decision (owner, 2026-10-10: "depend on it"):** chief-of-stuff declares `datetime-inject` in `dependencies` and lists `ai-additions` in `allowCrossMarketplaceDependenciesOn` in its `marketplace.json`. No clock hook is shipped in the worker guard plugin. Declare the dependency in the marketplace entry as well as `plugin.json`, because a `plugin.json`-only declaration installs without the dependency and then fails to load. Check on install that datetime-inject arrived and enabled; the docs say nothing on uninstalling it while chief-of-stuff needs it. A version range (for example `^1.0`) is an open choice.
+- Sources: code.claude.com/docs/en/plugins/dependencies.md, install.md, cli-reference.md, manifest-reference.md, troubleshooting.md.
+

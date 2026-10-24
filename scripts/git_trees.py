@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import subprocess
 from pathlib import Path
+from typing import NamedTuple
 
 import git_view
 from tree_state import UNREADABLE_BRANCH, TreeState
@@ -66,21 +67,32 @@ def write_env() -> dict[str, str]:
     return env
 
 
-def git(args: list[str], cwd: Path, view: git_view.View | None = None) -> tuple[int, str]:
+class ReadFailure(NamedTuple):
+    """A helper failure, distinguishable from Git's exit while preserving the two-item return shape."""
+
+    code: int
+    detail: str
+
+
+def git(args: list[str], cwd: Path, view: git_view.View | git_view.Unviewable | None = None, *,
+        expected_common: Path | None = None) -> tuple[int, str]:
     """One git call that reads, through the sanitised view (#443). Never a shell, always a list, always bounded.
     With `view` (the audit's one opened view per tree, #548) the read runs inside it instead of building and
     removing a view for one call; a view opened for another tree is an unreadable refusal, never a wrong-tree answer."""
     try:
+        if isinstance(view, git_view.Unviewable):
+            raise view
         if view is None:
-            out = git_view.run(args, cwd, env=audit_env(), timeout=GIT_TIMEOUT)
-        elif _for_tree(view, cwd):
+            options = {"expected_common": expected_common} if expected_common is not None else {}
+            out = git_view.run(args, cwd, env=audit_env(), timeout=GIT_TIMEOUT, **options)
+        elif _for_tree(view, cwd) and (expected_common is None or view.layout.common == expected_common.resolve()):
             out = git_view.in_view(view, args, timeout=GIT_TIMEOUT)
         else:
-            return 128, "unreadable: the opened view is not this tree's"
+            return ReadFailure(128, "unreadable: the opened view is not this tree's")
     except (git_view.Unviewable, RuntimeError, ValueError) as exc:  # RuntimeError: no home to put the view in; ValueError: a path it cannot write
-        return 128, f"unreadable: {exc}"
+        return ReadFailure(128, f"unreadable: {exc}")
     except (OSError, subprocess.SubprocessError) as exc:
-        return 128, f"{type(exc).__name__}: {exc}"  # git's own failure code: 1 is a real answer to `--is-ancestor`
+        return ReadFailure(128, f"{type(exc).__name__}: {exc}")  # 1 is a real answer to `--is-ancestor`
     return out.returncode, (out.stdout or out.stderr).strip()
 
 
@@ -92,27 +104,58 @@ def _for_tree(view: git_view.View, cwd: Path) -> bool:
         return False
 
 
-def _count(rev_range: str, tree: Path, view: git_view.View | None = None) -> int | None:
-    code, out = git(["rev-list", "--count", rev_range], tree, view)
+def _count(rev_range: str, tree: Path, view: git_view.View | git_view.Unviewable | None = None, *,
+           expected_common: Path | None = None) -> int | None:
+    code, out = git(["rev-list", "--count", rev_range], tree, view, expected_common=expected_common)
     return int(out) if code == 0 and out.isdecimal() else None
 
 
-def branch_of(tree: Path, view: git_view.View | None = None) -> str:
+def branch_of(tree: Path, view: git_view.View | git_view.Unviewable | None = None, *,
+              expected_common: Path | None = None) -> str:
     """The branch HEAD is on; one fixed placeholder when git cannot say, never its error text (it is printed everywhere)."""
-    code, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], tree, view)
+    code, branch = git(["rev-parse", "--abbrev-ref", "HEAD"], tree, view, expected_common=expected_common)
     return branch if code == 0 else UNREADABLE_BRANCH
 
 
-def read_state(tree: Path, view: git_view.View | None = None) -> TreeState:
-    branch = branch_of(tree, view)
-    code, dirty = git(["status", "--porcelain"], tree, view)
+def read_state(tree: Path, view: git_view.View | git_view.Unviewable | None = None, *,
+               expected_common: Path | None = None) -> TreeState:
+    branch = branch_of(tree, view, expected_common=expected_common)
+    code, dirty = git(["status", "--porcelain"], tree, view, expected_common=expected_common)
     readable = code == 0  # an unreadable status cannot rule out uncommitted work: leave the counts unknown, so the tree stays at risk
     return TreeState(
         branch=branch,
         dirty=len(dirty.splitlines()) if readable else None,
-        off_origin=_count(f"{BASE}..HEAD", tree, view) if readable else None,
-        unpushed=_count("@{u}..HEAD", tree, view) if readable else None,
+        off_origin=_count(f"{BASE}..HEAD", tree, view, expected_common=expected_common) if readable else None,
+        unpushed=_count("@{u}..HEAD", tree, view, expected_common=expected_common) if readable else None,
     )
+
+
+def trusted_commons(clones: list[Path]) -> dict[Path, Path]:
+    """Pin registered trees from known clones' admin directories, never from a tree's worker-written `.git`."""
+    found: dict[Path, Path] = {}
+    try:
+        for clone in dict.fromkeys(clones):
+            layout = git_view.locate(clone)
+            common = layout.common
+            found[clone.resolve()] = common
+            found[common] = common
+            admins = common / "worktrees"
+            try:
+                entries = sorted(admins.iterdir())
+            except FileNotFoundError:
+                continue
+            for admin in entries:
+                back = git_view._read(admin / "gitdir", 4096).decode().rstrip("\r\n")
+                path = Path(back)
+                if not path.is_absolute() or path.name != ".git" or any(c in back for c in "\r\n"):
+                    raise git_view.Unviewable("invalid registered worktree pointer")
+                tree = path.parent.resolve()
+                if tree in found and found[tree] != common:
+                    raise git_view.Unviewable("worktree is registered to more than one repository")
+                found[tree] = common
+    except (git_view.Unviewable, OSError, ValueError, RuntimeError):
+        raise ValueError("known repository registrations are unreadable") from None
+    return found
 
 
 def discover(root: Path, trees: str) -> list[Path]:
@@ -129,18 +172,19 @@ def discover(root: Path, trees: str) -> list[Path]:
     return found
 
 
-def sha_trees(root: Path, trees: str) -> list[tuple[str, Path]]:
+def sha_trees(root: Path, trees: str, commons: dict[Path, Path] | None = None) -> list[tuple[str, Path]]:
     """(name, tree) for each repository `--sha` should ask: the first tree by name of each repository `discover`
     finds (trees sharing a common git dir are one, as is a pruned
     worktree with its repository), else the root named `.` when it is a git tree, else none."""
     seen: set[Path] = set()
     found = []
+    commons = commons or {}
     for tree in discover(root, trees):
         try:
-            key = git_view.locate(tree).common.resolve()
+            key = git_view.locate(tree, expected_common=commons.get(tree)).common.resolve()
         except git_view.Unviewable:  # unreadable: its pruned repository, else itself
             pruned = _pruned_common(tree)
-            key = pruned.resolve() if pruned else tree
+            key = commons.get(tree) or (pruned.resolve() if pruned else tree)
         if key not in seen:
             seen.add(key)
             found.append((tree.name, tree))
@@ -154,7 +198,7 @@ def fetch_base(tree: Path, timeout: int = 30) -> str:
 
 
 def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
-    """`""` once `origin/<branch>` is fetched, else one line saying why: the first `fatal:` line, else the last, with the
+    """`""` once `origin/<branch>` is fetched, else a timeout line or the first `fatal:` line (else the last), with the
     tree's path blanked and every non-printable character escaped (`clean`), since it is printed. The refspec is
     explicit and forced, so the ref moves whatever `remote.origin.fetch` says and follows a rewritten branch, and
     `--no-tags` keeps it the only ref written. Not through `git()`: the fetch writes into a tree a worker can write, so
@@ -163,7 +207,7 @@ def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
     `branch` names a branch the caller has checked (`check_branch`); it is an argv element, never a shell word."""
     ref = f"refs/remotes/origin/{branch}"
     try:
-        for _ in range(2):  # a concurrent fetch holding the ref has moved it by the second try
+        for attempt in range(2):  # a concurrent fetch holding the ref has moved it by the second try
             out = subprocess.run(
                 ["git", *GIT_WRITE_PINS, "-C", str(tree), "fetch", "-q", "--no-tags", "origin", f"+refs/heads/{branch}:{ref}"],
                 capture_output=True, text=True, errors="backslashreplace", timeout=timeout,  # stderr from ssh or a helper may hold any byte
@@ -171,7 +215,9 @@ def fetch_branch(tree: Path, branch: str, timeout: int = 30) -> str:
             )
             if out.returncode == 0 or "cannot lock ref" not in out.stderr:
                 break
-    except (OSError, subprocess.SubprocessError) as exc:  # not `exc`'s text: a timeout's repeats the tree's path
+    except subprocess.TimeoutExpired:  # name this call's budget and attempt, not the total elapsed time (#804)
+        return f"git fetch timed out after {timeout}s (attempt {attempt + 1} of 2)"
+    except (OSError, subprocess.SubprocessError) as exc:  # not `exc`'s text: it can repeat the tree's path
         return f"git fetch did not run ({type(exc).__name__})"
     if out.returncode == 0:
         return ""
@@ -220,11 +266,11 @@ def sha_exit(answers: list[tuple[int, bool]]) -> int:
     return 0 if 0 in codes else 2 if 2 in codes else 1
 
 
-def _commits(sha: str, tree: Path) -> list[str] | None:
+def _commits(sha: str, tree: Path, *, expected_common: Path | None = None) -> list[str] | None:
     """The commit ids that start with `sha`, or None when git could not read the repository. `--disambiguate` lists
     ids of every type without reading refs, so a blob or tree is dropped and a tag object's id is not a commit."""
-    code, ids = git(["rev-parse", f"--disambiguate={sha}"], tree)
-    types = [(i, *git(["cat-file", "-t", i], tree)) for i in ids.split()] if code == 0 else []
+    code, ids = git(["rev-parse", f"--disambiguate={sha}"], tree, expected_common=expected_common)
+    types = [(i, *git(["cat-file", "-t", i], tree, expected_common=expected_common)) for i in ids.split()] if code == 0 else []
     if code != 0 or any(c != 0 for _, c, _ in types):
         return None
     return [i for i, _, kind in types if kind == "commit"]
@@ -262,14 +308,14 @@ def _is_git_dir(common: Path) -> bool:
     """Whether `common` is itself a bare-style git directory (no tree) real git would use, by files only: the view's layout
     check plus its HEAD check (an empty or garbage HEAD is no repository to git)."""
     try:
-        lay = git_view.locate(common)
+        lay = git_view.locate(common, expected_common=common)
         git_view._head(lay)
     except git_view.Unviewable:
         return False
     return lay.tree is None
 
 
-def check_sha(sha: str, tree: Path) -> tuple[int, str, bool]:
+def check_sha(sha: str, tree: Path, *, expected_common: Path | None = None) -> tuple[int, str, bool]:
     """One repository's `(exit code, line, held)`; `held` is whether it has a commit with that id, or may have one (git
     cannot read it). A pruned worktree (`_pruned_common`: its `.git` file names a `<common>/worktrees/<name>` known gone) is
     answered by its repository, checked only when the commit lookup failed, with two rules. A: only when `<common>` is itself
@@ -285,15 +331,23 @@ def check_sha(sha: str, tree: Path) -> tuple[int, str, bool]:
     cannot compare, or the clone is shallow and the commit may be in what was cut off. A repository with no
     `refs/heads/main` is simply not on local main. The unknown lines say `; local main holds it` when it has the
     commit."""
-    fetch_error = fetch_base(tree)
-    commits = _commits(sha, tree)
-    if commits is None and (common := _pruned_common(tree)) and _is_git_dir(common):  # A (#294)
+    if expected_common is not None:
+        try:
+            git_view.locate(tree, expected_common=expected_common)
+        except git_view.Unviewable:
+            if _pruned_common(tree) != expected_common:
+                return _verdict(sha, tree, "", None, expected_common=expected_common)
+    fetch_error = fetch_base(expected_common or tree)
+    commits = _commits(sha, tree, expected_common=expected_common)
+    if (commits is None and (common := _pruned_common(tree))
+            and (expected_common is None or common.resolve() == expected_common) and _is_git_dir(common)):  # A (#294)
         tree, fetch_error = common, fetch_base(common)  # the repository forgot this tree: it answers for it, once (B)
-        commits = _commits(sha, tree)
-    return _verdict(sha, tree, fetch_error, commits)
+        commits = _commits(sha, tree, expected_common=expected_common)
+    return _verdict(sha, tree, fetch_error, commits, expected_common=expected_common)
 
 
-def _verdict(sha: str, tree: Path, fetch_error: str, commits: list[str] | None) -> tuple[int, str, bool]:
+def _verdict(sha: str, tree: Path, fetch_error: str, commits: list[str] | None, *,
+             expected_common: Path | None = None) -> tuple[int, str, bool]:
     """`check_sha`'s answer for one repository whose fetch and commit lookup are done. It never redirects."""
     held = commits is None or bool(commits)  # any other repository git could not read may hold it
 
@@ -303,22 +357,22 @@ def _verdict(sha: str, tree: Path, fetch_error: str, commits: list[str] | None) 
     if commits is None:
         return unknown("git could not read this repository")
     try:
-        found = git_view.signals(git_view.locate(tree))
+        found = git_view.signals(git_view.locate(tree, expected_common=expected_common))
     except git_view.Unviewable:
         return unknown("git could not read this repository")
     if "grafts" in found:
         return unknown("this repository has grafts, so ancestry cannot be trusted")
-    ref = git(["rev-parse", "--verify", "-q", LOCAL_REF], tree)[0] if len(commits) == 1 else 1  # 1: no such ref
-    local_code = git(["merge-base", "--is-ancestor", commits[0], LOCAL_REF], tree)[0] if ref == 0 else ref
+    ref = git(["rev-parse", "--verify", "-q", LOCAL_REF], tree, expected_common=expected_common)[0] if len(commits) == 1 else 1  # 1: no such ref
+    local_code = git(["merge-base", "--is-ancestor", commits[0], LOCAL_REF], tree, expected_common=expected_common)[0] if ref == 0 else ref
     note = _local_note(local_code == 0)
-    code, tip = git(["rev-parse", "--short", REF], tree)
+    code, tip = git(["rev-parse", "--short", REF], tree, expected_common=expected_common)
     if code != 0:
         return unknown(f"no {BASE} to check against{note}")
     if len(commits) > 1:
         return unknown("more than one commit starts with it")
     if "shallow" in found:  # a shallow clone never answers yes: the commit may be in what was cut off
         return unknown(f"shallow clone, so history is cut off{note}")
-    compared = git(["merge-base", "--is-ancestor", commits[0], REF], tree)[0] if held else 1
+    compared = git(["merge-base", "--is-ancestor", commits[0], REF], tree, expected_common=expected_common)[0] if held else 1
     if compared not in (0, 1):
         return unknown(f"git could not compare it with {BASE}")
     if local_code not in (0, 1) and compared != 0:  # origin/main holding it needs no local fact
@@ -329,10 +383,10 @@ def _verdict(sha: str, tree: Path, fetch_error: str, commits: list[str] | None) 
     return code, line, held
 
 
-def _own_git_dirs(cwd: Path) -> list[str]:
+def _own_git_dirs(cwd: Path, *, expected_common: Path | None = None) -> list[str]:
     """The git directories codex may write: a linked worktree's common dir and own gitdir, or a clone's `.git`; none if unviewable or bare."""
     try:
-        lay = git_view.locate(cwd)
+        lay = git_view.locate(cwd, expected_common=expected_common)
     except git_view.Unviewable:
         return []
     if lay.tree is None:
@@ -340,6 +394,6 @@ def _own_git_dirs(cwd: Path) -> list[str]:
     return [str(lay.common)] if lay.gitdir == lay.common else [str(lay.common), str(lay.gitdir)]
 
 
-def codex_add_dir_args(cwd: Path) -> list[str]:
+def codex_add_dir_args(cwd: Path, *, expected_common: Path | None = None) -> list[str]:
     """The `--add-dir` argv that grants codex the validated git directories (#428)."""
-    return [a for d in _own_git_dirs(cwd) for a in ("--add-dir", d)]
+    return [a for d in _own_git_dirs(cwd, expected_common=expected_common) for a in ("--add-dir", d)]

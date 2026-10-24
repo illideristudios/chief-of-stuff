@@ -21,19 +21,21 @@ from clock import HHMM, RAN, dur as _dur, hhmm as _hhmm  # noqa: E402
 from findings import ISSUE, KANBAN, LANE, MERGED, NEXT, OVER, QUEUE, REOPEN, STOPPED  # noqa: E402
 from md import cells as _cells, is_separator as _is_separator, section as _section, unmark as _unmark  # noqa: E402
 from tracker import Session, clip_name, parse_tracker  # noqa: E402
-from workspace import ConfigError, parse_coordinator, read_config, worktrees_dir  # noqa: E402
+from workspace import ConfigError, parse_coordinator, read_config, settings_path, worktrees_dir  # noqa: E402
 from dispatch_prompt import PROMPT_DIR, STOP_FILE, task_keys  # noqa: E402
 from backlog import CLOSED, GITHUB, Backlog, BacklogError, GitHubBacklog, file_with, home_of, issue_ref, issue_states  # noqa: E402
 import backlog  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 import board_sources  # noqa: E402
 import tracker_log  # noqa: E402
+import forge  # noqa: E402
 import kanban as kanban_tool  # noqa: E402
 import ownership  # noqa: E402
 import git_trees  # noqa: E402
 import git_view  # noqa: E402
 from tree_state import UNCOMMITTED_UNKNOWN  # noqa: E402
 from orphans import Claim, Orphan, Unclaimed, judge  # noqa: E402
+from process_status import process_exists, registrations, running_trees  # noqa: E402
 from tree_claims import Claims, one_shot_claims, registry_claims  # noqa: E402
 
 # Preserve branch names from ownership rows when worktrees disappear.
@@ -357,16 +359,16 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         status = None
         if ref.host == GITHUB and config.github_project:
             if project_items is None:
-                project_items, project_error = kanban_tool._project_items(
-                    gh or kanban_tool.backlog.run_gh, config.github_project)
+                project_items, project_error = forge.project_items(
+                    gh or backlog.run_gh, config.github_project)
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))
                 continue
-            if ref.url not in project_items:
+            if ref.url.casefold() not in project_items:
                 faults.append(KanbanFault(clip_name(furthest.label),
                                           "issue is absent from the configured GitHub Project"))
                 continue
-            status = project_items[ref.url]
+            status = project_items[ref.url.casefold()]
         issue_config = config if ref.host == GITHUB else replace(config, github_project=None)
         why = kanban_tool.drift(issue_config, found.labels, furthest.stage.strip(), project_status=status,
                                 allow_extra_hold=furthest.kind == "waiting")
@@ -650,7 +652,8 @@ def _state(worktree: Path, view=None) -> tuple[str, str]:
         reasons.append("not on main")
     elif merged != 0:
         reasons.append(f"on main: {UNREADABLE_PHRASE}")
-    return branch, "; ".join(reasons)
+    # Worker-controlled branch names can carry line/bidi/C1 controls; escape before any audit line (#534).
+    return git_trees.clean(branch), "; ".join(reasons)
 
 
 def _tree_line(name: str, branch: str, why: str) -> str:
@@ -751,6 +754,18 @@ def _push_gap(worktree: Path, view=None) -> str:
     return at + ", ".join(parts) + " vs origin/main"
 
 
+UNREADABLE_GAP = "main vs origin/main unknown"
+
+
+def _pass_push_gap(order: list[Path], view_of, names: dict[Path, str]) -> str:
+    """Gap line for the pass: first readable tree's fact, else name the first tree that could not be read (#537)."""
+    for path in order:
+        line = _push_gap(path, view_of(path))
+        if not line.endswith(UNREADABLE_GAP.removeprefix("main ")):  # `main abc123 vs origin/main unknown` too
+            return line
+    return f"{names[order[0]]}: {UNREADABLE_GAP}"
+
+
 # Read labeled stop-file fields.
 STOP_FIELD = re.compile(r"(?im)^\s*([A-Za-z][A-Za-z ]*?)\s*:\s*(.*?)\s*$")
 # Open and waiting tasks need no stop finding.
@@ -820,6 +835,8 @@ def queue_faults(tracker_text: str) -> tuple[list[QueueFault], list[str], int]:
 def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetime | None = None, call=None) -> Report:
     claude_md = (root / "CLAUDE.md").read_text()
     cfg = parse_coordinator(claude_md, today=date.today())
+    settings = load_settings(root, cfg.settings_path)
+    commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     trees = worktrees_dir(claude_md)
     tracker_text = (root / cfg.tracker_path(day)).read_text()
     tracker = parse_tracker(tracker_text)
@@ -846,18 +863,18 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     names: dict[Path, str] = {}
     stopped_at: set[str] = set()
     gone: dict[str, str] = {}
-    views: dict[Path, git_view.View | None] = {}
+    views: dict[Path, git_view.View | git_view.Unviewable] = {}
     with contextlib.ExitStack() as stack:
 
-        def view_of(tree: Path) -> git_view.View | None:
+        def view_of(tree: Path) -> git_view.View | git_view.Unviewable:
             """One opened view per tree for the whole audit (#548): every git read about `tree` runs inside it, and
-            the view is closed when the audit's git reads are done. A tree whose view cannot be built (`None`)
-            keeps the per-call behaviour — each of its reads then answers on its own."""
+            the view is closed when the audit's git reads are done. A refused view keeps every read refused."""
             if tree not in views:
                 try:
-                    views[tree] = stack.enter_context(git_view.opened(tree, git_trees.audit_env()))
+                    options = {"expected_common": commons[tree.resolve()]} if tree.resolve() in commons else {}
+                    views[tree] = stack.enter_context(git_view.opened(tree, git_trees.audit_env(), **options))
                 except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
-                    views[tree] = None
+                    views[tree] = git_view.Unviewable("git cannot read this tree")
             return views[tree]
 
         def visit(row: OwnerRow, name: str, task) -> None:
@@ -923,11 +940,14 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
                 path = _resolve(root, trees, name)[0]
                 if path is not None:
                     claims.setdefault(path, []).append(row_claim(row, tasks, roster, refs, cfg.user, tracker.sessions))
-        for source in (registry_claims(root), one_shot_claims((root / trees).resolve())):
+        for source in (registry_claims(root, registrations, process_exists),
+                       one_shot_claims((root / trees).resolve(), running_trees)):
             for path, found in source.items():
                 claims.setdefault(path, []).extend(found)
         for path in order:
-            finding = judge(names[path], git_trees.read_state(path, view_of(path)), claims.get(path, []))
+            state = git_trees.read_state(path, view_of(path))
+            state = replace(state, branch=git_trees.clean(state.branch))  # the branch reaches an audit line (#534)
+            finding = judge(names[path], state, claims.get(path, []))
             if isinstance(finding, Orphan):
                 report.orphans.append(finding)
             elif isinstance(finding, Unclaimed):
@@ -937,7 +957,7 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
             report.lines.append(missing_tree(handle, name, detail, view_of(handle) if handle else None))
         if order:
             # All worktrees share the same main and origin/main refs.
-            report.lines.append(_push_gap(order[0], view_of(order[0])))
+            report.lines.append(_pass_push_gap(order, view_of, names))
     report.lines.extend(group_reopens(report.reopen))
     report.lines.extend(str(o) for o in report.orphans)
     report.lines.extend(str(u) for u in report.unclaimed)
@@ -947,7 +967,6 @@ def audit(root: Path, day: str, gh=None, check_issues: bool = True, now: datetim
     report.lines.extend(queue_lines)
     report.lines.extend(str(q) for q in report.queue)
     issues = merged = ""
-    settings = load_settings(root, cfg.settings_path)
     if cfg.backlog:
         if check_issues:
             report.issues.extend(issue_faults(tasks, cfg.backlog, gh, settings.lanes,
@@ -1014,14 +1033,25 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         if not SHA.fullmatch(args.sha):
             print("audit_tasks: --sha takes 7-64 lowercase hex digits", file=sys.stderr)
             return 2
-        trees = worktrees_dir((root / "CLAUDE.md").read_text())
-        asked = git_trees.sha_trees(root, trees)
+        claude_md = (root / "CLAUDE.md").read_text()
+        trees = worktrees_dir(claude_md)
+        try:
+            settings = load_settings(root, settings_path(claude_md))
+            commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+        except (SettingsError, ValueError) as e:
+            print(f"audit_tasks: {e}", file=sys.stderr)
+            return 2
+        asked = git_trees.sha_trees(root, trees, commons)
         if not asked:
             print(f"audit_tasks: --sha found no git tree under {trees or 'the workspace root'}, so nothing was checked", file=sys.stderr)
             return 2
         answers = []
         for name, tree in asked:
-            code, line, held = git_trees.check_sha(args.sha, tree)
+            try:
+                code, line, held = git_trees.check_sha(args.sha, tree, expected_common=commons.get(tree))
+            except git_view.CacheError as e:
+                print(f"audit_tasks: {e}", file=sys.stderr)
+                return 2
             print(git_trees.clean(f"{line} [{name}]"))  # escaped: neither a name nor a remote's error can forge or split a line
             answers.append((code, held))
         code = git_trees.sha_exit(answers)
@@ -1035,7 +1065,7 @@ def main(argv: list[str] | None = None, gh=None) -> int:
         return 2
     try:
         report = audit(root, day, gh=gh, check_issues=not args.no_issues)
-    except SettingsError as e:
+    except (SettingsError, git_view.CacheError, ValueError) as e:
         print(f"audit_tasks: {e}", file=sys.stderr)
         return 2
     for line in report.lines:
