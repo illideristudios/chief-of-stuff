@@ -193,12 +193,15 @@ def render(number: int | IssueRef, trackers: list[tuple[date, str]], sources: bo
            pending_refs: Container[str] = frozenset()) -> str | None:
     """The page, or None when no task in `trackers` names issue `number`. `cfg` resolves a task's due (the board's
     deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
+    if cfg is None and root and (root / "CLAUDE.md").is_file():
+        cfg = read_config(root)
     sources = issue_routes.homed(sources, cfg.backlog if cfg else None)
     target = issue_routes.target(number, sources.home)
     ref = issue_routes.key(target, sources.home)
     shown_ref = escape(ref)
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
-    known = [t for _, text in trackers for t in parse_tracker(text).tasks]
+    known = [replace(t, issue=issue_routes.tracker_cell(t.issue, sources.home))
+             for _, text in trackers for t in parse_tracker(text).tasks]
     mine = [t for t in known if issue_routes.resolve(t.issue, sources.home) == target]
     if not mine:
         return None
@@ -210,7 +213,8 @@ def render(number: int | IssueRef, trackers: list[tuple[date, str]], sources: bo
             if t.kind != "done" and (end := _resolve_due(t.due, cfg, now.date()))}
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
-    today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
+    today = [replace(t, issue=issue_routes.tracker_cell(t.issue, sources.home))
+             for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
     held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
     rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
                                                 ended=forge_ends(known, sources, now.tzinfo), home=sources.home)

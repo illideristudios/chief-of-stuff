@@ -1,15 +1,15 @@
-"""issue_page.py: one tracker issue's page, `/issues/<n>`, from the tracker and the cached sources (Task.dc.html,
+"""issue_page.py: one tracker issue's qualified page, from the tracker and cached sources (Task.dc.html,
 "Task page — laptop"). Stage 1: only what the tracker and board_sources already hold.
 
 The module the implementer creates is `scripts/issue_page.py` with
 
-    render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
+    render(number: int | IssueRef, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None) -> str | None
 
-`number` is the issue (`109` for the tracker cell `#109`); `trackers` is (day, tracker text), oldest first, the last
+`number` accepts a complete IssueRef, or an integer in the configured home (strictly bare cells without a home); `trackers` is (day, tracker text), oldest first, the last
 being today's, over the days the Flow chart reaches back; `lanes` is the settings' lanes. It returns the page's HTML,
 or None when no task in `trackers` names the issue. Sections are `<h2>` headings; the header is one `<header>`.
-pages.py serves it at `GET /issues/<n>`, re-rendered on request like the board and decision pages.
+pages.py serves it at `GET /issues/<host>/<project>/<n>`, re-rendered on request like the board and decision pages.
 """
 
 import re
@@ -939,6 +939,15 @@ class IdentityTest(unittest.TestCase):
                 self.assertIn(ref.label(src.home), html)
                 from issue_routes import route
                 self.assertIn(route(ref, True) + "#f-file", html)
+
+    def test_canonical_gitlab_cells_preserve_flow_and_forge_identity(self):
+        refs, tracker, src = colliding()
+        tracker = tracker.replace(refs[2].url, refs[2].label(src.home))
+        for i in (0, 2):
+            html = ip.render(refs[i], [(TODAY, tracker)], src, NOW, LANES)
+            flow = section(html, "Flow")
+            self.assertIn(f"Task{i}", flow)
+            self.assertNotIn(f"Task{2 if i == 0 else 0}", flow)
 
     def test_integer_home_url_equivalence_unknown_and_foreign_only(self):
         from backlog_ref import IssueRef

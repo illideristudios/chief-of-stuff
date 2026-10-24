@@ -274,7 +274,7 @@ def render(number: int | IssueRef, trackers: list[tuple[date, str]], sources: bo
            graph: Graph | None = None, pages: Path | None = None, root: Path | None = None,
            notes: list[Note] | None = None, notes_error: str = "", pending: int = 0) -> str | None:
     """The page, or None when no task in `trackers` names issue `number`. `notes` are the change's review threads."""
-    sources = issue_routes.homed(sources, read_config(root).backlog if root and (root / "CLAUDE.md").is_file() else None)
+    sources = issue_routes.homed(sources, read_config(root).backlog if not sources.home and root and (root / "CLAUDE.md").is_file() else None)
     target = issue_routes.target(number, sources.home)
     ref = issue_routes.key(target, sources.home)
     shown_ref = escape(ref)

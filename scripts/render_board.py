@@ -161,6 +161,10 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                   held: dict[Task, str] | None = None) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
+    normalized = {t: replace(t, issue=issue_routes.tracker_cell(t.issue, sources.home)) for t in tasks}
+    tasks = list(normalized.values())
+    if held is not None:
+        held = {normalized.get(t, t): cause for t, cause in held.items()}
     lanes = lanes or {}
     held = hold_causes(tasks, kanban, sources, lanes, frozenset()) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
@@ -312,7 +316,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     tracker = parse_tracker(tracker_text)
     today, zone = now.date(), cfg.zone
     # A standing session with no task is not a task.
-    tasks = [task for task in tracker.tasks if not task.standing]
+    tasks = [replace(task, issue=issue_routes.tracker_cell(task.issue, sources.home))
+             for task in tracker.tasks if not task.standing]
     active = [task for task in tasks if task.kind != "done"]
     nearest = nearest_deadline(cfg, now)
     hist = history(tasks, cfg, now)
@@ -339,7 +344,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     since = looked or datetime.combine(today, time(), zone)
     shown = since.astimezone(zone)  # a look on another day names its day
     went = went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == today else f"{shown:%a %H:%M}"
-    known = [t for _, text in stage_log or [] for t in parse_tracker(text).tasks] + tasks
+    known = [replace(t, issue=issue_routes.tracker_cell(t.issue, sources.home))
+             for _, text in stage_log or [] for t in parse_tracker(text).tasks] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     epics = epic_risk(tasks, sources, ends, zone, now)

@@ -24,7 +24,7 @@ Markup contract these tests read (keep to it; everything else is free):
   up with the heads one to one.
 - Header boxes sit in the page's `<header>`: each is an element whose text is its label (`need you`, `running`,
   `slots free`) and its value, in either order.
-- A task link is `<a href="/issues/<n>">`.
+- A task link preserves its complete issue identity (`/issues/<host>/<project>/<n>`); a bare number is local only without a home.
 """
 
 import functools

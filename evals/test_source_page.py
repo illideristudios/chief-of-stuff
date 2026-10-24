@@ -1,4 +1,4 @@
-"""source_page.py: the "Source & diff" page for a task's change, `/issues/<n>/source` (Source48.dc.html, "Source & diff —
+"""source_page.py: the "Source & diff" page for a task's change, `/issues/<host>/<project>/<n>/source` (Source48.dc.html, "Source & diff —
 task !48"), unified diff only. Out of scope here: split view, coverage gutter, inline review notes, compare modes, tags.
 
 The module the implementer creates is `scripts/source_page.py` with
@@ -9,7 +9,7 @@ The module the implementer creates is `scripts/source_page.py` with
 
 `render` returns None when no task in `trackers` names issue `number` (as issue_page.render). The change is the one the
 sources say closes the issue; its diff is read from the clone at `root / graph.clone`, fetched and merge-based as
-module_graph.draw does. `write` writes `<pages_dir>/issue-<n>-source.html`, or removes it and returns None when
+module_graph.draw does. `write` writes an identity-hashed file in `<pages_dir>`, or removes it and returns None when
 `render` does. pages.py serves it at `GET /issues/<n>/source`.
 
 Markup contract these tests read (keep to it; everything else is free):
@@ -17,7 +17,7 @@ Markup contract these tests read (keep to it; everything else is free):
 - The header is one `<header>` element.
 - The file list is one `<ul class="files">` holding one `<li>` per changed file.
 - Each file's diff is one `<table>` carrying `id="<anchor>"` and `data-path="<the file's path>"`; the task page's file
-  links point at `/issues/<n>/source#<anchor>`. A hunk header's text (`@@ -a,b +c,d @@`) sits inside that table.
+  links point at `/issues/<host>/<project>/<n>/source#<anchor>`. A hunk header's text (`@@ -a,b +c,d @@`) sits inside that table.
 - Each diff line is one `<tr>` whose class list holds `add`, `del` or `ctx`, with the cells `<td class="o">` (old line
   number, empty on an added line), `<td class="n">` (new line number, empty on a removed line), `<td class="sign">`
   (`+`, `-` or `−`, empty on context) and `<td class="tx">` (the line's text, escaped).
@@ -301,7 +301,7 @@ class RenderTest(SourcePage):
 class TaskPageLinkTest(SourcePage):
     def test_the_files_changed_card_links_to_the_source_page(self):
         # "The task page's Files changed card links to the source page: `open source & diff` goes to
-        # `/issues/<n>/source`, and each file path links to that file on the source page."
+        # `/issues/<host>/<project>/<n>/source`, and each file path links to that file on the source page."
         task = ip.render(109, TRACKERS, self.sources(), NOW, LANES)
         m = re.search(r"<h2[^>]*>\s*Files changed\b.*?(?=<h2|\Z)", task, re.S)
         self.assertIsNotNone(m, "the task page has no Files changed section")

@@ -719,6 +719,14 @@ class QualifiedNavigationTest(unittest.TestCase):
         main = rb.build_columns([], LANES, None, src, NOW)[-1]
         self.assertEqual({c.name: c.href for c in main.cards}, {f"ChangeTitle{i}": route(r) for i, r in enumerate(refs)})
 
+    def test_canonical_gitlab_cell_selects_its_own_changes(self):
+        from test_issue_page import colliding
+        from issue_routes import route
+        refs, tracker, src = colliding()
+        tracker = tracker.replace(refs[2].url, refs[2].label(src.home))
+        card = card_named(rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, None, src, NOW), "Task2")
+        self.assertEqual(card.refs, ((refs[2].label(src.home), route(refs[2])), ("!42", route(refs[2]))))
+
     def test_flow_and_cold_cache_cards_use_the_workspace_home(self):
         from test_issue_page import colliding
         from issue_routes import route

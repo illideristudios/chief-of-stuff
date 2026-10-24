@@ -48,6 +48,16 @@ def resolve(cell: str, home) -> IssueRef | None:
     return ref if ref and _ok(ref) else None
 
 
+def tracker_cell(cell: str, home) -> str:
+    """Present a canonical GitLab cache key to the tracker consumers as its supported URL form.
+
+    Their parser accepts GitLab URLs but not host/project#N keys; leaving a key there would invoke their
+    legacy trailing-number fallback. Other cells keep their original spelling.
+    """
+    ref = resolve(cell, home)
+    return ref.url if ref and _KEY_GITLAB.fullmatch(cell.strip()) else cell
+
+
 def target(x: int | IssueRef, home) -> IssueRef:
     """`x` as an identity; a number is the Backlog's issue, or the local namespace's when there is no Backlog."""
     if isinstance(x, IssueRef):
