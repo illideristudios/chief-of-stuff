@@ -356,8 +356,11 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
                                  frozenset(t.name.strip() for t in tasks
                                            if t.name.strip() and any(c.state == "open" and c.approved for c in task_changes(t, sources))),
                                  ended=forge_ends(tasks, sources, zone), home=sources.home)
-    # Resolve the row's complete key before shortening its visible label.
-    issue_cells = {issue_key(t.issue, sources.home): t.issue.strip() for t in known if t.issue.strip() and not t.workflow}
+    # Resolve the row's complete key before shortening its visible label; titles keep the tracker's raw issue cell.
+    raw_tasks = [t for _, text in stage_log or [] for t in parse_tracker(text).tasks
+                 ] + [t for t in tracker.tasks if not t.standing]
+    issue_cells = {issue_key(t.issue, sources.home): t.issue.strip()
+                   for t in raw_tasks if t.issue.strip() and not t.workflow}
 
     def flow_ref(row):
         if target := issue_routes.resolve(row.ref, sources.home):
