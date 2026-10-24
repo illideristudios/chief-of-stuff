@@ -388,6 +388,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                           plugin_dirs=plugin_dirs)
         host: dict[str, Any] = {}
         if chosen.runtime == "claude":
+            claude_adapter.require_worker_clock(claude_as_profile, str(tree))
             runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
         else:
             # §13: no guard plugin on these hosts, so the forge must protect the default and the request's target, and
