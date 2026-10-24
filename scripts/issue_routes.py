@@ -14,7 +14,7 @@ import re
 from dataclasses import replace
 from urllib.parse import unquote
 
-from backlog_ref import GITHUB, IssueRef, home_of, issue_ref
+from backlog_ref import GITHUB, WORKFLOW, IssueRef, home_of, issue_ref
 
 _KEY_GITLAB = re.compile(r"^([\w.-]+)/((?:[\w.-]+/)+[\w.-]+)#(\d+)$")  # the cache's `host/project#N`
 _BARE = re.compile(r"#(\d+)")
@@ -49,13 +49,16 @@ def resolve(cell: str, home) -> IssueRef | None:
 
 
 def tracker_cell(cell: str, home) -> str:
-    """Present a canonical GitLab cache key to the tracker consumers as its supported URL form.
+    """A supported identity for the tracker consumers, without their trailing-number fallback.
 
-    Their parser accepts GitLab URLs but not host/project#N keys; leaving a key there would invoke their
-    legacy trailing-number fallback. Other cells keep their original spelling.
+    Qualified identities become URLs their parser understands, including canonical GitLab cache keys.
+    Unsupported cells name no issue; callers keep their original text separately for external links.
+    Workflow cells retain their association behavior.
     """
     ref = resolve(cell, home)
-    return ref.url if ref and _KEY_GITLAB.fullmatch(cell.strip()) else cell
+    if ref:
+        return ref.url if ref.host else f"#{ref.number}"
+    return cell if cell.strip() == WORKFLOW else ""
 
 
 def target(x: int | IssueRef, home) -> IssueRef:

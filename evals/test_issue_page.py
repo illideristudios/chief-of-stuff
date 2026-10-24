@@ -940,6 +940,12 @@ class IdentityTest(unittest.TestCase):
                 from issue_routes import route
                 self.assertIn(route(ref, True) + "#f-file", html)
 
+    def test_unrelated_cells_ending_in_the_number_do_not_join_the_issue_flow(self):
+        refs, tracker, src = colliding()
+        tracker = tracker.replace(refs[2].url, "step 8")
+        html = ip.render(refs[0], [(TODAY, tracker)], src, NOW, LANES)
+        self.assertNotIn("worker2", section(html, "Flow"))
+
     def test_canonical_gitlab_cells_preserve_flow_and_forge_identity(self):
         refs, tracker, src = colliding()
         tracker = tracker.replace(refs[2].url, refs[2].label(src.home))

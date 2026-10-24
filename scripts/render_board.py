@@ -162,6 +162,7 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     normalized = {t: replace(t, issue=issue_routes.tracker_cell(t.issue, sources.home)) for t in tasks}
+    original_cells = {normalized[t]: t.issue for t in tasks}
     tasks = list(normalized.values())
     if held is not None:
         held = {normalized.get(t, t): cause for t, cause in held.items()}
@@ -187,15 +188,16 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
 
     def card(task: Task, stage: str | None = None) -> columns.Card:
         changes = task_changes(task, sources)
-        url = issue_url(issue_key(task.issue, sources.home), task.issue)
-        target = issue_routes.resolve(task.issue, sources.home)
-        issue = issue_routes.key(target, sources.home) if target else task.issue.strip()
-        refs = ((issue, page(task.issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
+        cell = original_cells[task]
+        target = issue_routes.resolve(cell, sources.home)
+        url = issue_url(issue_routes.key(target, sources.home) if target else "", cell)
+        issue = issue_routes.key(target, sources.home) if target else cell.strip()
+        refs = ((issue, page(cell, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
                             flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
-                            href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
+                            href=page(cell, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
     laned = [t for t in tasks if t.lane.strip() and t.stage.strip()]
@@ -333,7 +335,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
     held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs)
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
+    build_cols = build_columns([t for t in tracker.tasks if not t.standing], lanes, kanban, sources, now, held)
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols)}</section>\n')
     flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]

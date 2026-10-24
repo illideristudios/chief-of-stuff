@@ -323,7 +323,9 @@ class Build(unittest.TestCase):
         self.assertIn("+ <span>2 merged today</span>", html)
 
     def test_drift_marks_the_card(self) -> None:
-        card = next(c for col in self.cols(kanban=KANBAN) for c in col.cards if c.name == "Write README")
+        # Drift needs a supported issue reference; the external docs URL names no issue (#412).
+        tasks = rb.parse_tracker(TRACKER.replace("https://forge/i/7", "#7")).tasks
+        card = next(c for col in rb.build_columns(tasks, LANES, KANBAN, SOURCES, NOW) for c in col.cards if c.name == "Write README")
         self.assertIn(columns.Mark("drift", "drift"), card.marks)
         cut = next(c for col in self.cols(kanban=KANBAN) for c in col.cards if c.name == "Cut the release")
         self.assertNotIn(columns.Mark("drift", "drift"), cut.marks)
@@ -496,7 +498,7 @@ class CardRefAndOwnerLinkTest(unittest.TestCase):
 class Page(unittest.TestCase):
     def setUp(self) -> None:
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
-        self.html = rb.render(TRACKER, self.cfg, NOW, lanes=LANES, kanban=KANBAN, sources=SOURCES,
+        self.html = rb.render(TRACKER.replace("https://forge/i/7", "#7"), self.cfg, NOW, lanes=LANES, kanban=KANBAN, sources=SOURCES,
                               decisions=[("x", {"headline": "Pick", "recommended": "B", "default": "d"}, NOW.replace(hour=10, minute=0), "")],
                               answered=1, tracker_at=NOW - timedelta(minutes=5))
         self.body = self.html.split("</style>", 1)[1]
@@ -587,7 +589,7 @@ class Page(unittest.TestCase):
         tracker = TRACKER.replace("## Decisions",
                                   "| Ship the tool | Ship it | Robin | waiting | 09:00 |  | S | build | merge | #8 | Checklist: ship |\n"
                                   "\n## Decisions")
-        html = rb.render(tracker, self.cfg, NOW, lanes=lanes, kanban=kanban, sources=sources)
+        html = rb.render(tracker.replace("https://forge/i/7", "#7"), self.cfg, NOW, lanes=lanes, kanban=kanban, sources=sources)
         tiles = dict(re.findall(r'<span class="panels-label">([A-Z ]+)</span><b class="panels-count">(\d+)</b>', html))
         # #349: the artboard's label (BLOCKED is NEEDS INPUT).
         self.assertEqual(tiles["NEEDS INPUT"], "0")
@@ -718,6 +720,14 @@ class QualifiedNavigationTest(unittest.TestCase):
         src = replace(src, changes={k: replace(c, state="merged", merged_at=NOW) for k, c in src.changes.items()})
         main = rb.build_columns([], LANES, None, src, NOW)[-1]
         self.assertEqual({c.name: c.href for c in main.cards}, {f"ChangeTitle{i}": route(r) for i, r in enumerate(refs)})
+
+    def test_unsupported_numeric_url_keeps_external_fallback_without_borrowing_an_issue(self):
+        from test_issue_page import colliding
+        refs, tracker, src = colliding()
+        tracker = tracker.replace(refs[2].url, "https://example.test/docs/8")
+        card = card_named(rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, None, src, NOW), "Task2")
+        self.assertEqual(card.href, "https://example.test/docs/8")
+        self.assertEqual(card.refs, (("https://example.test/docs/8", "https://example.test/docs/8"),))
 
     def test_canonical_gitlab_cell_selects_its_own_changes(self):
         from test_issue_page import colliding
