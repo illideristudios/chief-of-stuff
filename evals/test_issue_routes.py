@@ -73,6 +73,9 @@ class RouteTest(unittest.TestCase):
                 with self.subTest(ref=ref, source=source):
                     self.assertEqual(ir.parse(ir.route(ref, source)), (ref, source))
 
+    def test_safe_encoded_segments_decode_once(self):
+        self.assertEqual(ir.parse("/issues/github.com/%74eam/app/8"), (self.REFS[0], False))
+
     def test_same_number_in_another_project_or_host_is_another_route_and_file(self):
         self.assertEqual(len({ir.route(r) for r in self.REFS}), len(self.REFS))
         self.assertEqual(len({ir.filename(r) for r in self.REFS}), len(self.REFS))

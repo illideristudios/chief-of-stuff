@@ -439,5 +439,24 @@ class OnRequestTest(unittest.TestCase):
         self.assertIn(column(running, row(running, "impl-a1"), "token"), token_forms(TOKENS + 1000))
 
 
+
+class QualifiedWorkerNavigationTest(unittest.TestCase):
+    def test_running_and_ended_workers_keep_same_number_issue_identities(self):
+        from dataclasses import replace
+        from test_issue_page import colliding
+        from test_flow_chart import NOW
+        from issue_routes import route
+        import workers_page
+        refs, tracker, src = colliding()
+        src = replace(src, workers=tuple(bs.Worker(f"worker{i}", "one-shot", "codex", f"model{i}", f"Task{i}", "", NOW, NOW)
+                                         for i in range(3)))
+        html = workers_page.render(tracker, src, NOW, Path("/unused"), 4)
+        for i, ref in enumerate(refs):
+            running = next(row for row in re.findall(r"<tr>.*?</tr>", html, re.S) if f"model{i}" in row)
+            self.assertIn(f'href="{route(ref)}"', running)
+        ended = html[html.index("Ended today"):]
+        self.assertIn(f'href="{route(refs[1])}"', ended)
+        self.assertNotIn(f'href="{route(refs[0])}"', ended)
+
 if __name__ == "__main__":
     unittest.main()

@@ -303,15 +303,14 @@ class Build(unittest.TestCase):
                          (columns.Mark("failed", "failed"), columns.Mark("approved", "approved")))
         self.assertEqual(rb.change_marks((change("!1", pipeline="running"),)), (columns.Mark("running", "pending"),))
 
-    def test_an_issue_url_matches_its_number(self) -> None:
-        # A ref's number, not a matching sources.issues URL, decides its link: it still opens /issues/7,
-        # sources.issues["#7"] notwithstanding (#209).
+    def test_an_unsupported_url_keeps_its_external_link(self) -> None:
+        # An unrelated URL ending in a number supplies no issue identity (#412).
         card = next(c for col in self.cols() for c in col.cards if c.name == "Write README")
-        self.assertEqual(card.refs, (("#7", "/issues/7"),))
+        self.assertEqual(card.refs, (("https://forge/i/7", "https://forge/i/7"),))
 
     def test_a_tracker_issue_url_links_without_sources(self) -> None:
         card = next(c for col in rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES) for c in col.cards if c.name == "Write README")
-        self.assertEqual(card.refs, (("#7", "/issues/7"),))
+        self.assertEqual(card.refs, (("https://forge/i/7", "https://forge/i/7"),))
         bare = next(c for col in self.cols() for c in col.cards if c.name == "Webhook check")
         self.assertEqual((bare.refs, bare.href), ((), ""))
 
@@ -385,14 +384,14 @@ class HomeProjectUrlTest(unittest.TestCase):
 
     def test_the_card_names_the_issue_by_its_short_key(self) -> None:
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, self.sources, NOW), "Ship it")
-        self.assertEqual(card.refs, (("#8", "/issues/8"), ("!60", "/issues/8")))
+        self.assertEqual(card.refs, (("#8", "/issues/example.com/o/app/8"), ("!60", "/issues/example.com/o/app/8")))
         self.assertIn(columns.Mark("drift", "drift"), card.marks)
 
     def test_the_cards_own_key_decides_its_ref(self) -> None:
         # no change and no known issue: only the card's own issue_key call decides its ref
         bare = replace(self.sources, changes={}, issues={})
         card = card_named(rb.build_columns(self.tasks, LANES, KANBAN, bare, NOW), "Ship it")
-        self.assertEqual(card.refs, (("#8", "/issues/8"),))
+        self.assertEqual(card.refs, (("#8", "/issues/example.com/o/app/8"),))
 
 
 class CardLinkTest(unittest.TestCase):
@@ -406,8 +405,8 @@ class CardLinkTest(unittest.TestCase):
         for sources in (SOURCES, bs.EMPTY):
             cols = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW)
             with self.subTest(sources="some" if sources.changes else "none"):
-                self.assertEqual(card_named(cols, "Write README").href, "/issues/7")
-                self.assertEqual(card_named(cols, "Write README").refs, (("#7", "/issues/7"),))
+                self.assertEqual(card_named(cols, "Write README").href, "https://forge/i/7")
+                self.assertEqual(card_named(cols, "Write README").refs, (("https://forge/i/7", "https://forge/i/7"),))
                 self.assertEqual(card_named(cols, "Cut the release").href, "/issues/9")
         cut = card_named(rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, SOURCES, NOW), "Cut the release")
         self.assertEqual(cut.refs, (("#9", "/issues/9"), ("!48", "/issues/9")))
@@ -704,6 +703,33 @@ class EpicsOnTheBoardTest(unittest.TestCase):
         self.assertIn('title="milestones: 1 late">1 late</span>', rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=sources))
         self.assertNotIn("milestones:", rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=SOURCES))
 
+
+
+class QualifiedNavigationTest(unittest.TestCase):
+    def test_cards_refs_changes_and_merged_cards_keep_their_issue_identity(self):
+        from test_issue_page import colliding
+        from issue_routes import route
+        refs, tracker, src = colliding()
+        cols = rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, None, src, NOW)
+        for i, ref in enumerate(refs):
+            card = card_named(cols, f"Task{i}")
+            self.assertEqual(card.href, route(ref))
+            self.assertEqual([url for _, url in card.refs], [route(ref), route(ref)])
+        src = replace(src, changes={k: replace(c, state="merged", merged_at=NOW) for k, c in src.changes.items()})
+        main = rb.build_columns([], LANES, None, src, NOW)[-1]
+        self.assertEqual({c.name: c.href for c in main.cards}, {f"ChangeTitle{i}": route(r) for i, r in enumerate(refs)})
+
+    def test_flow_and_cold_cache_cards_use_the_workspace_home(self):
+        from test_issue_page import colliding
+        from issue_routes import route
+        from workspace import parse_coordinator
+        refs, tracker, src = colliding()
+        cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
+                                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n"
+                                "- Backlog: GitHub issues; repo team/app\n", today=NOW.date())
+        for sources in (src, bs.EMPTY):
+            html = rb.render(tracker, cfg, NOW, LANES, tracker_day=NOW.date(), sources=sources)
+            self.assertEqual(set(re.findall(r'href="(/issues/[^"]+)"', html)), {route(ref) for ref in refs})
 
 if __name__ == "__main__":
     unittest.main()

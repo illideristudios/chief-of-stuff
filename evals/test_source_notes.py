@@ -31,7 +31,9 @@ import json
 import os
 import re
 import sys
+import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, time, timezone
 from html import escape, unescape
 from pathlib import Path
@@ -158,7 +160,10 @@ class NotesPage(SourcePage):
         (root / "daily").mkdir(exist_ok=True)
         day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (root / "daily" / f"{day}-tracker.md").write_text(ROUTE_TRACKER.format(day=day))
-        bs._write(root / "pages" / bs.CACHE, self.sources())
+        src = self.sources()
+        src = replace(src, changes={k: replace(c, url=f"{home.host}/{home.project}/-/merge_requests/48")
+                                    if c.ref == "!48" else c for k, c in src.changes.items()})
+        bs._write(root / "pages" / bs.CACHE, src)
         asked = []
 
         def fake(change, home, *a, **k):
@@ -311,6 +316,51 @@ class NotesQueryTest(unittest.TestCase):
             got, error = sp.notes(GL_MR, GL, call=lambda *a, **k: self.fail("no call without a token"))
         self.assertEqual((got, bool(error)), ([], True))
 
+
+
+class NotesIdentityTest(unittest.TestCase):
+    def test_foreign_changes_never_query_the_home_project_or_use_its_credentials(self):
+        for url in ("https://github.com/team/other/pull/48", "https://elsewhere.test/team/app/-/merge_requests/48",
+                    "https://labs.example.test/team/other/-/merge_requests/48"):
+            for home in (GH, GL):
+                with self.subTest(url=url, home=home), mock.patch.object(backlog, "token") as token:
+                    gh, call = mock.Mock(), mock.Mock()
+                    found, error = sp.notes(replace(GL_MR, url=url), home, gh=gh, call=call)
+                    self.assertEqual(found, [])
+                    self.assertTrue(error)
+                    token.assert_not_called()
+                    gh.assert_not_called()
+                    call.assert_not_called()
+
+    def test_writer_selects_the_same_identity_for_notes_content_and_filename(self):
+        from test_issue_page import colliding
+        from issue_routes import filename
+        from test_flow_chart import TODAY
+        refs, tracker, src = colliding()
+        src = replace(src, changes={str(i): replace(c, url=(f"https://{ref.host}/{ref.repo}/pull/{40+i}" if i < 2 else
+                                                          f"https://{ref.host}/{ref.repo}/-/merge_requests/{40+i}"))
+                                    for i, (c, ref) in enumerate(zip(src.changes.values(), refs))})
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
+                                          "- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n"
+                                          "- Board: self-hosted; URL http://127.0.0.1:8787/; dir `pages/`\n"
+                                          "- Backlog: GitHub issues; repo team/app\n")
+            (root / "daily").mkdir()
+            today = datetime.now(ZoneInfo(ZONE)).date()
+            (root / "daily" / f"{today}-tracker.md").write_text(tracker.replace(str(TODAY), str(today)))
+            pages = root / "pages"
+            pages.mkdir()
+            bs._write(pages / bs.CACHE, src)
+            with mock.patch.object(sp, "notes", return_value=([], "")) as notes:
+                for i, ref in enumerate(refs):
+                    out = sp.write(root, pages, ref)
+                    self.assertEqual(out.name, filename(ref, True))
+                    html = out.read_text()
+                    self.assertIn(f"ChangeTitle{i}", html)
+                    self.assertEqual("Review notes unavailable" in html, i != 0)
+                self.assertEqual(notes.call_count, 1)
+                self.assertEqual(notes.call_args.args, (src.changes["0"], src.home))
 
 if __name__ == "__main__":
     unittest.main()

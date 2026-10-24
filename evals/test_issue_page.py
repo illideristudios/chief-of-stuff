@@ -517,7 +517,8 @@ class FlowRefReviewTest(unittest.TestCase):
             with self.subTest(ref=ref):
                 tracker = flow_launch_tracker([("Build parser", "Build the parser", ref)],
                                               [("Build the parser", "worker-1", "00:10")])
-                html = page(7, src=bs.Sources({}, {}, {}, (), {}), trackers=[(TODAY, tracker)])
+                from issue_routes import resolve
+                html = page(resolve(ref, None), src=bs.Sources({}, {}, {}, (), {}), trackers=[(TODAY, tracker)])
                 self.assertIsNotNone(html)
                 self.assertEqual(set(re.findall(r'class="gantt-name">([^<]*)<', section(html, "Flow"))),
                                  {"Build parser"})
@@ -912,6 +913,9 @@ def colliding():
         f"| Task{i} | Work{i} | worker{i} | {'done 01:00' if i == 1 else 'running 00:10'} | {TODAY} |  | S | build | implement | {cell} | c |\n"
         for i, cell in enumerate(cells))
     tasks += "\n## Log\n\n" + "".join(f"- 00:10 stage: Task{i} → implement\n" for i in range(3))
+    tasks += "".join(f"- 00:11 one-shot worker{i} started: codex model{i}, worktree `tree{i}`, task Work{i}\n"
+                     + (f"- 00:50 one-shot worker{i}: completed; awaiting integration — done. Changes: file{i}.py.\n" if i == 1 else "")
+                     for i in range(3))
     issues, changes = {}, {}
     for i, ref in enumerate(refs):
         key = ref.label(home)
@@ -929,7 +933,7 @@ class IdentityTest(unittest.TestCase):
                 html = ip.render(ref, [(TODAY, tracker)], src, NOW, LANES)
                 self.assertIsNotNone(html)
                 for j in range(3):
-                    for value in (f"Accept{j}", f"ChangeTitle{j}", f"Task{j}", f"file{j}.py"):
+                    for value in (f"Accept{j}", f"ChangeTitle{j}", f"Task{j}", f"file{j}.py", f"model{j}"):
                         (self.assertIn if i == j else self.assertNotIn)(value, html)
                 self.assertEqual("the issue is closed" in html, i == 1)
                 self.assertIn(ref.label(src.home), html)

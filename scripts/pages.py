@@ -2,9 +2,9 @@
 """Serve the workspace's pages locally: the board and any page a session writes beside it.
 
 The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
-`/decisions/<slug>` a decision page, `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
+`/decisions/<slug>` a decision page, `/issues/<host>/<project>/<n>` a tracker issue's page, that route plus `/source` its change's source
 and diff. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
-`issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
+identity-hashed issue/source filenames), which only the routes serve: a request for the file's own name is a 404.
 A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
 `.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
 reloads itself when the file changes.
@@ -47,6 +47,7 @@ from stat import S_ISREG
 from html import escape
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
+import issue_routes
 import page_reload
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
 
@@ -54,9 +55,8 @@ SERVER = "chief-of-stuff-pages"
 PID = ".pid"
 CACHE = ".sources.json"
 REFRESH = 60  # seconds between forge reads
-RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-\d+(?:-source)?\.html")
+RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|q-[0-9a-f]{64})(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
-ISSUE = re.compile(r"/issues/(\d+)(/source)?")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
@@ -124,7 +124,7 @@ def today_board(root: Path) -> str | None:
     return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() else None
 
 
-def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()) -> str:
+def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext(), issue=None) -> str:
     """Re-render the page `name` when a source is newer than its last render, or differs in bytes from what that
     render consumed, inside one of `slots`. Returns the render error, or "". On an error the last good file stays
     where it is."""
@@ -138,6 +138,10 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
     # directly in pages_dir, and everything after uses the checked path (and the name taken from it), not the raw one.
     if not RENDERED.fullmatch(name):
         return ""
+    if name.startswith("issue-"):
+        issue = issue if issue is not None else issue_routes.from_filename(name)
+        if issue is None or issue_routes.filename(issue, name.endswith("-source.html")) != name:
+            return "issue target does not match rendered filename"
     base = os.path.realpath(pages_dir)
     checked = os.path.realpath(os.path.join(base, name))
     if not checked.startswith(base + os.sep):
@@ -169,7 +173,9 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             digest = _digest(sources)
             record = RENDERED_AT.get(key)
             rendered = record[0] if record and record[1] in (mtime, None) else mtime
-            if rendered >= newest and name != "workers.html":
+            # Issue files from an earlier server have no verified identity, even if their mtime is fresh.
+            verified = not name.startswith("issue-") or (record and record[1] == mtime)
+            if rendered >= newest and name != "workers.html" and verified:
                 # The filesystem's mtime clock reads behind the wall clock by more than a render takes under load
                 # here, so a source saved after that render began can carry an mtime from before it. Where the
                 # record is this server's render of this file, the sources' bytes settle it: fresh only if they
@@ -185,9 +191,9 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                 elif name.startswith("decision-"):
                     decision_page.write(root, pages_dir, name[len("decision-"):-5], day)
                 elif name.endswith("-source.html"):
-                    source_page.write(root, pages_dir, int(name[len("issue-"):-len("-source.html")]))
+                    source_page.write(root, pages_dir, issue)
                 elif name.startswith("issue-"):
-                    issue_page.write(root, pages_dir, int(name[len("issue-"):-5]))
+                    issue_page.write(root, pages_dir, issue)
                 else:
                     render_board.write(root, day)
             RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
@@ -219,7 +225,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def _allowed(self) -> bool:
         """Refuse a foreign Host or a dotfile; map `/` to today's (else the newest) board, `/all` to the listing and
-        `/workers`, `/decisions[/<slug>]` and `/issues/<n>` to its file; refuse a rendered page's file name; re-render a page its sources outdate."""
+        `/workers`, `/decisions[/<slug>]` and qualified issue routes to their files; refuse a rendered page's file name; re-render a page its sources outdate."""
         port = self.server.server_address[1]
         if self.headers.get("Host", "") not in (f"127.0.0.1:{port}", f"localhost:{port}"):
             self.send_error(403, "Host is not this machine")
@@ -231,6 +237,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         root = getattr(self.server, "root", None)
         self._poke()
         look = False
+        issue = None
         if path == "/":
             # Served in place, not redirected: the tab stays on `/`, so its reload poll finds the next day's board.
             name = None
@@ -259,11 +266,23 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return False
             self.path = f"/decision-{m[1]}.html"
         elif path.startswith("/issues/"):
-            m = ISSUE.fullmatch(path)
-            if not m:
+            parsed = issue_routes.parse(path)
+            if not parsed:
                 self.send_error(404, "no such issue")
                 return False
-            self.path = f"/issue-{int(m[1])}{'-source' if m[2] else ''}.html"
+            issue, source = parsed
+            if not issue.host and root is not None:
+                import board_sources
+                home = board_sources.load(Path(self.directory)).home or read_config(root).backlog
+                if home is not None:
+                    location = issue_routes.route(issue_routes.target(issue.number, home), source)
+                    query = self.path.partition("?")[2]
+                    self.send_response(302)
+                    self.send_header("Location", location + ("?" + query if query else ""))
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return False
+            self.path = "/" + issue_routes.filename(issue, source)
         elif RENDERED.fullmatch(Path(self.translate_path(path)).name.lower()):
             # A rendered page is a route only. The resolved name, lowercased: `//x` and a case-insensitive disk reach it too.
             self.send_error(404)
@@ -278,7 +297,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if look:
                     with contextlib.suppress(OSError):
                         prior = record_look(pages, datetime.now().astimezone())
-                self.banner = fresh(root, pages, name, self.server.slots)
+                self.banner = fresh(root, pages, name, self.server.slots, issue=issue)
                 if self.banner and prior is not None:
                     with contextlib.suppress(OSError):
                         unrecord_look(pages, prior)

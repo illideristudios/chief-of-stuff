@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 
 PAGES = frozenset({"render_board", "decision_page", "issue_page", "source_page", "workers_page", "pages",
-                   "flow_chart", "gantt", "panels", "columns", "fragment", "module_graph", "page_reload"})
+                   "issue_routes", "flow_chart", "gantt", "panels", "columns", "fragment", "module_graph", "page_reload"})
 
 # The leaf page modules: each imports at most fragment (the shared escaping), so a chart or the reload check lifts out with it.
 LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")

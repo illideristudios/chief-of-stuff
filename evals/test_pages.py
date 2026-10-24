@@ -1076,7 +1076,7 @@ class _Renders:
         self.inside, self.entered, self.most = [], [], {}
         for target, fake in ((render_board, lambda root, day=None: self.render(f"{day}-board.html")),
                              (decision_page, lambda root, pages_dir, slug, day, source=None: self.render(f"decision-{slug}.html")),
-                             (issue_page, lambda root, pages_dir, n: self.render(f"issue-{n}.html"))):
+                             (issue_page, lambda root, pages_dir, n: self.render(pg.issue_routes.filename(n)))):
             patcher = mock.patch.object(target, "write", fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1224,6 +1224,163 @@ class ConfiguredWorkersTest(_Renders, unittest.TestCase):
         # Rule: "N comes from the workspace settings TOML `[pages] workers`, a positive whole number".
         self.assert_up_to(2)
 
+
+
+class QualifiedIssueRoutesTest(unittest.TestCase):
+    """The route, storage, freshness and errors all use the same complete identity (#412)."""
+
+    def setUp(self):
+        from test_issue_page import RouteTest, colliding, ZONE
+        import board_sources as bs
+        RouteTest.setUp(self)
+        self.refs, tracker, self.src = colliding()
+        self.config = self.root / "CLAUDE.md"
+        self.config.write_text(self.config.read_text() + "- Backlog: GitHub issues; repo team/app\n")
+        self.tracker = next((self.root / "daily").glob("*-tracker.md"))
+        from test_flow_chart import TODAY
+        today = datetime.now(ZoneInfo(ZONE)).date()
+        self.tracker.write_text(tracker.replace(str(TODAY), str(today)))
+        bs._write(self.pages / bs.CACHE, self.src)
+        import issue_routes
+        self.ir = issue_routes
+
+    def test_qualified_get_head_and_storage_keep_projects_and_hosts_apart(self):
+        for source in (False, True):
+            for i, ref in enumerate(self.refs):
+                with self.subTest(source=source, ref=ref):
+                    path = self.ir.route(ref, source)
+                    resp = get(self.port, path)
+                    self.assertEqual(resp.status, 200)
+                    self.assertIn(f"{'file' if source else 'Accept'}{i}".encode(), resp.body)
+                    for j in range(3):
+                        if j != i:
+                            self.assertNotIn(f"{'file' if source else 'Accept'}{j}".encode(), resp.body)
+                    head = get(self.port, path, method="HEAD")
+                    self.assertEqual(head.status, 200)
+                    self.assertEqual(head.body, b"")
+                    self.assertEqual(head.getheader("Content-Length"), resp.getheader("Content-Length"))
+                    name = self.ir.filename(ref, source)
+                    self.assertTrue((self.pages / name).is_file())
+                    self.assertIn(str(self.pages / name), pg.RENDERED_AT)
+                    self.assertEqual(get(self.port, "/" + name).status, 404)
+                    self.assertNotIn(name.encode(), get(self.port, "/all").body)
+        self.assertEqual(len({id(pg.page_lock(self.pages / self.ir.filename(ref))) for ref in self.refs}), 3)
+
+    def test_numeric_aliases_redirect_to_home_and_preserve_query_for_get_and_head(self):
+        (self.pages / "issue-8.html").write_text("wrong legacy page")
+        for source in (False, True):
+            for method in ("GET", "HEAD"):
+                resp = get(self.port, "/issues/8" + ("/source" if source else "") + "?file=a%2Fb&x=1", method=method)
+                self.assertEqual(resp.status, 302)
+                self.assertEqual(resp.getheader("Location"), self.ir.route(self.refs[0], source) + "?file=a%2Fb&x=1")
+                self.assertNotIn(b"wrong legacy", resp.body)
+        self.assertEqual(get(self.port, "/issue-8.html").status, 404)
+        self.assertNotIn(b"issue-8.html", get(self.port, "/all").body)
+
+    def test_unknown_removed_and_mutated_identity_never_borrow_another_cache(self):
+        from backlog_ref import IssueRef
+        for ref in self.refs:
+            self.assertEqual(get(self.port, self.ir.route(ref)).status, 200)
+        other = self.pages / self.ir.filename(self.refs[1])
+        original = other.read_bytes()
+        self.tracker.write_text(self.tracker.read_text().replace("| #8 |", "| #9 |"))
+        self.assertEqual(get(self.port, self.ir.route(self.refs[0])).status, 404)
+        self.assertFalse((self.pages / self.ir.filename(self.refs[0])).exists())
+        self.assertEqual(other.read_bytes(), original)
+        self.assertEqual(get(self.port, self.ir.route(self.refs[1])).status, 200)
+        self.assertEqual(get(self.port, self.ir.route(IssueRef("missing/app", 8))).status, 404)
+        self.assertEqual(get(self.port, self.ir.route(self.refs[1], True)).status, 200)
+
+    def test_malformed_paths_and_encoded_separators_are_not_routes(self):
+        for path in ("/issues/github.com/team/app/8/extra", "/issues/github.com/team/app/08",
+                     "/issues/github.com/team/app/x", "/issues/github.com/team/app/8/source/extra",
+                     "/issues/github.com/team%2Fapp/8", "/issues/github.com/team/%2e%2e/8",
+                     "/issues/github.com/team/%252e%252e/8", "/issues/github.com/team/app/8%2fsource",
+                     "/issues/github.com/team/app/8%252fsource", "/issues/labs.example.test/team/8"):
+            with self.subTest(path=path):
+                self.assertEqual(get(self.port, path).status, 404)
+
+    def test_stale_errors_keep_only_that_identitys_last_good_page(self):
+        import issue_page
+        real = issue_page.write
+        for ref in self.refs:
+            get(self.port, self.ir.route(ref))
+        self.tracker.write_text(self.tracker.read_text() + "\n- 00:20 updated\n")
+        def fail_one(root, pages, target):
+            if target == self.refs[0]:
+                raise ValueError("home render broke")
+            return real(root, pages, target)
+        with mock.patch.object(issue_page, "write", side_effect=fail_one):
+            home = get(self.port, self.ir.route(self.refs[0]))
+            other = get(self.port, self.ir.route(self.refs[1]))
+        self.assertIn(b"not re-rendered", home.body)
+        self.assertIn(b"Accept0", home.body)
+        self.assertNotIn(b"Accept1", home.body)
+        self.assertNotIn(b"not re-rendered", other.body)
+        self.assertIn(b"Accept1", other.body)
+
+    def test_cold_cache_uses_workspace_home_for_aliases_and_writes(self):
+        (self.pages / pg.CACHE).unlink()
+        self.assertEqual(get(self.port, "/issues/8").getheader("Location"), self.ir.route(self.refs[0]))
+        resp = get(self.port, self.ir.route(self.refs[0]))
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"Task0", resp.body)
+        self.assertNotIn(b"Task1", resp.body)
+        self.assertEqual(get(self.port, self.ir.route(self.refs[0], True)).status, 200)
+
+    def test_no_home_numeric_namespace_matches_only_explicit_bare_refs(self):
+        self.config.write_text(self.config.read_text().replace("- Backlog: GitHub issues; repo team/app\n", ""))
+        (self.pages / pg.CACHE).unlink()
+        resp = get(self.port, "/issues/8")
+        self.assertEqual(resp.status, 200)
+        self.assertIn(b"Task0", resp.body)
+        self.assertNotIn(b"Task1", resp.body)
+        self.tracker.write_text(self.tracker.read_text().replace("| #8 |", "| #9 |"))
+        self.assertEqual(get(self.port, "/issues/8").status, 404)
+        self.assertEqual(get(self.port, self.ir.route(self.refs[1])).status, 200)
+
+    def test_an_unverified_legacy_cache_cannot_supply_a_no_home_bare_page(self):
+        self.config.write_text(self.config.read_text().replace("- Backlog: GitHub issues; repo team/app\n", ""))
+        (self.pages / pg.CACHE).unlink()
+        self.tracker.write_text(self.tracker.read_text().replace("| #8 |", "| #9 |"))
+        legacy = self.pages / "issue-8.html"
+        legacy.write_text("foreign legacy content")
+        future = time.time() + 3600
+        os.utime(legacy, (future, future))
+        self.assertEqual(get(self.port, "/issues/8").status, 404)
+
+    def test_render_target_must_agree_with_the_hashed_filename(self):
+        import issue_page
+        with mock.patch.object(issue_page, "write") as write:
+            error = pg.fresh(self.root, self.pages, self.ir.filename(self.refs[0]), issue=self.refs[1])
+        self.assertTrue(error)
+        write.assert_not_called()
+
+    def test_distinct_targets_render_concurrently_and_one_target_serializes(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import issue_page
+        entered, release = threading.Event(), threading.Event()
+        real = issue_page.write
+        calls = []
+        def slow(root, pages, target):
+            calls.append(target)
+            if target == self.refs[0]:
+                entered.set()
+                if not release.wait(4):
+                    raise TimeoutError("test render was not released")
+            return real(root, pages, target)
+        with mock.patch.object(issue_page, "write", side_effect=slow), ThreadPoolExecutor(max_workers=3) as pool:
+            first = pool.submit(get, self.port, self.ir.route(self.refs[0]))
+            self.assertTrue(entered.wait(2))
+            second = pool.submit(get, self.port, self.ir.route(self.refs[0]))
+            try:
+                foreign = pool.submit(get, self.port, self.ir.route(self.refs[1])).result(timeout=3)
+                self.assertEqual(foreign.status, 200)
+            finally:
+                release.set()
+            self.assertEqual(first.result().status, 200)
+            self.assertEqual(second.result().status, 200)
+        self.assertEqual(calls.count(self.refs[0]), 1)
 
 if __name__ == "__main__":
     unittest.main()

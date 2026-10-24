@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""One tracker issue's page, `/issues/<n>` (Task.dc.html, "Task page — laptop"), from the trackers and the cached
+"""One tracker issue's page, `/issues/<host>/<project>/<n>` (Task.dc.html, "Task page — laptop"), from the trackers and the cached
 forge sources: the header; its merge request (merge order, overlap, pipeline jobs, conflicts, threads); the issue's
 one Flow row; What happens next; Files changed; Architecture (module_graph.py, as on the decision page); How it got here
 (its Log lines); Review; Acceptance (the bullets under the issue body's "Acceptance" heading); its workers; and
-References. pages.py renders it on request into `issue-<n>.html`.
+References. pages.py renders it on request into an identity-specific file.
 """
 
 from __future__ import annotations
@@ -17,13 +17,15 @@ from pathlib import Path
 
 import board_sources
 import flow_chart
+import issue_routes
+from backlog_ref import IssueRef
 import tracker_log
 from decision_page import HEAD, _md, _section, context, entries, held_refs, span, write_if_changed
 from fragment import href, tab_bar
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
-from tracker import TRAILING_NUMBER, issue_number, parse_tracker, resolve_due as _resolve_due
+from tracker import TRAILING_NUMBER, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, daily_trackers, read_config
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
@@ -122,15 +124,16 @@ def anchor(path: str) -> str:
     return "f-" + re.sub(r"[^A-Za-z0-9_.-]", "-", path)
 
 
-def _files(c: board_sources.Change, changes, number: int) -> str:
+def _files(c: board_sources.Change, changes, target: IssueRef) -> str:
     """FILES CHANGED: a link to the source page; each file, linked to its diff there, its +additions −deletions when
     known, "also !N" for another open change on it."""
+    source_url = issue_routes.route(target, True)
     stats, shared = {f.path: f for f in c.stats}, _shared(c, changes)
-    rows = [f'      <div class="fl"><span class="cap">files changed</span><a href="/issues/{number}/source">open source &amp; diff</a>'
+    rows = [f'      <div class="fl"><span class="cap">files changed</span><a href="{source_url}">open source &amp; diff</a>'
             "<span></span></div>"]
     for p in _paths(c):
         f = stats.get(p)
-        rows.append(f'      <div class="fl"><a class="path" href="/issues/{number}/source#{escape(anchor(p))}">{escape(p)}</a>'
+        rows.append(f'      <div class="fl"><a class="path" href="{source_url}#{escape(anchor(p))}">{escape(p)}</a>'
                     f'<span class="d">{f"+{f.additions} −{f.deletions}" if f else ""}</span>'
                     f'<span class="meta">{"also " + escape(", ".join(shared[p])) if p in shared else ""}</span></div>')
     if c.stats:
@@ -184,16 +187,19 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
     return _section("What happens next", '    <div class="card">\n' + "\n".join(f"      <p>{x}</p>" for x in lines) + "\n    </div>")
 
 
-def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
+def render(number: int | IssueRef, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
            pending_refs: Container[str] = frozenset()) -> str | None:
     """The page, or None when no task in `trackers` names issue `number`. `cfg` resolves a task's due (the board's
     deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
-    ref = f"#{number}"
+    sources = issue_routes.homed(sources, cfg.backlog if cfg else None)
+    target = issue_routes.target(number, sources.home)
+    ref = issue_routes.key(target, sources.home)
+    shown_ref = escape(ref)
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
-    mine = [t for t in known if issue_number(t.issue) == number]
+    mine = [t for t in known if issue_routes.resolve(t.issue, sources.home) == target]
     if not mine:
         return None
     keys = set().union(*map(names, mine))
@@ -207,23 +213,23 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
     held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
     rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                                ended=forge_ends(known, sources, now.tzinfo))
-            if issue_number(r.ref) == number]
+                                                ended=forge_ends(known, sources, now.tzinfo), home=sources.home)
+            if issue_routes.resolve(r.ref, sources.home) == target]
     log = [m for m in log if m.name.strip().casefold() in keys]
-    issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
+    issue, latest = sources.issues.get(ref), {k: t for t in mine for k in names(t)}  # later trackers win
     status = rows[0][0] if rows else mine[-1].kind
     name = rows[0][1].name if rows else mine[0].label
 
     order = {"open": 0, "merged": 1}
     changes = sorted((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2))
     every = list(sources.changes.values())
-    cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {ref} yet.</p></div>')
+    cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {shown_ref} yet.</p></div>')
     change = changes[0] if changes else None
     current = {t.name.strip().casefold(): t for t in mine}.values()
     why_not = ("the issue is closed" if issue and issue.state == "closed" else
                "the task is done" if status == "merged" or all(t.kind == "done" for t in current) else "")
-    ahead = _next(rows, change, every, why_not, now) + (_files(change, every, number) if change and _paths(change) else "")
-    ahead += _graph(change, graph, pages, root, "Architecture", f"No change names {ref} to graph.")
+    ahead = _next(rows, change, every, why_not, now) + (_files(change, every, target) if change and _paths(change) else "")
+    ahead += _graph(change, graph, pages, root, "Architecture", f"No change names {shown_ref} to graph.")
 
     task_of = lambda m: (t.name.strip() if (t := latest.get(m.name.strip().casefold())) else m.name).casefold()  # noqa: E731
     workers: dict[str, list[list]] = {}  # who → [[started move, its Log match, ended move or None], ...]
@@ -270,19 +276,19 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
                              '    <div class="card">\n' + "\n".join(x for _, x in lines) + "\n    </div>") if lines else
                     _section("Workers", '    <div class="card"><p>No workers launched.</p></div>'))
 
-    refs = [("issue", f'<a {href(issue.url)}>{ref} {escape(issue.title)}</a>' if issue else f"{ref} {escape(name)}",
+    refs = [("issue", f'<a {href(issue.url)}>{shown_ref} {escape(issue.title)}</a>' if issue else f"{shown_ref} {escape(name)}",
              issue.state if issue else "")]
     refs += [("MR" if c.ref.startswith("!") else "PR", f'<a {href(c.url)}>{escape(c.ref)} {escape(c.title)}</a>',
               " · ".join(filter(None, (c.state, c.pipeline)))) for c in changes]
     refs_html = "\n".join(f'      <span class="cap">{cap}</span><span>{what}</span><span class="st">{escape(st)}</span>' for cap, what, st in refs)
 
     lane = next((t.lane.strip() for t in reversed(mine) if t.lane.strip()), "")
-    eyebrow = " · ".join(["Task", f'<a class="ref" data-k="issue" {href(issue.url)}>{ref}</a>' if issue else ref,
+    eyebrow = " · ".join(["Task", f'<a class="ref" data-k="issue" {href(issue.url)}>{shown_ref}</a>' if issue else shown_ref,
                           *([f"lane {escape(lane)}"] if lane else []), '<a href="/">board</a>'])  # (#215) no render clock
     flow = flow_chart.section(rows, now)
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
+            f"<title>{shown_ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
             f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True)}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
             f'    <span class="chip {escape(status)}">{escape(status.upper())}</span>\n  </header>\n\n'
@@ -318,12 +324,13 @@ def put(out: Path, page: str | None) -> Path | None:
     return out
 
 
-def write(root: Path, pages_dir: Path, number: int) -> Path | None:
-    """Render `issue-<number>.html`; with no page, remove the file and return None. The page server calls this in
-    process."""
+def write(root: Path, pages_dir: Path, number: int | IssueRef) -> Path | None:
+    """Render the target's identity-specific file, removing only that file when its task disappears."""
     cfg, now, trackers, settings = inputs(root)
     ctx = context(root, now.date().isoformat())
     pending = entries(pages_dir, ctx) if ctx else []
-    page = render(number, trackers, board_sources.load(pages_dir), now, settings.lanes, cfg, settings.graph, pages_dir, root,
+    sources = issue_routes.homed(board_sources.load(pages_dir), cfg.backlog)
+    target = issue_routes.target(number, sources.home)
+    page = render(target, trackers, sources, now, settings.lanes, cfg, settings.graph, pages_dir, root,
                   sum(d is not None for _, d, _, _ in pending), settings.kanban, held_refs(pending, ctx))
-    return put(pages_dir / f"issue-{number}.html", page)
+    return put(pages_dir / issue_routes.filename(target), page)

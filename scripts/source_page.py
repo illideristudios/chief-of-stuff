@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""A task's change as source and diff, `/issues/<n>/source` (Source48.dc.html, "Source & diff — task !48"): the change's
+"""A task's change as source and diff, `/issues/<host>/<project>/<n>/source` (Source48.dc.html, "Source & diff — task !48"): the change's
 files with +additions −deletions, a NEW / CHANGED / REMOVED badge and the other open changes on the same file, then
 each file's diff against the merge base, unified or split (a radio pair; CSS shows the one picked), with each review
 thread inline under the line it is on. The diff is read from the `[graph]` table's clone, fetched as the
 module graph fetches it; without the table the page lists the files from the sources cache. pages.py renders it on
-request into `issue-<n>-source.html`.
+request into an identity-specific file.
 """
 
 from __future__ import annotations
@@ -18,12 +18,15 @@ from pathlib import Path
 
 import backlog
 import board_sources
+import issue_routes
+from backlog_ref import IssueRef, home_of
 import decision_page
 import module_graph
 from decision_page import HEAD
 from fragment import href, tab_bar
 from issue_page import _paths, _shared, anchor, inputs, put
-from tracker import TRAILING_NUMBER, parse_tracker
+from tracker import parse_tracker
+from workspace import read_config
 from settings import Graph
 
 HUNK = re.compile(r"@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@")
@@ -84,9 +87,20 @@ class Note:
     thread: board_sources.ReviewThread
 
 
+def _notes_allowed(change: board_sources.Change | None, home) -> bool:
+    """Only the configured change project can use the configured notes query and credentials."""
+    if change is None or home is None:
+        return False
+    url = re.sub(r"/(?:merge_requests|pull)/(\d+)$", r"/issues/\1", change.url.rstrip("/"))
+    ref = issue_routes.resolve(url, None)
+    return ref is not None and (ref.host, ref.repo) == home_of(home)
+
+
 def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._call) -> tuple[list[Note], str]:
     """The change's review threads with their file and line: (notes, error), from one small query for this change
     only, apart from the cache refresh's. Never raises."""
+    if not _notes_allowed(change, home):
+        return [], "change is outside the configured backlog"
     when = board_sources._when
     try:
         n = int(change.ref[1:])
@@ -256,19 +270,22 @@ LAYOUT = ('  <div class="seg" role="group" aria-label="Diff layout">'
           '<input type="radio" name="layout" id="layout-split"><label for="layout-split">Split</label></div>\n')
 
 
-def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
+def render(number: int | IssueRef, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            graph: Graph | None = None, pages: Path | None = None, root: Path | None = None,
            notes: list[Note] | None = None, notes_error: str = "", pending: int = 0) -> str | None:
     """The page, or None when no task in `trackers` names issue `number`. `notes` are the change's review threads."""
-    ref = f"#{number}"
+    sources = issue_routes.homed(sources, read_config(root).backlog if root and (root / "CLAUDE.md").is_file() else None)
+    target = issue_routes.target(number, sources.home)
+    ref = issue_routes.key(target, sources.home)
+    shown_ref = escape(ref)
     mine = [t for _, text in trackers for t in parse_tracker(text).tasks
-            if (m := TRAILING_NUMBER.search(t.issue)) and int(m[1]) == number]
+            if issue_routes.resolve(t.issue, sources.home) == target]
     if not mine:
         return None
     issue = sources.issues.get(ref)
     name = issue.title if issue else mine[0].label
     change = _change(ref, sources)
-    crumb = f"Source · {escape(change.ref) + ' · ' if change else ''}{ref} {escape(name)}"
+    crumb = f"Source · {escape(change.ref) + ' · ' if change else ''}{shown_ref} {escape(name)}"
     title = f"{escape(change.ref)} · {escape(change.title)}" if change else escape(name)
     compare = note = ""
     files: list[File] = []
@@ -311,7 +328,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     if notes_error:
         tables.insert(0, f'    <p class="card">Review notes unavailable: {escape(notes_error)}</p>')
     if not change:
-        body = f'  <p class="card">Nothing to diff: no change names {ref} yet.</p>\n'
+        body = f'  <p class="card">Nothing to diff: no change names {shown_ref} yet.</p>\n'
     else:
         total = f"{len(files)} · +{sum(f.add for f in files)} −{sum(f.dele for f in files)}"
         body = (LAYOUT if tables else "") + (f'  <div class="src">\n    <div class="card"><div class="cap">files · {total}</div>\n'
@@ -321,19 +338,21 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     cmp = f'    <div class="card cmp"><span class="cap">compare</span><div>{compare}</div></div>\n' if compare else ""
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Source {escape(change.ref) if change else ref}</title>\n{HEAD}{CSS}</head>\n"
+            f"<title>Source {escape(change.ref) if change else shown_ref}</title>\n{HEAD}{CSS}</head>\n"
             f'<body>\n<main class="source">\n{tab_bar("Board", pending, True)}  <header class="top">\n    <div>\n      <span class="eyebrow">{crumb} · '
-            f'<a href="/issues/{number}">task</a> · <a href="/">board</a></span>\n'
+            f'<a href="{issue_routes.route(target)}">task</a> · <a href="/">board</a></span>\n'
             f"      <h1>{title}</h1>\n    </div>\n{cmp}  </header>\n{body}</main>\n</body>\n</html>\n")
 
 
-def write(root: Path, pages_dir: Path, number: int) -> Path | None:
-    """Render `issue-<number>-source.html`; with no page, remove the file and return None."""
+def write(root: Path, pages_dir: Path, number: int | IssueRef) -> Path | None:
+    """Render the target's source file, removing only that file when its task disappears."""
     cfg, now, trackers, settings = inputs(root)
-    sources = board_sources.load(pages_dir)
-    change = _change(f"#{number}", sources)
+    sources = issue_routes.homed(board_sources.load(pages_dir), cfg.backlog)
+    target = issue_routes.target(number, sources.home)
+    change = _change(issue_routes.key(target, sources.home), sources)
     # ponytail: one small forge query per render (about once a minute while the page is open); cache by head if it bites.
-    found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")
-    page = render(number, trackers, sources, now, settings.graph, pages_dir, root, found, error,
+    found, error = (notes(change, cfg.backlog) if _notes_allowed(change, cfg.backlog) else
+                    ([], "change is outside the configured backlog") if change else ([], ""))
+    page = render(target, trackers, sources, now, settings.graph, pages_dir, root, found, error,
                   decision_page.pending_count(pages_dir, decision_page.context(root, now.date().isoformat())))
-    return put(pages_dir / f"issue-{number}-source.html", page)
+    return put(pages_dir / issue_routes.filename(target, True), page)

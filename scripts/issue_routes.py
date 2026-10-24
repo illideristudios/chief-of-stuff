@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 from dataclasses import replace
+from urllib.parse import unquote
 
 from backlog_ref import GITHUB, IssueRef, home_of, issue_ref
 
@@ -23,7 +24,11 @@ _FILE = re.compile(r"issue-(\d+)(-source)?\.html")
 
 
 def _ok(ref: IssueRef) -> bool:
-    return not ref.host or all(_SEGMENT.fullmatch(s) for s in (ref.host, *ref.repo.split("/")))
+    if not ref.host:
+        return not ref.repo and ref.number >= 0
+    project = ref.repo.split("/")
+    return (ref.number >= 0 and len(project) >= 2 and (ref.host != GITHUB or len(project) == 2)
+            and all(_SEGMENT.fullmatch(s) for s in (ref.host, *project)))
 
 
 def bare(number: int) -> IssueRef:
@@ -67,11 +72,17 @@ def route(ref: IssueRef, source: bool = False) -> str:
 def parse(path: str) -> tuple[IssueRef, bool] | None:
     """(identity, is the source page) of exactly one issue route, else None. `/issues/<n>` parses to the local
     namespace; the server turns that into the Backlog's issue."""
-    parts = path.split("/")
+    try:
+        parts = [unquote(part, errors="strict") for part in path.split("/")]
+    except UnicodeDecodeError:
+        return None
     if parts[:2] != ["", "issues"]:
         return None
     source = parts[-1] == "source"
-    *where, number = parts[2:len(parts) - source]
+    identity = parts[2:len(parts) - source]
+    if not identity:
+        return None
+    *where, number = identity
     if not number or not _NUMBER.fullmatch(number):
         return None
     if not where:

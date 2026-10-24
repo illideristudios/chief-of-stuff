@@ -22,9 +22,10 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, task_changes, went_held, worker_names  # noqa: E402
-from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, issue_number, parse_tracker  # noqa: E402
+from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
+import issue_routes
 import board_sources  # noqa: E402
 import columns  # noqa: E402
 import decision_page  # noqa: E402
@@ -169,9 +170,9 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         return known.url if known else cell.strip() if cell.strip().startswith(("https://", "http://")) else ""
 
     def page(cell: str, other: str) -> str:
-        """A card name's link: its task page when the issue ends in a number, as Flow rows link, else `other` (#194)."""
-        m = TRAILING_NUMBER.search(cell)
-        return f"/issues/{int(m[1])}" if m else other
+        """Preserve the complete issue identity before abbreviating a card's visible reference."""
+        ref = issue_routes.resolve(cell, sources.home)
+        return issue_routes.route(ref) if ref else other
 
     def change_href(c: board_sources.Change) -> str:
         """A change's own page: the task page of its own first named issue, or its forge link when it names
@@ -183,8 +184,9 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
     def card(task: Task, stage: str | None = None) -> columns.Card:
         changes = task_changes(task, sources)
         url = issue_url(issue_key(task.issue, sources.home), task.issue)
-        issue = issue_key(task.issue, sources.home) if changes or url else task.issue.strip()
-        refs = ((issue, page(issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
+        target = issue_routes.resolve(task.issue, sources.home)
+        issue = issue_routes.key(target, sources.home) if target else task.issue.strip()
+        refs = ((issue, page(task.issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
@@ -304,6 +306,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
     `look_log` the earlier days back to it that `stage_log` does not reach, read only for when a hold began."""
+    sources = issue_routes.homed(sources, cfg.backlog)
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
     tracker = parse_tracker(tracker_text)
@@ -345,12 +348,12 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
                                  frozenset(t.name.strip() for t in tasks
                                            if t.name.strip() and any(c.state == "open" and c.approved for c in task_changes(t, sources))),
                                  ended=forge_ends(tasks, sources, zone), home=sources.home)
-    # An issue's row links to its page, pages.py's /issues/<n>.
+    # Resolve the row's complete key before shortening its visible label.
     issue_cells = {issue_key(t.issue, sources.home): t.issue.strip() for t in known if t.issue.strip() and not t.workflow}
 
     def flow_ref(row):
-        if (number := issue_number(row.ref)) is not None:
-            return replace(row, ref=f"#{number}", href=f"/issues/{number}", ref_title=issue_cells.get(row.ref, row.ref))
+        if target := issue_routes.resolve(row.ref, sources.home):
+            return replace(row, ref=f"#{target.number}", href=issue_routes.route(target), ref_title=issue_cells.get(row.ref, row.ref))
         if change := change_keys(row.ref)[1]:
             return replace(row, ref=f"!{int(change.rstrip('/').rsplit('/', 1)[1])}")
         return row

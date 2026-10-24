@@ -12,12 +12,13 @@ from datetime import date, datetime
 from html import escape
 from pathlib import Path
 
+import issue_routes
 import board_sources
 import panels
 from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar
 from md import section as _section
-from tracker import TRAILING_NUMBER, launcher, parse_tracker
+from tracker import launcher, parse_tracker
 from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STARTED
 from workspace import parse_coordinator, worktrees_dir
 from settings import load as load_settings
@@ -55,11 +56,11 @@ def activity(tree: Path) -> tuple[datetime | None, int]:
     return last, sum(v for u in usage.values() if isinstance(u, dict) for k in USAGE if isinstance(v := u.get(k), int))
 
 
-def _task(t, fallback: str) -> str:
-    """The task's name, linked to its page when its issue cell has a number."""
+def _task(t, fallback: str, home=None) -> str:
+    """The task's name and complete issue route."""
     name = escape(t.name.strip() if t and t.name.strip() else fallback)
-    m = TRAILING_NUMBER.search(t.issue) if t else None
-    return f'<a class="ref" data-k="issue" href="/issues/{m[1]}">#{m[1]}</a> {name}' if m else name
+    ref = issue_routes.resolve(t.issue, home) if t else None
+    return f'<a class="ref" data-k="issue" href="{issue_routes.route(ref)}">{escape(issue_routes.key(ref, home))}</a> {name}' if ref else name
 
 
 def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
@@ -78,7 +79,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
         t = by_name.get(w.task.strip().casefold())
         last, tokens = activity(trees / w.tree) if w.tree else (None, 0)
         running.append([escape(w.name), escape(" ".join(x for x in (w.runtime, w.model) if x)), escape(w.kind),
-                        _task(t, w.task), escape(t.stage.strip() if t else ""), panels.hm(w.started, now) if w.started else "",
+                        _task(t, w.task, sources.home), escape(t.stage.strip() if t else ""), panels.hm(w.started, now) if w.started else "",
                         f"{last.astimezone(now.tzinfo):%H:%M}" if last else "", f"{tokens:,}" if last else ""])
     row_of, task_of, ended = launcher(tasks), {}, []
     for line in map(str.strip, _section(tracker_text, "## Log")):
@@ -86,7 +87,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             task_of[m[3]] = m[4]
         elif m := ENDED.match(line) or RELAUNCH.match(line):
             t, name = row_of(task_of.get(m[3], ""))
-            ended.append([f"{int(m[1]):02d}:{m[2]}", HOW[m[4]], escape(m[3]), _task(t, name)])
+            ended.append([f"{int(m[1]):02d}:{m[2]}", HOW[m[4]], escape(m[3]), _task(t, name, sources.home)])
     ended.reverse()  # newest first
     need = sum(e[1] == "human review" for e in ended)
     shots = sum(w.kind == "one-shot" for w in sources.workers)
@@ -114,7 +115,7 @@ def write(root: Path, pages_dir: Path) -> Path:
     cfg = parse_coordinator(claude_md, today=date.today())
     now = datetime.now(cfg.zone)  # not cut to the second: a time running floors, as panels.hm counts
     tracker = root / cfg.tracker_path(now.date().isoformat())
-    page = render(tracker.read_text() if tracker.is_file() else "", board_sources.load(pages_dir), now,
+    page = render(tracker.read_text() if tracker.is_file() else "", issue_routes.homed(board_sources.load(pages_dir), cfg.backlog), now,
                   root / worktrees_dir(claude_md), load_settings(root, cfg.settings_path).workers.max_concurrency,
                   pending_count(pages_dir, context(root, now.date().isoformat())))
     out = pages_dir / "workers.html"
