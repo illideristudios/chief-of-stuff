@@ -356,5 +356,20 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(get(self.port, "/issue-109-source.html").status, 404)
 
 
+
+class SourceIdentityTest(unittest.TestCase):
+    def test_colliding_source_pages_show_their_own_change_and_backlink(self):
+        from test_issue_page import colliding
+        from issue_routes import route
+        refs, tracker, src = colliding()
+        for i, ref in enumerate(refs):
+            html = sp.render(ref, [(TODAY, tracker)], src, NOW)
+            self.assertIsNotNone(html)
+            self.assertIn(f'href="{route(ref)}"', html)
+            for j in range(3):
+                for value in (f"IssueTitle{j}", f"ChangeTitle{j}", f"file{j}.py"):
+                    (self.assertIn if i == j else self.assertNotIn)(value, html)
+        self.assertEqual(sp.render(8, [(TODAY, tracker)], src, NOW), sp.render(refs[0], [(TODAY, tracker)], src, NOW))
+
 if __name__ == "__main__":
     unittest.main()

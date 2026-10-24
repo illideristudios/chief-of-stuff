@@ -901,5 +901,60 @@ class DoneClockAfterMidnightTest(unittest.TestCase):
         self.assertRegex(flow, r"(?i)\bWorked\s+2h10m\s+of\s+3h58m\s+elapsed\s*·\s*1h48m\s+waiting\b", flow)
 
 
+
+# Same number in three projects/hosts, with independently observable content (#412).
+def colliding():
+    from backlog_ref import GitHubBacklog, IssueRef
+    refs = (IssueRef("team/app", 8), IssueRef("team/other", 8), IssueRef("team/app", 8, "labs.example.test"))
+    home = GitHubBacklog("team/app")
+    cells = ("#8", refs[1].url, refs[2].url)
+    tasks = "# Tracker\n\n## Tasks\n\n" + HEAD + "".join(
+        f"| Task{i} | Work{i} | worker{i} | {'done 01:00' if i == 1 else 'running 00:10'} | {TODAY} |  | S | build | implement | {cell} | c |\n"
+        for i, cell in enumerate(cells))
+    tasks += "\n## Log\n\n" + "".join(f"- 00:10 stage: Task{i} → implement\n" for i in range(3))
+    issues, changes = {}, {}
+    for i, ref in enumerate(refs):
+        key = ref.label(home)
+        issues[key] = bs.Issue(key, ref.url, f"IssueTitle{i}", "closed" if i == 1 else "open", (),
+                               f"## Acceptance\n- Accept{i}\n")
+        changes[str(i)] = replace(MR, ref=f"!{40+i}", title=f"ChangeTitle{i}", issues=(key,), files=(f"file{i}.py",))
+    return refs, tasks, bs.Sources({}, issues, changes, (), {}, home)
+
+
+class IdentityTest(unittest.TestCase):
+    def test_colliding_issue_pages_keep_content_and_flow_separate(self):
+        refs, tracker, src = colliding()
+        for i, ref in enumerate(refs):
+            with self.subTest(ref=ref):
+                html = ip.render(ref, [(TODAY, tracker)], src, NOW, LANES)
+                self.assertIsNotNone(html)
+                for j in range(3):
+                    for value in (f"Accept{j}", f"ChangeTitle{j}", f"Task{j}", f"file{j}.py"):
+                        (self.assertIn if i == j else self.assertNotIn)(value, html)
+                self.assertEqual("the issue is closed" in html, i == 1)
+                self.assertIn(ref.label(src.home), html)
+                from issue_routes import route
+                self.assertIn(route(ref, True) + "#f-file", html)
+
+    def test_integer_home_url_equivalence_unknown_and_foreign_only(self):
+        from backlog_ref import IssueRef
+        refs, tracker, src = colliding()
+        render = lambda ref, text=tracker, sources=src: ip.render(ref, [(TODAY, text)], sources, NOW, LANES)
+        self.assertEqual(render(8), render(refs[0]))
+        self.assertEqual(render(8), render(8, tracker.replace("#8 |", refs[0].url + " |")))
+        self.assertIsNone(render(IssueRef("missing/project", 8)))
+        foreign = tracker.replace("#8 |", "#9 |")
+        self.assertIsNone(render(8, foreign))
+        self.assertIsNotNone(render(refs[1], foreign))
+        self.assertIn("Task0", render(refs[0], sources=replace(src, issues={})))
+
+    def test_no_home_bare_namespace_never_matches_qualified_cells(self):
+        refs, tracker, src = colliding()
+        src = replace(src, home=None, issues={}, changes={})
+        html = ip.render(8, [(TODAY, tracker)], src, NOW, LANES)
+        self.assertIn("Task0", html)
+        self.assertNotIn("Task1", html)
+        self.assertNotIn("Task2", html)
+
 if __name__ == "__main__":
     unittest.main()
