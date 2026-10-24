@@ -177,9 +177,10 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIsInstance(unknown, Failure)
         self.assertEqual(unknown.kind, "unknown")
 
-    def check(self, *, after, commits=(), recorded=(), fetch=0, rev_list=0):
+    def check(self, *, after, commits=(), recorded=(), fetch=0, rev_list=0, branch="work/issue-1-plan-1"):
         """§13 (c) against a fake git: (fetch, ls-remote, rev-list) answers and the engine's recorded merges."""
-        record = {"tree": str(self.dir), "runtime": "codex", "default_branch": "main", "default_head": "a" * 40}
+        record = {"tree": str(self.dir), "runtime": "codex", "default_branch": "main", "default_head": "a" * 40,
+                  "branch": branch}
         store = SimpleNamespace(items=lambda: [SimpleNamespace(issue_key="k"), SimpleNamespace(issue_key="other")],
                                 resume=lambda key: {"merges": [{"request": 2, "sha": s, "at": "t"} for s in recorded]}
                                 if key == "other" else {"review_findings": {}})
@@ -243,6 +244,59 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIn("cannot verify", self.check(after="b" * 40, fetch=1))
         self.assertIn("cannot verify", self.check(after=""))
         self.assertIn("cannot list", self.check(after="b" * 40, rev_list=128))
+
+    def test_a_pr_merge_of_another_branch_does_not_hold_the_run(self):
+        # #949: a person merging an unrelated pull request is not the worker's doing.
+        pr = f"{'p' * 40} {'a' * 40} {'b' * 40}\tMerge pull request #946 from illideristudios/docs/decision-pages-945"
+        self.assertEqual(self.check(after="p" * 40, commits=[pr], branch="work/issue-949-plan-1"), "")
+        self.assertEqual(self.check(after="p" * 40, commits=[pr, "m" * 40], recorded=["m" * 40],
+                                    branch="work/issue-949-plan-1"), "")
+
+    def test_a_pr_merge_of_the_runs_own_branch_holds_and_is_named(self):
+        own = f"{'w' * 40} {'a' * 40} {'b' * 40}\tMerge pull request #949 from illideristudios/work/issue-949-plan-1"
+        held = self.check(after="w" * 40, commits=[own], branch="work/issue-949-plan-1")
+        self.assertIn("w" * 12, held)
+        self.assertIn("holding for human review", held)
+
+    def test_a_direct_push_or_local_merge_holds_even_with_a_pr_subject(self):
+        other = "Merge pull request #946 from illideristudios/other"
+        for commit, branch in ((f"{'d' * 40} {'a' * 40}\t{other}", "work/x"),  # one parent: a direct push
+                               (f"{'l' * 40} {'a' * 40} {'b' * 40}\tMerge branch 'other' into main", "work/x"),
+                               (f"{'n' * 40} {'a' * 40} {'b' * 40}\t{other}", "")):  # no own branch: fail closed
+            with self.subTest(commit=commit):
+                self.assertIn(commit[:12], self.check(after=commit[:1] * 40, commits=[commit], branch=branch))
+
+    def test_moved_outside_engine_with_a_real_git_remote_excuses_unrelated_pr_merges(self):
+        origin = self.dir / "origin.git"
+        self.assertEqual(host_adapter.make_worktree.git_trusted(["init", "-q", "--bare", str(origin)], self.dir)[0], 0)
+        tree = self.git_tree()
+
+        def git(*args):
+            code, out = host_adapter.make_worktree.git_trusted(
+                ["-c", "user.name=t", "-c", "user.email=t@t", *args], tree)
+            self.assertEqual(code, 0, out)
+            return out
+
+        def pr_merge(title):
+            git("checkout", "-q", "-b", "side", "develop")
+            git("commit", "-q", "--allow-empty", "-m", "side work")
+            git("checkout", "-q", "develop")
+            git("merge", "-q", "--no-ff", "-m", title, "side")
+            git("branch", "-q", "-D", "side")
+            git("push", "-q", "origin", "develop")
+            return git("rev-parse", "HEAD")
+        git("checkout", "-q", "-b", "develop")
+        git("commit", "-q", "--allow-empty", "-m", "start")
+        git("remote", "add", "origin", str(origin))
+        git("push", "-q", "origin", "develop")
+        record = {"tree": str(tree), "runtime": "codex", "branch": "work/issue-949-plan-1",
+                  "branch_heads": {"develop": git("rev-parse", "HEAD")}}
+        store = SimpleNamespace(items=lambda: [])
+        pr_merge("Merge pull request #946 from illideristudios/docs/decision-pages-945")
+        self.assertEqual(host_adapter.moved_outside_engine(store, record, "now"), "")
+        own = pr_merge("Merge pull request #949 from illideristudios/work/issue-949-plan-1")
+        held = host_adapter.moved_outside_engine(store, record, "now")
+        self.assertIn(f"develop gained commits the engine did not merge: {own[:12]} during", held)
 
     def test_an_unknown_host_has_no_adapter(self):
         with self.assertRaisesRegex(ValueError, "no host adapter"):

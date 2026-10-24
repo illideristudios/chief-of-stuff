@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,7 @@ from shell_setup import ShellError, login_argv, resolve
 SCRIPTS = Path(__file__).resolve().parent
 HOSTS = ("codex", "cursor", "agy")
 SHIMMED = ("git", "gh", "glab")
+PR_MERGE = re.compile(r"^Merge pull request #\d+ from [^/\s]+/(\S+)$")
 SHIM = '''#!{python}
 """chief-of-stuff worker guard shim (#700): {name} behind guard_commands, then the real {name}."""
 import json, os, shlex, sys
@@ -270,14 +272,22 @@ def engine_merges(store) -> set[str]:
     return found
 
 
+def _unrelated_pr_merge(parents: list[str], subject: str, own_branch: str) -> bool:
+    """Whether a commit is a pull-request merge whose head is not the run's own branch (#949)."""
+    match = PR_MERGE.match(subject) if len(parents) >= 2 and own_branch else None
+    return match is not None and match.group(1) != own_branch
+
+
 def moved_outside_engine(store, record: dict, now: str) -> str:
     """§13: why a non-Claude run holds for human review, or "" when every first-parent commit each protected branch
-    gained during the run is a merge the engine recorded (#860). A direct push, a merge outside the engine, or an
-    unreadable branch or range holds (ledger F3: unknown is never safe), naming each commit and its branch."""
+    gained during the run is a merge the engine recorded (#860) or a pull-request merge of another branch (#949). A
+    direct push, a merge outside the engine, or an unreadable branch or range holds (ledger F3: unknown is never
+    safe), naming each commit and its branch."""
     heads = record.get("branch_heads")
     if not isinstance(heads, dict):  # a run started before #860 recorded the default branch alone
         heads = {record["default_branch"]: record.get("default_head", "")} if record.get("default_branch") else {}
     runtime, tree = record.get("runtime"), Path(record["tree"])
+    own_branch = record["branch"] if isinstance(record.get("branch"), str) else ""
     problems, recorded = [], None
     for branch, before in sorted(heads.items()):
         fetched, _ = make_worktree.git_trusted(["fetch", "-q", "origin", f"refs/heads/{branch}"], tree)
@@ -287,12 +297,18 @@ def moved_outside_engine(store, record: dict, now: str) -> str:
             continue
         if before == after:
             continue
-        code, out = make_worktree.git_trusted(["rev-list", "--first-parent", f"{before}..{after}"], tree)
+        code, out = make_worktree.git_trusted(
+            ["rev-list", "--first-parent", f"{before}..{after}", "--no-commit-header", "--format=%H %P\t%s"], tree)
         if code:
             problems.append(f"cannot list {branch} from {before[:12]} to {after[:12]}")
             continue
         recorded = engine_merges(store) if recorded is None else recorded
-        unknown = [commit for commit in out.split() if commit not in recorded]
+        unknown = []
+        for line in out.splitlines():
+            shas, _, subject = line.partition("\t")
+            commit, *parents = shas.split() or [""]
+            if commit and commit not in recorded and not _unrelated_pr_merge(parents, subject, own_branch):
+                unknown.append(commit)
         if unknown:
             problems.append(f"{branch} gained commits the engine did not merge: {', '.join(c[:12] for c in unknown)}")
     if not problems:
