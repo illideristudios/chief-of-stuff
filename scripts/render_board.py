@@ -237,7 +237,7 @@ MERGE_SHOWN = 5
 def merge_order(sources: board_sources.Sources) -> panels.Panel:
     """Open changes in the order to merge them: approved first, then in review; within each, a passed pipeline
     first, then those sharing no file with another open change (#75's least-conflict order, by file overlap)."""
-    # ponytail: overlap by file names; #75's trial merge (`git merge-tree`) when overlap proves too coarse.
+    # `chief-of-stuff merge-order` offers pairwise trial merges; this panel keeps its filename-overlap ranking.
     open_ = [c for c in sources.changes.values() if c.state == "open"]
     shared = {c.ref: sorted({o.ref for o in open_ if o is not c and set(o.files) & set(c.files)}) for c in open_}
     overlap = {c.ref: len({f for o in open_ if o is not c for f in set(o.files) & set(c.files)}) for c in open_}
