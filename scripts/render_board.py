@@ -22,6 +22,7 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 from task_forge import drifts, effective_stage, epic_risk, forge_ends, held_names, hold_began, hold_causes, task_changes, went_held, worker_names  # noqa: E402
+from backlog_ref import home_of, issue_ref  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, decision_rows, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
@@ -168,8 +169,14 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         known = sources.issues.get(ref)
         return known.url if known else cell.strip() if cell.strip().startswith(("https://", "http://")) else ""
 
-    def page(cell: str, other: str) -> str:
-        """A card name's link: its task page when the issue ends in a number, as Flow rows link, else `other` (#194)."""
+    def page(cell: str, other: str, tracker_cell: str | None = None) -> str:
+        """A card name's link: `/issues/N` for the home issue, the forge URL for another project on the host, else `other` (#194, #416)."""
+        tc = (tracker_cell if tracker_cell is not None else cell).strip()
+        if sources.home and tc:
+            ref = issue_ref(tc, sources.home)
+            if ref and (ref.host, ref.repo) != home_of(sources.home):
+                url = other.strip() or ref.url
+                return url if url else cell
         m = TRAILING_NUMBER.search(cell)
         return f"/issues/{int(m[1])}" if m else other
 
@@ -184,12 +191,12 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         changes = task_changes(task, sources)
         url = issue_url(issue_key(task.issue, sources.home), task.issue)
         issue = issue_key(task.issue, sources.home) if changes or url else task.issue.strip()
-        refs = ((issue, page(issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
+        refs = ((issue, page(issue, url, task.issue)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
         owner = task.shown_owner
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
                             flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
-                            href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
+                            href=page(task.issue, next((c.url for c in changes if c.state == "open"), url), task.issue),
                             owner_href="/workers" if owner in workers else "")
 
     laned = [t for t in tasks if t.lane.strip() and t.stage.strip()]
