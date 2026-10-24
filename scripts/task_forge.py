@@ -97,7 +97,8 @@ def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[s
             continue
         staged |= set() if m.launch else {t}
         into[t, m.stage] = m.at
-    return {t: pending_refs.get(issue_key(t.issue, home)) if cause == "decision" else into.get((t, cause))
+    return {t: pending_refs.get(issue_key(t.issue, home))
+            if cause == "decision" or cause.startswith("action blocked:") else into.get((t, cause))
             for t, cause in held.items()}
 
 
@@ -107,7 +108,8 @@ def went_held(held: dict[Task, str], began: dict[Task, datetime | None], since: 
     counts; a decision's asked time keeps seconds, so it is compared as it is."""
     minute = since.replace(second=0, microsecond=0)
     return sum(1 for t, cause in held.items()
-               if (at := began.get(t)) is not None and at >= (since if cause == "decision" else minute))
+               if (at := began.get(t)) is not None
+               and at >= (since if cause == "decision" or cause.startswith("action blocked:") else minute))
 
 
 def held_names(held: dict[Task, str]) -> dict[str, str]:

@@ -758,6 +758,42 @@ class BlockedDecisionOnTheBoard(unittest.TestCase):
         self.assertNotIn(">ANSWERED", page)
         self.assertIn(f"Action blocked — waits on: {REASON}", page)
 
+    def test_a_log_block_and_tracker_answer_render_on_the_board_and_count_since_looked(self) -> None:
+        day = "2026-09-26"
+        root = Path(tempfile.mkdtemp())
+        (root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            "- Timezone: America/Chicago\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+            "- Settings: `cos.toml`\n")
+        (root / "cos.toml").write_text('[lanes]\nbuild = { stages = ["implement", "review", "merge"], gates = ["merge"] }\n')
+        (root / "daily").mkdir()
+        (root / "daily" / f"{day}-tracker.md").write_text(
+            f"# Tracker {day}\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Launch worker | Launch the worker | unassigned | open | 10:00 |  | S | build | implement | #9 | Checklist: launch |\n\n"
+            "## Decisions\n\n| time | item | Robin's words |\n|---|---|---|\n"
+            '| 10:05 | option A of decision-launch-worker | "A, launch it" |\n\n## Log\n\n'
+            "- 10:00 asked decision-launch-worker\n"
+            f"- 10:06 decision-launch-worker blocked: {REASON}\n")
+        pages = root / "pages"
+        pages.mkdir()
+        ask = {"headline": "Launch the worker?", "ask": "Launch it?",
+               "options": [{"key": "A", "title": "Launch"}, {"key": "B", "title": "Wait"}],
+               "recommended": "A", "why": "The user said yes.", "default": "Wait.", "holds": ["#9"]}
+        (pages / "decision-launch-worker.json").write_text(json.dumps(ask))
+        out, *_ = rb.write(root, day)
+        board = out.read_text()
+        self.assertIn(f"BLOCKED · A — waits on {REASON}", board)
+        self.assertIn("0 answered today", board)
+        self.assertIn(f"action blocked: {REASON}", board)
+        ctx = rb.decision_page.decision_context(root, rb.date(2026, 9, 26), NOW)
+        pending = rb.decision_page.entries(pages, ctx)
+        refs = rb.decision_page.held_refs(pending, ctx)
+        held = task_forge.hold_causes(list(ctx.tasks), None, bs.EMPTY, LANES, refs, rb.decision_page.blocked_refs(pending, ctx))
+        began = task_forge.hold_began(held, [], refs, None, list(ctx.tasks))
+        self.assertEqual(task_forge.went_held(held, began, datetime(2026, 9, 26, 9, 0, tzinfo=NOW.tzinfo)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

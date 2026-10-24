@@ -410,8 +410,10 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
         waiting = ctx.blocked(slug, d) if ctx else blocked_reason(d)
     if waiting:
         recorded = _saved_html(d, fmt) if page else ""
-        if not recorded and ctx and ctx.answer(slug):
-            recorded = f'<span>{escape(answer_label(ctx, slug, d))}</span>'
+        if not recorded:
+            label = answer_label(ctx, slug, d) if ctx else answer_key(d)
+            if label:
+                recorded = f'<span>{escape(label)}</span>'
         done = (f'    <div class="card answered blocked">{recorded}'
                 f'<p>Action blocked — waits on: {md(waiting)}</p></div>\n')
     else:
@@ -797,7 +799,9 @@ def _held_tasks(slug: str, tasks, pages: Path | None, home) -> list:
     issue_keys = set()
     if raw:
         texts = [str(h) for h in raw.get("holds") or []]
-        texts += [str(r.get("value") or "") for r in raw.get("references") or [] if isinstance(r, dict)]
+        for r in raw.get("references") or []:
+            if isinstance(r, dict) and len(one := ref_keys(str(r.get("value") or ""), home)) == 1:
+                texts += one
         issue_keys = {k for text in texts for k in ref_keys(text, home) if not k.startswith("!")}
     held = []
     for task in tasks:
@@ -811,21 +815,21 @@ def _held_tasks(slug: str, tasks, pages: Path | None, home) -> list:
 def _log_blocks(log: tuple[tuple[datetime, str], ...], tasks, pages: Path | None, home) -> tuple[tuple[str, str], ...]:
     """Slug -> reason from the latest blocked line, dropped once a later stage or start moves the held task,
     or that task is done (#288)."""
-    latest: dict[str, tuple[datetime, str]] = {}
-    moves: list[tuple[datetime, str]] = []
-    for when, text in log:
+    latest: dict[str, tuple[int, datetime, str]] = {}
+    moves: list[tuple[int, datetime, str]] = []
+    for idx, (when, text) in enumerate(log):
         line = f"- {text}"
         if m := tracker_log.DECISION_BLOCKED.match(line):
-            latest[m[3]] = (when, m[4].strip())
+            latest[m[3]] = (idx, when, m[4].strip())
         elif m := tracker_log.STAGE.match(line):
-            moves.append((when, m[3].strip()))
+            moves.append((idx, when, m[3].strip()))
         elif m := tracker_log.STARTED.match(line):
-            moves.append((when, m[4].strip()))
+            moves.append((idx, when, m[4].strip()))
     out = []
-    for slug, (at, reason) in latest.items():
+    for slug, (idx, at, reason) in latest.items():
         held = _held_tasks(slug, tasks, pages, home)
         names = {t.name.strip() for t in held if t.name.strip()}
-        if any(t.kind == "done" for t in held) or any(moved > at and name in names for moved, name in moves):
+        if any(t.kind == "done" for t in held) or any(i > idx and moved >= at and name in names for i, moved, name in moves):
             continue
         out.append((slug, reason))
     return tuple(out)

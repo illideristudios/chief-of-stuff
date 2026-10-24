@@ -263,28 +263,30 @@ def merge_order(sources: board_sources.Sources) -> panels.Panel:
                         f"{approved} approved · {len(rows) - approved} in review", foot=f"+ {rest} more" if rest > 0 else "")
 
 
-def _blocked_facts(d: dict, reason: str) -> str:
+def _blocked_facts(d: dict, reason: str, ctx: decision_page.Context | None = None, slug: str = "") -> str:
     """The DECISIONS row for an answered decision whose action is still blocked (#288)."""
-    answer = d.get("answer")
-    if isinstance(answer, dict):
-        label = str(answer.get("key") or "").strip() or str(answer.get("words") or "").strip()
-    else:
-        label = str(answer or "").strip()
+    label = decision_page.answer_label(ctx, slug, d) if ctx else ""
+    if not label:
+        answer = d.get("answer")
+        if isinstance(answer, dict):
+            label = str(answer.get("key") or "").strip() or str(answer.get("words") or "").strip()
+        else:
+            label = str(answer or "").strip()
     return f"BLOCKED · {label} — waits on {reason}" if label else f"BLOCKED — waits on {reason}"
 
 
 def decision_panel(pending: list[tuple[str, dict | None, datetime | None, str]], answered: int, now: datetime,
-                   blocked: dict[str, str] | None = None) -> panels.Panel:
+                   blocked: dict[str, str] | None = None, ctx: decision_page.Context | None = None) -> panels.Panel:
     """The pending decisions (decision_page.entries, as decisions.html lists them) and how many were answered today."""
-    when = decision_page.Context(now).when
+    when = (ctx or decision_page.Context(now)).when
     blocked = blocked or {}
 
     def row(slug: str, d: dict | None, asked: datetime | None, why: str) -> panels.Row:
         if d is None:
             return panels.Row(f"decision-{slug}.json", f"unreadable: {why}")
-        reason = blocked.get(slug) or decision_page.blocked_reason(d)
+        reason = blocked.get(slug) or (ctx.blocked(slug, d) if ctx else decision_page.blocked_reason(d))
         if reason:
-            return panels.Row(d["headline"], _blocked_facts(d, reason), href=f"/decisions/{slug}")
+            return panels.Row(d["headline"], _blocked_facts(d, reason, ctx, slug), href=f"/decisions/{slug}")
         return panels.Row(d["headline"], " · ".join([*([f"asked {when(asked)}"] if asked else []),
                                                      f"recommended {d['recommended']}", f"default: {d['default']}"]),
                           href=f"/decisions/{slug}")
@@ -322,7 +324,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            tracker_at: datetime | None = None, stage_log: list[tuple[date, str]] | None = None, slots: int = 1,
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
            look_log: list[tuple[date, str]] | None = None, blocked: dict[str, str] | None = None,
-           blocked_refs: dict[str, str] | None = None) -> str:
+           blocked_refs: dict[str, str] | None = None, ctx: decision_page.Context | None = None) -> str:
     """The board page, the Flow artboard's sections: header, tiles, BUILD (the stage columns), the MERGE ORDER,
     DECISIONS and WORKERS panels, and the Flow charts. `stage_log` is (day, tracker text) for the earlier days the
     Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
@@ -393,7 +395,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
     tiles = flow_tiles(len(tasks), len(held),
                        sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned))
-    panels_html = panels.panels([merge_order(sources), decision_panel(pending, answered, now, blocked), worker_panel(sources, now)])
+    panels_html = panels.panels([merge_order(sources), decision_panel(pending, answered, now, blocked, ctx), worker_panel(sources, now)])
 
     return f"""<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -491,7 +493,7 @@ def write(root: Path, day: str | None = None) -> tuple[Path, Config, datetime, s
                   answered=decision_page.answered_today(tracker_text, out.parent, ctx),
                   tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone), stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=refs,
-                  looked=looked, look_log=look_log, blocked=blocked, blocked_refs=blocked_refs)
+                  looked=looked, look_log=look_log, blocked=blocked, blocked_refs=blocked_refs, ctx=ctx)
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 
