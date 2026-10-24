@@ -1972,6 +1972,89 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([w.decision_id[0] for w in waits], ["scope"])  # a real decision for the owner
         self.assertIn("scope_proposal", self.db.resume(KEY))  # kept until the owner answers
 
+    def _unknown(self):
+        def fail(request):
+            fail.n += 1
+            return model_port.Failure("unknown", "no answer within 300s")
+
+        fail.n = 0
+        return fail
+
+    def test_a_scope_outage_waits_on_the_owner_and_is_not_asked_again(self):
+        # #927: one open scope decision. A retryable outage is that wait, not another consult next pass.
+        self._trio()
+        self.proposal()
+        model = self._unknown()
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=model)
+            row, = self.db.decisions(KEY)
+            self.assertEqual((row.topic, row.decided_by, row.answer), ("scope", "zach", None))
+            self.assertFalse(getattr(self.forge, "bodies", []))
+            waits = decision_escalation.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY))
+            self.assertEqual([w.decision_id[0] for w in waits], ["scope"])
+            asked = model.n
+            self.now += timedelta(hours=2)  # past any retry backoff
+            self.run_pass(model=model)
+        self.assertEqual(model.n, asked)
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
+
+    def test_a_legacy_scope_outage_is_escalated_once_without_a_model_call(self):
+        self._trio()
+        self.proposal()
+        listed = "; ".join(f"{mode}: {path}" for path, mode in (("src/a.py", "write"), ("docs/design.md", "read")))
+        question = f"Approve this file ownership for {KEY}? {listed}"
+        self.db.add_decision(KEY, "scope", question, None, "", {
+            "decision": {"options": ["approve", "reject"], "context": listed, "stage": "plan", "attempt": 1},
+            "verdicts": [{"choice": None, "reasoning": "model failure (unknown): no answer within 300s"}],
+            "failures": 1})
+        model = self._unknown()
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=model)
+            self.assertEqual(model.n, 0)
+            self.assertEqual([row.decided_by for row in self.db.decisions(KEY)], ["", "zach"])
+            self.assertIsNone(self.db.decisions(KEY)[-1].answer)
+            self.now += timedelta(hours=2)
+            self.run_pass(model=model)
+        self.assertEqual(model.n, 0)
+        self.assertEqual(len(self.db.decisions(KEY)), 2)
+
+    def test_a_scope_split_is_not_reconsulted_and_the_owner_answer_is_written(self):
+        self._trio()
+        self.proposal()
+        votes = self._votes([("adopt", "approve"), ("concern", "reject"), ("adopt", "approve")])
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=votes)
+            self.assertEqual(len(self.db.decisions(KEY)), 1)
+            self.assertEqual(self.db.decisions(KEY)[0].decided_by, "zach")
+            asked = votes.n
+            self.run_pass(model=votes)
+            self.assertEqual(votes.n, asked)
+            row = self.db.decisions(KEY)[-1]
+            self.db.add_decision(KEY, row.topic, row.question, "approve", "user",
+                                 {"decision": row.record.get("decision")})
+            self.run_pass(model=votes)
+        self.assertEqual(votes.n, asked)
+        self.assertNotIn("scope_proposal", self.db.resume(KEY))
+        self.assertIn("## File ownership\n- write: `src/a.py`", self.forge.bodies[-1][1])
+
+    def test_a_worker_that_exits_during_a_scope_consult_is_closed_in_that_pass(self):
+        self._trio()
+        self.proposal()
+        self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
+        self.launch(KEY, "implement", 1, "builder")
+        model = self._unknown()
+
+        def during(request):
+            if model.n == 0:
+                self.publish_exit()
+            return model(request)
+
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=during)
+        segment = self.db.segments(KEY)[0]
+        self.assertIsNotNone(segment.ended_at)
+        self.assertEqual(segment.outcome, "done")
+
     def test_trio_consults_stop_starting_once_the_pass_budget_is_spent(self):
         # #927: consults run inside the pass, so a slow trio must not hold the pass (and worker collection) for long.
         self._trio()
@@ -1988,10 +2071,12 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {
                 **next(r for r in self.forge.rows if r["issue_key"] == issue_key), "stage_mark": None}):
             self.run_pass(model=slow)
-        self.assertEqual(votes.n, 1)  # the first vote spends the budget: no further call, and the next consult waits
+        self.assertEqual(votes.n, 1)  # the first vote spends the budget: no further call
         consulted = [key for key in (KEY, other) if self.db.decisions(key)]
         self.assertEqual(len(consulted), 1)
-        self.assertTrue(decision_escalation.retryable_failure(self.db.decisions(consulted[0])[-1].record))
+        row = self.db.decisions(consulted[0])[-1]
+        self.assertEqual(row.decided_by, "zach")  # a scope outage waits on the owner, it is not retried (#927)
+        self.assertFalse(decision_escalation.retryable_failure(row.record))
 
     def _trio(self, **fields):
         self.p = policy.parse({

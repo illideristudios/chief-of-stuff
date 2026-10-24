@@ -358,6 +358,32 @@ class GateTest(unittest.TestCase):
                                 record=restarted[0].record)
         self.assertEqual(decision_escalation.restarted(self.store.decisions(KEY), "implement"), [])
 
+    def test_a_scope_outage_is_an_owner_wait_and_any_other_topic_is_retried(self):
+        # #927: topic scope escalates a retryable outage on the row it just wrote. Asks keep the retry.
+        failure = model_port.Failure("unknown", "no answer within 300s")
+        scope = replace(self.decision, topic="scope", question="Approve this file ownership?",
+                        options=("approve", "reject"), tags=())
+        trio_gate.consult(scope, self.policy, PERSONAS, FakeModel([failure] * 3), self.store, escalate_outage=True)
+        row = self.store.decisions(KEY)[-1]
+        self.assertEqual((row.decided_by, row.answer), ("zach", None))
+        self.assertTrue(row.record.get("retry_exhausted"))
+        self.assertIn(scope.question, row.record["error"])
+        again = FakeModel([reply(choice="approve")] * 3)
+        trio_gate.decide(scope, self.store.decisions(KEY), self.policy, PERSONAS, again, self.store,
+                         escalate_outage=True)
+        self.assertEqual(again.requests, [])
+
+        plain = replace(scope, question="Retry the outage?")
+        trio_gate.consult(plain, self.policy, PERSONAS, FakeModel([failure] * 3), self.store)
+        self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "")
+        retry = FakeModel([reply(choice="approve")] * 3)
+        got = trio_gate.decide(plain, self.store.decisions(KEY), self.policy, PERSONAS, retry, self.store)
+        self.assertEqual((got.recommendation, len(retry.requests)), ("approve", 3))
+
+        ask = replace(self.decision, topic="ask", question="Which parser?")
+        trio_gate.consult(ask, self.policy, PERSONAS, FakeModel([failure] * 3), self.store)
+        self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "")
+
     def test_decide_reuses_matching_decision_and_reconsults_on_new_options_context_reversal_or_retryable_failure(self):
         model = FakeModel([reply()] * 12)
         got = trio_gate.decide(self.decision, self.store.decisions(KEY), self.policy, PERSONAS, model, self.store)
