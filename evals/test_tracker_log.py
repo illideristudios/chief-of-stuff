@@ -1,6 +1,7 @@
 """tracker_log.py: each Log line the scripts write reads back with the pattern its readers use, worded as it always was."""
 
 import sys
+import tempfile
 import unittest
 from datetime import date, time
 from pathlib import Path
@@ -9,10 +10,44 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import tracker_log as tl  # noqa: E402
+import one_shot  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 DAY = date(2026, 9, 18)
 TREE = "worktree `trees/up` (fix-upload)"  # as one_shot._tree_note names a tree in File ownership
+
+
+class EndSummaryTest(unittest.TestCase):
+    def test_reasons_round_trip_without_the_changes(self):
+        for status in ("done", "human_review"):
+            line = tl.ended_line("10:20", "worker01", status, "fixed. Changes: reviewed the cap", "a.py")
+            self.assertEqual(tl.reason(line), "fixed. Changes: reviewed the cap.")
+        self.assertEqual(tl.reason(tl.relaunch_line("10:20", "worker01", "Check parser", "base moved")), "base moved.")
+
+    def test_old_lines_without_a_summary_are_empty_and_whitespace_collapses(self):
+        self.assertEqual(tl.reason(f"- 10:20 one-shot worker01: {tl.COMPLETED}"), "")
+        self.assertEqual(tl.reason(tl.ended_line("10:20", "worker01", "done", "fixed\n  the\tcap", "a.py")), "fixed the cap.")
+
+    def test_launcher_failure_reasons_are_recognized(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "result.toon"
+            for raw, code in ((None, 0), ('{"', 0), ('status: done\n', 0),
+                              ('status: done\nreason: boom\nchanges: none\n', 1),
+                              ('status: done\nreason: terminated\nchanges: none\n', -15)):
+                with self.subTest(raw=raw, code=code):
+                    if raw is not None:
+                        path.write_text(raw)
+                    status, why, changes = one_shot.worker_result(path, code)
+                    self.assertEqual(status, "human_review")
+                    summary = tl.reason(tl.ended_line("10:20", "worker01", status, why, changes))
+                    self.assertIsNotNone(tl.CRASH.match(summary), why)
+        self.assertIsNotNone(tl.CRASH.match("the launcher died before reconciling this run; recovered result"))
+
+    def test_requested_review_and_relaunch_are_not_crashes(self):
+        for why in ("needs a decision", "task row changed during the one-shot run", "base moved",
+                    "discussion of worker exited 1: boom", "worker exited normally"):
+            with self.subTest(why=why):
+                self.assertIsNone(tl.CRASH.match(why))
 
 
 class RoundTripTest(unittest.TestCase):

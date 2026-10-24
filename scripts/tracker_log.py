@@ -26,6 +26,11 @@ RELAUNCH_STAGE = "relaunch"
 STAGE = re.compile(r"^- (\d{1,2}):(\d{2}) stage: (.+) → (\S+)\s*$")
 STARTED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+) started: .*, task (.+?)\s*$")
 ENDED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (completed; awaiting integration|HUMAN REVIEW NEEDED)\b")
+# Launcher failures, as one_shot.worker_result and adopted-run reconciliation word them. Other human-review
+# reasons are requests for a person, not evidence that the worker crashed.
+CRASH = re.compile(r"^(?:worker did not write a valid TOON result\b|worker wrote an unreadable TOON result\b|"
+                   r"worker result is incomplete or invalid\b|worker exited -?\d+:|"
+                   r"the launcher died before reconciling this run;)")
 # RELAUNCHED's Log line, grouped as ENDED is.
 RELAUNCH = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (relaunch) requested for ")
 # A run whose wait ran out relaunches once into its tree (#110); this line is the once-per-row marker the
@@ -67,6 +72,15 @@ def ended_line(at: str, name: str, status: str, reason: str, changes: str) -> st
 def relaunch_line(at: str, name: str, task: str, reason: str) -> str:
     """The launcher's line when worker `name` asks for `task` to run again; `reason` comes already on one line."""
     return f"- {at} one-shot {name}{RELAUNCHED.format(task=task)}{one_period(reason)}"
+
+
+def reason(line: str) -> str:
+    """An end or relaunch line's reason, without the final Changes field, collapsed onto one line.
+    Older lines with no reason yield empty text. Split Changes from the right so a reason can mention it."""
+    tail = line.partition(" — ")[2]
+    if ENDED.match(line) and " Changes: " in tail:
+        tail = tail.rsplit(" Changes: ", 1)[0]
+    return " ".join(tail.split())
 
 
 def timed_out_line(at: str, name: str, minutes: int, task: str) -> str:
