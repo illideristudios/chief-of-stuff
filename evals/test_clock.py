@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -16,6 +17,20 @@ import store
 
 KEY = "github:example/repo#12"
 PINNED = datetime(2026, 10, 11, 19, 0, 0, tzinfo=timezone.utc)
+DATETIME_INJECT = {"name": "datetime-inject", "marketplace": "ai-additions", "version": "^1.0"}
+
+
+class ClockDependencyTest(unittest.TestCase):
+    def test_plugin_manifest_declares_datetime_inject(self) -> None:
+        manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+        self.assertIn(DATETIME_INJECT, manifest.get("dependencies", []))
+
+    def test_marketplace_manifest_declares_datetime_inject_and_cross_marketplace_allowlist(self) -> None:
+        marketplace = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+        self.assertIn("ai-additions", marketplace.get("allowCrossMarketplaceDependenciesOn", []))
+        plugins = {entry["name"]: entry for entry in marketplace.get("plugins", [])}
+        self.assertIn("chief-of-stuff", plugins)
+        self.assertIn(DATETIME_INJECT, plugins["chief-of-stuff"].get("dependencies", []))
 
 
 class ClockTest(unittest.TestCase):
