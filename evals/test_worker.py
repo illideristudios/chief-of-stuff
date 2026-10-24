@@ -52,7 +52,7 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
-        clock = mock.patch.object(worker.claude_adapter, "require_worker_clock", create=True)
+        clock = mock.patch.object(worker.claude_adapter, "require_worker_clock")
         self.clock = clock.start()
         self.addCleanup(clock.stop)
 
@@ -1367,7 +1367,7 @@ class WorkerTest(unittest.TestCase):
 
         self.db.set_resume(KEY, {})
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
-        (self.root / "chief-of-stuff.toml").write_text('[models.code]\nrotation = ["codex:gpt-5.4@high"]\n')
+        (self.root / "chief-of-stuff.toml").write_text('[models.implement]\nrotation = ["codex:gpt-5.4@high"]\n')
         self.forge.default_branch_protected = lambda: True
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.host_adapter, "available", return_value="/bin/codex"), \

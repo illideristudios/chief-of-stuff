@@ -543,7 +543,7 @@ class WorkerClockTest(unittest.TestCase):
 
         with mock.patch.object(claude_adapter, "resolve", return_value=str(probe)), \
              mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=spy_popen):
-            claude_adapter.require_worker_clock("secondary", cwd=str(self.dir))
+            claude_adapter.require_worker_clock(cwd=str(self.dir))
         self.assertEqual(seen["stdin"], subprocess.DEVNULL)
         self.assertNotEqual(seen["stdout"], subprocess.PIPE)
         self.assertNotEqual(seen["stderr"], subprocess.PIPE)

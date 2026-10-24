@@ -15,11 +15,13 @@ import signal
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+import clock
 import runtimes
 from model_port import Failure, Reply, Request, quota_reset
 from shell_setup import ShellError, clean_env, login_argv, resolve
@@ -32,20 +34,63 @@ def available() -> str | None:
     return resolve(RUNTIME.binary)
 
 
-def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[str, ...] = (),
-            path_prefix: str = "") -> list[str]:
-    """Resolve the registry's host through shell setup and build exact login argv."""
-    if request.session_id and not request.resume and not _is_uuid(request.session_id):
-        raise ShellError(f"session_id {request.session_id!r} must be a UUID to start a session")
+def _host(claude_as_profile: str) -> tuple[str, list[str]]:
     program, lead = runtimes.program(RUNTIME.name, claude_as_profile)
     binary = resolve(program) if claude_as_profile else available()
     if not binary:
         why = f"; claude_as_profile {claude_as_profile!r} needs it" if claude_as_profile else ""
         raise ShellError(f"`{program}` is not on the login shell's PATH{why}")
+    return binary, lead
+
+
+def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[str, ...] = (),
+            path_prefix: str = "") -> list[str]:
+    """Resolve the registry's host through shell setup and build exact login argv."""
+    if request.session_id and not request.resume and not _is_uuid(request.session_id):
+        raise ShellError(f"session_id {request.session_id!r} must be a UUID to start a session")
+    binary, lead = _host(claude_as_profile)
     built = argv(request, binary, lead)
     # The delimiter, rather than the tail length, owns the boundary between options and prompt.
     boundary = built.index("--")
     return login_argv([*built[:boundary], *extra_args, *built[boundary:]], path_prefix=path_prefix)
+
+
+def require_worker_clock(claude_as_profile: str = "", cwd: str | None = None) -> None:
+    """Refuse a worker launch unless `datetime-inject@ai-additions` is enabled at user scope (1.0 plan, M3 item 8)."""
+    binary, lead = _host(claude_as_profile)
+    prepared = login_argv([binary, *lead, "--setting-sources", "user", "plugin", "list", "--json"])
+    with tempfile.TemporaryFile() as out_file, tempfile.TemporaryFile() as err_file:
+        try:
+            process = subprocess.Popen(prepared, env=clean_env(), cwd=cwd, stdin=subprocess.DEVNULL,
+                                       stdout=out_file, stderr=err_file, start_new_session=True)
+        except OSError as exc:
+            raise RuntimeError(f"cannot verify worker clock plugin {clock.WORKER_CLOCK_PLUGIN}: {exc}") from exc
+        try:
+            code = process.wait(timeout=15)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            process.wait(timeout=5)
+            raise RuntimeError(f"worker clock check for {clock.WORKER_CLOCK_PLUGIN} timed out after 15s") from exc
+        out_file.seek(0)
+        err_file.seek(0)
+        stdout = out_file.read().decode(errors="replace")
+        stderr = err_file.read().decode(errors="replace").strip()
+    if code != 0:
+        detail = stderr or f"exit {code}"
+        raise RuntimeError(f"cannot verify worker clock plugin {clock.WORKER_CLOCK_PLUGIN}: {detail}")
+    try:
+        plugins = json.loads(stdout)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"cannot parse `claude --setting-sources user plugin list --json` while checking {clock.WORKER_CLOCK_PLUGIN}"
+        ) from exc
+    if clock.user_clock(plugins) is None:
+        raise RuntimeError(
+            f"worker launch requires plugin {clock.WORKER_CLOCK_PLUGIN} installed and enabled at user scope"
+        )
 
 
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
@@ -139,7 +184,7 @@ def _kill_and_drain(process: subprocess.Popen) -> tuple[str, str]:
     """Reap the leader and bound pipe draining even if a descendant escaped its group."""
     try:
         os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
+    except (ProcessLookupError, PermissionError):
         pass
     try:
         return process.communicate(timeout=1)
