@@ -281,7 +281,7 @@ Engine workers can run on Claude, Codex, Cursor and Antigravity (owner, 2026-10-
 - **The guard holds on every host.** The Claude plugin's PreToolUse gate does not load on other hosts, so a non-Claude worker gets a host-neutral guard with the same judgements:
   - **Shims:** a `PATH` shim directory, placed first by the engine, wraps `git`, `gh` and `glab` and refuses what `guard_commands` refuses: merges, pushes to protected or ambiguous refs, and forge calls outside the allowlist. It reuses `guard_commands` rather than copying it. A shim, like the hook, is a guard rail. The forge and the engine are the boundary.
   - **Branch protection:** a non-Claude entry launches only in a workspace whose forge protects its default branch and the branch its requests target, which can differ, for example `main` and `develop`. Otherwise the worker moves to the next entry in its rotation.
-  - **The engine checks after the run, on every protected branch.** It records each protected branch's head when a non-Claude run starts. At collect, every first-parent commit a protected branch gained during the run must be a merge the engine recorded, as structured data (request and merge commit), never inferred from log text or a time window. Any other commit, whether a worker's merge or a direct push, holds the run for human review, naming each commit and its branch. An unreadable branch holds too.
+  - **The engine checks after the run, on every protected branch.** It records each protected branch's head and the run's start time when a non-Claude run starts. At collect, every first-parent commit a protected branch gained during the run must be either a merge the engine recorded, as structured data (request and merge commit), or the merge commit of a request the forge records as opened before the run started (Zach, 2026-10-24, #949). The second case is read from the forge's own record of the request behind that commit (its number, its merge commit, its creation time), which a worker cannot write. It is never inferred from log text, a commit subject, a branch name or a time window. Any other commit, whether a worker's merge or a direct push, holds the run for human review, naming each commit and its branch. An unreadable branch, or a forge record that cannot be read, holds too. The known residue: a worker that pushes onto an older request's branch and gets it merged outside the engine passes this check, so the shims and branch protection stay the first line.
 - **Quota and outage** are classified per host into the model port's retryable kinds, never by guessing at success.
 
 ```
@@ -289,11 +289,13 @@ H := a host adapter implements the model port's contract and run evidence
 R := argv and environment come from runtimes.py      G := the shim reuses guard_commands' judgements
 B := the forge protects the default branch and the request target branch
 Rm(c) := commit c is a merge the engine recorded      P := every protected branch
+Fr(c) := the forge records c as the merge commit of a request opened before the run started
 N := a non-Claude worker may launch      Ok := the run passes the post-run check
 
 H ∧ R            [design decision 7; #830 retires the one-shot argv]
 N → G ∧ B        [the guard holds on every host; an unprotected branch means the next entry]
-Ok ↔ ∀b ∈ P, ∀c ∈ first-parent(start(b)..end(b)): Rm(c)      [unreadable → ¬Ok; #860]
+Ok ↔ ∀b ∈ P, ∀c ∈ first-parent(start(b)..end(b)): Rm(c) ∨ Fr(c)      [unreadable branch or forge record → ¬Ok; #860, #949 (Zach, 2026-10-24)]
+Fr(c) is read from the forge's record, never from c's subject or a branch name      [a worker writes those]
 ¬Ok → held for human review, each commit named, never silent
 ∴ other hosts run behind the same port, the same evidence and an equivalent guard
 ```
