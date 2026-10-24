@@ -18,7 +18,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from decision_actions import current_rows, state_of
+from decision_actions import current_rows, state_of, tab_counts as store_tab_counts
 from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history, horizon,  # noqa: E402
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
@@ -275,29 +275,16 @@ def _render_store_decisions(decisions: list) -> str:
         return ""
     items: list[str] = []
     for d in decisions:
-        st_name = state_of(d).status
-        if st_name == "superseded":  # its replacement carries the card
+        st = state_of(d)
+        if st.status == "superseded":  # its replacement carries the card
             continue
-        if st_name == "blocked":
-            why = d.blocked_reason or "action blocked"
-            badge = f'<span class="decision-badge blocked">BLOCKED · {_esc(why)}</span>'
-        else:
-            badge = f'<span class="decision-badge {_esc(st_name)}">{_esc(st_name.upper())}</span>'
-        ans = f' <span class="decision-answer">({_esc(d.answer)})</span>' if d.answer else ""
-        form = (
-            f'<form method="post" action="/" class="decision-form">'
-            f'<input type="hidden" name="decision_id" value="{d.id}">'
-            f'<input type="text" name="answer" value="{_esc(d.answer or "")}">'
-            f'<input type="text" name="target_stage" value="{_esc(d.rerouted_to or "")}">'
-            f'<button type="submit" name="action" value="answer">Answer</button>'
-            f'<button type="submit" name="action" value="reverse">Reverse</button>'
-            f'<button type="submit" name="action" value="reroute">Re-route</button>'
-            f'</form>'
-        )
+        badge = decision_page.store_decision_badge(st)
+        ans = f' <span class="decision-answer">({_esc(st.answer)})</span>' if st.answer else ""
+        form = decision_page.store_decision_form(st)
         items.append(
-            f'<div class="decision-item" data-status="{_esc(st_name)}">'
-            f'{badge} <a href="{_esc(issue_href(d.issue_key))}">{_esc(d.issue_key)}</a> '
-            f'<strong>{_esc(d.question)}</strong>{ans}{form}</div>'
+            f'<div class="decision-item" data-status="{_esc(st.status)}">'
+            f'{badge} <a href="{_esc(issue_href(st.issue_key))}">{_esc(st.issue_key)}</a> '
+            f'<strong>{_esc(st.prompt)}</strong>{ans}{form}</div>'
         )
     return '<div class="board-decisions">\n' + "\n".join(items) + "\n</div>\n"
 
@@ -399,8 +386,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     if db is not None:
-        import decision_actions
-        navigation = decision_actions.tab_counts(db.items(), db.decisions(), db.segments())
+        navigation = store_tab_counts(db.items(), db.decisions(), db.segments())
     else:
         navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
                                 [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
@@ -520,7 +506,8 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     except SettingsError as e:
         raise ConfigError(str(e)) from None
     ctx = decision_page.decision_context(root, tracker_day, now)
-    pending = decision_page.write_all(out.parent, ctx, day, root)
+    navigation = store_tab_counts(db.items(), db.decisions(), db.segments()) if db is not None else None
+    pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
     sources = board_sources.load(out.parent)
