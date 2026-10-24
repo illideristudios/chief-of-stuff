@@ -11,7 +11,7 @@
     }
   },
   "description": "#111: the implement rotation's first entry (claude:haiku@high) is out of quota per today's Log. The dispatch advances to the next entry, claude:opus@low, with its effort, and the Log records the entry used and why.",
-  "prompt": "Dispatch the CSV export fix. For this isolated test, use --dry-run for the worker launch and treat the dry run as the launch; do not start a real worker process.",
+  "prompt": "Dispatch the CSV export fix. Read the tracker Log before you choose a model. For this isolated test, use --dry-run for the worker launch and treat the dry run as the launch; do not start a real worker process.",
   "graders": [
     {
       "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
