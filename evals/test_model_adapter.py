@@ -504,5 +504,103 @@ class CallTest(unittest.TestCase):
         self.assertIn("claude_as_profile", got.message)
 
 
+class WorkerClockTest(unittest.TestCase):
+    """M3 item 8: worker launch checks `claude --setting-sources user plugin list --json` before spawning."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dir = Path(tmp.name)
+        self.cli = self.dir / "claude"
+        self.cli.write_text(f"#!{sys.executable}\nimport runpy\nrunpy.run_path({str(FAKE)!r}, run_name='__main__')\n")
+        self.cli.chmod(0o755)
+        self.resolved = []
+        patches = (mock.patch.dict(os.environ, {"SHELL": "/bin/sh"}),
+                   mock.patch.object(claude_adapter, "resolve", side_effect=self.resolve))
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def resolve(self, program):
+        self.resolved.append(program)
+        return str(self.cli)
+
+    def test_passes_with_fake_claude_and_captured_fixture_and_uses_file_streams(self):
+        claude_adapter.require_worker_clock(cwd=str(self.dir))
+        self.assertEqual(self.resolved, ["claude"])
+        fixture = (ROOT / "evals" / "fixtures" / "claude-plugin-list-user.json").read_text(encoding="utf-8")
+        probe = self.dir / "probe"
+        probe.write_text(f"#!{sys.executable}\nimport json,sys\n"
+                         f"assert sys.argv[1:] == ['--setting-sources', 'user', 'plugin', 'list', '--json'], sys.argv\n"
+                         f"print({fixture!r})\n")
+        probe.chmod(0o755)
+        seen = {}
+        real_popen = subprocess.Popen
+
+        def spy_popen(*args, **kwargs):
+            seen.update(kwargs)
+            return real_popen(*args, **kwargs)
+
+        with mock.patch.object(claude_adapter, "resolve", return_value=str(probe)), \
+             mock.patch.object(claude_adapter.subprocess, "Popen", side_effect=spy_popen):
+            claude_adapter.require_worker_clock("secondary", cwd=str(self.dir))
+        self.assertEqual(seen["stdin"], subprocess.DEVNULL)
+        self.assertNotEqual(seen["stdout"], subprocess.PIPE)
+        self.assertNotEqual(seen["stderr"], subprocess.PIPE)
+        self.assertTrue(seen["start_new_session"])
+        self.assertEqual(seen["cwd"], str(self.dir))
+
+    def test_profile_runs_through_claude_as_and_missing_binary_raises_shell_error(self):
+        capture = self.dir / "capture-profile"
+        fixture = (ROOT / "evals" / "fixtures" / "claude-plugin-list-user.json").read_text(encoding="utf-8")
+        capture.write_text(f"#!{sys.executable}\nimport sys\n"
+                           "assert sys.argv[1:] == ['run', 'work', '--setting-sources', 'user', 'plugin', 'list', '--json'], sys.argv\n"
+                           f"print({fixture!r})\n")
+        capture.chmod(0o755)
+        with mock.patch.object(claude_adapter, "resolve", side_effect=lambda p: self.resolved.append(p) or str(capture)):
+            claude_adapter.require_worker_clock("work", cwd=str(self.dir))
+        self.assertEqual(self.resolved[-1], "claude-as")
+        with mock.patch.object(claude_adapter, "resolve", return_value=None):
+            with self.assertRaises(claude_adapter.ShellError):
+                claude_adapter.require_worker_clock("work", cwd=str(self.dir))
+
+    def test_refuses_missing_disabled_project_scoped_or_wrong_marketplace_plugin(self):
+        for payload in (
+            [],
+            [{"id": "datetime-inject@ai-additions", "scope": "user", "enabled": False}],
+            [{"id": "datetime-inject@ai-additions", "scope": "project", "enabled": True}],
+            [{"id": "datetime-inject@other", "scope": "user", "enabled": True}],
+        ):
+            with self.subTest(payload=payload):
+                self.cli.write_text(f"#!{sys.executable}\nimport json\nprint(json.dumps({payload!r}))\n")
+                with self.assertRaises(RuntimeError) as raised:
+                    claude_adapter.require_worker_clock(cwd=str(self.dir))
+                self.assertIn("datetime-inject@ai-additions", str(raised.exception))
+                self.assertIn("user", str(raised.exception))
+
+    def test_refuses_nonzero_exit_unparseable_output_and_timeout(self):
+        self.cli.write_text(f"#!{sys.executable}\nimport sys\nprint('plugin list boom', file=sys.stderr)\nsys.exit(2)\n")
+        with self.assertRaises(RuntimeError) as raised:
+            claude_adapter.require_worker_clock(cwd=str(self.dir))
+        self.assertIn("datetime-inject@ai-additions", str(raised.exception))
+        self.assertIn("plugin list boom", str(raised.exception))
+
+        for bad_out in ("not json", "{}"):
+            with self.subTest(bad_out=bad_out):
+                self.cli.write_text(f"#!{sys.executable}\nprint({bad_out!r})\n")
+                with self.assertRaises(RuntimeError) as raised:
+                    claude_adapter.require_worker_clock(cwd=str(self.dir))
+                self.assertIn("datetime-inject@ai-additions", str(raised.exception))
+
+        process = mock.Mock(pid=9876)
+        process.wait.side_effect = [subprocess.TimeoutExpired("claude", 15), 0]
+        with mock.patch.object(claude_adapter.subprocess, "Popen", return_value=process), \
+             mock.patch.object(claude_adapter.os, "killpg") as killpg:
+            with self.assertRaises(RuntimeError) as raised:
+                claude_adapter.require_worker_clock(cwd=str(self.dir))
+        killpg.assert_called_once_with(9876, signal.SIGKILL)
+        self.assertIn("datetime-inject@ai-additions", str(raised.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

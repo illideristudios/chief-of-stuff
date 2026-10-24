@@ -15,8 +15,15 @@ def one_answer(args):
     """`claude -p --output-format json ... -- <prompt>`, as the M0 spike measured it. A `claude-as run <profile>` lead is
     skipped. Sessions live in `.fake-claude-sessions/` in cwd. The prompt picks the outcome: QUOTA is a 429 quota stop on
     stderr, FAIL an error envelope with subtype success, SLEEP hangs; anything else is answered."""
-    prompt = args[args.index("--") + 1]
     flag = {key: value for key, value in zip(args, args[1:]) if key.startswith("--")}
+    if "plugin" in args and "list" in args:
+        if "--json" in args and flag.get("--setting-sources") == "user":
+            print(json.dumps([{"id": "datetime-inject@ai-additions", "version": "1.0.0",
+                               "scope": "user", "enabled": True, "installPath": "fake-install-path"}]))
+            sys.exit(0)
+        print("Error: plugin list requires --setting-sources user --json", file=sys.stderr)
+        sys.exit(1)
+    prompt = args[args.index("--") + 1]
     sessions = Path(".fake-claude-sessions")
     session = flag.get("--resume") or flag.get("--session-id") or str(uuid.uuid4())
     if "SLEEP" in prompt:

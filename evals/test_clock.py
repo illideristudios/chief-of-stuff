@@ -32,6 +32,24 @@ class ClockDependencyTest(unittest.TestCase):
         self.assertIn("chief-of-stuff", plugins)
         self.assertIn(DATETIME_INJECT, plugins["chief-of-stuff"].get("dependencies", []))
 
+    def test_user_clock_matches_only_enabled_user_scoped_datetime_inject(self) -> None:
+        fixture = json.loads((ROOT / "evals" / "fixtures" / "claude-plugin-list-user.json").read_text(encoding="utf-8"))
+        matched = clock.user_clock(fixture)
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched["id"], "datetime-inject@ai-additions")
+        for bad in (
+            None,
+            {},
+            [],
+            ["not-a-dict"],
+            [{"id": "datetime-inject@ai-additions", "scope": "user", "enabled": False}],
+            [{"id": "datetime-inject@ai-additions", "scope": "user", "enabled": 1}],
+            [{"id": "datetime-inject@ai-additions", "scope": "project", "enabled": True}],
+            [{"id": "datetime-inject@other", "scope": "user", "enabled": True}],
+        ):
+            with self.subTest(bad=bad):
+                self.assertIsNone(clock.user_clock(bad))
+
 
 class ClockTest(unittest.TestCase):
     def test_system_returns_aware_utc(self) -> None:

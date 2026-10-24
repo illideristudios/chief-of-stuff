@@ -52,6 +52,9 @@ class WorkerTest(unittest.TestCase):
         git = mock.patch.object(worker.make_worktree, "git", return_value=(0, "head"))
         git.start()
         self.addCleanup(git.stop)
+        clock = mock.patch.object(worker.claude_adapter, "require_worker_clock", create=True)
+        self.clock = clock.start()
+        self.addCleanup(clock.stop)
 
     def launch(self, stage="implement", attempt=1):
         return worker.launch(KEY, stage, attempt, None, store=self.db, root=self.root,
@@ -1328,6 +1331,51 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "guard/ plugin"):
                 self.launch()
         start.assert_not_called()
+
+    def test_claude_launch_requires_user_scoped_datetime_inject_before_spawning_and_reuses_tree_after_refusal(self):
+        self.clock.side_effect = RuntimeError("worker launch requires plugin datetime-inject@ai-additions enabled at user scope")
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)) as build, \
+             mock.patch.object(worker.make_worktree, "git", return_value=(0, "work/issue-1-implement-1")), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=self.start) as start, \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            with self.assertRaises(worker.StartFailed) as raised:
+                worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                              trees=self.trees, policies=self.p, forge=self.forge, claude_as_profile="work",
+                              clock=lambda: NOW)
+            self.assertIn("datetime-inject@ai-additions", str(raised.exception))
+            self.assertEqual(self.clock.call_args_list, [mock.call("work", str(self.tree))])
+            start.assert_not_called()
+            run_dir = worker._run_dir(self.root, KEY, "implement", 1)
+            self.assertFalse((run_dir / "command.json").exists())
+            self.assertFalse((run_dir / "started.json").exists())
+
+            self.clock.side_effect = None
+            worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root,
+                          trees=self.trees, policies=self.p, forge=self.forge, claude_as_profile="work",
+                          clock=lambda: NOW)
+            self.assertEqual(build.call_count, 1)
+            self.assertEqual(self.clock.call_args_list,
+                             [mock.call("work", str(self.tree)), mock.call("work", str(self.tree))])
+            self.assertEqual(start.call_count, 1)
+
+    def test_non_claude_and_adopted_runs_do_not_check_claude_worker_clock(self):
+        self.launched()
+        self.clock.reset_mock()
+        with mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            self.launch()
+        self.clock.assert_not_called()
+
+        self.db.set_resume(KEY, {})
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text('[models.code]\nrotation = ["codex:gpt-5.4@high"]\n')
+        self.forge.default_branch_protected = lambda: True
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "available", return_value="/bin/codex"), \
+             mock.patch.object(worker.host_adapter, "branch_heads", return_value={"trunk": "head"}), \
+             mock.patch.object(worker.host_adapter, "start", side_effect=lambda rt, req, rd, env=None: (self.start(req, rd), None)), \
+             mock.patch.object(worker.process_status, "identity", return_value="start"):
+            self.launch("implement", attempt=2)
+        self.clock.assert_not_called()
 
     def test_adapter_runner_gives_the_host_the_chief_env(self):
         run = self.root / "run"
