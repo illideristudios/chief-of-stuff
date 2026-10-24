@@ -763,6 +763,7 @@ class CaseLintTest(unittest.TestCase):
         quota_table = {
             "chief-of-stuff models --root . --class implement --after claude:haiku@high": (True, False, False),
             'chief-of-stuff models --root . --class implement --after "claude:haiku@high"': (True, False, False),
+            "C=/plugin/chief_of_stuff.py; python3 $C models --root . --class implement --after claude:haiku@high": (True, False, False),
             f"{w} --dry-run --model opus --effort low {tail}": (False, True, False),
             f'{w} --dry-run --model "opus" --effort "low" {tail}': (False, True, False),
             f"{w} --dry-run --class implement {tail}": (False, False, True),

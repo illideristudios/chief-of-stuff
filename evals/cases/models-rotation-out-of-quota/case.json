@@ -27,7 +27,7 @@
       "rule": "When the chosen model is unavailable or out of quota, advance the rotation with `chief-of-stuff models --root . --class <class> --after <entry>` and launch that entry instead, never with `--class`.",
       "type": "tool_used",
       "tool": "Bash",
-      "input_match": "(?:chief-of-stuff|chief_of_stuff\\.py)\\s+models\\b(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--class[ =](?:\\\\\\\"|')?implement(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--after[ =](?:\\\\\\\"|')?[^\\\"']*haiku)",
+      "input_match": "(?:(?:chief-of-stuff|chief_of_stuff\\.py)\\s+models\\b|python3\\s+(?:\\$\\{?\\w+\\}?|\\S*chief_of_stuff\\.py)\\s+models\\b)(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--class[ =](?:\\\\\\\"|')?implement(?![\\w.-]))(?=(?:(?:\\\\\"(?:[^\\\\]|\\\\[^\"])*\\\\\"|\\'[^\\']*\\'|[^;&|\\\\\"\\']|\\\\(?![n\"])))*--after[ =](?:\\\\\\\"|')?[^\\\"']*haiku)",
       "min": 1
     },
     {
