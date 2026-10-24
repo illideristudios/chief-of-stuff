@@ -305,9 +305,11 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             steps_list.append((start, f'{escape(seg.stage)} started · {escape(who)}'))
             if seg.ended_at:
                 steps_list.append((stop, f'{escape(seg.stage)} {escape(seg.outcome or "ended")} · {escape(who)}'))
+            status = ("failed to start" if seg.outcome == "failed" and seg.started_at
+                      and seg.started_at == seg.ended_at else seg.outcome or "running")
             lines.append((took, f'<div class="wk"><b>{escape(who)}</b><span>{escape(seg.runtime)} '
                                f'{escape(seg.model)} · {escape(seg.stage)} · attempt {seg.attempt}</span>'
-                               f'<span>{escape(seg.outcome or "running")} · {_dur(took)}</span></div>'))
+                               f'<span>{escape(status)} · {_dur(took)}</span></div>'))
         steps_list.extend((parse_stamp(entry.at, now), escape(entry.message))
                           for entry in db.log(item.issue_key))
         steps = "\n".join(f'<div class="step"><span class="when">{_clock(at, now)}</span>'
