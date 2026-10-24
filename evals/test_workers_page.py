@@ -22,8 +22,8 @@ Markup contract these tests read (keep to it; everything else is free):
   `<table>`: its first `<tr>` holds `<th>` column heads, and each later `<tr>` is one row. On RUNNING, the column for
   last activity has a head containing "activity" and the one for tokens a head containing "token"; a row's cells line
   up with the heads one to one.
-- Header boxes sit in the page's `<header>`: each is an element whose text is its label (`need you`, `running`,
-  `slots free`) and its value, in either order.
+- Header boxes sit in the page's `<header>`: each is an element whose text is its label (`NEEDS INPUT`, `RUNNING`,
+  `SLOTS FREE`) and its value, in either order.
 - A task link is `<a href="/issues/<n>">`.
 """
 
@@ -59,6 +59,7 @@ TRACKER = """# Tracker
 ## Tasks
 
 {head}| Upload size limit | Cap uploads | unassigned | open | {day} |  | M |  | implement | #109 | c |
+| Recover queue | Recover queue | unassigned | open | {day} |  | S |  | fix | #124 | c |
 | Cache warmup | Warm the pool | unassigned | open | {day} |  | S |  | review | #111 | c |
 | Tidy config | Tidy | Robin | open | {day} |  | S |  |  | #112 | c |
 | Review round 1 | Review r1 | unassigned | open | {day} |  | S |  |  | #120 | c |
@@ -76,6 +77,7 @@ TRACKER = """# Tracker
 | Verify r1 | `src/d/` |
 | Fix r1 | `src/e/` |
 | Docs p1 | `src/f/` |
+| Recover queue | `src/g/` |
 
 ## Log
 
@@ -88,10 +90,12 @@ USAGE = ({"input_tokens": 100, "output_tokens": 200, "cache_creation_input_token
          {"input_tokens": 20, "output_tokens": 180, "cache_creation_input_tokens": 500, "cache_read_input_tokens": 12000})
 TOKENS = 56000
 # Today's launcher end lines: worker -> (Log time, what the line says, how it ended as the page words it, task ref).
-ENDED = {"impl-c3": ("00:20", "done", "completed", "120"),
-         "impl-d4": ("00:30", "human_review", "human review", "121"),
-         "impl-e5": ("00:40", "relaunch", "relaunch", "122")}
-TASK = {"impl-c3": "Review r1", "impl-d4": "Verify r1", "impl-e5": "Fix r1"}
+ENDED = {"impl-c3": ("00:20", "done", "done", "120"),
+         "impl-d4": ("00:30", "human_review", "review", "121"),
+         "impl-e5": ("00:40", "relaunch", "relaunch", "122"),
+         "impl-h8": ("00:45", "human_review", "crashed", "124")}
+TASK = {"impl-c3": "Review r1", "impl-d4": "Verify r1", "impl-e5": "Fix r1", "impl-h8": "Recover queue"}
+CRASH_REASON = 'worker exited 1: <b title="boom">boom</b>'
 
 
 def claude_dir(tree: Path) -> str:
@@ -120,7 +124,7 @@ def elapsed(start: datetime, now: datetime) -> set[str]:
 
 class Workspace:
     """A workspace on disk: today's tracker with two running one-shots (impl-a1 with a session log, impl-b2
-    without), a session (planner), today's three end lines, yesterday's tracker, and the sources cache."""
+    without), a session (planner), a taskless session, today's end lines, yesterday's tracker, and the sources cache."""
 
     def __init__(self, cap: int | None):
         self.root = Path(tempfile.mkdtemp()).resolve()
@@ -145,12 +149,14 @@ class Workspace:
             self.launch(task, worker, runtime, model, f"{self.started[worker]:%H:%M}")
         for worker, (at, status, _, _) in ENDED.items():
             self.launch(TASK[worker], worker, "claude", "sonnet", "00:10")
-            one_shot.update_tracker(self.tracker, TASK[worker], worker, "Robin", status, "reason", "x.py", at)
+            one_shot.update_tracker(self.tracker, TASK[worker], worker, "Robin", status,
+                                    CRASH_REASON if worker == "impl-h8" else "reason", "x.py", at)
         self.pages = self.root / "pages"
         self.pages.mkdir()
         self.cache([bs.Worker("impl-a1", "one-shot", "claude", "opus", "Upload size limit", "impl-a1", self.started["impl-a1"], None),
                     bs.Worker("impl-b2", "one-shot", "codex", "gpt-5.5", "Cache warmup", "impl-b2", self.started["impl-b2"], None),
-                    bs.Worker("planner", "session", "claude", "", "Tidy config", "", self.started["planner"], None)])
+                    bs.Worker("planner", "session", "claude", "", "Tidy config", "", self.started["planner"], None),
+                    bs.Worker("idle", "session", "claude", "", " \t ", "", self.started["planner"], None)])
         self.log = self.home / ".claude" / "projects" / claude_dir(self.root / "trees" / "impl-a1") / "0a1b2c3d.jsonl"
         self.log.parent.mkdir(parents=True)
         self.last = self.now - timedelta(minutes=2)
@@ -327,6 +333,35 @@ class RunningTest(unittest.TestCase):
                 row(t, worker)
         self.assertEqual(len(rows(t)), 3, [words(tr) for tr in rows(t)])
 
+    def test_rows_lead_with_state_and_name_over_runtime_model_and_kind(self):
+        t = table(page(), "running")
+        for worker, state, detail in (("impl-a1", "RUNNING", "claude opus · one-shot"),
+                                      ("impl-b2", "RUNNING", "codex gpt-5.5 · one-shot"),
+                                      ("planner", "LOOPING", "claude · session")):
+            with self.subTest(worker=worker):
+                first = cells(row(t, worker))[0]
+                chips = [n for n in first.walk() if "chip" in n.attrs.get("class", "").split()]
+                self.assertEqual([words(n) for n in chips], [state])
+                self.assertTrue(words(first).startswith(f"{state} {worker}"))
+                self.assertTrue(any(words(n) == detail for n in first.children))
+
+    def test_stage_is_a_chip_after_the_task_name(self):
+        t = table(page(), "running")
+        for worker, task, stage in (("impl-a1", "Upload size limit", "implement"),
+                                     ("impl-b2", "Cache warmup", "review"), ("planner", "Tidy config", "")):
+            with self.subTest(worker=worker):
+                tr = row(t, worker)
+                task_cell = next(c for c in cells(tr) if task in words(c))
+                chips = [n for n in task_cell.walk() if "chip" in n.attrs.get("class", "").split()]
+                self.assertEqual([words(n) for n in chips], [stage] if stage else [])
+                if stage:
+                    self.assertTrue(words(task_cell).endswith(f"{task} {stage}"))
+
+    def test_a_session_without_a_task_is_not_running(self):
+        self.assertNotIn("idle", words(table(page(), "running")))
+        heading = next(n for n in doc(page()).walk() if n.tag == "h2" and words(n).startswith("Running"))
+        self.assertEqual(words(heading), "Running · 3")
+
     def test_a_one_shot_row_names_its_runtime_task_stage_and_time(self):
         ws = served(CAP)[0]
         for worker, runtime, model, ref, task, stage in (("impl-a1", "claude", "opus", "109", "Upload size limit", "implement"),
@@ -385,17 +420,42 @@ class EndedTodayTest(unittest.TestCase):
                 self.assertIn(how, text.casefold())
                 self.assertIn(f"/issues/{ref}", links(tr))
 
+    def test_ended_states_are_chips_and_summaries_show_the_reason(self):
+        t = table(page(), "ended today")
+        for worker, (_, _, state, _) in ENDED.items():
+            with self.subTest(worker=worker):
+                tr = row(t, worker)
+                chips = [n for n in tr.walk() if "chip" in n.attrs.get("class", "").split()]
+                self.assertEqual([words(n) for n in chips], [state.upper()])
+                summary = CRASH_REASON + "." if worker == "impl-h8" else "reason."
+                self.assertEqual(column(t, tr, "summary"), summary)
+                full = next(n for n in tr.walk() if n.attrs.get("title") == summary)
+                self.assertEqual(words(full), summary)
+                self.assertFalse(any(n.tag == "b" for n in full.walk()), "the reason was rendered as HTML")
+
+    def test_stopped_workers_link_to_the_task_for_re_dispatch(self):
+        t = table(page(), "ended today")
+        for worker, (_, _, state, ref) in ENDED.items():
+            with self.subTest(worker=worker):
+                action = next(n for n in row(t, worker).walk() if n.tag == "a" and n.attrs.get("href") == f"/issues/{ref}")
+                self.assertEqual(words(action), f"#{ref}" if state == "done" else "re-dispatch")
+
 
 class HeaderTest(unittest.TestCase):
-    """(#195) Header boxes: need you (today's human-review ends), running, and slots free `k of N` when the workspace
+    """Header boxes: NEEDS INPUT (today's human-review ends), RUNNING, and SLOTS FREE `k of N` when the workspace
     caps one-shots."""
 
     def test_no_header_prints_a_rendered_clock(self) -> None:
         # #215: the eyebrow keeps the board link and the sources' errors, not a render clock.
         self.assertNotRegex(page(), r"\brendered \d{1,2}:\d{2}")
 
-    def test_need_you_counts_todays_human_review_ends(self):
-        self.assertEqual(box(page(), "need you"), "1")
+    def test_needs_input_counts_todays_human_review_ends_including_crashes(self):
+        self.assertEqual(box(page(), "needs input"), "2")
+
+    def test_tile_labels_are_uppercase(self):
+        header = next(n for n in doc(page()).walk() if n.tag == "header")
+        for label in ("NEEDS INPUT", "RUNNING", "SLOTS FREE"):
+            self.assertTrue(any(words(n) == label for n in header.walk()), label)
 
     def test_running_counts_the_running_workers(self):
         self.assertEqual(box(page(), "running"), "3")
@@ -419,6 +479,24 @@ class OnRequestTest(unittest.TestCase):
         resp = get(self.port, "/workers")
         self.assertEqual(resp.status, 200, f"GET /workers answered {resp.status}")
         return resp.body.decode()
+
+    def test_an_ended_task_without_an_issue_keeps_its_name_without_an_action(self):
+        self.ws.tracker.write_text(self.ws.tracker.read_text().replace("| #120 |", "|  |"))
+        self.ws.touch(self.ws.tracker)
+        t = table(self.fetch(), "ended today")
+        tr = row(t, "impl-c3")
+        self.assertIn("Review round 1", words(tr))
+        self.assertEqual(links(tr), [])
+
+    def test_a_legacy_end_without_a_start_or_summary_still_has_a_state(self):
+        with self.ws.tracker.open("a") as out:
+            out.write("- 01:05 one-shot legacy: completed; awaiting integration\n")
+        self.ws.touch(self.ws.tracker)
+        t = table(self.fetch(), "ended today")
+        tr = row(t, "legacy")
+        self.assertEqual(column(t, tr, "state"), "DONE")
+        self.assertEqual(column(t, tr, "summary"), "")
+        self.assertEqual(links(tr), [])
 
     def test_the_next_request_shows_what_the_cache_and_logs_say_now(self):
         self.fetch()
