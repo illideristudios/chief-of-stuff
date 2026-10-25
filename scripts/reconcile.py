@@ -310,11 +310,12 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
             return _work(key, "review", workflow, history, policies, room)
     elif item.review_state != "approved":
         return Wait(key, "review has not run")
-    if counts is None:
+    # A workflow with no review stage never produces a worker report, so unknown counts cannot arrive.
+    if counts is None and "review" in stages:
         return Wait(key, "review findings are unknown")
     review_stage = "review" if "review" in stages else "merge"
     resolved = _policy(policies, review_stage, room)
-    if _blocking(counts, resolved):
+    if counts is not None and _blocking(counts, resolved):
         return Wait(key, "blocking review findings")
     work_stages = {review_stage} | {s.stage for s in completed if s.stage in policies.stages}
     if any(_policy(policies, stage, room).architect for stage in work_stages):
