@@ -34,12 +34,14 @@ class Bar:
 
 
 def nearest_deadline(cfg: Config, now: datetime) -> Deadline:
-    """The nearest deadline of all, whatever it governs: the Clock line, `data-deadline` and the axes use it."""
+    """The first deadline at or after `now`, else today's end of day.
+
+    The clock and `data-deadline` use it. A deadline that has already passed is not a countdown;
+    end of day is 23:59 in the workspace zone, including when the configured list is empty.
+    """
     for d in cfg.deadlines:
         if d.at >= now:
             return d
-    if cfg.deadlines:
-        return cfg.deadlines[-1]
     return _end_of_day(cfg, now)
 
 

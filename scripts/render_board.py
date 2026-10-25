@@ -411,9 +411,11 @@ figure{{margin:0;padding:0;background:none;border:0}}
   function hms(d){{return new Intl.DateTimeFormat('en-GB',{{timeZone:tz,hour:'2-digit',minute:'2-digit',second:'2-digit'}}).format(d);}}
   function pad(n){{return (n<10?'0':'')+n;}}
   function tick(){{
-    var now=new Date(),ms=dl-now,sign=ms<0?'-':'',s=Math.floor(Math.abs(ms)/1000);
+    var now=new Date(),ms=dl-now,s=Math.floor(Math.abs(ms)/1000),expired=ms<0;
+    var dur=Math.floor(s/3600)+'h'+pad(Math.floor(s/60)%60)+'m'+pad(s%60)+'s';
     root.querySelector('.panels-now').textContent=hms(now);
-    root.querySelector('.panels-left').textContent=sign+Math.floor(s/3600)+'h'+pad(Math.floor(s/60)%60)+'m'+pad(s%60)+'s';
+    root.querySelector('.panels-due .panels-clock-name').textContent=root.dataset.deadlineName+(expired?' passed':' in');
+    root.querySelector('.panels-left').textContent=expired?dur+' ago':dur;
   }}
   tick();setInterval(tick,1000);
 }})();
