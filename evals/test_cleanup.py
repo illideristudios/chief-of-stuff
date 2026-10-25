@@ -188,6 +188,41 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(self.removable(out), ["done"])
         self.assertFalse(tree.exists())
 
+    def test_cursor_channel_file_alone_is_removable_while_sibling_or_other_ignored_files_keep_the_tree(self) -> None:
+        tree = self.trees / "done"
+        exclude = self.clone / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("/.cursor/mcp.json\n")
+        (tree / ".cursor").mkdir()
+        (tree / ".cursor" / "mcp.json").write_text("{}\n")
+
+        sibling = tree / ".cursor" / "other.txt"
+        sibling.write_text("untracked\n")
+        _, out = self.run_cleanup("--remove")
+        self.assertNotIn("done", self.removable(out))
+        self.assertIn("done", self.kept(out))
+        self.assertTrue(tree.is_dir())
+        sibling.unlink()
+
+        gitignore = tree / ".cursor" / ".gitignore"
+        notes = tree / ".cursor" / "notes.md"
+        gitignore.write_text("*\n")
+        notes.write_text("only copy\n")
+        _, out = self.run_cleanup("--remove")
+        self.assertNotIn("done", self.removable(out))
+        self.assertIn("done", self.kept(out))
+        self.assertTrue(tree.is_dir())
+        gitignore.unlink()
+        notes.unlink()
+
+        code, out = self.run_cleanup()
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertNotIn("done", self.kept(out))
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+
     def test_a_failing_admin_dir_removal_reports_partial_removal_and_logs_it(self) -> None:
         tree = self.trees / "done"
         admin = cleanup.git_view.locate(tree).gitdir

@@ -173,6 +173,31 @@ class ReadStateTest(Repo):
         git("update-ref", "-d", "refs/remotes/origin/main", cwd=self.clone)
         self.assertIsNone(git_trees.read_state(t).off_origin)
 
+    def test_cursor_channel_file_at_root_is_excluded_while_siblings_nested_and_repo_excludes_count(self) -> None:
+        t = self.tree("wt-a", "feat/a")
+        exclude = self.clone / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("/.cursor/mcp.json\n")
+        (t / ".cursor").mkdir()
+        (t / ".cursor" / "mcp.json").write_text("{}\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 0)
+        exclude.write_text("/.cursor/mcp.json\nsecret.txt\n")
+        (t / "secret.txt").write_text("hidden\n")
+        (t / ".cursor" / "other.txt").write_text("sibling\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 2)
+        (t / "pkg" / ".cursor").mkdir(parents=True)
+        (t / "pkg" / ".cursor" / "mcp.json").write_text("{}\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 3)
+
+    def test_nested_cursor_channel_file_alone_is_counted_as_dirty(self) -> None:
+        t = self.tree("wt-a", "feat/a")
+        exclude = self.clone / ".git" / "info" / "exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("/.cursor/mcp.json\n")
+        (t / "pkg" / ".cursor").mkdir(parents=True)
+        (t / "pkg" / ".cursor" / "mcp.json").write_text("{}\n")
+        self.assertEqual(git_trees.read_state(t).dirty, 1)
+
 
 class DiscoverTest(Repo):
     def test_every_tree_under_the_worktrees_dir_is_found(self) -> None:
