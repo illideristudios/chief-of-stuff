@@ -13,10 +13,16 @@ from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+import forge
 import host_adapter
 import runtimes
 from model_port import Failure, Reply, Request
 from shell_setup import ShellError
+
+# §13 (#949): a request's creation time against the run's start. Equal is not before.
+OLD = "2026-10-20T00:00:00+00:00"
+START = "2026-10-25T12:00:00+00:00"
+DURING = "2026-10-25T13:00:00+00:00"
 
 BINDING = {"CHIEF_ISSUE_KEY": "github:o/r#1", "CHIEF_SESSION_ID": "s", "CHIEF_PYTHON": sys.executable}
 
@@ -177,13 +183,16 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIsInstance(unknown, Failure)
         self.assertEqual(unknown.kind, "unknown")
 
-    def check(self, *, after, commits=(), recorded=(), fetch=0, rev_list=0, branch="work/issue-1-plan-1"):
-        """§13 (c) against a fake git: (fetch, ls-remote, rev-list) answers and the engine's recorded merges."""
+    def check(self, *, after, commits=(), recorded=(), fetch=0, rev_list=0, branch="work/issue-1-plan-1",
+              started_at=START, requests=None, unreadable=False):
+        """§13 against a fake git and a fake forge. `requests` is a list of (merge sha, created_at) or a dict keyed
+        by commit; None means the workspace has no forge. `unreadable` makes the forge call fail."""
         record = {"tree": str(self.dir), "runtime": "codex", "default_branch": "main", "default_head": "a" * 40,
-                  "branch": branch}
+                  "branch": branch, "started_at": started_at}
         store = SimpleNamespace(items=lambda: [SimpleNamespace(issue_key="k"), SimpleNamespace(issue_key="other")],
                                 resume=lambda key: {"merges": [{"request": 2, "sha": s, "at": "t"} for s in recorded]}
                                 if key == "other" else {"review_findings": {}})
+        self.forge_asks, self.rev_args = [], []
 
         def git(args, cwd):
             if args[0] == "fetch":
@@ -191,9 +200,21 @@ class HostAdapterTest(unittest.TestCase):
             if args[0] == "ls-remote":
                 return (0, f"{after}\trefs/heads/main") if after else (0, "")
             if args[0] == "rev-list":
+                self.rev_args.append(args)
                 return rev_list, "\n".join(commits)
             raise AssertionError(args)
-        with mock.patch.object(host_adapter.make_worktree, "git_trusted", side_effect=git):
+
+        def requests_for_commit(sha):
+            self.forge_asks.append(sha)
+            if unreadable:
+                raise forge.ForgeError("unreadable")
+            if isinstance(requests, dict):
+                return list(requests.get(sha, []))
+            return list(requests or [])
+
+        source = None if requests is None and not unreadable else SimpleNamespace(requests_for_commit=requests_for_commit)
+        with mock.patch.object(host_adapter.make_worktree, "git_trusted", side_effect=git), \
+             mock.patch("forge.for_workspace", return_value=source):
             return host_adapter.moved_outside_engine(store, record, "now")
 
     def test_an_unmoved_default_branch_or_only_engine_merges_pass(self):
@@ -245,28 +266,40 @@ class HostAdapterTest(unittest.TestCase):
         self.assertIn("cannot verify", self.check(after=""))
         self.assertIn("cannot list", self.check(after="b" * 40, rev_list=128))
 
-    def test_a_pr_merge_of_another_branch_does_not_hold_the_run(self):
-        # #949: a person merging an unrelated pull request is not the worker's doing.
-        pr = f"{'p' * 40} {'a' * 40} {'b' * 40}\tMerge pull request #946 from illideristudios/docs/decision-pages-945"
-        self.assertEqual(self.check(after="p" * 40, commits=[pr], branch="work/issue-949-plan-1"), "")
-        self.assertEqual(self.check(after="p" * 40, commits=[pr, "m" * 40], recorded=["m" * 40],
-                                    branch="work/issue-949-plan-1"), "")
+    def test_a_request_opened_before_the_run_does_not_hold(self):
+        # #949: the forge records the commit as the merge of a request opened before the run. The subject is not read.
+        sha = "c" * 40
+        self.assertEqual(self.check(after=sha, commits=[sha], requests=[(sha, OLD)]), "")
+        self.assertEqual(self.rev_args, [["rev-list", "--first-parent", f"{'a' * 40}..{sha}"]])
+        recorded = "b" * 40
+        self.assertEqual(self.check(after=sha, commits=[sha, recorded], recorded=[recorded],
+                                    requests={sha: [(sha, OLD)]}), "")
+        self.assertEqual(self.forge_asks, [sha])
 
-    def test_a_pr_merge_of_the_runs_own_branch_holds_and_is_named(self):
-        own = f"{'w' * 40} {'a' * 40} {'b' * 40}\tMerge pull request #949 from illideristudios/work/issue-949-plan-1"
-        held = self.check(after="w" * 40, commits=[own], branch="work/issue-949-plan-1")
-        self.assertIn("w" * 12, held)
+    def test_a_request_opened_during_the_run_holds_and_is_named(self):
+        sha = "d" * 40
+        # Two parents and another branch's subject still hold when the forge says the request opened during the run.
+        line = f"{sha} {'a' * 40} {'b' * 40}\tMerge pull request #946 from illideristudios/docs/decision-pages-945"
+        held = self.check(after=sha, commits=[line], requests=[(sha, DURING)])
+        self.assertIn(sha[:12], held)
         self.assertIn("holding for human review", held)
+        same = self.check(after=sha, commits=[sha], requests=[(sha, START)])
+        self.assertIn(sha[:12], same)
 
-    def test_a_direct_push_or_local_merge_holds_even_with_a_pr_subject(self):
-        other = "Merge pull request #946 from illideristudios/other"
-        for commit, branch in ((f"{'d' * 40} {'a' * 40}\t{other}", "work/x"),  # one parent: a direct push
-                               (f"{'l' * 40} {'a' * 40} {'b' * 40}\tMerge branch 'other' into main", "work/x"),
-                               (f"{'n' * 40} {'a' * 40} {'b' * 40}\t{other}", "")):  # no own branch: fail closed
-            with self.subTest(commit=commit):
-                self.assertIn(commit[:12], self.check(after=commit[:1] * 40, commits=[commit], branch=branch))
+    def test_an_unreadable_forge_record_holds(self):
+        sha = "e" * 40
+        self.assertIn(sha[:12], self.check(after=sha, commits=[sha], unreadable=True))
+        self.assertIn(sha[:12], self.check(after=sha, commits=[sha], requests=None))
+        self.assertIn(sha[:12], self.check(after=sha, commits=[sha], requests=[(sha, OLD)], started_at=""))
 
-    def test_moved_outside_engine_with_a_real_git_remote_excuses_unrelated_pr_merges(self):
+    def test_a_commit_with_a_pr_subject_but_no_forge_record_holds(self):
+        sha = "f" * 40
+        line = f"{sha} {'a' * 40} {'b' * 40}\tMerge pull request #946 from illideristudios/docs/decision-pages-945"
+        self.assertIn(sha[:12], self.check(after=sha, commits=[line], requests=[]))
+        # Associated with a request whose merge commit is a different sha.
+        self.assertIn(sha[:12], self.check(after=sha, commits=[sha], requests=[("1" * 40, OLD)]))
+
+    def test_moved_outside_engine_asks_the_forge_about_a_real_merge_commit(self):
         origin = self.dir / "origin.git"
         self.assertEqual(host_adapter.make_worktree.git_trusted(["init", "-q", "--bare", str(origin)], self.dir)[0], 0)
         tree = self.git_tree()
@@ -275,7 +308,7 @@ class HostAdapterTest(unittest.TestCase):
             code, out = host_adapter.make_worktree.git_trusted(
                 ["-c", "user.name=t", "-c", "user.email=t@t", *args], tree)
             self.assertEqual(code, 0, out)
-            return out
+            return out.strip()
 
         def pr_merge(title):
             git("checkout", "-q", "-b", "side", "develop")
@@ -289,14 +322,25 @@ class HostAdapterTest(unittest.TestCase):
         git("commit", "-q", "--allow-empty", "-m", "start")
         git("remote", "add", "origin", str(origin))
         git("push", "-q", "origin", "develop")
-        record = {"tree": str(tree), "runtime": "codex", "branch": "work/issue-949-plan-1",
+        record = {"tree": str(tree), "runtime": "codex", "branch": "work/issue-949-plan-1", "started_at": START,
                   "branch_heads": {"develop": git("rev-parse", "HEAD")}}
         store = SimpleNamespace(items=lambda: [])
-        pr_merge("Merge pull request #946 from illideristudios/docs/decision-pages-945")
-        self.assertEqual(host_adapter.moved_outside_engine(store, record, "now"), "")
-        own = pr_merge("Merge pull request #949 from illideristudios/work/issue-949-plan-1")
-        held = host_adapter.moved_outside_engine(store, record, "now")
-        self.assertIn(f"develop gained commits the engine did not merge: {own[:12]} during", held)
+        records, asked = {}, []
+
+        def requests_for_commit(sha):
+            asked.append(sha)
+            return list(records.get(sha, []))
+
+        with mock.patch("forge.for_workspace", return_value=SimpleNamespace(requests_for_commit=requests_for_commit)):
+            first = pr_merge("Merge pull request #946 from illideristudios/docs/decision-pages-945")
+            records[first] = [(first, OLD)]
+            self.assertEqual(host_adapter.moved_outside_engine(store, record, "now"), "")
+            self.assertEqual(asked, [first])
+            second = pr_merge("Merge pull request #949 from illideristudios/work/issue-949-plan-1")
+            records[second] = [(second, DURING)]
+            held = host_adapter.moved_outside_engine(store, record, "now")
+        self.assertIn(f"develop gained commits the engine did not merge: {second[:12]} during", held)
+        self.assertNotIn(first[:12], held)
 
     def test_an_unknown_host_has_no_adapter(self):
         with self.assertRaisesRegex(ValueError, "no host adapter"):

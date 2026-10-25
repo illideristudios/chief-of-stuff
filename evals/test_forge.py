@@ -1281,6 +1281,39 @@ class ProtectedBranchesTest(unittest.TestCase):
                                ({"target_branch": "main"}, {}, "") if url == f"{base}/merge_requests/7" else (None, {}, "x")):
             self.assertEqual(forge.Forge(GL, token="t").request_base(7), "main")
 
+    def test_requests_for_commit_reads_the_forge_record_behind_a_merge(self):
+        # #949: GitHub commits/{sha}/pulls and GitLab commits/:sha/merge_requests. The merge commit and its
+        # creation time, never a subject. A full page is truncated and holds; a merge commit with no creation time too.
+        sha, opened = "a" * 40, "2026-10-20T15:00:00Z"
+        path = f"repos/{REPO}/commits/{sha}/pulls?per_page=100"
+
+        def gh(args, input_text=None):
+            self.assertEqual(args, ["api", path])
+            return 0, json.dumps([
+                {"merge_commit_sha": sha, "created_at": opened},
+                {"merge_commit_sha": None, "created_at": opened},
+            ]), ""
+        self.assertEqual(forge.Forge(GH, gh=gh).requests_for_commit(sha), [(sha, opened)])
+        self.assertEqual(forge.Forge(GH, gh=lambda args, input_text=None: (0, "[]", "")).requests_for_commit(sha), [])
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (1, "", "rate limited")).requests_for_commit(sha)
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (0, json.dumps(
+                [{"merge_commit_sha": sha, "created_at": opened}] * 100), "")).requests_for_commit(sha)
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=lambda args, input_text=None: (0, json.dumps(
+                [{"merge_commit_sha": sha}]), "")).requests_for_commit(sha)
+        with self.assertRaises(forge.ForgeError):
+            forge.Forge(GH, gh=gh).requests_for_commit("not a sha")
+        base = GL.api()
+
+        def call(method, url, token, timeout, payload=None):
+            self.assertEqual(url, f"{base}/repository/commits/{sha}/merge_requests?per_page=100")
+            return [{"merge_commit_sha": sha, "created_at": opened},
+                    {"merge_commit_sha": None, "squash_commit_sha": sha, "created_at": opened}], {}, ""
+        with mock.patch.object(backlog, "_call", call):
+            self.assertEqual(forge.Forge(GL, token="t").requests_for_commit(sha), [(sha, opened)])
+
     def test_merge_commit_reads_what_a_merged_request_landed_as(self):
         # §13 (c): the engine records this; an unreadable or unmerged answer is None, which the check cannot vouch for.
         def gh(out, code=0):
