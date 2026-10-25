@@ -2,11 +2,13 @@
 
 import io
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -14,8 +16,48 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import performance_report  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
+
+HELP_SECTIONS = ("Purpose", "When not to use", "Options", "Output", "Exit codes", "Side effects", "Examples")
+# A per-command help issue opts in here after bringing its parser up to the standard.
+ENFORCED = frozenset({"performance"})
+
+
+def missing_sections(help_text: str, name: str) -> list[str]:
+    """Check the shared help contract; Purpose is argparse's description."""
+    problems = []
+    if not re.match(rf"usage: chief-of-stuff {re.escape(name)}(?:\s|$)", help_text):
+        problems.append("usage must name the installed command")
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    purpose = body[:headings[0].start()].strip() if headings else body.strip()
+    if not purpose:
+        problems.append("Purpose")
+    sections = {}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    for section in getattr(cli, "HELP_SECTIONS", HELP_SECTIONS)[1:]:
+        if not sections.get(section.casefold()):
+            problems.append(section)
+    if not re.search(rf"^\s*chief-of-stuff {re.escape(name)}(?:\s|$)",
+                     sections.get("examples", ""), re.MULTILINE):
+        problems.append("Examples must invoke the installed command")
+    return problems
+
+
+def _help_sections(help_text: str) -> dict[str, str]:
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    sections = {"purpose": body[:headings[0].start()].strip() if headings else body.strip()}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    return sections
 
 
 class InstallTest(unittest.TestCase):
@@ -329,6 +371,131 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     if target.startswith("scripts/") and target.count("/") == 1
                     and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
         self.assertEqual(reaching, set(cli.STORE_BACKED))
+
+
+class PerformanceHelpTest(unittest.TestCase):
+    """#850: `chief-of-stuff performance --help` is the reference an agent discovers and trusts."""
+
+    def run_performance(self, *args):
+        env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "performance", *args],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_performance_help_meets_shared_standard_and_covers_performance_contract(self):
+        self.assertIn("performance", ENFORCED)
+        done = self.run_performance("--help")
+        short = self.run_performance("-h")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (0, done.stdout, ""))
+        self.assertEqual(missing_sections(done.stdout, "performance"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = performance_report.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = performance_report.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in (
+            "chief-of-stuff board",
+            "chief-of-stuff pages",
+            "chief-of-stuff tracker",
+            "chief-of-stuff health",
+            "chief-of-stuff limits",
+            "stage segments",
+            "store.db",
+            "interactive sessions",
+            "one-shot",
+            "not TOON",
+            "not JSON",
+            "period",
+            "runtime",
+            "model",
+            "effort",
+            "agent_type",
+            "runs",
+            "completed",
+            "human_review",
+            "relaunched",
+            "median_minutes",
+            "Monday",
+            "lower middle",
+            "performance:",
+            "migrate.lock",
+            "engine.lock",
+            "No preview",
+            "--dry-run",
+            "--commit",
+            "maple-workspace",
+        ):
+            self.assertIn(phrase, help_text, phrase)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff performance")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "performance"])
+            parser.parse_args(tokens[2:])
+
+    def test_help_does_not_read_config_or_open_store(self):
+        with mock.patch("performance_report.read_config") as read_cfg, \
+                mock.patch("performance_report.store_access.migrated_store") as migrated, \
+                mock.patch("performance_report.table") as tbl, \
+                redirect_stdout(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                performance_report.main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        read_cfg.assert_not_called()
+        migrated.assert_not_called()
+        tbl.assert_not_called()
+
+    def test_parser_fault_exits_two_without_store_access(self):
+        for bad_argv in ([], ["--since"], ["--by", "month"], ["--unknown"]):
+            with self.subTest(argv=bad_argv):
+                err = io.StringIO()
+                with mock.patch("performance_report.read_config") as read_cfg, \
+                        mock.patch("performance_report.store_access.migrated_store") as migrated, \
+                        mock.patch("performance_report.table") as tbl, \
+                        redirect_stderr(err):
+                    with self.assertRaises(SystemExit) as raised:
+                        performance_report.main(bad_argv)
+                self.assertEqual(raised.exception.code, 2)
+                self.assertIn("usage: chief-of-stuff performance", err.getvalue())
+                read_cfg.assert_not_called()
+                migrated.assert_not_called()
+                tbl.assert_not_called()
+
+    def test_invalid_date_and_missing_store_exit_two_on_stderr(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(
+                "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n"
+                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: UTC\n")
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main(["--root", str(root), "--since", "not-a-date"])
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue(), "")
+            self.assertTrue(err.getvalue().startswith("performance: "), err.getvalue())
+
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main(["--root", str(root), "--since", "2026-10-01"])
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue(), "")
+            self.assertIn(f"performance: no store at {root.resolve() / 'store.db'}", err.getvalue())
 
 
 if __name__ == "__main__":
