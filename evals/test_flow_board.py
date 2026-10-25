@@ -288,7 +288,24 @@ class Build(unittest.TestCase):
                          ("main", [("Locale fallback", (("#8", "/issues/8"), ("!37", "/issues/8")),
                                     "merged 12:30", "done", "merged today")]))
         html = columns.render([columns.Column("main", main.cards * 5)])
-        self.assertIn("+ <span>2 merged today</span>", html)
+        self.assertEqual(html.count('class="columns-card"'), 5)
+        self.assertNotIn("columns-more", html)
+
+    def test_a_needs_input_card_past_the_third_is_drawn(self) -> None:
+        # #938: the plan column folded past three, so a NEEDS INPUT card in fourth place sat in a closed
+        # <details> and the board hid it at rest. The flag has to be in the column, with every card.
+        head = ("| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+                "|---|---|---|---|---|---|---|---|---|---|---|\n")
+        rows = "".join(
+            f"| Card {i} | Card {i} | Robin | open | 09:00 |  | S | build | plan |  |  |\n" for i in range(3)
+        ) + "| Hidden ask | Hidden ask | Robin | waiting | 09:00 |  | S | build | plan |  |  |\n"
+        lanes = {"build": st.Lane(("plan", "implement"))}
+        html = columns.render(rb.build_columns(rb.parse_tracker(f"# Tracker\n\n## Tasks\n\n{head}{rows}").tasks, lanes))
+        self.assertIn('<div class="columns-tag columns-flag" data-cat="hold">NEEDS INPUT</div>', html)
+        self.assertIn("Hidden ask", html)
+        self.assertEqual(len(re.findall(r'class="columns-card(?: |")', html)), 4)
+        self.assertNotIn("columns-more", html)
+        self.assertNotIn("<details", html)
 
     def test_drift_marks_the_card(self) -> None:
         card = next(c for col in self.cols(kanban=KANBAN) for c in col.cards if c.name == "Write README")
