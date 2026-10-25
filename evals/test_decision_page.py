@@ -182,6 +182,15 @@ GH = GitHubBacklog(repo="o/app")
 GL = Backlog(host="https://gl.example", project="grp/app")
 
 
+def owned(case: unittest.TestCase, files: dict[str, str], origin: str = "https://github.com/o/app.git") -> Path:
+    """A temporary clone with `files` committed and a synthetic `origin`. No network."""
+    workspace = Path(tempfile.mkdtemp())
+    case.addCleanup(shutil.rmtree, workspace, True)
+    clone = make_repo.build(workspace, {"files": files})
+    make_repo.git(["remote", "set-url", "origin", origin], clone)
+    return clone
+
+
 def refs(text: str, forge=None, root=None, at=None) -> str:
     return dp._md(text, dp.Linker(forge, root, at))
 
@@ -190,8 +199,10 @@ class LinkTest(unittest.TestCase):
     """References in the text link to the configured forge; nothing is linked that the forge cannot place."""
 
     def test_github(self):
+        root = owned(self, {"src/cache/pool.py": "x\n", "config/db.toml": "x = 1\n", "src/gateway/keep.txt": "k\n",
+                            "docs/architecture.md": "x\n"})
         out = refs("#12, !58, a41c9e2, src/cache/pool.py:24-58, config/db.toml:14, pipeline #8812, src/gateway/ "
-                   "and docs/architecture.md#connection-budgets", GH)
+                   "and docs/architecture.md#connection-budgets", GH, root)
         for kind, href, label in (
                 ("issue", "https://github.com/o/app/issues/12", "#12"),
                 ("PR", "https://github.com/o/app/pull/58", "!58"),
@@ -206,7 +217,8 @@ class LinkTest(unittest.TestCase):
                 self.assertIn(f'<a class="ref" data-k="{kind}" href="{href}" target="_blank" rel="noopener">{label}</a>', out)
 
     def test_gitlab(self):
-        out = refs("#12, !58, !58#note_2291, a41c9e2, src/cache/pool.py:24-58, pipeline #8812", GL)
+        root = owned(self, {"src/cache/pool.py": "x\n"}, "https://gl.example/grp/app.git")
+        out = refs("#12, !58, !58#note_2291, a41c9e2, src/cache/pool.py:24-58, pipeline #8812", GL, root)
         for kind, href in (("issue", "https://gl.example/grp/app/-/issues/12"),
                            ("MR", "https://gl.example/grp/app/-/merge_requests/58"),
                            ("note", "https://gl.example/grp/app/-/merge_requests/58#note_2291"),
@@ -224,27 +236,28 @@ class LinkTest(unittest.TestCase):
         self.assertEqual(refs(text, GH), text)
 
     def test_a_code_span_that_is_one_reference_links(self):
-        self.assertEqual(refs("`src/app.py:3`", GH),
+        root = owned(self, {"src/app.py": "x\n"})
+        self.assertEqual(refs("`src/app.py:3`", GH, root),
                          '<a class="ref" data-k="code" href="https://github.com/o/app/blob/HEAD/src/app.py#L3" target="_blank" rel="noopener">src/app.py:3</a>')
-        self.assertEqual(refs("`s3://bucket` and `make test`", GH), "<code>s3://bucket</code> and <code>make test</code>")
+        self.assertEqual(refs("`s3://bucket` and `make test`", GH, root), "<code>s3://bucket</code> and <code>make test</code>")
 
     def test_sections_and_symbols_resolve_against_a_local_copy(self):
-        root = Path(tempfile.mkdtemp())
-        (root / "docs").mkdir()
-        (root / "docs" / "architecture.md").write_text("# Arch\n\n## 4.1 Queues\n\n## 4.2 Connection budgets\n")
-        (root / "src").mkdir()
-        (root / "src" / "pool.py").write_text("import os\n\n\ndef warm(n):\n    pass\n")
+        root = owned(self, {
+            "docs/architecture.md": "# Arch\n\n## 4.1 Queues\n\n## 4.2 Connection budgets\n",
+            "src/pool.py": "import os\n\n\ndef warm(n):\n    pass\n",
+        })
         self.assertIn('href="https://github.com/o/app/blob/HEAD/docs/architecture.md#42-connection-budgets" target="_blank" rel="noopener">'
                       'docs/architecture.md §4.2</a>', refs("docs/architecture.md §4.2", GH, root))
         self.assertIn('href="https://github.com/o/app/blob/HEAD/src/pool.py#L4" target="_blank" rel="noopener">src/pool.py:warm</a>',
                       refs("src/pool.py:warm", GH, root))
-        # Without the copy the file is still the right place; the section is not guessed.
-        self.assertIn('href="https://github.com/o/app/blob/HEAD/docs/architecture.md" target="_blank" rel="noopener">docs/architecture.md §4.2</a>',
-                      refs("docs/architecture.md §4.2", GH))
+        # Without a workspace the repository is unknown, so the reference stays text.
+        self.assertEqual(refs("docs/architecture.md §4.2", GH), "docs/architecture.md §4.2")
 
     def test_a_pinned_reference_links_at_its_commit(self):
-        self.assertIn("https://github.com/o/app/blob/a41c9e2/src/cache/pool.py#L24-L58",
-                      refs("src/cache/pool.py:24-58", GH, at="a41c9e2"))
+        root = owned(self, {"src/cache/pool.py": "x\n"})
+        sha = make_repo.git(["rev-parse", "HEAD"], root)
+        self.assertIn(f"https://github.com/o/app/blob/{sha}/src/cache/pool.py#L24-L58",
+                      refs("src/cache/pool.py:24-58", GH, root, at=sha))
 
 
 class OwnershipTest(unittest.TestCase):
@@ -509,11 +522,13 @@ ARCH = {
 
 
 class DesignTest(unittest.TestCase):
-    def page(self, forge=None, **over) -> str:
-        return dp.render(dp.parse(decision(**over)), "2026-09-25", forge)
+    def page(self, forge=None, root=None, **over) -> str:
+        return dp.render(dp.parse(decision(**over)), "2026-09-25", forge, root)
 
     def test_where_it_sits_draws_the_architecture_in_the_review_encoding(self):
-        page = self.page(GH, architecture=ARCH)
+        root = owned(self, {"src/cache/pool.py": "x\n", "src/cache/client.py": "y\n",
+                            "docs/architecture.md": "# Arch\n\n## 4.2 Connection budgets\n"})
+        page = self.page(GH, root, architecture=ARCH)
         self.assertIn("Where it sits", page)
         self.assertIn(f'aria-label="{ARCH["summary"]}"', page)
         for cls in ('class="ext"', 'class="n"', 'class="n-inflight"', 'class="n-designed"', 'class="ext hot"',
@@ -549,11 +564,13 @@ class DesignTest(unittest.TestCase):
         self.assertIn('href="https://github.com/o/app/issues/111"', page)
 
     def test_references_carry_kind_status_and_pin(self):
-        page = self.page(GH, references=[{"kind": "code", "value": "src/cache/pool.py:24-58", "at": "a41c9e2"},
-                                         {"kind": "MR", "value": "!58", "label": "Warm the cache pool", "status": "open · passed"},
-                                         {"label": "Plan", "value": "https://github.com/o/backlog/issues/7"}])
-        self.assertIn("blob/a41c9e2/src/cache/pool.py#L24-L58", page)
-        self.assertIn("@ a41c9e2", page)
+        root = owned(self, {"src/cache/pool.py": "x\n"})
+        sha = make_repo.git(["rev-parse", "HEAD"], root)
+        page = self.page(GH, root, references=[{"kind": "code", "value": "src/cache/pool.py:24-58", "at": sha},
+                                               {"kind": "MR", "value": "!58", "label": "Warm the cache pool", "status": "open · passed"},
+                                               {"label": "Plan", "value": "https://github.com/o/backlog/issues/7"}])
+        self.assertIn(f"blob/{sha}/src/cache/pool.py#L24-L58", page)
+        self.assertIn(f"@ {sha}", page)
         self.assertIn("Warm the cache pool", page)
         self.assertIn("open · passed", page)
         self.assertRegex(page, r'<span class="cap">Plan</span>')

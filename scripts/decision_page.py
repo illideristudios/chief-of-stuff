@@ -27,22 +27,29 @@ inflight or designed; `hot` marks what waits on this decision. A reference's `at
 
 Text is escaped; `code`, **bold** and http(s) URLs are marked up, and references link to the forge the
 `Backlog:` line names: `#12`, `!58` (`!58#note_1`), a commit sha, `pipeline #8812`, `path/file.py:42`
-(`:24-58`, `:symbol`), `docs/x.md §4.2` or `docs/x.md#anchor`, `src/dir/`. A section or symbol is placed from a
-copy under `--root` when there is one. With no forge, or a reference it cannot place, the text stays text.
+(`:24-58`, `:symbol`), `docs/x.md §4.2` or `docs/x.md#anchor`, `src/dir/`. A path links only when `--root`
+contains it in the repository whose `origin` is that forge, committed at the reference's `at`, or at HEAD when
+unpinned. A section or symbol is placed from that committed file. With no forge, no root, a different origin,
+or a path the repository does not contain, the text stays text.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html import escape, unescape
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import board_sources
+import git_trees
+import git_view
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config
 from clock import leading
 from fragment import FONTS, TAB_CSS, href, tab_bar, theme
@@ -138,21 +145,224 @@ TOKEN = re.compile(r"""
   | (?<![\w\#&-])(?P<sha>(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\b
 """, re.X)
 DOCS = (".md", ".markdown", ".rst", ".adoc", ".txt")
+_CONFIG_LIMIT = 1024 * 1024
+# A revision git may be asked for: no `..`, no leading dash, no revision:path in one token.
+_REV = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9._/-]{0,200})?\Z")
+_SCP = re.compile(r"(?:[^@\s]+@)?([^:@\s]+):(.+)")
+
+
+def _forge_identity(forge: Backlog | GitHubBacklog) -> tuple[str, str] | None:
+    """(host, project) the backlog names. GitHub is always github.com."""
+    if isinstance(forge, GitHubBacklog):
+        host, project = "github.com", forge.repo
+    else:
+        host, project = (urlsplit(forge.host).hostname or "").lower(), forge.project
+    project = project.strip("/")
+    return (host, project) if host and project else None
+
+
+def _origin_identity(url: str) -> tuple[str, str] | None:
+    """(host, project) of an https, ssh, or scp-style origin, or None when it is not one of those."""
+    raw = url.strip()
+    if not raw or any(c in raw for c in "\r\n\x00 \t"):
+        return None
+    if "://" in raw:
+        parts = urlsplit(raw)
+        if parts.scheme not in ("https", "http", "ssh") or not parts.hostname:
+            return None
+        host, path = parts.hostname.lower(), parts.path
+    else:
+        matched = _SCP.fullmatch(raw)
+        if not matched:
+            return None
+        host, path = matched.group(1).lower(), matched.group(2)
+    if path.endswith(".git"):
+        path = path[:-4]
+    path = path.strip("/")
+    parts = path.split("/")
+    if not host or not path or any(not part or part in (".", "..") or ":" in part or "\\" in part for part in parts):
+        return None
+    return host, path
+
+
+def _origin_url(common: Path) -> str | None:
+    """The literal `remote.origin.url`, or None. The safe git view rewrites every remote to /nonexistent, so this
+    reads the config file itself, with includes disabled, and never returns the URL into HTML."""
+    config = common / "config"
+    try:
+        data = git_view.read_regular(config, _CONFIG_LIMIT + 1, nofollow=True)
+    except OSError:
+        return None
+    if data is None or len(data) > _CONFIG_LIMIT:
+        return None
+    try:
+        out = subprocess.run(
+            ["git", "config", "--file", str(config), "--no-includes", "--get", "remote.origin.url"],
+            cwd=Path("/"), env=git_trees.audit_env(), stdin=subprocess.DEVNULL,
+            capture_output=True, text=True, timeout=git_trees.GIT_TIMEOUT)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    text = out.stdout[:-1] if out.stdout.endswith("\n") else out.stdout
+    if not text or any(c in text for c in "\r\n\x00"):
+        return None
+    return text
+
+
+def _inside(root: Path, rel: Path) -> bool:
+    """False when `rel` is absolute, walks out of `root`, or a symlink along it leaves `root`."""
+    if rel.is_absolute() or not rel.parts or any(part in ("", ".", "..") for part in rel.parts):
+        return False
+    current = root
+    for index, part in enumerate(rel.parts):
+        if "\x00" in part or "/" in part:
+            return False
+        current = current / part
+        try:
+            linked = current.is_symlink()
+        except OSError:
+            return False
+        if linked:
+            try:
+                target = current.resolve()
+            except OSError:
+                return False
+            if not target.is_relative_to(root):
+                return False
+            current = target
+            continue
+        if not current.exists():
+            rest = current
+            for extra in rel.parts[index + 1:]:
+                rest = rest / extra
+            try:
+                return rest.is_relative_to(root)
+            except ValueError:
+                return False
+    try:
+        return current.resolve().is_relative_to(root)
+    except (OSError, ValueError):
+        return False
+
+
+def _owner(root: Path, rel: Path) -> tuple[git_view.Layout, str] | None:
+    """The nearest git repository at or below `root` that contains `rel`, and the path inside that repository."""
+    if not _inside(root, rel):
+        return None
+    logical = root.joinpath(*rel.parts)
+    start = logical if logical.is_dir() and not logical.is_symlink() else logical.parent
+    while not start.exists() and start != root:
+        parent = start.parent
+        if parent == start:
+            return None
+        start = parent
+    if not start.exists():
+        return None
+    try:
+        here = start.resolve()
+    except OSError:
+        return None
+    if not here.is_relative_to(root):
+        return None
+    while True:
+        if os.path.lexists(here / ".git"):
+            try:
+                layout = git_view.locate(here)
+            except git_view.Unviewable:
+                return None
+            tree = layout.tree
+            if tree is None or not tree.is_relative_to(root):
+                return None
+            try:
+                repo_rel = logical.relative_to(tree).as_posix()
+            except ValueError:
+                return None
+            parts = repo_rel.split("/")
+            if not repo_rel or repo_rel == "." or any(part in ("", ".", "..") for part in parts):
+                return None
+            return layout, repo_rel
+        if here == root:
+            return None
+        parent = here.parent
+        if parent == here:
+            return None
+        here = parent
+
+
+def _entry_kind(tree: Path, rev: str, rel: str) -> str | None:
+    """`blob` or `tree` when `rel` is that exact committed entry at `rev`. A submodule or a miss is None."""
+    code, out = git_trees.git(["ls-tree", rev, "--", rel], tree)
+    if code != 0 or "\n" in out or "\t" not in out:
+        return None
+    mode, _, rest = out.partition(" ")
+    kind, _, rest = rest.partition(" ")
+    _oid, sep, found = rest.partition("\t")
+    if sep != "\t" or found != rel or mode == "160000" or kind not in ("blob", "tree"):
+        return None
+    return kind
 
 
 @dataclass(frozen=True)
 class Linker:
-    """Turns a reference into its place on the workspace's forge (the `Backlog:` line). `root` holds local copies
-    that place a `§` section or a symbol; `at` pins files to a commit. With no forge nothing is linked."""
+    """Turns a reference into its place on the workspace's forge (the `Backlog:` line). A path links only when
+    `root` contains it in the repository whose origin is that forge, committed at `at` (HEAD when unpinned);
+    otherwise it stays text. `root` also places a `§` section or a symbol in that committed file. `cache` lives
+    for one render and is shared with every pinned row linker."""
 
     forge: Backlog | GitHubBacklog | None = None
     root: Path | None = None
     at: str | None = None
+    cache: dict = field(default_factory=dict)
 
     def _url(self, what: str, target: str) -> str:
         gh = isinstance(self.forge, GitHubBacklog)
         base = f"https://github.com/{self.forge.repo}" if gh else f"{self.forge.host.rstrip('/')}/{self.forge.project}"
-        return f"{base}/" + (GITHUB if gh else GITLAB)[what].format(target, at=self.at or "HEAD")
+        rev = quote(self.at, safe="") if isinstance(self.at, str) else "HEAD"
+        if what in ("blob", "tree"):
+            target = "/".join(quote(part, safe="") for part in target.split("/"))
+        return f"{base}/" + (GITHUB if gh else GITLAB)[what].format(target, at=rev)
+
+    def _revision(self) -> str | None:
+        rev = self.at or "HEAD"
+        if not isinstance(rev, str) or not _REV.fullmatch(rev) or ".." in rev or "//" in rev or rev.endswith("/"):
+            return None
+        return rev
+
+    def _lookup(self, workspace_path: str, need: str) -> str | None:
+        """The repository-relative path when `workspace_path` is a committed `need` (`blob` or `tree`), else None."""
+        rev = self._revision()
+        if rev is None or self.root is None or self.forge is None:
+            return None
+        try:
+            root = self.root.resolve()
+        except OSError:
+            return None
+        key = ("place", str(root), workspace_path, rev, need)
+        if key in self.cache:
+            return self.cache[key]
+        try:
+            found = self._owned(root, Path(workspace_path), rev, need)
+        except Exception:
+            found = None  # a failed git probe leaves the reference as text
+        self.cache[key] = found
+        return found
+
+    def _owned(self, root: Path, rel: Path, rev: str, need: str) -> str | None:
+        owned = _owner(root, rel)
+        if owned is None:
+            return None
+        layout, repo_rel = owned
+        origin_key = ("origin", str(layout.common))
+        if origin_key not in self.cache:
+            url = _origin_url(layout.common)
+            self.cache[origin_key] = bool(url and _origin_identity(url) == _forge_identity(self.forge))
+        if not self.cache[origin_key]:
+            return None
+        entry_key = ("entry", str(layout.common), rev, repo_rel)
+        if entry_key not in self.cache:
+            self.cache[entry_key] = _entry_kind(layout.tree, rev, repo_rel)
+        return repo_rel if self.cache[entry_key] == need else None
 
     def _find(self, path: str, sec: str | None, sym: str | None) -> str:
         """The `#` fragment for a section heading or a symbol's definition in a local copy, or "" (never guessed)."""
@@ -187,18 +397,23 @@ class Linker:
         path = m["path"]
         if not path:
             return None
-        if path.endswith("/"):
-            return "code", m[0], self._url("tree", path.rstrip("/")) + "/"
-        if "/" not in path and not (m["line"] or m["sym"] or m["sec"] or m["anchor"]):
+        directory = path.endswith("/")
+        bare = path[:-1] if directory else path
+        if not bare or (not directory and "/" not in bare and not (m["line"] or m["sym"] or m["sec"] or m["anchor"])):
             return None  # a bare `name.ext` is too often a word
+        repo_rel = self._lookup(bare, "tree" if directory else "blob")
+        if not repo_rel:
+            return None
+        if directory:
+            return "code", m[0], self._url("tree", repo_rel) + "/"
         frag = ""
         if m["line"]:
             frag = f"#L{m['line']}" + (f"-{'L' if gh else ''}{m['end']}" if m["end"] else "")
         elif m["anchor"]:
             frag = f"#{m['anchor']}"
         elif m["sec"] or m["sym"]:
-            frag = self._find(path, m["sec"], m["sym"])
-        return ("doc" if path.lower().endswith(DOCS) else "code"), m[0], self._url("blob", path) + frag
+            frag = self._find(bare, m["sec"], m["sym"])
+        return ("doc" if bare.lower().endswith(DOCS) else "code"), m[0], self._url("blob", repo_rel) + frag
 
     def href(self, text: str) -> str | None:
         """The first placeable reference in `text` (already escaped)."""
@@ -389,7 +604,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     if d.get("references"):
         rows = []
         for r in d["references"]:
-            pin = Linker(forge, root, r.get("at"))
+            pin = Linker(forge, root, r.get("at"), link.cache)
             label = f" {md(r['label'])}" if r.get("kind") and r.get("label") else ""
             one = TOKEN.fullmatch(escape(r["value"], quote=False))
             one = one and pin.resolve(one)
