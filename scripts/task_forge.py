@@ -269,9 +269,21 @@ def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
 
 
 def needs_input(tracker_text: str) -> int:
-    """Today's human-review ends: the Workers page's lead count, also shown in every tab bar."""
+    """Today's human-review ends in the tracker log."""
     return sum(1 for line in section(tracker_text, "## Log")
                if (m := tracker_log.ENDED.match(line.strip())) and m[4] == tracker_log.HUMAN_REVIEW)
+
+
+def workers_need_input(tracker_text: str = "", items=None, segments=()) -> int:
+    """The Workers tab badge and the Workers page NEEDS INPUT tile.
+
+    Store (`items` is not None): `decision_actions.waiting_workers` — open items flagged human_review, or
+    whose latest segment outcome is human_review. Tracker: today's HUMAN REVIEW NEEDED ends. A workspace
+    with both adds the two, the way the workers page merges tracker rows and store rows.
+    """
+    store = 0 if items is None else len(decision_actions.waiting_workers(items, segments))
+    # shortcut: a worker in both the log and the store counts twice, union once a log line carries its issue key
+    return needs_input(tracker_text) + store
 
 
 def tab_counts(tracker_text: str, cfg, now: datetime, lanes: dict, kanban: Kanban | None,
@@ -294,7 +306,7 @@ def tab_counts(tracker_text: str, cfg, now: datetime, lanes: dict, kanban: Kanba
         est = estimates(active, cfg, now, history(tasks, cfg, now))
         ends = {t.item: end[0] for t in active
                 if (end := task_end(t, cfg, now, now, est))[1] in ("due", "derived")}
-    return {"workers": needs_input(tracker_text),
+    return {"workers": workers_need_input(tracker_text),
             "dispatch": len(ready_tasks(tracker_text, slots)),
             "since": (went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == now.date() else f"{shown:%a %H:%M}"),
             "epics": epic_risk(tasks, sources, ends, cfg.zone, now)}

@@ -24,7 +24,8 @@ from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 from task_forge import (current_tasks, drifts, effective_stage, epic_risk, forge_ends, held_names,  # noqa: E402
-                        hold_began, hold_causes, looping, tab_counts, task_changes, went_held, worker_names)
+                        hold_began, hold_causes, looping, tab_counts, task_changes, went_held, worker_names,
+                        workers_need_input)
 from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
@@ -262,9 +263,10 @@ CARD_COLOURS = {**columns.PALETTE, "merged today": columns.PALETTE["done"],
 
 def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: int, drift: int, orphaned: int) -> list[panels.Tile]:
     """Six counts in the artboard's order and words, each linking to where its items are listed. ALL counts every
-    task; NEEDS INPUT the held cards; RUNNING workers, or running tasks when no worker source is read."""
+    task; NEEDS INPUT the held cards (tasks, not workers); RUNNING workers, or running tasks when no worker source is read."""
     approved = sum(c.state == "open" and c.approved for c in sources.changes.values())
-    return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked"),
+    return [panels.Tile("ALL", total, "flow", "all"),
+            panels.Tile("NEEDS INPUT", held, "flow", "blocked", title="tasks that need input"),
             panels.Tile("RUNNING", len(sources.workers) or running, "flow", "running"),
             panels.Tile("APPROVED", approved, "flow", "approved"),
             panels.Tile("ORPHANED", orphaned, "flow", "orphaned"), panels.Tile("DRIFT", drift, "flow", "drift")]
@@ -401,6 +403,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     if db is not None:
         import decision_actions
         navigation = decision_actions.tab_counts(db.items(), db.decisions(), db.segments())
+        # The store tab count has no tracker log. The workers page adds both, so the board badge does too (#898).
+        navigation["workers"] = workers_need_input(tracker_text, db.items(), db.segments())
     else:
         navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
                                 [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)

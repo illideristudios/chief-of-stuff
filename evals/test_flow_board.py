@@ -654,7 +654,7 @@ class Page(unittest.TestCase):
 
     def test_each_tile_links_to_the_cards_that_carry_its_facts(self) -> None:
         # #208: the removed panels no longer have anchors; tiles reach BUILD, and tabs reach the detail pages.
-        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="#([a-z]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
+        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="#([a-z]+)"(?: title="[^"]*")?><span class="panels-label">([A-Z ]+)</span>', self.body)
         # #349 review: the kind is what the stylesheet colours a tile by, so each is pinned with its link and label.
         self.assertEqual(links, [("all", "flow", "ALL"), ("blocked", "flow", "NEEDS INPUT"), ("running", "flow", "RUNNING"),
                                  ("approved", "flow", "APPROVED"), ("orphaned", "flow", "ORPHANED"), ("drift", "flow", "DRIFT")])
@@ -697,6 +697,11 @@ class Page(unittest.TestCase):
         self.assertEqual(tiles["NEEDS INPUT"], "2")
         flags = re.findall(r'<div class="columns-tag columns-flag" data-cat="hold">([^<]*)<', html)
         self.assertEqual(flags, ["NEEDS INPUT", "NEEDS INPUT"])
+        # #898: this tile counts held tasks, so its title says tasks. The Workers tab counts workers and can differ.
+        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="#flow" title="[^"]*tasks[^"]*"')
+        workers = re.search(r'href="/workers"[^>]*>Workers(?:<span class="badge"[^>]*>(\d+)</span>)?', html)
+        self.assertIsNotNone(workers)
+        self.assertNotEqual(workers.group(1) or "0", tiles["NEEDS INPUT"])
 
     def test_tasks_with_no_name_are_held_each_by_its_own_stage(self) -> None:
         # Keyed by name, every blank-named task shared one stage: one hold held them all, or none of them.

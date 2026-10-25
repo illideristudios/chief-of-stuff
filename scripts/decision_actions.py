@@ -304,14 +304,28 @@ def human_answer(decisions: Sequence[Any], update: DecisionUpdate) -> Any | None
     return row if row is not None and row.decided_by == "user" and (row.answer or "").strip() else None
 
 
+def waiting_workers(items, segments) -> set:
+    """Open items a person still has to answer.
+
+    The item's human_review flag is set, or its latest segment outcome is human_review. Latest is the last
+    segment in `segments` for that issue (store id order). A closed item is excluded. The end date does not
+    matter: yesterday's review still counts while the item is open and waiting.
+    """
+    opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
+    last: dict = {}
+    for seg in segments:
+        last[seg.issue_key] = seg
+    waiting = {key for key, item in opened.items() if item.human_review}
+    waiting.update(key for key, seg in last.items() if key in opened and seg.outcome == "human_review")
+    return waiting
+
+
 def tab_counts(items, decisions, segments) -> dict:
     """Lead counts from engine rows. Tabs without a store source omit their count."""
     opened = {i.issue_key: i for i in items if i.forge_state != "closed"}
     pending = [d for d in states([d for d in decisions if d.issue_key in opened]) if d.status in OPEN_STATES]
     held = {d.issue_key for d in pending}
-    last = {s.issue_key: s for s in segments}
-    waiting = {i.issue_key for i in opened.values() if i.human_review}
-    waiting.update(key for key, seg in last.items() if key in opened and seg.outcome == "human_review")
+    waiting = waiting_workers(items, segments)
     held.update(waiting)
     running = {s.issue_key for s in segments if s.issue_key in opened and not s.ended_at}
     return {"workers": len(waiting), "dispatch": len(opened.keys() - held - running), "decisions": len(pending)}

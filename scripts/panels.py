@@ -31,6 +31,7 @@ class Tile:
     count: int
     anchor: str  # the id it links to
     kind: str
+    title: str = ""  # optional hover text; empty omits the attribute so unmarked tiles stay byte-identical
 
 
 @dataclass(frozen=True)
@@ -80,10 +81,12 @@ def header(h: Header) -> str:
 
 
 def tiles(ts: list[Tile]) -> str:
-    return ('<nav class="panels-tiles" aria-label="counts">'
-            + "".join(f'<a class="panels-tile" data-kind="{_kind(t.kind)}" href="#{_kind(t.anchor)}">'
-                      f'<span class="panels-label">{_esc(t.label)}</span><b class="panels-count">{t.count}</b></a>' for t in ts)
-            + "</nav>")
+    def one(t: Tile) -> str:
+        title = f' title="{_esc(t.title)}"' if t.title else ""
+        return (f'<a class="panels-tile" data-kind="{_kind(t.kind)}" href="#{_kind(t.anchor)}"{title}>'
+                f'<span class="panels-label">{_esc(t.label)}</span><b class="panels-count">{t.count}</b></a>')
+
+    return '<nav class="panels-tiles" aria-label="counts">' + "".join(one(t) for t in ts) + "</nav>"
 
 
 def _row(r: Row, inline: Callable[[str], str] = _esc) -> str:

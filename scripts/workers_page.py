@@ -17,12 +17,12 @@ import board_sources
 import panels
 import session_logs
 from clock import parse_stamp
-from task_forge import PageData
+from task_forge import PageData, workers_need_input
 from decision_page import HEAD, context, pending_count, write_if_changed
 from fragment import tab_bar, issue_href
 from md import section as _section
 from tracker import TRAILING_NUMBER, launcher, parse_tracker
-from tracker_log import COMPLETED, ENDED, HUMAN_REVIEW, RELAUNCH, STAGE, STARTED
+from tracker_log import COMPLETED, ENDED, RELAUNCH, STAGE, STARTED
 from workspace import parse_coordinator, worktrees_dir
 from settings import load as load_settings
 
@@ -95,9 +95,9 @@ def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
     return f'    <div class="card scroll"><table>\n<tr>{head}</tr>\n{body}</table></div>'
 
 
-def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[list[str]], int]:
-    """From the tracker's Log: fix-loop counts by task, ENDED TODAY rows newest first, and the human-review count."""
-    task_of, fix_counts, last_stage, ended, need = {}, {}, {}, [], 0
+def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[list[str]]]:
+    """From the tracker's Log: fix-loop counts by task, and ENDED TODAY rows newest first."""
+    task_of, fix_counts, last_stage, ended = {}, {}, {}, []
     for line in map(str.strip, _section(tracker_text, "## Log")):
         if m := STAGE.match(line):
             t, name = row_of(m[3].strip())
@@ -111,7 +111,6 @@ def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[list[
         elif m := ENDED.match(line) or RELAUNCH.match(line):
             t, name = row_of(task_of.get(m[3], ""))
             done = m[4] == COMPLETED
-            need += m[4] == HUMAN_REVIEW
             state = "DONE" if done else "CRASHED"
             summary = (line[m.end():].removeprefix(" — ").strip() if m.re is ENDED
                        else line[m.end():].partition(" — ")[2].strip())
@@ -121,7 +120,7 @@ def _tracker_ends(tracker_text: str, row_of) -> tuple[dict[str, int], list[list[
             ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(m[3])}</b>',
                           f"{int(m[1]):02d}:{m[2]}", _task(t, name), escape(summary), action])
     ended.reverse()  # newest first
-    return fix_counts, ended, need
+    return fix_counts, ended
 
 
 def _running_row(lead: str, task: str, started: datetime, now: datetime, tree: Path | None, account: str) -> list[str]:
@@ -152,11 +151,11 @@ def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, 
 
 
 def _store_rows(db: PageData, seen_running: set[str], now: datetime, trees: Path,
-                account: str) -> tuple[list[list[str]], list[list[str]], int, int]:
-    """RUNNING and ENDED TODAY rows from the store's segments, the human-review count and the running one-shot count."""
+                account: str) -> tuple[list[list[str]], list[list[str]], int]:
+    """RUNNING and ENDED TODAY rows from the store's segments, and the running one-shot count."""
     running: list[list[str]] = []
     ended: list[list[str]] = []
-    need = store_shots = 0
+    store_shots = 0
     all_segs = db.segments()
     fix_by_issue: dict[str, int] = {}
     for s in all_segs:
@@ -187,14 +186,12 @@ def _store_rows(db: PageData, seen_running: set[str], now: datetime, trees: Path
             reports = db.reports(seg.issue_key, stage=seg.stage, attempt=seg.attempt)
             summary = reports[-1].summary if reports else (seg.outcome or "")
             done = seg.outcome == "done"
-            if seg.outcome == "human_review":
-                need += 1
             state = "DONE" if done else "CRASHED"
             action = (f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
                       if done else '<span class="chip redispatch">re-dispatch</span>')
             ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(runner)}</b>',
                           f"{ended_dt:%H:%M}", task_link, escape(summary), action])
-    return running, ended, need, store_shots
+    return running, ended, store_shots
 
 
 def render(tracker_text: str, sources: board_sources.Sources, now: datetime, trees: Path, cap: int | None,
@@ -203,14 +200,16 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
     tasks = parse_tracker(tracker_text).tasks
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
     row_of = launcher(tasks)
-    fix_counts, ended, need = _tracker_ends(tracker_text, row_of)
+    fix_counts, ended = _tracker_ends(tracker_text, row_of)
     running, seen_running = _session_rows(sources, row_of, fix_counts, by_name, now, trees, claude_account)
     store_shots = 0
     if db is not None:
-        store_running, store_ended, store_need, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
+        store_running, store_ended, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
         running += store_running
         ended += store_ended
-        need += store_need
+    # The same count the tab badge shows, including when the caller passed a navigation dict (#898).
+    need = workers_need_input(tracker_text, None if db is None else db.items(), () if db is None else db.segments())
+    navigation = {**(navigation or {}), "workers": need}
     shots = sum(w.kind == "one-shot" for w in sources.workers) + store_shots
     boxes = [("NEEDS INPUT", str(need), " hot" if need else ""), ("RUNNING", str(len(running)), "")]
     if cap:
@@ -220,7 +219,7 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
                           '<a href="/">board</a>'])
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Workers</title>\n{HEAD}{CSS}</head>\n<body>\n<main>\n{tab_bar('Workers', pending, **(navigation or {'workers': need}))}"
+            f"<title>Workers</title>\n{HEAD}{CSS}</head>\n<body>\n<main>\n{tab_bar('Workers', pending, **navigation)}"
             f'  <header class="top">\n    <div>\n      <h1>Workers</h1>\n      <span class="eyebrow">{eyebrow}</span>\n    </div>\n'
             f'    <div class="boxes">{boxes_html}</div>\n  </header>\n'
             f'  <section>\n    <h2>Running · {len(running)}</h2>\n'
