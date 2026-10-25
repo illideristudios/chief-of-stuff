@@ -24,6 +24,9 @@ DEFAULT_BIN_DIR = Path("/usr/local/bin")
 COMMANDS = {
     "start": "start_coordinator.py",
     "init": "scripts/init_workspace.py",
+    "work": "scripts/work.py",
+    "engine": "scripts/engine.py",
+    "supervisor": "scripts/supervisor.py",
     "models": "scripts/install_model_guidance.py",
     "worktree": "scripts/make_worktree.py",
     "worker": "scripts/spawn_session.py",
@@ -31,10 +34,11 @@ COMMANDS = {
     "processes": "scripts/process_status.py",
     "result": "scripts/one_shot_result.py",
     "adopt": "scripts/adopt_one_shots.py",
-    "board": "scripts/render_board.py",
+    "board": "scripts/pages.py",
     "inbox": "scripts/inbox.py",
     "backlog": "scripts/backlog.py",
-    "kanban": "scripts/kanban.py",
+    "kanban": "scripts/kanban_cli.py",
+    "pipeline": "scripts/pipeline_cli.py",
     "notify": "scripts/notify_service.py",
     "health": "scripts/probe_health.py",
     "pages": "scripts/pages.py",
@@ -43,10 +47,14 @@ COMMANDS = {
     "tracker": "scripts/tracker_read.py",
     "merge-approved": "scripts/merge_approved.py",
     "merge-ready": "scripts/merge_ready.py",
+    "performance": "scripts/performance_report.py",
+    "limits": "scripts/limits_cli.py",
     "review-threads": "scripts/review_threads.py",
     "sources": "scripts/board_sources.py",
     "tick": "scripts/flow.py",
 }
+# Commands whose scripts import store (SQLAlchemy/Alembic).
+STORE_BACKED = frozenset({"adopt", "board", "decision", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})
 
 
 def wrapper_text(current: Path) -> str:
@@ -143,7 +151,23 @@ def main(argv: list[str] | None = None) -> int:
     if not target.is_file():
         print(f"installed command is missing: {target}", file=sys.stderr)
         return 1
-    os.execv(sys.executable, [sys.executable, str(target), *args[1:]])
+    if args[0] in STORE_BACKED:
+        scripts_dir = str(SOURCE / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import subprocess
+        import shell_setup
+        import supervisor
+        try:
+            data = supervisor.data_dir()
+            with supervisor.lock(data / "supervisor.lock", wait=True):  # install holds it briefly; wait, do not refuse
+                python = str(supervisor.ensure_venv(data))
+        except (supervisor.ServiceError, shell_setup.ShellError, OSError, subprocess.SubprocessError) as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
+    else:
+        python = sys.executable
+    os.execv(python, [python, str(target), *(["--board"] if args[0] == "board" else []), *args[1:]])
     return 0
 
 

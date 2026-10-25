@@ -12,4 +12,4 @@
 - Worktrees: `trees/`
 - Backlog: GitHub issues; repo o/app
 - Settings: `cos.toml`
-- Human-only actions: dashboard or console changes; `railway` commands; spending money
+- Human-only actions: dashboard or console changes; spending money

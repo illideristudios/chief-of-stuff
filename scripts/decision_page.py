@@ -35,17 +35,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import stat
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
-from html import escape, unescape
+from html import escape
 from pathlib import Path
 
 import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config
 from clock import leading
-from fragment import FONTS, TAB_CSS, href, tab_bar, theme
+from fragment import FONTS, PROSE_CSS, TAB_CSS, href, tab_bar, theme
+from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
 from module_graph import section as _graph
 from notify_service import atomic_write
@@ -126,18 +129,8 @@ GITHUB = {"issue": "issues/{}", "MR": "pull/{}", "commit": "commit/{}", "blob": 
           "pipeline": "actions/runs/{}"}
 GITLAB = {"issue": "-/issues/{}", "MR": "-/merge_requests/{}", "commit": "-/commit/{}", "blob": "-/blob/{at}/{}",
           "tree": "-/tree/{at}/{}", "pipeline": "-/pipelines/{}"}
-# One pass over escaped text, so nothing already linked is read again. Order is precedence.
-TOKEN = re.compile(r"""
-    (?P<tag><[^>]+>)
-  | `(?P<code>[^`]+)`
-  | (?<![\w/>])(?P<url>https?://[^\s<`]*[^\s<`.,;:)])
-  | \b(?:[Pp]ipeline|[Rr]un)\ \#(?P<pid>\d+)\b
-  | (?<![\w&/!\#])(?P<sigil>[!\#])(?P<num>\d+)(?:\#(?P<note>note_\d+|issuecomment-\d+|discussion_r\d+))?\b
-  | (?<![\w/.-])(?P<path>(?:[\w.-]+/)+(?![\w.-])|(?:[\w.-]+/)*[\w-][\w.-]*\.[A-Za-z]\w*)
-    (?::(?P<line>\d+)(?:[-–](?P<end>\d+))?\b|:(?P<sym>[A-Za-z_]\w*)\b|\ §\ ?(?P<sec>\d+(?:\.\d+)*)|\#(?P<anchor>[\w-]+))?
-  | (?<![\w\#&-])(?P<sha>(?=[0-9a-f]*[0-9])(?=[0-9a-f]*[a-f])[0-9a-f]{7,40})\b
-""", re.X)
 DOCS = (".md", ".markdown", ".rst", ".adoc", ".txt")
+REFERENCE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -148,6 +141,7 @@ class Linker:
     forge: Backlog | GitHubBacklog | None = None
     root: Path | None = None
     at: str | None = None
+    _files: dict[str, tuple[str, ...]] = field(default_factory=dict, compare=False, repr=False)
 
     def _url(self, what: str, target: str) -> str:
         gh = isinstance(self.forge, GitHubBacklog)
@@ -158,10 +152,22 @@ class Linker:
         """The `#` fragment for a section heading or a symbol's definition in a local copy, or "" (never guessed)."""
         if not self.root:
             return ""
-        f = (self.root / path).resolve()
-        if not f.is_relative_to(self.root.resolve()) or not f.is_file():
-            return ""
-        lines = f.read_text(errors="replace").splitlines()
+        if path not in self._files:
+            lines = ()
+            try:
+                f = (self.root / path).resolve()
+                if f.is_relative_to(self.root.resolve()):
+                    # Nonblocking open plus fstat covers a file replaced by a FIFO after resolution.
+                    with open(f, 'rb', opener=lambda p, flags: os.open(p, flags | os.O_NONBLOCK)) as source:
+                        info = os.fstat(source.fileno())
+                        if stat.S_ISREG(info.st_mode) and info.st_size <= REFERENCE_BYTES:
+                            data = source.read(REFERENCE_BYTES + 1)
+                            if len(data) <= REFERENCE_BYTES:
+                                lines = tuple(data.decode('utf-8', errors='replace').splitlines())
+            except OSError:
+                pass  # Unreadable or removed local copies still link to the forge without a fragment.
+            self._files[path] = lines
+        lines = self._files[path]
         if sym:
             hit = re.compile(rf"^\s*(?:(?:async\s+)?def|class|function|func|fn|const|let|var)\s+{sym}\b|^\s*{sym}\s*=")
             n = next((i for i, text in enumerate(lines, 1) if hit.search(text)), None)
@@ -206,24 +212,8 @@ class Linker:
 
 
 def _md(text: str, linker: Linker = Linker()) -> str:
-    """Escape, then mark up **bold**, `code`, URLs and references the forge can place."""
-    out = re.sub(r"\*\*([^*]+)\*\*", r"<b>\1</b>", escape(str(text), quote=False))
-
-    def chip(m: re.Match) -> str | None:
-        r = linker.resolve(m)
-        return f'<a class="ref" data-k="{r[0]}" {href(r[2])}>{r[1]}</a>' if r else None
-
-    def one(m: re.Match) -> str:
-        if m["tag"]:
-            return m[0]
-        if m["code"] is not None:
-            whole = TOKEN.fullmatch(m["code"])
-            return (whole and chip(whole)) or f"<code>{m['code']}</code>"
-        if m["url"]:
-            return f'<a {href(unescape(m["url"]))}>{m["url"]}</a>'
-        return chip(m) or m[0]
-
-    return TOKEN.sub(one, out)
+    """Compatibility name for the shared inline prose renderer."""
+    return markdown_inline(text, linker.resolve)
 
 
 def _section(heading: str, body: str) -> str:
@@ -334,7 +324,7 @@ def _saved_html(d: dict, when) -> str:
     a = saved(d)
     title = next((o.get("title", "") for o in d["options"] if o["key"] == a.get("key")), "")
     key = f'<span><span class="key">{escape(a["key"])}</span>{escape(title)}</span>' if a.get("key") else ""
-    words = f'<span class="words">“{escape(a["words"].strip())}”</span>' if str(a.get("words") or "").strip() else ""
+    words = f'<span class="words">“{markdown_inline(str(a["words"]).strip())}”</span>' if str(a.get("words") or "").strip() else ""
     return f'{key}{words}<span class="saved">answered, saved {when(datetime.fromisoformat(a["at"]))}</span>'
 
 
@@ -357,10 +347,10 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     left, right = [], []
     for s in d.get("sections", []):
         paras = [s["text"]] if isinstance(s.get("text"), str) else s.get("text", [])
-        left.append(_section(s["heading"], '    <div class="card">\n' + "\n".join(f"      <p>{md(p)}</p>" for p in paras) + "\n    </div>"))
+        left.append(_section(s["heading"], '    <div class="card prose">\n' + "\n".join(markdown_blocks(p, link.resolve) for p in paras) + "\n    </div>"))
     if d.get("sides"):
         sides = "\n".join(f'      <div class="card side">\n        <span class="pill {s["status"]}">{escape(s["status"].upper())}</span>\n'
-                          f'        <p><b>{escape(s["label"])}</b>: {md(s["text"])}</p>\n      </div>' for s in d["sides"])
+                          f'        <b>{escape(s["label"])}</b><div class="prose">{markdown_blocks(s["text"], link.resolve)}</div>\n      </div>' for s in d["sides"])
         left.append(_section("Where it stands", f'    <div class="compare">\n{sides}\n    </div>'))
     if d.get("timeline"):
         steps = "\n".join(
@@ -384,13 +374,13 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     fmt = (lambda t: ctx.when(t)) if ctx else (lambda t: f"{t:%H:%M}")
     done = f'    <div class="card answered">{_saved_html(d, fmt)}</div>\n' if page else ""
     right.append(_section("Options", done + "    " + _answer_form(slug, "options", "\n" + "\n".join(opts)) + "\n    </form>"))
-    right.append(_section("Recommendation", f'    <div class="card"><p>{md(d["why"])}</p></div>'))
-    right.append(_section("If you don't answer", f'    <div class="card default"><p>{md(d["default"])}</p></div>'))
+    right.append(_section("Recommendation", f'    <div class="card prose">{markdown_blocks(d["why"], link.resolve)}</div>'))
+    right.append(_section("If you don't answer", f'    <div class="card default prose">{markdown_blocks(d["default"], link.resolve)}</div>'))
     if d.get("references"):
         rows = []
         for r in d["references"]:
             pin = Linker(forge, root, r.get("at"))
-            label = f" {md(r['label'])}" if r.get("kind") and r.get("label") else ""
+            label = f" {escape(r['label'])}" if r.get("kind") and r.get("label") else ""
             one = TOKEN.fullmatch(escape(r["value"], quote=False))
             one = one and pin.resolve(one)
             # A row that is one reference is one plain link: the row's kind already labels it.
@@ -411,7 +401,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     eyebrow = " · ".join([escape(x) for x in ("Decision", d.get("topic"), _day(day), asked) if x]
                          + ['<a href="/decisions">decisions</a>', '<a href="/">board</a>'])
     chip = f"ANSWERED · {escape(chosen)}" if chosen else "ANSWERED" if answered else "PENDING"
-    yes = f"\n    <p>{md(d['yes'])}</p>" if d.get("yes") else ""
+    yes = f'\n    <div class="prose">{markdown_blocks(d["yes"], link.resolve)}</div>' if d.get("yes") else ""
     where = _figure(d["architecture"], link) if d.get("architecture") else ""
     where = _section("Where it sits", where) if where else ""
     # The first change the references name that the forge knows.
@@ -422,10 +412,10 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}"
             f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
-            f"      <h1>{md(d['headline'])}</h1>\n    </div>\n"
+            f"      <h1>{escape(d['headline'])}</h1>\n    </div>\n"
             f'    <span class="chip{" answered" if answered else ""}">{chip}</span>\n  </header>\n\n'
             f'  <div class="card ask">\n    <span class="cap">ask</span>\n'
-            f"    <strong>{md(d['ask'])}</strong>{yes}\n  </div>\n\n"
+            f"    <div class=\"prose\">{markdown_blocks(d['ask'], link.resolve)}</div>{yes}\n  </div>\n\n"
             + where
             + '  <div class="cols">\n  <div class="col">\n' + "".join(left) + '  </div>\n  <div class="col">\n'
             + "".join(right) + "  </div>\n  </div>\n"
@@ -692,6 +682,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
     board's DECISIONS panel lists too."""
     pending = entries(pages_dir, ctx) if pending is None else pending
     rows, held = [], held_refs(pending, ctx)
+    linker = Linker(ctx.forge)
     for slug, d, asked, why in pending:
         when = f'<span class="when">{ctx.when(asked)}</span>' if asked else ""
         if d is None:
@@ -714,8 +705,8 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
         refs = "".join(f"<span>{ctx.ref(r)} {escape(ctx.where(r))}</span>" for r in holds)
         rows.append(f'      <div class="row pend{" saved" if saved(d) else ""}">\n        <span class="stack">{when}{age}</span>\n'
                     f'        <span class="stack"><span class="line"><a class="headline" href="/decisions/{escape(slug)}">{escape(d["headline"])}</a>{topic}</span>'
-                    f'<span class="q">{_md(d["ask"])}</span></span>\n        {opts}\n'
-                    f'        <span class="stack holds">{refs}</span>\n        <span class="fallback">{_md(d["default"])}</span>\n      </div>')
+                    f'<span class="q">{_md(d["ask"], linker)}</span></span>\n        {opts}\n'
+                    f'        <span class="stack holds">{refs}</span>\n        <span class="fallback">{_md(d["default"], linker)}</span>\n      </div>')
     try:
         today = date.fromisoformat(day)
     except ValueError:
@@ -741,13 +732,13 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
             first, _, rest = re.sub(r'^\(via [^)]*\)\s*', "", row.words).strip(' "“”').partition(" ")
             if first.rstrip(",.;:").lower() in ("yes", "no"):
                 key, answer = first.rstrip(",.;:").lower(), rest.strip(' "“”')
-            head = f'<span class="headline">{_md(row.item)}</span><span class="page">{escape(page) if page else "Decisions row"}</span>'
+            head = f'<span class="headline">{_md(row.item, linker)}</span><span class="page">{escape(page) if page else "Decisions row"}</span>'
         ref = refs[0] if refs else ""
         since = f"{ctx.ref(ref)} {escape(ctx.where(ref))}" if ref else ""
         keyed = f'<span class="key">{escape(key)}</span>' if key else ""
         done.append(f'      <div class="row done">\n        <span class="stack"><span class="when">{ctx.when(row.when) if row.when else ""}</span>'
                     f'<span class="took">{took}</span></span>\n        <span class="stack">{head}</span>\n'
-                    f"        <span>{keyed}{escape(answer)}</span>\n        <span class=\"words\">{escape(row.words)}</span>\n"
+                    f"        <span>{keyed}{escape(answer)}</span>\n        <span class=\"words\">{_md(row.words, linker)}</span>\n"
                     f'        <span class="since">{since}</span>\n      </div>')
     ready = [a for _, d, a, _ in pending if d is not None]
     mrs = sum(1 for r in held if ctx.is_change(r))
@@ -828,8 +819,9 @@ header.top>div{flex:1 1 auto;min-width:0}
 header .chip{color:var(--link);border:1px solid var(--brass);margin-bottom:4px}
 header .chip.answered{color:var(--surface);background:#009E73;border-color:#009E73}
 .ask{border-top:3px solid var(--brass);display:flex;flex-direction:column;gap:4px}
-.ask strong{font-size:16px}
+.ask b{font-size:16px}
 .ask p{color:var(--muted)}
+.ask>.prose:first-of-type p{color:var(--fg);font-size:16px}
 code{font-family:ui-monospace,monospace;font-size:.88em;background:var(--ref-bg);padding:0 3px;border-radius:3px;overflow-wrap:normal}
 .ref{font-family:ui-monospace,monospace;font-size:.88em;color:var(--link);text-decoration:none;border-bottom:1px dotted var(--brass);background:var(--ref-bg);padding:0 3px;border-radius:3px;white-space:nowrap}
 .ref::before{content:attr(data-k);font-size:.8em;color:var(--muted);margin-right:3px}
@@ -933,7 +925,7 @@ h2.pend{color:var(--link)}
 @media (max-width:760px){.row.pend,.row.done{grid-template-columns:minmax(0,1fr);gap:4px}.row.head{display:none}.row .stack:first-child{flex-direction:row;gap:8px}.unread .none{display:none}}
 @media (max-width:900px){.cols{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:480px){header.top{flex-direction:column;align-items:flex-start;gap:6px}.refs{grid-template-columns:minmax(0,1fr)}}
-""" + TAB_CSS + "</style>\n"
+""" + TAB_CSS + PROSE_CSS + "</style>\n"
 HEAD = HEAD_OPEN + PAGE_CSS
 
 # Picking an option saves it at once; the write-in saves on its button. Without JS the form posts and the server

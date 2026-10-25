@@ -16,6 +16,7 @@ import shlex
 import subprocess
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -23,6 +24,7 @@ import dispatch_prompt  # noqa: E402
 import runtimes  # noqa: E402
 from settings import HERDR_NAME, SettingsError, load as load_settings  # noqa: E402
 from shell_setup import ShellError, resolve  # noqa: E402
+import make_worktree  # noqa: E402
 
 ENV = "CHIEF_OF_STUFF_LAUNCHER"
 # Keep assignments and stop files in the worktree's ignored metadata directory.
@@ -147,9 +149,9 @@ def _as_string(value: str) -> str:
 
 def worker_tokens(*, cwd: str, agent_type: str | None, binary: Path | None, title: str | None = None,
                   runtime: str = "claude", model: str = "", effort: str = "", workspace: str = ".",
-                  claude_profile: str = "") -> list[str]:
+                  claude_as_profile: str = "") -> list[str]:
     """The worker argv from `sys.executable` on, without the `env -C <root> PATH=... WORKSPACE=...` prefix."""
-    program, lead = runtimes.program(runtime, claude_profile)
+    program, lead = runtimes.program(runtime, claude_as_profile)
     if binary is None:
         raise RefusedError(f"cannot find `{program}` on PATH")
     root, dispatch = _paths(cwd)
@@ -342,10 +344,10 @@ def launch_herdr(create: list[str], pane_run: list[str]) -> None:
 
 def ghostty_script(*, cwd: str, agent_type: str | None, claude: Path | None, title: str | None = None,
                    runtime: str = "claude", model: str = "", effort: str = "", workspace: str = ".",
-                   claude_profile: str = "") -> str:
+                   claude_as_profile: str = "") -> str:
     """Build a Ghostty tab script with an absolute binary and the launching shell's PATH."""
     tokens = runtime_tokens(cwd=cwd, agent_type=agent_type, binary=claude, title=title, runtime=runtime,
-                            model=model, effort=effort, workspace=workspace, claude_profile=claude_profile)
+                            model=model, effort=effort, workspace=workspace, claude_as_profile=claude_as_profile)
     command = " ".join(shlex.quote(tok) for tok in tokens)
     # Surface configuration has no title field.
     named = (f'  perform action {_as_string("set_tab_title:" + title)} on focused terminal of tb\n'
@@ -375,19 +377,22 @@ def launch_env(parent: dict[str, str] | None = None) -> dict[str, str]:
     return {k: v for k, v in source.items() if k in KEEP and not k.upper().startswith("CLAUDE")}
 
 
-EFFORTS = ("", "low", "medium", "high", "xhigh", "max")
+EFFORTS = ("", *runtimes.EFFORTS)
 CHECK_TREE = Path("<worktree>")  # --check makes no tree; the one-shot assignment still names one
 
 
-def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None = None) -> str:
+def assignment(args, one_shot: bool, worktree: Path | None, *, name: str | None = None, settings=None) -> str:
     """The assignment a dispatch composes from its flags: one path for a launch and for --check."""
     return dispatch_prompt.compose(Path(args.root), args.date, args.task, worktree=worktree, coordinator=args.coordinator,
-                                   name=args.title if name is None else name, runtime=args.runtime, one_shot=one_shot)
+                                   name=args.title if name is None else name, runtime=args.runtime, one_shot=one_shot,
+                                   settings=settings)
 
 
 def main(argv_in: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--type", dest="agent_type", help="an agent type from the Coordinator block; omitted runs the default agent")
+    ap.add_argument("--type", dest="agent_type",
+                    help="an agent type from the Coordinator block; overrides the stage's agent profile "
+                         "(stage profiles also require an Agent: declaration)")
     ap.add_argument("--cwd", help="the worktree the session starts in")
     ap.add_argument("--name", "--title", dest="title",
                     help="the session's name, e.g. impl07; the listing, the prompt box and the tab all show it")
@@ -424,6 +429,7 @@ def main(argv_in: list[str] | None = None) -> int:
     try:
         config = dispatch_prompt.config(Path(args.root))
         settings = load_settings(Path(args.root), config.settings_path)
+        args.date = args.date or datetime.now(config.zone).date().isoformat()
         args.task = dispatch_prompt.resolve_task(Path(args.root), args.date, args.task)
     except (dispatch_prompt.RefusedError, SettingsError, OSError) as exc:
         print(f"refused: {exc}", file=sys.stderr)
@@ -434,7 +440,8 @@ def main(argv_in: list[str] | None = None) -> int:
         # The launch-only flags below (--runtime, --model, --effort, --class, --coordinator) are no part of the rows.
         args.coordinator, args.runtime = None, "claude"
         try:
-            sys.stdout.write(assignment(args, one_shot, Path(args.cwd) if args.cwd else CHECK_TREE if one_shot else None))
+            sys.stdout.write(assignment(args, one_shot, Path(args.cwd) if args.cwd else CHECK_TREE if one_shot else None,
+                                        settings=settings))
         except dispatch_prompt.RefusedError as exc:
             print(f"refused: {exc}", file=sys.stderr)
             return 1
@@ -453,6 +460,15 @@ def main(argv_in: list[str] | None = None) -> int:
         print(f"refused: {exc}", file=sys.stderr)
         return 1
     args.runtime = args.runtime or "claude"
+    if args.agent_type is None and settings.stages and args.runtime == "claude":
+        try:
+            stage = dispatch_prompt.stage_defaults(Path(args.root), args.date, args.task, settings=settings)
+            text = (Path(args.root) / "CLAUDE.md").read_text()
+            if stage is not None and stage.agent in make_worktree.agent_types(text):
+                args.agent_type = stage.agent
+        except (dispatch_prompt.RefusedError, make_worktree.RefusedError, OSError) as exc:
+            print(f"refused: {exc}", file=sys.stderr)
+            return 1
     runtime = runtimes.get(args.runtime)
     if (args.model or runtime.needs_model) and not MODEL.fullmatch(args.model):
         print(f"refused: --model needs a model id (agy: one from `agy models`, and it is required), not {args.model!r}", file=sys.stderr)
@@ -485,12 +501,12 @@ def main(argv_in: list[str] | None = None) -> int:
     override = os.environ.get(ENV)
     try:
         selected = args.launcher or worker_settings.launcher
-        body = assignment(args, False, Path(args.cwd))
+        body = assignment(args, False, Path(args.cwd), settings=settings)
         # The eval harness uses the argv override.
         worker = dict(cwd=args.cwd, agent_type=args.agent_type, title=args.title, runtime=args.runtime,
                       model=args.model, effort=args.effort, workspace=args.root,
-                      claude_profile=worker_settings.claude_profile)
-        program = runtimes.program(args.runtime, worker_settings.claude_profile)[0]
+                      claude_as_profile=worker_settings.claude_as_profile)
+        program = runtimes.program(args.runtime, worker_settings.claude_as_profile)[0]
         if override:
             command = argv(launcher(), agent_type=args.agent_type, cwd=args.cwd, title=args.title,
                            model=args.model, effort=args.effort, workspace=args.root)

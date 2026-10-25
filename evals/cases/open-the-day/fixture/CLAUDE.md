@@ -13,4 +13,4 @@
   - `cal-program`: program schedule (classes, deadlines)
 - Deadlines:
   - Launch: {{today}} 23:59
-- Human-only actions: dashboard or console changes; `railway` commands; git commit, add, or push; spending money
+- Human-only actions: dashboard or console changes; git commit, add, or push; spending money
