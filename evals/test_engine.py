@@ -185,6 +185,92 @@ class EngineTest(unittest.TestCase):
     def findings(self, attempt=1, counts=None):
         review_report(self.db, KEY, attempt, counts)
 
+    def released_implementation(self, *, request=True, held=False, shared=False):
+        pr = {**tf.tma.pr(10, [], draft=True), "headRefName": "work/issue-1"}
+        gh = tf.FakeGh(issues=[owned_issue(1, "Released work", ["stage: doing"] + (["needs human"] if held else []))],
+                       prs=[pr] if request else [], bodies={10: "Closes #1"})
+        board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 1 if shared else 2, "merge": 0})
+        self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
+        self.db.sync_from_forge(self.forge.snapshots())
+        self.db.record_segment(KEY, "implement", 2, (NOW-timedelta(minutes=2)).isoformat(),
+                               (NOW-timedelta(minutes=1)).isoformat(), "human_review")
+        self.db.set_resume(KEY, {"work_branch": "legacy-other", "runs": {
+            "implement-2": {"branch": "work/issue-1", "session_id": "implement-session"}}})
+        self.db.add_report(KEY, "implement", 2, "implement-session", "human_review", "Please review", [])
+        return gh
+
+    def test_human_release_advances_implement_two_to_review_without_implement_three(self):
+        gh = self.released_implementation(held=True)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        gh.issues[1]["labels"] = [label for label in gh.issues[1]["labels"] if label["name"] != "needs human"]
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.launched, [(KEY, "review", 1, "critic")])
+        self.assertEqual(self.db.item(KEY).stage, "review")
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+        self.assertEqual(self.db.reports(KEY)[0].outcome, "human_review")
+        self.assertEqual(self.run_pass(), [])
+        self.assertEqual(len(self.launched), 1)
+
+    def test_released_implementation_without_request_retries_implement(self):
+        self.released_implementation(request=False)
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 3)])
+        self.assertEqual(self.launched, [(KEY, "implement", 3, "builder")])
+
+    def test_historical_release_uses_normal_handoff_on_shared_board_label(self):
+        self.released_implementation(shared=True)
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.db.item(KEY).stage, "review")
+        self.assertEqual(self.run_pass(), [])
+        self.assertEqual(self.db.item(KEY).stage, "review")
+        self.assertEqual(len(self.launched), 1)
+
+    def test_cached_clear_hold_does_not_accept_when_snapshot_omits_hold(self):
+        self.released_implementation()
+        snapshot = {key: value for key, value in self.forge.snapshots()[0].items() if key != "human_review"}
+        with mock.patch.object(engine.forge.Forge, "snapshots", return_value=[snapshot]):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "implementation hold release is unobserved")])
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+
+    def test_request_read_failure_waits_and_does_not_hold_an_unaffected_sibling(self):
+        self.released_implementation()
+        snapshot = {**self.forge.snapshots()[0], "body": "## File ownership\n- write: `src/`"}
+        sibling = {"issue_key": OTHER, "stage": "implement", "forge_state": "open", "human_review": False,
+                   "body": "## File ownership\n- write: `docs/`", "stage_mark": None}
+        with mock.patch.object(engine.forge.Forge, "snapshots", return_value=[snapshot, sibling]), \
+             mock.patch.object(engine.forge.Forge, "requests", side_effect=ForgeError("partial request read")):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "implementation request evidence is unknown"),
+                                               reconcile.Dispatch(OTHER, "implement", "builder", 1)])
+        self.assertEqual(self.launched, [(OTHER, "implement", 1, "builder")])
+
+    def test_release_handoff_retries_failed_stage_write_without_duplicate_work(self):
+        self.released_implementation()
+        with mock.patch.object(engine.forge.Forge, "write_stage", return_value=SimpleNamespace(ok=False, error="offline")):
+            self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+            self.assertEqual(self.db.resume(KEY)["pending_stage"], {"stage": "review", "expected": "implement"})
+            self.assertEqual(self.run_pass(), [])
+        self.assertEqual(self.run_pass(), [])
+        self.assertEqual(self.db.item(KEY).stage, "review")
+        self.assertEqual(self.launched, [(KEY, "review", 1, "critic")])
+
+    def test_release_handoff_launch_failure_recovers_in_review(self):
+        self.released_implementation()
+        with mock.patch.object(self, "launch", side_effect=ForgeError("request closed before launch")):
+            self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.db.item(KEY).stage, "review")
+        self.assertEqual(self.db.resume(KEY)["launcher_hold"], {"stage": "review", "attempt": 1})
+        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 2)])
+        self.assertEqual(self.launched, [(KEY, "review", 2, "critic")])
+
+    def test_unpublished_suite_hold_is_not_accepted_by_request_evidence(self):
+        self.released_implementation()
+        data = self.db.resume(KEY)
+        data["suite_hold"] = {"stage": "implement", "attempt": 2, "published": False}
+        self.db.set_resume(KEY, data)
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+
     def test_dispatch_review_merge_end_to_end(self):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
         self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
