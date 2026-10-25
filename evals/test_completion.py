@@ -62,6 +62,19 @@ class CompletionTest(unittest.TestCase):
                         False, report="done", on_main=True, suite_on_main=True, tree=tree,
                         tree_name=tree_name, tree_claims=gone, landing_required=True)
                     self.assertEqual(verdict, completion.Verdict("done", completion.unlanded(tree), True))
+        # engine_facts.gather sets tree_landed when local HEAD is on main; dirty still holds.
+        for tree in (TreeState("feature", 1, 0, 0), TreeState("feature", 1, 2, None),
+                     TreeState("feature", None, 0, 0)):
+            with self.subTest(tree=tree, tree_landed=True):
+                verdict = completion.abandoned(
+                    False, report="done", on_main=True, suite_on_main=True, tree=tree,
+                    tree_name="tree", tree_claims=gone, landing_required=True, tree_landed=True)
+                self.assertEqual(verdict, completion.Verdict("done", completion.unlanded(tree), True))
+        outside = TreeState("feature", 0, 2, 0)
+        verdict = completion.abandoned(
+            False, report="done", on_main=True, suite_on_main=True, tree=outside,
+            tree_name="tree", tree_claims=gone, landing_required=True, tree_landed=False)
+        self.assertEqual(verdict, completion.Verdict("done", "tree HEAD is outside the verified landing", True))
 
     def test_final_done_clears_a_clean_tree_with_no_work_at_risk(self):
         for tree in (CLEAN, TreeState("feature", 0, 0, None), TreeState("feature", 0, 2, 0)):
@@ -70,6 +83,12 @@ class CompletionTest(unittest.TestCase):
                     False, report="done", on_main=True, suite_on_main=True, tree=tree,
                     tree_name="tree", tree_claims=(orphans.Claim("worker", False),), landing_required=True)
                 self.assertEqual(verdict, completion.Verdict("done", ""))
+        squash = TreeState("feature", 0, 2, None)
+        verdict = completion.abandoned(
+            False, report="done", on_main=True, suite_on_main=True, tree=squash,
+            tree_name="tree", tree_claims=(orphans.Claim("worker", False),),
+            landing_required=True, tree_landed=True)
+        self.assertEqual(verdict, completion.Verdict("done", ""))
 
     def test_a_gone_worker_whose_tree_could_not_be_read_is_held(self):
         self.assertEqual(completion.abandoned(False, tree_unreadable=True),
