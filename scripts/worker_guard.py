@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 
 from decision_escalation import ask_decision
@@ -26,6 +28,50 @@ def _earlier(db: Store, issue_key: str, event: dict) -> tuple[object, str | None
             row = ask_decision(db.decisions(issue_key), ask)
             return ask, ((row.answer if row is not None else None) or ask.answer or None)
     return None
+
+
+def _git(cwd: str, *args: str) -> subprocess.CompletedProcess[str] | None:
+    try:
+        # Inherited environment: local, global and system config must match the commit the worker would run.
+        return subprocess.run(["git", "-C", cwd, *args], stdin=subprocess.DEVNULL,
+                              capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def _unreadable_hooks(event: dict) -> None:
+    event["hooks_path"] = ""
+    event["hooks_root"] = None
+
+
+def _resolve_commit_hooks(event: dict) -> None:
+    # shortcut: hooksPath is not realpath'd; a path that lexically sits outside the worktree can still be a symlink
+    # into it. Upgrade when a repository does that.
+    given = event.get("tool_input")
+    command = given.get("command") if isinstance(given, dict) else None
+    if not isinstance(command, str) or "commit" not in command:
+        return
+    cwd = event.get("cwd")
+    if not isinstance(cwd, str) or not os.path.isdir(cwd):
+        _unreadable_hooks(event)
+        return
+    got = _git(cwd, "config", "--get", "core.hooksPath")
+    if got is None or got.returncode not in (0, 1):
+        _unreadable_hooks(event)
+        return
+    path = got.stdout.strip()
+    if got.returncode == 1 and not path:
+        event["hooks_path"] = None
+        return
+    if got.returncode != 0 or not path:
+        _unreadable_hooks(event)
+        return
+    root = _git(cwd, "rev-parse", "--show-toplevel")
+    if root is None or root.returncode != 0 or not root.stdout.strip():
+        _unreadable_hooks(event)
+        return
+    event["hooks_path"] = os.path.expanduser(path) if path.startswith("~") else path
+    event["hooks_root"] = root.stdout.strip()
 
 
 def _deny(event: str, reason: str) -> dict:
@@ -55,6 +101,7 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
     try:
         if event_name == "PermissionRequest":
             # #874: judged as the PreToolUse gate judges, so routine reads never stop a worker or reach the owner.
+            _resolve_commit_hooks(event)
             verdict, why = permission_judgement(event, binding.protected_branches)
             if verdict == "allow":
                 return {"hookSpecificOutput": {"hookEventName": event_name, "decision": {"behavior": "allow"}}}
@@ -72,7 +119,8 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
                                          "An ask is not an approval. Report blocked, then stop and wait.")
             question, context = permission_ask(event)
             # #750 ruling: the unjudged become an allow/deny ask that the trio is consulted on first.
-            context = json.dumps({**json.loads(context), "why": why})
+            context = json.dumps({**json.loads(context), "why": why, "kind": "permission",
+                                  "hooks_path": event.get("hooks_path"), "hooks_root": event.get("hooks_root")})
             ask_id = db.add_ask(binding.issue_key, binding.stage, binding.attempt, binding.session_id,
                                 question, ["allow", "deny"], context)
             # Already recorded: asking again through the MCP tool would duplicate it.
