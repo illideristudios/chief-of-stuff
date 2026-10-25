@@ -115,11 +115,11 @@ class RunnerPeerWiringTest(unittest.TestCase):
     def test_peers_config_and_allowlist(self) -> None:
         cfg = run.peers_mcp_config(Path("/r/sessions.json"), Path("/r/calls.jsonl"), "America/Chicago")
         self.assertIn(str(run.MOCK_PEERS.resolve()), cfg["mcpServers"]["peers"]["args"])
-        cmd = run.command(run.Case("x", Path("/x"), {}), "baseline", "opus", "hi", mcp_config=cfg)
+        cmd = run.claude_options({}, mcp_config=cfg)
         allowed = cmd[cmd.index("--allowedTools") + 1 :]
         for name in run.PEER_MOCK_TOOLS:
             self.assertIn(name, allowed)
-        self.assertNotIn(run.PEER_MOCK_TOOLS[0], run.command(run.Case("x", Path("/x"), {}), "baseline", "opus", "hi"))
+        self.assertNotIn(run.PEER_MOCK_TOOLS[0], run.claude_options({}))
 
     def test_check_arm_requires_peers_when_needed(self) -> None:
         init = {"tools": [], "agents": [], "mcp_servers": []}
@@ -129,13 +129,22 @@ class RunnerPeerWiringTest(unittest.TestCase):
         init["mcp_servers"].append({"name": "peers", "status": "connected"})
         self.assertTrue(run.check_arm(init, "baseline", needs_peers=True)[0])
 
-    def test_drive_turns_before_turn_hook(self) -> None:
-        fake = [sys.executable, str(FIXTURES / "fake_claude.py")]
+    def test_peers_are_rewritten_before_each_adapter_call(self) -> None:
+        from unittest import mock
         seen = []
-        with tempfile.TemporaryDirectory() as cwd:
-            turns = run.drive_turns(fake, ["one", "two"], Path(cwd), None, 20, lambda n: None, before_turn=lambda n: seen.append(n))
-        self.assertEqual(len(turns), 2)
-        self.assertEqual(seen, [1, 2])
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            (base / "first.json").write_text("first")
+            (base / "second.json").write_text("second")
+            def call(request, **kwargs):
+                seen.append((base / "peers-sessions.json").read_text())
+                return run.Reply("done", None, "session", 0, 1, events=[{"type": "result"}])
+            with mock.patch.object(run.claude_adapter, "call", side_effect=call):
+                run.run_turns({"turns": [{"prompt": "one", "peers": "first.json"},
+                                          {"prompt": "two", "peers": "second.json"}]},
+                    "baseline", "sonnet", base, base, {}, None, base / "calls", "America/Chicago",
+                    case_root=base, ctx={})
+        self.assertEqual(seen, ["first", "second"])
 
 
 TRACKER_BEFORE = """# Tracker

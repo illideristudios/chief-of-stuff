@@ -10,7 +10,7 @@ Ship the release.
 
 - [ ] Security audit of the upload endpoint
 - [ ] Draft release notes
-- [ ] Deploy the release
+- [ ] Commit the release
 
 ## End of day
 
