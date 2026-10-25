@@ -52,11 +52,16 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
         store.add_log(action.issue_key, f"merge refused: {exc}", at, reconcile.OP_MERGE_REFUSED)
         return False
     merged = message.startswith("merged ")
+    queued = message.startswith("queued ")
     store.add_log(action.issue_key, message, at, reconcile.OP_MERGE if merged else "")  # queued or unknown: not a merge
+    data = dict(store.resume(action.issue_key) or {})
     if merged:
         # §13 (c): a structured record of what the engine merged, so a non-Claude run's check can tell it apart.
         sha = getattr(forge, "merge_commit", lambda number: None)(request.number)
-        data = dict(store.resume(action.issue_key) or {})
+        data.pop("merge_pending", None)
         data["merges"] = [*data.get("merges", []), {"request": request.number, "sha": sha, "at": at}]
+        store.set_resume(action.issue_key, data)
+    elif queued:
+        data["merge_pending"] = {"expected": item.stage, "request": request.number}
         store.set_resume(action.issue_key, data)
     return merged
