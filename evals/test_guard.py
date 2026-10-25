@@ -196,11 +196,17 @@ class GuardTest(unittest.TestCase):
         self.denied_ask("guard", row=False)
         self.asked_again_only_next_attempt()
 
-    def test_a_trio_verdict_deny_stays_denied_on_the_next_attempt(self):
+    def test_a_trio_or_person_deny_stays_denied_on_the_next_attempt(self):
         ask = self.denied_ask("trio")
         self.env["CHIEF_ATTEMPT"] = "3"
         decision = self.permission(command="touch /outside/file")
         self.assertIn(f"ask {ask.id}", decision["message"])
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_deny_a_person_gave_stays_denied_on_the_next_attempt(self):
+        self.denied_ask("zach")
+        self.env["CHIEF_ATTEMPT"] = "3"
+        self.permission(command="touch /outside/file")
         self.assertEqual(len(self.db.asks(KEY)), 1)
 
     def test_a_person_reversing_a_trio_deny_lets_the_next_attempt_ask_again(self):
