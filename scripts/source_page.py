@@ -24,7 +24,7 @@ from task_forge import PageData, source_key
 from fragment import issue_href, issue_page_name
 from decision_page import HEAD
 from fragment import href, tab_bar
-from page_common import markdown_blocks
+from page_common import drop_html_comments, markdown_blocks
 from issue_page import _paths, _shared, anchor, inputs, put
 from tracker import TRAILING_NUMBER, parse_tracker
 from settings import Graph
@@ -132,7 +132,7 @@ def _note(n: Note, now: datetime, linker: decision_page.Linker = decision_page.L
     t = n.thread
     when = f" · {t.at.astimezone(now.tzinfo):%H:%M}" if t.at else ""
     return (f'<div class="nt{" resolved" if t.resolved else ""}"><span><b>{"Resolved" if t.resolved else "Open"} thread · '
-            f'{escape(t.author)}{when}</b> · <a {href(t.url)}>thread</a></span><div class="prose">{markdown_blocks(t.body, linker.resolve)}</div></div>')
+            f'{escape(t.author)}{when}</b> · <a {href(t.url)}>thread</a></span><div class="prose">{markdown_blocks(drop_html_comments(t.body), linker.resolve)}</div></div>')
 
 
 class File:

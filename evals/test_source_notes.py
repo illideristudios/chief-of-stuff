@@ -128,6 +128,16 @@ class NotesPage(SourcePage):
         self.assertIn(escape(MARKED.body, quote=False), body.replace("&quot;", '"').replace("&#x27;", "'"))
         self.assertIn(MARKED.author, text(body))
 
+    def test_a_note_drops_a_trailing_hidden_html_comment(self):
+        if sp is None:
+            raise AssertionError("scripts/source_page.py does not exist yet")
+        body = "Useful? React with 👍 / 👎.\n\n<!-- codex-code-review-finding:v1 -->"
+        noted = thread(True, "02:10", "chatgpt-codex-connector", body, 9)
+        html = sp.render(109, TRACKERS, self.sources(), NOW, self.graph, self.root / "pages", self.root,
+                         notes=[sp.Note(LIMITS, 7, "new", noted)])
+        self.assertIn("Useful? React with 👍 / 👎.", html)
+        self.assertNotIn("codex-code-review-finding", html)
+
     # "When the notes cannot be read the page still renders its diff and says why in one line."
     def test_unreadable_notes_leave_the_diff_and_say_why(self):
         if sp is None:

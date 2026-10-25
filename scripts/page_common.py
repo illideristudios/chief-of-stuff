@@ -109,6 +109,19 @@ _MARKDOWN.renderer.rules['strong_close'] = lambda *args: '</b>'
 # The threaded page server shares this parser, whose ruler caches compile lazily.
 _MARKDOWN_LOCK = RLock()
 
+# Fences before inline code, so a ``` fence is not consumed as a double-backtick span.
+# shortcut: an unclosed comment stays and a four-space indented block loses its comment, upgrade when a review shows the marker there.
+_HTML_COMMENT = re.compile(
+    r"(?P<code>^[ ]{0,3}```.*?^[ ]{0,3}```|^[ ]{0,3}~~~.*?^[ ]{0,3}~~~|``.+?``|`[^`\n]+`)"
+    r"|(?P<comment><!--.*?-->)",
+    re.DOTALL | re.MULTILINE,
+)
+
+
+def drop_html_comments(text: str) -> str:
+    """Drop HTML comments the forge hides. A comment inside a code span or fence stays."""
+    return _HTML_COMMENT.sub(lambda m: m.group(0) if m.group("code") else "", text)
+
 
 def markdown_inline(text: str, resolve: ReferenceResolver | None = None, *, links: bool = True) -> str:
     """Inline CommonMark with raw HTML escaped; `links=False` keeps a navigation label free of anchors."""

@@ -388,6 +388,25 @@ class ReviewTest(unittest.TestCase):
         got = text(section(page(src=sources(replace(MR, threads=()), OTHER)), "Review"))
         self.assertRegex(got, r"(?i)\bno review threads\b")
 
+    def test_a_hidden_html_comment_is_dropped_and_other_html_stays_text(self):
+        body = (
+            "Useful? React with 👍 / 👎.\n\n"
+            "<!-- codex-code-review-finding:v1 -->\n\n"
+            "<script>alert(1)</script>\n\n"
+            "<!-- spans\nlines -->\n\n"
+            "See `<!-- inline -->` and ``<!-- ticks -->``.\n\n"
+            "```suggestion\n<!-- keep -->\n```\n\n"
+            "~~~\n<!-- tide -->\n~~~\n"
+        )
+        review = section(page(src=sources(replace(MR, threads=(thread(True, "02:10", body),)), OTHER)), "Review")
+        self.assertIn("Useful? React with 👍 / 👎.", review)
+        self.assertIn("&lt;script&gt;", review)
+        self.assertNotIn("codex-code-review-finding", review)
+        self.assertNotIn("<script>", review)
+        self.assertNotIn("spans", review)
+        for kept in ("keep", "inline", "ticks", "tide"):
+            self.assertRegex(review, rf"<code[^>]*>[^<]*&lt;!-- {kept} --&gt;")
+
 
 BODY = """## Context
 
