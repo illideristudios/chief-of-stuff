@@ -47,6 +47,7 @@ DRAWS_NOTHING = (
     "decision_escalation",
     "performance",
     "performance_report",
+    "bake",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs",
     "supervisor",
     "startup",
@@ -242,7 +243,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "bake",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }
