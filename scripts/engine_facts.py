@@ -162,8 +162,64 @@ def _starting_head(record: dict | None) -> str | None:
     return None
 
 
+def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | None]) -> tuple:
+    """Bind released work to the same open request review launch selects; unread evidence stays unknown."""
+    candidates = []
+    for item in store.items():
+        key = item.issue_key
+        data = store.resume(key)
+        data = data if isinstance(data, dict) else {}
+        if (item.forge_state != "open" or item.stage != "implement" or item.human_review
+                or observed.get(key) is not False or "suite_hold" in data):
+            continue
+        history = store.segments(key)
+        if any(s.ended_at is None for s in history):
+            continue
+        completed = [s for s in history if s.started_at and s.ended_at and s.stage != "architect"]
+        latest = max(completed, key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
+        if (latest is None or latest.stage != "implement" or latest.outcome != "human_review"
+                or any(s.stage != latest.stage and s.started_at == latest.started_at for s in completed)):
+            continue
+        runs = data.get("runs", {})
+        run_name = f"implement-{latest.attempt}"
+        if not isinstance(runs, dict) or (run_name in runs and not isinstance(runs[run_name], dict)):
+            candidates.append(((key, latest.stage, latest.attempt), None))
+            continue
+        record = _record(store, key, latest.stage, latest.attempt)
+        branch = record.get("branch") if record else None
+        if branch is None or (isinstance(branch, str) and not branch.strip()):
+            # The shared branch belongs to the current attempt, never to an older segment with a later clock.
+            current_attempt = max(s.attempt for s in history if s.stage == "implement")
+            branch = data.get("work_branch") if latest.attempt == current_attempt else None
+        candidates.append(((key, latest.stage, latest.attempt), branch))
+    result = {identity: None for identity, _ in candidates}
+    if not any(isinstance(branch, str) and branch.strip() for _, branch in candidates):
+        return tuple(result.items())
+    try:
+        requests = forge.requests()
+        if not isinstance(requests, list) or any(
+                type(r.number) is not int or r.number < 1 or not isinstance(r.branch, str) or not r.branch.strip()
+                or not isinstance(r.closes, tuple) or any(not isinstance(ref, str) for ref in r.closes)
+                for r in requests):
+            return tuple(result.items())
+    except (ForgeError, OSError, ValueError, TypeError, AttributeError):
+        return tuple(result.items())
+    for identity, branch in candidates:
+        if not isinstance(branch, str) or not branch.strip():
+            continue
+        try:
+            request = forge.closing_request(identity[0], requests)
+            result[identity] = request.branch == branch
+        except ForgeError as exc:
+            if str(exc) == f"no open request closes {identity[0]}":
+                result[identity] = False
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    return tuple(result.items())
+
+
 def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
-           require_green: bool = False) -> Facts:
+           require_green: bool = False, hold_observations: tuple[tuple[str, bool | None], ...] = ()) -> Facts:
     """Read recorded worker trees directly; discovery is not evidence that a recorded tree is unreadable."""
     if now.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
@@ -278,4 +334,8 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
                  landing_heads=tuple(landing_heads.items()), landed_trees=tuple(landed_trees),
                  trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),
-                 suites=tuple(suites), require_green=require_green)
+                 suites=tuple(suites), require_green=require_green,
+                 hold_observations=hold_observations,
+                 implementation_requests=_implementation_requests(forge, store, dict(hold_observations)),
+                 suite_holds=tuple(item.issue_key for item in store.items()
+                                   if isinstance(data := store.resume(item.issue_key), dict) and "suite_hold" in data))
