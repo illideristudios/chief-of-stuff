@@ -15,4 +15,4 @@
 - Backlog: GitHub issues; repo https://github.com/o/backlog (private)
 - Settings: `cos.toml`
 - Sessions: list `mcp__peers__list_sessions`; send `mcp__peers__send`
-- Human-only actions: dashboard or console changes; `railway` commands; spending money; merging a pull request
+- Human-only actions: dashboard or console changes; spending money; merging a pull request

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import backlog
 import dispatch_prompt
+import forge
 import git_trees
 import git_view
 import kanban
@@ -23,12 +24,14 @@ import runtimes
 import tracker_write
 from _vendor.toon_format import ToonDecodeError, decode as toon_decode, encode as toon_encode
 from md import cells as _cells, is_separator as _is_separator
+from reconcile import suite_holds
+from model_port import quota_reset
 from notify_service import atomic_write
 from one_shot_report import FIELD_MAX, UNREADABLE, read_report
 from process_status import PIDFILE, PIDFILE_MAX, pidfile_runs, process_exists, running_trees
 from tracker import parse_tracker
 from tracker_log import RELAUNCHED, TIMED_OUT, ended_line, hold_failed_line, relaunch_line, started_line, timed_out_line
-from workspace import worktrees_dir
+from workspace import settings_path, worktrees_dir
 from settings import load as load_settings
 from shell_setup import clean_env, login_argv, resolve
 
@@ -40,7 +43,7 @@ BOOTSTRAP = ("Read {dispatch} first. It is your entire one-shot assignment. Work
 
 
 def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type: str | None,
-            model: str, effort: str, lead: list[str] = ()) -> list[str]:
+            model: str, effort: str, lead: list[str] = (), expected_common: Path | None = None) -> list[str]:
     """A single foreground CLI invocation, without interactive plan or mailbox modes."""
     prompt = BOOTSTRAP.format(dispatch=dispatch, cwd=cwd)
     tail: list[str] = []
@@ -54,7 +57,7 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
         argv = [binary, "-a", "never", "exec", "-C", str(cwd), "--sandbox", "workspace-write",
                 # Network for fetch, push, and forge APIs; file writes stay confined.
                 "-c", "sandbox_workspace_write.network_access=true", "--ephemeral"]
-        argv += git_trees.codex_add_dir_args(cwd)
+        argv += git_trees.codex_add_dir_args(cwd, expected_common=expected_common)
     elif runtime == "cursor":
         argv = [binary, "--print", "--force", "--trust", "--workspace", str(cwd)]
     elif runtime == "agy":
@@ -67,26 +70,29 @@ def command(runtime: str, binary: str, cwd: Path, dispatch: Path, *, agent_type:
     return [argv[0], *lead, *argv[1:], *flags, *tail, prompt]
 
 
-def worker_result(path: Path, exit_code: int) -> tuple[str, str, str]:
-    """Do not infer success from the CLI exit code or a free-form final response."""
+def worker_result(path: Path, exit_code: int) -> tuple[str, str, str, dict[str, int | None]]:
+    """Return (status, reason, changes, counts); never infer success from the CLI exit code or free-form final response."""
+    counts = dict.fromkeys(dispatch_prompt.SUITE_KEYS)
     try:
         raw = path.read_text()
     except OSError as exc:
-        return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", ""
+        return "human_review", f"worker did not write a valid TOON result ({exc}); exit {exit_code}", "", counts
     try:
         data = toon_decode(raw)
     except (ToonDecodeError, ValueError, TypeError) as exc:
         try:  # some workers write JSON instead of TOON (#154); same fields either way
             data = json.loads(raw)
         except ValueError:
-            return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", ""
+            return "human_review", f"worker wrote an unreadable TOON result ({exc}); exit {exit_code}: {_brief(raw)}", "", counts
+    if isinstance(data, dict):
+        counts = dispatch_prompt.suite_counts(data)
     if not isinstance(data, dict) or data.get("status") not in ("done", "human_review", "relaunch") or any(
         not isinstance(data.get(k), str) or not data[k].strip() for k in ("reason", "changes")
     ):
-        return "human_review", f"worker result is incomplete or invalid; exit {exit_code}", ""
+        return "human_review", f"worker result is incomplete or invalid; exit {exit_code}", "", counts
     if exit_code:
-        return "human_review", f"worker exited {exit_code}: {data['reason']}", data["changes"]
-    return data["status"], data["reason"], data["changes"]
+        return "human_review", f"worker exited {exit_code}: {data['reason']}", data["changes"], counts
+    return data["status"], data["reason"], data["changes"], counts
 
 
 QUOTA_STOP = "quota stop: "
@@ -108,13 +114,8 @@ def quota_stop(log: Path, runtime: str, model: str) -> str:
             text = f.read().decode(errors="replace")
     except OSError:
         return ""
-    # One line must carry a standalone 429 (after whitespace, `=`, `(` or the line start) and the quota word; its reset text is the snippet.
-    for line in text.splitlines():
-        low = line.lower()
-        if re.search(r"(?<![^\s=(])429(?!\w)", line) and ("resource_exhausted" in low or "quota" in low):
-            reset = re.search(r"\bresets?\b(?:[^\".]|\.(?!\s|$))*(?:\.(?=\s|$))?", line, re.IGNORECASE)
-            return quota_marker(runtime, model) + (f"; {reset.group()[:80].rstrip()}" if reset else "")
-    return ""
+    reset = quota_reset(text)  # the detector lives with the model port (ledger E5)
+    return "" if reset is None else quota_marker(runtime, model) + (f"; {reset}" if reset else "")
 
 
 def _enclosing_repository(cwd: Path) -> Path | None:
@@ -128,26 +129,27 @@ def _enclosing_repository(cwd: Path) -> Path | None:
     return next((parent for parent in parents if os.path.lexists(parent / ".git")), None)
 
 
-def _git(args: list[str], tree: Path) -> tuple[subprocess.CompletedProcess[str] | None, Exception | None]:
+def _git(args: list[str], tree: Path, *, expected_common: Path | None = None) -> tuple[subprocess.CompletedProcess[str] | None, Exception | None]:
     """Keep a refused or failed view separate from Git's own exit status. Only an absent
     layout (a plain folder below a repository) resolves to the enclosing repository; an
     unreadable one is never quietly replaced with another tree's view."""
     try:
-        return git_view.run(args, tree, env=git_trees.audit_env(), timeout=15), None
-    except (git_view.Unviewable, OSError, subprocess.TimeoutExpired) as exc:
+        options = {"expected_common": expected_common} if expected_common is not None else {}
+        return git_view.run(args, tree, env=git_trees.audit_env(), timeout=15, **options), None
+    except (git_view.Unviewable, git_view.CacheError, OSError, subprocess.TimeoutExpired) as exc:
         if not isinstance(exc, git_view.NotARepository):
             return None, exc
         root = _enclosing_repository(tree)
         if root is None:
             return None, exc
         try:
-            return git_view.run(args, root, env=git_trees.audit_env(), timeout=15), None
-        except (git_view.Unviewable, OSError, subprocess.TimeoutExpired) as enclosed:
+            return git_view.run(args, root, env=git_trees.audit_env(), timeout=15, **options), None
+        except (git_view.Unviewable, git_view.CacheError, OSError, subprocess.TimeoutExpired) as enclosed:
             return None, enclosed
 
 
-def changed_files(cwd: Path) -> str:
-    out, error = _git(["status", "--short"], cwd)
+def changed_files(cwd: Path, *, expected_common: Path | None = None) -> str:
+    out, error = _git(["status", "--short"], cwd, expected_common=expected_common)
     if out is None:
         if isinstance(error, git_view.NotARepository):  # a plain folder has no change list to report (#559)
             return ""
@@ -155,8 +157,8 @@ def changed_files(cwd: Path) -> str:
     return out.stdout.strip() if out.returncode == 0 else f"git status failed: {out.stderr.strip()}"
 
 
-def git_head(cwd: Path, *, strict: bool = False) -> str | None:
-    out, error = _git(["rev-parse", "HEAD"], cwd)
+def git_head(cwd: Path, *, strict: bool = False, expected_common: Path | None = None) -> str | None:
+    out, error = _git(["rev-parse", "HEAD"], cwd, expected_common=expected_common)
     if out is not None and out.returncode == 0:
         return out.stdout.strip()
     if strict:
@@ -164,22 +166,24 @@ def git_head(cwd: Path, *, strict: bool = False) -> str | None:
             return None
         # A missing symbolic branch is unborn; other failures cannot authorize a launch.
         if out is not None:
-            ref, _ = _git(["symbolic-ref", "-q", "HEAD"], cwd)
+            ref, error = _git(["symbolic-ref", "-q", "HEAD"], cwd, expected_common=expected_common)
             if ref is not None and ref.returncode == 0 and ref.stdout.strip():
-                refs, _ = _git(["for-each-ref", "--format=%(refname)", ref.stdout.strip()], cwd)
+                refs, error = _git(["for-each-ref", "--format=%(refname)", ref.stdout.strip()], cwd, expected_common=expected_common)
                 if refs is not None and refs.returncode == 0 and not refs.stdout.strip():
                     return None
+        if isinstance(error, git_view.CacheError):
+            raise ValueError(f"git view cache configuration error: {error}") from None
         raise ValueError("tree is unreadable")
     return None
 
 
-def committed_changes(cwd: Path, before: str | None) -> str:
-    after = git_head(cwd)
+def committed_changes(cwd: Path, before: str | None, *, expected_common: Path | None = None) -> str:
+    after = git_head(cwd, expected_common=expected_common)
     if not before or before == after:
         return NO_COMMITS
     if after is None:
         return "Could not read commits: tree unreadable"
-    out, error = _git(["log", "--format=%h %s", "--stat", f"{before}..{after}"], cwd)
+    out, error = _git(["log", "--format=%h %s", "--stat", f"{before}..{after}"], cwd, expected_common=expected_common)
     if out is None:
         return "Could not read commits: tree unreadable" if isinstance(error, git_view.Unviewable) else f"Could not read commits: {error}"
     return out.stdout.strip()[:12000] if out.returncode == 0 else f"Could not read commits: {out.stderr.strip()}"
@@ -220,14 +224,21 @@ def _carried(name: str) -> re.Pattern:
     return re.compile(rf"\|\s*{re.escape(name)}\s*\|\s*open\s*\|", re.I)
 
 
-def _tree_note(root: Path, cwd: Path) -> str:
+def _tree_note(root: Path, cwd: Path, expected_common: Path | None = None) -> str:
     """How the File ownership row names the tree: relative to the Worktrees dir, as audit reads it."""
-    base = (root / worktrees_dir((root / "CLAUDE.md").read_text())).resolve()
+    claude_md = (root / "CLAUDE.md").read_text()
+    base = (root / worktrees_dir(claude_md)).resolve()
+    if expected_common is None:
+        settings = load_settings(root, settings_path(claude_md))
+        commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+        expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
     try:
         tree = str(cwd.resolve().relative_to(base))
     except ValueError:
         tree = str(cwd.resolve())
-    out, error = _git(["branch", "--show-current"], cwd)
+    out, error = _git(["branch", "--show-current"], cwd, expected_common=expected_common)
+    if isinstance(error, git_view.CacheError):
+        raise ValueError(f"git view cache configuration error: {error}") from None
     if isinstance(error, git_view.NotARepository):
         branch = ""
     elif out is None or out.returncode:
@@ -340,12 +351,18 @@ def _launch_row_running(launch: Path, task: str, name: str) -> bool:
 
 def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: int,
               before_head: str | None = None, read_only: bool = False, runtime: str = "", model: str = "",
-              *, adopted: bool = False) -> dict:
+              *, adopted: bool = False, expected_common: Path | None = None) -> dict:
+    """Reconcile a worker run against its launch day, task and tree; git violations precede suite gating; return a report with counts and evidence."""
     cfg = dispatch_prompt.config(root)
     settings = load_settings(root, cfg.settings_path)
-    status, reason, changes = worker_result(cwd / RESULT, exit_code)
-    actual = changed_files(cwd)
-    commits = committed_changes(cwd, before_head)
+    if expected_common is None:
+        commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+        expected_common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
+    status, reason, changes, counts = worker_result(cwd / RESULT, exit_code)
+    suite = "Suite: " + ", ".join(f"{key}={value if value is not None else 'missing or invalid'}"
+                                  for key, value in counts.items())
+    actual = changed_files(cwd, expected_common=expected_common)
+    commits = committed_changes(cwd, before_head, expected_common=expected_common)
     # The result lands on the day the run ends, falling back to the launch day's (#93).
     path = root / cfg.tracker_path(day)
     launch = path
@@ -363,6 +380,9 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     if status == "done" and actual:
         status = "human_review"
         reason = f"worker reported completion but the worktree is not clean: {actual}"
+    # Git/worktree violations take precedence over the suite gate.
+    if status == "done" and suite_holds(counts, require_green=settings.workers.require_green_tests):
+        status, reason = "human_review", f"suite is not green; {suite}; worker said: {reason}"
     quota = ""
     if status == "human_review" and not changes and not actual and commits == NO_COMMITS:
         # No valid result from an unchanged tree: a quota stop returns it to ready rather than holding it (#422).
@@ -384,8 +404,13 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
                 status, reason = "human_review", f"quota stop repeated: {quota[len(QUOTA_STOP):]}"
         elif any(marker in line and not line.split(marker, 1)[1].startswith(QUOTA_STOP) for line in log):
             status, reason = "human_review", f"already relaunched once today and stopped again: {reason}"
-    summary = (changes + f"\nCommits from this run:\n{commits}" +
-               (f"\nWorking tree:\n{actual}" if actual else "\nWorking tree clean"))
+    # Keep launcher evidence ahead of worker prose and reserve room for each part.
+    evidence = (f"{suite}\nCommits from this run:\n{commits[:FIELD_MAX // 4]}" +
+                (f"\nWorking tree:\n{actual[:FIELD_MAX // 4]}" if actual else "\nWorking tree clean") + "\n")
+    summary = evidence + changes[:FIELD_MAX - len(evidence)]
+    # The tracker keeps only 500 characters: its git excerpts must leave room for both facts.
+    log_summary = (f"{suite}; Commits from this run: {_brief(commits)[:100]}; " +
+                   (f"Working tree: {_brief(actual)[:100]}" if actual else "Working tree clean") + f"; {changes}")
     rows = [row for row in parse_tracker(path.read_text()).tasks if row.item.strip() == task]
     row = rows[0] if len(rows) == 1 else None
     errors = []
@@ -394,7 +419,8 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             row.kind != "running" and not (carried and row.kind == "open")):
         report = {"status": "human_review", "task": task, "worker": name, "runtime_exit": exit_code,
                   "reason": "task row changed during the one-shot run; reconcile it manually",
-                  "changes": summary, "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
+                  "changes": summary, **counts,
+                  "errors": [f"{dispatch_prompt.TRACKER_ERROR} task row changed; no issue or tracker update was made"]}
         return write_report(root, cwd, report)
     if adopted:
         # #99: the launcher died before reconciling this run; the report, the Log line and any
@@ -404,7 +430,7 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
     hold_error = ""
     if status == "human_review" and ref:
         if settings.kanban:
-            error = kanban.add_human_hold(ref, cfg.backlog, settings.kanban)
+            error = forge.add_human_hold(ref, cfg.backlog, settings.kanban)
             if error:
                 hold_error = error
                 errors.append(f"review hold: {error}")
@@ -419,30 +445,37 @@ def reconcile(root: Path, day: str, task: str, name: str, cwd: Path, exit_code: 
             if not commented.done:
                 errors.append(f"issue comment: {commented.error}")
     try:
-        update_tracker(path, task, name, cfg.user, status, reason, summary,
+        update_tracker(path, task, name, cfg.user, status, reason, log_summary,
                        tracker_write.stamp(cfg.zone), hold_error=hold_error, carried=row.kind == "open")
     except (OSError, ValueError) as exc:
         errors.append(f"{dispatch_prompt.TRACKER_ERROR} {exc}")
     report = {"status": status, "task": task, "worker": name, "runtime_exit": exit_code,
-              "reason": reason, "changes": summary, "errors": errors}
+              "reason": reason, "changes": summary, **counts, "errors": errors}
     return write_report(root, cwd, report)
+
+
+@contextmanager
+def trees_lock(trees: Path):
+    """Hold the Worktrees dir's lock: workers claim their trees under it, and cleanup removes a tree under it."""
+    lock = os.open(trees, os.O_RDONLY)
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(lock)
 
 
 @contextmanager
 def slot(trees: Path, cwd: Path, task: str, cap: int | None):
     """Claim a worker slot under the Worktrees dir's lock, so two sessions launching at once cannot both
     take the last one; release it when the run ends."""
-    lock = os.open(trees, os.O_RDONLY)
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with trees_lock(trees):
         busy = running_trees(trees)
         if cap is not None and len(busy) >= cap:
             raise ValueError(f"{len(busy)} one-shot workers running; [workers] max_concurrency is {cap} "
                              "(list them: chief-of-stuff processes --root <workspace>)")
         (cwd / PIDFILE).parent.mkdir(exist_ok=True)
         (cwd / PIDFILE).write_text(f"{os.getpid()} {task}\n")
-    finally:
-        os.close(lock)
     try:
         yield
     finally:
@@ -479,15 +512,19 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
         timeout_minutes: int = 60) -> int:
     cfg = dispatch_prompt.config(root)
     chosen_day = day or datetime.now(cfg.zone).date().isoformat()
+    settings = load_settings(root, cfg.settings_path)
     body = dispatch_prompt.compose(root, chosen_day, task, worktree=cwd, name=name,
-                                   runtime=runtime, one_shot=True)
-    workers = load_settings(root, cfg.settings_path).workers
-    program, lead = runtimes.program(runtime, workers.claude_profile)
+                                   runtime=runtime, one_shot=True, settings=settings)
+    workers = settings.workers
+    commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
+    common = next((commons[p] for p in (cwd.resolve(), *cwd.resolve().parents) if p in commons), None)
+    program, lead = runtimes.program(runtime, workers.claude_as_profile)
     binary = resolve(program)
     if not binary:
         raise ValueError(f"{program} is unavailable in the configured interactive login shell")
     dispatch = cwd / dispatch_prompt.DISPATCH_FILE
-    argv = command(runtime, binary, cwd, dispatch, agent_type=agent_type, model=model, effort=effort, lead=lead)
+    argv = command(runtime, binary, cwd, dispatch, agent_type=agent_type, model=model, effort=effort, lead=lead,
+                   expected_common=common)
     if dry_run:
         print("would run one-shot: " + " ".join(shlex.quote(x) for x in argv))
         print(f"would write: {dispatch}")
@@ -497,15 +534,15 @@ def run(*, root: Path, day: str | None, task: str, cwd: Path, name: str,
     trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
     _clear_stale_dispatch(cwd, task)
     with slot(trees, cwd, task, workers.max_concurrency):
-        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv, timeout_minutes)
+        return _launch(root, cfg, chosen_day, task, cwd, name, runtime, model, effort, body, argv, timeout_minutes, common)
 
 
 def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, runtime: str, model: str,
-            effort: str, body: str, argv: list[str], timeout_minutes: int) -> int:
+            effort: str, body: str, argv: list[str], timeout_minutes: int, expected_common: Path | None = None) -> int:
     # Same clean login-shell path as interactive sessions; auth and user PATH come from shell setup.
     # Everything that can refuse runs before anything is written; a refused row takes its dispatch back.
-    launch_argv, tree = login_argv(argv), _tree_note(root, cwd)
-    before_head = git_head(cwd, strict=True)
+    launch_argv, tree = login_argv(argv), _tree_note(root, cwd, expected_common)
+    before_head = git_head(cwd, strict=True, expected_common=expected_common)
     written = dispatch_prompt.write_dispatch(cwd, body)
     logs = cwd / dispatch_prompt.PROMPT_DIR
     try:
@@ -520,7 +557,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
     # A relaunch in a fresh tree leaves the old tree's copy; `result` would pick it by mtime. Other tasks' copies stay.
     for copy in (root / dispatch_prompt.REPORTS_DIR).glob("*.toon"):
         try:
-            if read_report(copy)["task"] == task:
+            if read_report(copy, git_trees.read_regular)["task"] == task:
                 copy.unlink()
         except UNREADABLE:
             pass
@@ -542,7 +579,7 @@ def _launch(root: Path, cfg, chosen_day: str, task: str, cwd: Path, name: str, r
                 (cwd / RESULT).unlink(missing_ok=True)
             exit_code = _run_worker(cwd, logs, launch_argv, env, task, timeout_minutes * 2)
     report = reconcile(root, chosen_day, task, name, cwd, exit_code, before_head, runtime=runtime, model=model,
-                       read_only=dispatch_prompt.READ_ONLY in body.splitlines())  # held to what it was told
+                       read_only=dispatch_prompt.READ_ONLY in body.splitlines(), expected_common=expected_common)  # held to what it was told
     print(toon_encode(report))
     return 0 if report["status"] == "done" and not report["errors"] else 1
 
@@ -615,6 +652,8 @@ def adopt(root: Path, day: str | None = None) -> list[dict]:
     the next sweep adopts it. The day is a tracker day, not the zone's today; with none given,
     adoption looks back through ADOPT_LOOKBACK days."""
     cfg = dispatch_prompt.config(root)
+    settings = load_settings(root, cfg.settings_path)
+    commons = git_trees.trusted_commons([root / path for path in settings.repos.values()])
     trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
     days = [day] if day else [(datetime.now(cfg.zone).date() - timedelta(days=n)).isoformat()
                               for n in range(ADOPT_LOOKBACK)]
@@ -632,5 +671,6 @@ def adopt(root: Path, day: str | None = None) -> list[dict]:
         body = stale.read_text() if stale.is_file() else ""
         # The dispatch is the launcher's own writing, so its Read-only line is trusted (#57).
         adopted.append(reconcile(root, row_day, task, name, cwd, 0,
-                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True))
+                                 read_only=dispatch_prompt.READ_ONLY in body.splitlines(), adopted=True,
+                                 expected_common=commons.get(cwd.resolve())))
     return adopted

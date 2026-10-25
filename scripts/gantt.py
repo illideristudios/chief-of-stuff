@@ -42,6 +42,10 @@ class Row:
     href: str = ""  # where the ref links, if anywhere
     ref_title: str = ""
 
+    @property
+    def label(self) -> str:
+        return f"{self.ref} {self.name}".strip()
+
 
 @dataclass(frozen=True)
 class Window:
@@ -92,7 +96,7 @@ def _bar(g: Segment, win: Window) -> str:
     def clock(at: datetime) -> str:
         return at.strftime("%a %H:%M" if win.end - win.start > DAY or at.date() != win.now.date() else "%H:%M")
 
-    label = _esc(" · ".join(p for p in (f"{g.category} {clock(g.start)}–{clock(g.end)}", g.title, g.kind) if p))
+    label = _esc(" · ".join(p for p in (f"{g.category} {clock(g.start)}–{clock(g.end)}", g.title, "needs input" if g.kind == "hold" else g.kind) if p))
     return (f'<span class="gantt-bar gantt-{_kind(g.kind)}" data-cat="{_esc(g.category)}" tabindex="0" role="img" '
             f'aria-label="{label}" title="{label}" style="{place(g.start, g.end, win.start, win.end)}"></span>')
 
@@ -124,9 +128,9 @@ def render(rows: list[Row], win: Window, ticks: list[tuple[datetime, str]] | Non
 
 
 def legend(colors: dict[str, str | tuple[str, str]] = PALETTE, kinds: tuple[str, ...] = ("forecast", "hold")) -> str:
-    """One swatch per category, then one per kind other than solid."""
+    """One swatch per category, then one per kind other than solid; `hold` displays as `needs input`."""
     keys = [f'<span class="gantt-bar gantt-done" data-cat="{_esc(c)}"></span>{_esc(c)}' for c in colors]
-    keys += [f'<span class="gantt-bar gantt-{_kind(k)}"></span>{_esc(k)}' for k in kinds]
+    keys += [f'<span class="gantt-bar gantt-{_kind(k)}"></span>{_esc("needs input" if k == "hold" else k)}' for k in kinds]
     return '<div class="gantt-legend">' + "".join(f'<span class="gantt-key">{k}</span>' for k in keys) + "</div>"
 
 
