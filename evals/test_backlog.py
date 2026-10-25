@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import backlog as bl  # noqa: E402
+import backlog_ref  # noqa: E402
 
 TOKEN = "glpat-test-not-a-real-token"
 
@@ -669,6 +670,20 @@ class IssueRefTest(unittest.TestCase):
         self.assertEqual(ref.url, f"https://github.com/{REPO}/issues/9")
         self.assertEqual(ref.label(GH), "#9")
         self.assertEqual(ref.label(bl.GitHubBacklog("o/n")), f"{REPO}#9")
+
+    def test_store_label_reads_a_home_key_as_a_number(self):
+        # #903: a store key labels like IssueRef.label. Home is `#N`; another project names itself; no home drops only the forge prefix.
+        gl = bl.Backlog(host="https://gl.example", project="g/p")
+        self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", GH), "#9")
+        self.assertEqual(backlog_ref.store_label("github:o/n#9", GH), "o/n#9")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/g/p#5", gl), "#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", gl), "gl.example/acme/web#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl2.example/g/p#5", gl), "gl2.example/g/p#5")
+        self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", None), f"{REPO}#9")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", None), "gl.example/acme/web#5")
+        for cell in ("workflow", "#7", "https://github.com/o/n/issues/7"):
+            with self.subTest(cell=cell):
+                self.assertEqual(backlog_ref.store_label(cell, GH), cell)
 
 
 class ParseIssueArgTest(unittest.TestCase):
