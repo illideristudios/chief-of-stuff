@@ -816,8 +816,65 @@ class ReconcileTest(unittest.TestCase):
                          [reconcile.Dispatch(KEY, "implement", "builder", 2)])
 
     def test_human_review_segment_retries_current_stage_after_hold_is_cleared(self):
-        self.assertEqual(self.plan(history=[Segment("implement", outcome="human_review")]),
+        self.assertEqual(self.plan(history=[Segment("implement", outcome="human_review")],
+                                   facts=self.released_facts(False)),
                          [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+
+    def released_facts(self, product=True, observed=False, attempt=1, **kwargs):
+        return reconcile.Facts(hold_observations=((KEY, observed),),
+                               implementation_requests=(((KEY, "implement", attempt), product),),
+                               claims=(readiness.Claim(KEY, "src/"),), blockers=(), **kwargs)
+
+    def test_released_implementation_follows_success_edge(self):
+        history = [Segment("implement", outcome="human_review")]
+        self.assertEqual(self.plan(history=history, facts=self.released_facts()), [reconcile.Review(KEY, 1)])
+        self.assertEqual(history[0].outcome, "human_review")
+        self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(policy.Edge("implement", "plan"),))
+        self.p.stages["plan"] = policy.Place("plan", persona="builder")
+        self.assertEqual(self.plan(history=history, facts=self.released_facts()),
+                         [reconcile.Dispatch(KEY, "plan", "builder", 1)])
+
+    def test_released_implementation_still_obeys_gates_and_slots(self):
+        history = [Segment("implement", outcome="human_review")]
+        self.assertEqual(self.plan(history=history, facts=self.released_facts(), slots=0),
+                         [reconcile.Wait(KEY, "no free worker slots")])
+        self.p = replace(self.p, base=policy.Policy(zach_gates=("plan",)))
+        self.assertIsInstance(self.plan(history=history, facts=self.released_facts())[0], reconcile.Ask)
+
+    def test_released_implementation_waits_for_current_evidence(self):
+        history = [Segment("implement", outcome="human_review")]
+        for facts in (None, reconcile.Facts(), self.released_facts(observed=None),
+                      self.released_facts(observed=True), self.released_facts(product=None),
+                      self.released_facts(attempt=2)):
+            with self.subTest(facts=facts):
+                self.assertIsInstance(self.plan(history=history, facts=facts)[0], reconcile.Wait)
+
+    def test_release_cannot_accept_a_suite_hold_or_override_a_local_hold(self):
+        history = [Segment("implement", outcome="human_review")]
+        self.assertEqual(self.plan(history=history, facts=self.released_facts(suite_holds=(KEY,))),
+                         [reconcile.Wait(KEY, "suite hold acceptance pending")])
+        self.assertEqual(self.plan(item=replace(Item(), human_review=True), history=history,
+                                   facts=self.released_facts()), [reconcile.Wait(KEY, "human review")])
+
+    def test_request_does_not_accept_other_outcomes_stages_or_old_attempts(self):
+        for outcome in ("failed", "blocked", "quota", "unknown", None):
+            with self.subTest(outcome=outcome):
+                self.assertEqual(self.plan(history=[Segment("implement", outcome=outcome)], facts=self.released_facts()),
+                                 [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        self.assertEqual(self.plan(item=replace(Item(), stage="review"),
+                                   history=[Segment("review", outcome="human_review")], facts=self.released_facts()),
+                         [reconcile.Review(KEY, 2)])
+        history = [Segment("implement", outcome="human_review"),
+                   Segment("review", started_at=NOW-timedelta(minutes=30))]
+        self.assertEqual(self.plan(history=history, facts=self.released_facts()),
+                         [reconcile.Dispatch(KEY, "implement", "builder", 2)])
+        self.assertEqual(self.plan(history=[Segment("implement", ended_at=None, outcome="human_review")],
+                                   facts=self.released_facts()), [])
+        self.assertEqual(self.plan(item=replace(Item(), forge_state="closed"),
+                                   history=[Segment("implement", outcome="human_review")], facts=self.released_facts()), [])
+        history = [Segment("implement", outcome="human_review"), Segment("review")]
+        self.assertEqual(self.plan(history=history, facts=self.released_facts()),
+                         [reconcile.Wait(KEY, "segments tie at the latest start")])
 
     def test_segment_without_outcome_retries_current_stage_instead_of_advancing(self):
         self.assertEqual(self.plan(history=[Segment("implement", outcome=None)]),

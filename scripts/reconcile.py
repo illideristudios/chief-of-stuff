@@ -205,6 +205,9 @@ class Facts:
     suites: tuple[tuple[tuple[str, str, int], tuple], ...] = ()  # (issue, stage, attempt) → (counts, summary)
     require_green: bool = False
     scope_pending: tuple[str, ...] = ()  # issues whose plan's file_ownership proposal awaits the trio or the owner
+    hold_observations: tuple[tuple[str, bool | None], ...] = ()  # fresh forge flags; omitted is unknown
+    implementation_requests: tuple[tuple[tuple[str, str, int], bool | None], ...] = ()
+    suite_holds: tuple[str, ...] = ()  # suite acceptance belongs to its own publication/release lifecycle
 
 
 def _time(value: datetime | str) -> datetime:
@@ -461,7 +464,17 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, workflow, history, policies, room)
-    if latest.outcome != "done":
+    accepted = False
+    if stage == "implement" and latest.outcome == "human_review":
+        if facts is not None and key in facts.suite_holds:
+            return Wait(key, "suite hold acceptance pending")
+        if facts is None or dict(facts.hold_observations).get(key) is not False:
+            return Wait(key, "implementation hold release is unobserved")
+        product = dict(facts.implementation_requests).get((key, stage, latest.attempt))
+        if product is None:
+            return Wait(key, "implementation request evidence is unknown")
+        accepted = product is True
+    if latest.outcome != "done" and not accepted:
         return _work(key, stage, workflow, history, policies, room)
     blocking = False
     if stage == "review":
