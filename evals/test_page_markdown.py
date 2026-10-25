@@ -94,6 +94,10 @@ class MarkdownTest(unittest.TestCase):
             self.assertNotIn('href="javascript:', html)
             self.assertIn('&lt;script&gt;', html)
 
+    def test_a_bare_html_comment_stays_escaped_in_markdown_blocks(self):
+        html = page_common.markdown_blocks('<!-- codex-code-review-finding:v1 -->')
+        self.assertIn('&lt;!--', html)
+
     def test_forge_references_do_not_rewrite_links_or_fences(self):
         html = dp._md('**#12** and `src/app.py:3` [#12](https://example.com/#12) <https://example.com/#12>', dp.Linker(GH))
         self.assertEqual(html.count('class="ref"'), 2)
