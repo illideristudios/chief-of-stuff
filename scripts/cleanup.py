@@ -36,7 +36,7 @@ from git_trees import audit_env, clean, discover, git, read_state, trusted_commo
 from one_shot import launcher_copy, trees_lock  # noqa: E402
 from process_status import PIDFILE, check, one_shot_runs, registrations  # noqa: E402
 from store import Store, WorkItem  # noqa: E402
-from tree_state import at_risk, unsaved  # noqa: E402
+from tree_state import at_risk, cursor_channel_only, unsaved  # noqa: E402
 from settings import SettingsError, load as load_settings  # noqa: E402
 from workspace import settings_path, worktrees_dir  # noqa: E402
 
@@ -75,6 +75,12 @@ def git_guards(tree: Path, expected_common: Path | None = None) -> list[str]:
             code, status = git(["status", "--porcelain", "--ignored"], tree, view)
             flags_code, _ = git(["ls-files", "-v"], tree, view)
             state = read_state(tree, view)
+            lost = unsaved(status) if not code else ()
+            if ".cursor/" in lost or ".cursor" in lost:
+                cursor_code, cursor_status = git(
+                    ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ".cursor"], tree, view)
+                if not cursor_code and cursor_channel_only(cursor_status):
+                    lost = tuple(path for path in lost if path not in (".cursor/", ".cursor"))
     except git_view.CacheError as exc:
         return [f"git view cache configuration error: {exc}"]
     except (git_view.Unviewable, RuntimeError, ValueError, OSError, subprocess.SubprocessError):
@@ -83,7 +89,6 @@ def git_guards(tree: Path, expected_common: Path | None = None) -> list[str]:
         return ["git status --ignored is unreadable"]
     if flags_code:
         return ["git ls-files -v is unreadable"]
-    lost = unsaved(status)
     out = [f"{len(lost)} unsaved by git status --ignored ({', '.join(lost[:3])})"] if lost else []
     hidden = view.hidden_index_entries
     if hidden:
