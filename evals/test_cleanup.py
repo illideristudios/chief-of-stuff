@@ -248,6 +248,39 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual([entry.message for entry in self.store.log(key)],
                          [f"keep done — {key} is not finished", "wait: human review"])
 
+    def test_changing_process_pids_and_count_keeps_one_history_step(self) -> None:
+        tree = self.trees / "done"
+        for current in ([(12345, tree), (12346, tree / "node_modules")], [(23456, tree)]):
+            with mock.patch.object(cleanup, "processes", return_value=current):
+                code, out = self.run_cleanup("--remove")
+            self.assertEqual(code, 0, out)
+            self.assertTrue(tree.is_dir())
+        messages = [entry.message for entry in self.store.log(f"{KEY}-done")]
+        self.assertEqual(messages, ["keep done — live process in tree"])
+
+    def test_several_processes_add_one_claim_without_pids(self) -> None:
+        tree = self.trees / "done"
+        current = [(os.getpid(), tree), (12345, tree), (12346, tree / "node_modules"),
+                   (12347, self.trees / "done-other")]
+        with mock.patch.object(cleanup, "processes", return_value=current):
+            self.assertEqual(cleanup.claims(self.root, self.trees, tree), ["live process in tree"])
+
+    def test_process_replaced_by_uncommitted_work_adds_a_history_step(self) -> None:
+        tree = self.trees / "done"
+        with mock.patch.object(cleanup, "processes", return_value=[(12345, tree)]):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        (tree / "notes.md").write_text("unfinished work\n")
+        with mock.patch.object(cleanup, "processes", return_value=[]):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        messages = [entry.message for entry in self.store.log(f"{KEY}-done")]
+        self.assertEqual(len(messages), 2)
+        self.assertEqual(messages[0], "keep done — live process in tree")
+        self.assertIn("uncommitted", messages[1])
+        self.assertNotIn("live process in tree", messages[1])
+        self.assertTrue(tree.is_dir())
+
     def test_changed_cleanup_results_and_removal_still_log(self) -> None:
         key = f"{KEY}-done"
         self.finish("done", state="open")
@@ -534,7 +567,7 @@ class CleanupTest(unittest.TestCase):
             with self.subTest(cwd=cwd):
                 self.lsof.return_value = subprocess.CompletedProcess(["lsof"], 0, f"p12345\nfcwd\nn{cwd}\n", "")
                 _, out = self.run_cleanup("--remove")
-                self.assertIn("live process in tree (pid 12345)", self.kept(out).get("done", out))
+                self.assertIn("live process in tree", self.kept(out).get("done", out))
                 self.assertTrue(tree.is_dir())
         self.lsof.assert_called_with(["lsof", "-a", "-d", "cwd", "-Fpn"],
                                      capture_output=True, text=True, timeout=cleanup.TIMEOUT)
@@ -604,7 +637,7 @@ class CleanupTest(unittest.TestCase):
 
         with mock.patch.object(cleanup, "trees_lock", launch_then_lock):
             _, out = self.run_cleanup("--remove")
-        self.assertIn("live process in tree (pid 12345)", self.kept(out).get("done", out))
+        self.assertIn("live process in tree", self.kept(out).get("done", out))
         self.assertTrue(tree.is_dir())
 
     def test_a_reused_pid_is_not_a_live_worker(self) -> None:
