@@ -11,7 +11,7 @@
       "tool": "Read",
       "input_match": "\"file_path\": \"[^\"\\n]*skills/review-pipeline/SKILL\\.md\"",
       "min": 1,
-      "before": "\\A(?=[\\s\\S]*\"(?:to|recipient)\": \"[^\"\\n]+\")[\\s\\S]*\"(?:text|content)\": \"|\"(?:session_id|session_ref|session)\": \"[^\"\\n]+\""
+      "before": "\\A(?=[\\s\\S]*\"(?:to|recipient)\": \"[^\"\\n]+\")[\\s\\S]*\"(?:text|content)\": \""
     },
     {
       "name": "R1 is sent for a fix (one send per fix is fine)",

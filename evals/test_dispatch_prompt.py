@@ -578,9 +578,9 @@ class PromptCharacterBoundsTest(unittest.TestCase):
         self.assertLessEqual(len(body), dp.BODY_CAP)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
-        item = "Security audit " + ("x" * 2600)
-        chk = "Checklist: " + ("y" * 2600)
-        owns = "`src/" + ("z" * 2600) + "`"
+        item = "Security audit " + ("x" * 2380)
+        chk = "C" + ("y" * 2399)
+        owns = "`" + ("z" * 2398) + "`"
         oversized_tracker = f"""# Tracker 2026-09-18
 ## Tasks
 | item | owner | state | since | due | checklist |
@@ -596,9 +596,13 @@ class PromptCharacterBoundsTest(unittest.TestCase):
 - 09:00 opened
 """
         (self.root / "daily" / "2026-09-18-tracker.md").write_text(oversized_tracker)
-        with self.assertRaises(dp.RefusedError) as ctx:
-            dp.compose(self.root, "2026-09-18", item)
-        self.assertIn(f"over the {dp.BODY_CAP} cap", str(ctx.exception))
+        worktree = self.root / "trees" / "task"
+        worktree.mkdir(parents=True)
+        body = dp.compose(self.root, "2026-09-18", item, worktree=worktree, name="impl01", runtime="codex")
+        with mock.patch.object(dp, "BODY_CAP", len(body) - 1):
+            with self.assertRaises(dp.RefusedError) as ctx:
+                dp.compose(self.root, "2026-09-18", item, worktree=worktree, name="impl01", runtime="codex")
+        self.assertIn(f"over the {len(body) - 1} cap", str(ctx.exception))
 
 
 class CoordinatorPromptWorkflowTest(unittest.TestCase):

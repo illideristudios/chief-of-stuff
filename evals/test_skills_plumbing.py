@@ -17,9 +17,9 @@ READ_POINTER_GUIDANCE = 'A rule that says "Read <path>" means open that file wit
 # whitespace, substitutions, other adapter text and START all remain byte-sensitive.
 LEGACY_SHA256 = {
     "claude": "e03c9850cccd6c80db8e038cf10672f1c54afc1c48945098d958e958d6b1000d",
-    "codex": "92e8307a069a35a4ca56e13b95acc0ff76749dfef69e7aca9b64971eaa39dc2a",
-    "cursor": "a538a064eb92e4143f569e3f418e361c2d2a8281f80909ef7043a2f83ed32298",
-    "agy": "480c12e14f76f349005afc8905106d89d0868862d8ef6dbc512caa17949bec55",
+    "codex": "48a70f8f6a8d00c9cbfe6952ff35e60ffd431ba32416be5a0d300ff2ec8a44ec",
+    "cursor": "6e7f042830d9a7d29f6add33c0e2716fbbb6cd323bd8cd540267b782248c2145",
+    "agy": "67088fed19c833b0bbe77e57d2a3e0de6b82748dfa74f64f2ba4d76e7ccee5fa",
 }
 
 

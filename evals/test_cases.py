@@ -2092,8 +2092,8 @@ class CaseLintTest(unittest.TestCase):
                         "find . -name '*.toon' -exec cat {} +", "find trees -name '*.toon' | xargs cat", "cat reports/rate-limit.toon"):
             self.assertTrue(hit(shell, command), command)
         for command in ("chief-of-stuff result --root . --task 'Rate limit headers'", "cat daily/tracker.md", "chief-of-stuff tracker tasks --not done",
-                        "cat trees/rate-limit/src/a/headers.py", "ls trees", "cat .chief-of-stuff/reports/notes.md", "git -C trees/rate-limit status",
-                        "chief-of-stuff processes --root .", "cat chief-of-stuff.toml", "ls .chief-of-stuff/reports/*.md",
+                        "cat trees/rate-limit/src/a/headers.py", "ls trees", "cat .chief-of-stuff/mailbox/notes.md", "git -C trees/rate-limit status",
+                        "chief-of-stuff processes --root .", "cat chief-of-stuff.toml", "ls .chief-of-stuff/mailbox/*.md",
                         "chief-of-stuff tracker --root . tasks"):
             self.assertFalse(hit(shell, command), command)
         for path in ("/w/trees/rate-limit/.chief-of-stuff/one-shot-report.toon", "trees/rate-limit/.chief-of-stuff/worker-stdout.log",
@@ -2109,10 +2109,10 @@ class CaseLintTest(unittest.TestCase):
                            {"pattern": "reason", "glob": "*.toon"}, {"pattern": "reason", "path": "trees/*/.chief*"},
                            {"pattern": "reason", "path": "/w", "glob": "**/.chief-of-stuff/**"}):
             self.assertTrue(grader_hits(files, "Grep", **tool_input), tool_input)
-        for tool_input in ({"pattern": "reason", "path": ".chief-of-stuff/reports"}, {"pattern": "reason", "glob": "*.md"},
+        for tool_input in ({"pattern": "reason", "path": ".chief-of-stuff/mailbox"}, {"pattern": "reason", "glob": "*.md"},
                            {"pattern": "reason", "path": "daily"}):
             self.assertFalse(grader_hits(files, "Grep", **tool_input), tool_input)
-        for path in ("daily/2026-10-06-tracker.md", "trees/rate-limit/src/a/headers.py", ".chief-of-stuff/reports/a.md", "CLAUDE.md"):
+        for path in ("daily/2026-10-06-tracker.md", "trees/rate-limit/src/a/headers.py", ".chief-of-stuff/mailbox/a.md", "CLAUDE.md"):
             self.assertFalse(grader_hits(files, "Read", file_path=path), path)
         self.assertFalse(grader_hits(files, "Edit", file_path="trees/rate-limit/.chief-of-stuff/one-shot-report.toon"))  # tool name must match
 
