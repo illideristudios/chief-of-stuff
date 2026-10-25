@@ -272,8 +272,18 @@ def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: i
 
 
 def _render_store_decisions(decisions: list, home=None) -> str:
+    """Open and blocked decisions under a heading; answered ones folded below them, still reversible (#971)."""
     if not decisions:
         return ""
+    live = [d for d in decisions if state_of(d).status in ("open", "blocked")]
+    done = [d for d in decisions if state_of(d).status not in ("open", "blocked", "superseded")]
+    title = f"Decisions · {len(live)} open" if live else "Decisions · none open"
+    fold = (f'<details class="decisions-answered"><summary>{len(done)} answered</summary>\n'
+            f'{_decision_items(done, home)}\n</details>\n') if done else ""
+    return f'<div class="board-decisions">\n<h3>{title}</h3>\n{_decision_items(live, home)}\n{fold}</div>\n'
+
+
+def _decision_items(decisions: list, home=None) -> str:
     items: list[str] = []
     for d in decisions:
         st_name = state_of(d).status
@@ -300,7 +310,7 @@ def _render_store_decisions(decisions: list, home=None) -> str:
             f'{badge} <a href="{_esc(issue_href(d.issue_key))}">{_esc(store_label(d.issue_key, home))}</a> '
             f'<strong>{_esc(d.question)}</strong>{ans}{form}</div>'
         )
-    return '<div class="board-decisions">\n' + "\n".join(items) + "\n</div>\n"
+    return "\n".join(items)
 
 
 def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kanban | None,
@@ -444,7 +454,9 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     tiles = flow_tiles(len(tasks), len(held),
                        sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned))
 
-    return f"""<meta charset="utf-8">
+    return f"""<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Board {today.isoformat()}</title>
 <link rel="stylesheet" href="{FONTS}">
@@ -471,6 +483,17 @@ html{{scroll-behavior:auto}}
 section{{margin-top:0}}
 figure{{margin:0;padding:0;background:none;border:0}}
 @media (max-width:420px){{body{{padding:12px 12px 36px}}}}
+.board-decisions{{margin-top:24px;border-top:1px solid var(--line);padding-top:8px}}
+.board-decisions h3{{font-family:"Cormorant SC","Cormorant Garamond",Georgia,serif;font-size:15px;letter-spacing:.08em;margin:4px 0 8px}}
+.decision-item{{background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:0 0 6px}}
+.decision-badge{{font-size:11px;letter-spacing:.06em;padding:1px 6px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}}
+.decision-badge.open,.decision-badge.blocked{{border-color:var(--dl);color:var(--dl)}}
+.decision-answer{{color:var(--muted)}}
+.decision-form{{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}}
+.decision-form :is(input,button){{font:14px/1.4 "Alegreya Sans","Gill Sans",system-ui,sans-serif}}
+.decision-form input[type=text]{{flex:1 1 140px;padding:3px 6px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px}}
+.decision-form button{{padding:3px 10px;background:var(--surface);color:var(--fg);border:1px solid var(--brass);border-radius:3px;cursor:pointer}}
+.decisions-answered>summary{{cursor:pointer;color:var(--muted);margin:8px 0}}
 </style>
 <body>
 <div class="board" data-rendered-at="{_iso(now)}" data-tz="{_esc(cfg.tz)}" data-deadline="{_iso(nearest.at)}" data-deadline-name="{_esc(nearest.name)}">
