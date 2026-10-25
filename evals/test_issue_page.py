@@ -901,5 +901,35 @@ class DoneClockAfterMidnightTest(unittest.TestCase):
         self.assertRegex(flow, r"(?i)\bWorked\s+2h10m\s+of\s+3h58m\s+elapsed\s*·\s*1h48m\s+waiting\b", flow)
 
 
+def history_whens(html: str) -> list[str]:
+    """Clock texts in How it got here. Workers reuse `when` for durations in another section."""
+    return re.findall(r'<span class="when">([^<]*)</span>', section(html, "How it got here"))
+
+
+class HistoryDayTest(unittest.TestCase):
+    """A step that falls today still names its weekday, so it is not read as the previous step's day (#998)."""
+
+    def test_tracker_history_names_the_weekday_on_todays_steps(self):
+        whens = history_whens(page())
+        self.assertEqual(whens, ["Fri 22:00", *(f"Sat {t}" for t in TIMELINE[1:])])
+        self.assertTrue(all(re.fullmatch(r"[A-Z][a-z]{2} \d{2}:\d{2}", w) for w in whens))
+
+    def test_store_history_names_the_local_weekday_across_midnight(self):
+        # 04:51Z is Monday 23:51 in Chicago; 06:10Z and 07:51Z are Tuesday there. Formatting the UTC date would say Tuesday for the first.
+        import shutil
+        from test_m6_store_board import KEY, make_store_workspace
+
+        now = datetime(2026, 10, 20, 2, 51, tzinfo=CT)
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        db.upsert_item(KEY, title="First repository", stage="review")
+        db.add_log(KEY, "monday night", "2026-10-20T04:51:00+00:00")
+        db.add_log(KEY, "tuesday early", "2026-10-20T06:10:00+00:00")
+        db.add_log(KEY, "tuesday now", "2026-10-20T07:51:00+00:00")
+        html = ip.render(12, [], bs.EMPTY, now, db=task_forge.page_data(db))
+        self.assertEqual(history_whens(html), ["Mon 23:51", "Tue 01:10", "Tue 02:51"])
+
+
 if __name__ == "__main__":
     unittest.main()
