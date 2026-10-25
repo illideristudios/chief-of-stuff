@@ -1005,6 +1005,37 @@ class Forge:
         except (RuntimeError, ValueError, KeyError, TypeError, AttributeError):
             return None
 
+    def requests_for_commit(self, sha: str) -> list[tuple[str, str]]:
+        """Requests the forge associates with `sha`, as (merge commit, created_at). #949.
+
+        Read from the forge's record (GitHub commits/{sha}/pulls, GitLab commits/:sha/merge_requests), never from a
+        commit subject. A request with no merge commit is omitted. Unreadable, truncated, or a merge commit with no
+        creation time raises ForgeError, so the post-run check holds."""
+        if not isinstance(sha, str) or re.fullmatch(r"[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?", sha) is None:
+            raise ForgeError("commit requests: unreadable sha")
+        try:
+            # shortcut: first 100 associated requests; a commit on more than that holds. Page if one ever is.
+            named = quote(sha, safe="")
+            path = (f"commits/{named}/pulls?per_page=100" if self.github else
+                    f"repository/commits/{named}/merge_requests?per_page=100")
+            rows = self._pipeline_read(path)
+            if not isinstance(rows, list) or len(rows) >= 100 or any(not isinstance(row, dict) for row in rows):
+                raise ValueError("expected a complete list of requests for the commit")
+            found = []
+            for row in rows:
+                merge = row.get("merge_commit_sha")
+                if not isinstance(merge, str) or not merge:
+                    continue
+                created = row.get("created_at")
+                if not isinstance(created, str) or not created.strip():
+                    raise ValueError("a request has a merge commit and no creation time")
+                found.append((merge, created))
+            return found
+        except ForgeError:
+            raise
+        except (RuntimeError, ValueError, KeyError, TypeError, AttributeError) as exc:
+            raise ForgeError(f"commit requests: {exc}") from exc
+
     def create_issue(self, title: str, body: str = "", labels: tuple[str, ...] = (), parent: int | None = None,
                      blocked_by: tuple[int, ...] = (), commit: bool = False) -> backlog.Written:
         return backlog.create(self.home, title, body=body, labels=labels, token=self.token, commit=commit, gh=self.gh,
