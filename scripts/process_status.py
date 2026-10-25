@@ -12,8 +12,10 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 
 import runtimes
@@ -68,6 +70,70 @@ def process_exists(pid: int) -> bool:
         return True
     except (ProcessLookupError, OverflowError):  # OverflowError: a pid too large for the OS is no process
         return False
+
+
+def identity(pid: int, session_id: str, *, host: bool = False) -> str | None:
+    """A live process's birth time, only when its command carries this run's session id (#53, #551).
+
+    An unavailable process view raises: it must never count as verified or as proof of completion.
+    """
+    if not process_exists(pid):
+        return None
+    try:
+        probe = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "stat=,lstart=,command="],
+                               capture_output=True, text=True, timeout=3)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ps timed out verifying worker identity") from exc
+    if probe.returncode and not probe.stdout.strip():
+        if not process_exists(pid):
+            return None
+        raise RuntimeError("ps cannot verify worker identity")
+    fields = probe.stdout.strip().split(None, 6)
+    if len(fields) != 7:
+        raise RuntimeError("ps returned no worker identity")
+    if fields[0].startswith("Z") or session_id not in fields[6].split():
+        return None
+    if host and "-lic" in fields[6].split()[:3]:
+        return None  # shell setup is not a started host; wait for its exec
+    return " ".join(fields[1:6])
+
+
+def carriers(session_id: str) -> list[int]:
+    """Every live process whose command carries `session_id` as its own token (#901): a run's host and whatever it
+    re-exec'd or forked, even into another process group or after its parent exited. Every engine launch puts the
+    session id in its argv. An unavailable process view raises: it must never read as "none left"."""
+    try:
+        probe = subprocess.run(["ps", "-ww", "-A", "-o", "pid=,stat=,command="], capture_output=True, text=True, timeout=5)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("ps timed out listing processes") from exc
+    if probe.returncode:
+        raise RuntimeError("ps cannot list processes")
+    found = []
+    for line in probe.stdout.splitlines():
+        fields = line.split(None, 2)
+        if (len(fields) == 3 and fields[0].isdigit() and not fields[1].startswith("Z")
+                and session_id in fields[2].split() and int(fields[0]) != os.getpid()):
+            found.append(int(fields[0]))
+    return found
+
+
+def stop_session(session_id: str, grace: float = 5.0) -> None:
+    """Stop every live process of a run, by its session id (#901): a refused start must leave no host behind, whatever
+    group the host is in. Raises when one survives SIGKILL."""
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        live = carriers(session_id)
+        if not live:
+            return
+        for pid in live:
+            try:
+                os.kill(pid, sig)
+            except ProcessLookupError:
+                pass
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline and carriers(session_id):
+            time.sleep(0.05)
+    if live := carriers(session_id):
+        raise RuntimeError(f"processes {', '.join(map(str, live))} of session {session_id} survived SIGKILL")
 
 
 def pidfile_runs(trees: Path) -> list[tuple[Path, int, str]]:

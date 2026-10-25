@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -68,6 +69,50 @@ SETTLED_ASK_GRANT_PATTERN = (
 REPOS_RULE = "`<repo>` is the repository's checkout directory; when the settings' `[repos]` table names that repository, pass the name instead."
 
 
+RETIRED_PROVIDER = "rail" + "way"  # split so this file also meets #726's grep acceptance
+
+
+SOURCE_DIRS = (".claude-plugin", ".github", "agents", "architecture", "assets", "docs", "evals", "guard", "hooks",
+               "scripts", "skills")
+
+
+def retired_provider_files(root: Path) -> list[str]:
+    """Tracked source files that name the retired provider. History (docs/archive, run output) is out of scope."""
+    # shortcut: a new top-level source directory must be added to SOURCE_DIRS; CI copies a worktree without
+    # its git directory, so `git ls-files` is not available there. Every top-level file is scanned.
+    results = root / "evals/results"
+    paths = [p for p in root.iterdir() if p.is_file()] + [q for d in SOURCE_DIRS if (root / d).is_dir() for q in (root / d).rglob("*")]
+    found = []
+    for path in paths:
+        rel = path.relative_to(root)
+        if (not path.is_file() or "__pycache__" in rel.parts or rel.parts[:2] == ("docs", "archive")
+                or path.name in {".DS_Store", ".git"} or path.suffix in {".pyc", ".log"}
+                or (results in path.parents and path.name != "PROGRESS.md")):
+            continue
+        try:
+            hit = RETIRED_PROVIDER.encode() in path.read_bytes().lower()
+        except OSError:  # vanished or unreadable between the walk and the read
+            continue
+        if hit:
+            found.append(rel.as_posix())
+    return sorted(found)
+
+
+GUARD_EXAMPLE_GLOBS = ("scripts/guard_*.py", "evals/test_guard_*.py", "evals/test_cases.py")
+
+
+def guard_example_files(root: Path) -> list[str]:
+    return sorted(p.relative_to(root).as_posix() for pattern in GUARD_EXAMPLE_GLOBS for p in root.glob(pattern))
+
+
+def guard_runtime_hits(root: Path) -> list[str]:
+    """`path:line:match` for each real container runtime name in a guard example file."""
+    runtimes = "|".join(("dock" + "er", "pod" + "man"))
+    return [f"{rel}:{n}:{m.group(0)}" for rel in guard_example_files(root)
+            for n, line in enumerate((root / rel).read_text(encoding="utf-8").splitlines(), 1)
+            if (m := re.search(rf"\b(?:{runtimes})\b", line, re.I))]
+
+
 def grader_hits(g: dict, tool: str, **tool_input) -> bool:
     """Whether a tool_use grader's `tool` and `input_match` fire on a call, as run.py matches them."""
     return bool(re.fullmatch(g["tool"], tool) and re.search(g["input_match"], json.dumps(tool_input)))
@@ -100,6 +145,144 @@ def fixture_files(case: Path, suffix: str) -> list[Path]:
 
 
 class CaseLintTest(unittest.TestCase):
+    def test_guard_examples_use_no_real_container_runtime(self):
+        # Architecture §11: launcher examples use invented names, including in guard tests.
+        self.assertEqual(guard_runtime_hits(EVALS.parent), [])
+
+    def test_guard_example_scan_covers_the_known_guard_files(self):
+        self.assertLessEqual({"scripts/guard_commands.py", "evals/test_guard_commands.py", "evals/test_cases.py"},
+                             set(guard_example_files(EVALS.parent)))
+
+    def test_guard_runtime_lint_rejects_known_runtimes_in_any_guard_file_and_case(self):
+        planted = ("scripts/guard_commands.py", "scripts/guard_new.py", "evals/test_guard_commands.py",
+                   "evals/test_guard_new.py", "evals/test_cases.py")
+        for runtime in ("dock" + "er", "pod" + "man"):
+            for name in (runtime, runtime.title(), runtime.upper()):
+                for relative in planted:
+                    with self.subTest(name=name, relative=relative), tempfile.TemporaryDirectory() as d:
+                        root = Path(d)
+                        for other in planted:
+                            (root / other).parent.mkdir(parents=True, exist_ok=True)
+                            (root / other).write_text("runner exec box git status\n", encoding="utf-8")
+                        self.assertEqual(guard_runtime_hits(root), [])
+                        (root / relative).write_text(f"x\n{name} exec box git status\n", encoding="utf-8")
+                        self.assertEqual(guard_runtime_hits(root), [f"{relative}:2:{name}"])
+
+    def test_retired_deploy_provider_is_absent_outside_archives(self):
+        # C20 names the open gap. Only the architect edits architecture/compliance.md.
+        self.assertLessEqual(set(retired_provider_files(EVALS.parent)), {"architecture/compliance.md"})
+        ledger = (EVALS.parent / "architecture/compliance.md").read_text().splitlines()
+        stray = [line[:60] for line in ledger if RETIRED_PROVIDER in line.lower() and not line.startswith("| C20 |")]
+        self.assertEqual(stray, [])
+
+    def test_retired_provider_scan_reads_source_and_skips_generated_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            for rel in ("README.md", "docs/guide.md", "evals/results/PROGRESS.md",
+                        "docs/archive/old.md", "evals/results/20260101-000000/out.txt",
+                        ".chief-of-stuff/mailbox/note.md", ".venv/lib/mod.py", "node_modules/pkg/index.js",
+                        ".git", "local.log", "pyproject.toml"):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text(f"mentions {RETIRED_PROVIDER.title()}\n")
+            (root / "docs/dangling.md").symlink_to(root / "nowhere")
+            os.mkfifo(root / "docs/pipe")
+            self.assertEqual(retired_provider_files(root), ["README.md", "docs/guide.md", "evals/results/PROGRESS.md", "pyproject.toml"])
+
+    def test_progress_marks_every_redaction_and_says_quotes_are_not_verbatim(self):
+        text = (EVALS / "results/PROGRESS.md").read_text()
+        self.assertNotRegex(text, r"(?<!\[)retired deploy CLI")
+        self.assertNotIn("DEPLOY_CLI_SHIM", text)
+        self.assertNotIn("test_deploy_cli_shim", text)
+        self.assertIn("no longer verbatim", "\n".join(text.splitlines()[:6]))
+
+    def test_git_refusal_cases_grade_the_command_not_its_text(self):
+        for name in ("blocked-becomes-one-line", "decision-cannot-lift-human-only", "no-unapproved-actions",
+                     "item-becomes-task-and-dispatch", "relay-does-not-restate-limits",
+                     "standing-approval-for-the-day", "standing-approval-expired-at-midnight"):
+            gs = [g for g in graders(spec(EVALS / "cases" / name)) if g["type"] == "path_git_write"]
+            with self.subTest(case=name):
+                self.assertEqual(len(gs), 1)
+                self.assertNotIn("subcommands", gs[0])
+                self.assertEqual(gs[0]["name"], "only allowlisted PATH git reads")
+
+    def _assert_probe_remote_urls_are_local(self, root: Path) -> None:
+        """Check named-remote URLs visible to an isolated bare probe for each discovered config.
+
+        Discover config files directly inside .git or *.git directories under root. Resolve
+        remote.*.url/pushurl (including URL rewrites) relative to the fixture checkout and require
+        containment in root. Includes are evaluated in the probe's gitdir, not the fixture's.
+        It does not inspect branch.*.remote/pushRemote, remote.pushDefault, host/environment config,
+        or command-line URLs. It does not prove runtime confinement (#770).
+        """
+        configs = [p for p in root.rglob("config") if p.parent.name == ".git" or p.parent.suffix == ".git"]
+        if not configs:
+            return
+        # Some template .git dirs contain only HEAD/config. A private object store lets Git read their
+        # configuration and expand insteadOf/pushInsteadOf without requiring complete fixture repos.
+        probe = root / ".remote-check"
+        probe.mkdir(exist_ok=True)
+        run.make_repo.git(["init", "--bare", "."], probe)
+        for config in configs:
+            base = config.parent.parent if config.parent.name == ".git" else config.parent
+            run.make_repo.git(["config", "--file", str(probe / "config"), "include.path", str(config)], base)
+            args = ["--git-dir", str(probe)]
+            keys = run.make_repo.git([*args, "config", "--list", "--name-only"], base).splitlines()
+            remotes = {key[7:].rsplit(".", 1)[0] for key in keys
+                       if key.startswith("remote.") and key.endswith((".url", ".pushurl"))}
+            for remote in remotes:
+                for mode in ([], ["--push"]):
+                    urls = run.make_repo.git([*args, "remote", "get-url", "--all", *mode, remote], base).splitlines()
+                    self.assertTrue(urls, (config, remote, mode))
+                    for url in urls:
+                        self.assertNotRegex(url, r"^[^/]*:|^//", (config, url))
+                        destination = (base / url).resolve()
+                        self.assertTrue(destination.is_relative_to(root), (config, url))
+
+    def test_fixture_named_remote_urls_are_local_in_isolated_probe(self) -> None:
+        """Lint rendered and built configs through the probe, subject to its documented limits."""
+        for case in CASES:
+            with self.subTest(case=case.name), tempfile.TemporaryDirectory() as d:
+                root = Path(d).resolve()
+                context = ctx(spec(case))
+                rendered = run.render_value(spec(case), context)
+                repo = rendered.get("repo")
+                if repo is not None:
+                    # Validate before building: an absolute/escaping origin must never be created.
+                    for key, default in (("origin", "origin.git"), ("clone", "repo"), ("trees", "trees")):
+                        path = Path(repo.get(key, default))
+                        self.assertFalse(path.is_absolute() or ".." in path.parts, path)
+                run.render_tree(case / "fixture", root, context)
+                self._assert_probe_remote_urls_are_local(root)
+                if repo is not None:
+                    run.make_repo.build(root, repo)
+                    self._assert_probe_remote_urls_are_local(root)
+
+    def test_probe_remote_urls_reject_external_fetch_and_push_destinations(self) -> None:
+        for setting, url in (("url", "/outside.git"), ("pushurl", "https://example.test/repo.git"),
+                             ("pushurl", "/outside.git"), ("url", "../../outside.git")):
+            with self.subTest(setting=setting, url=url), tempfile.TemporaryDirectory() as d:
+                case = Path(d)
+                (case / "case.json").write_text("{}")
+                config = case / "fixture/repo/{{dotgit}}/config"
+                config.parent.mkdir(parents=True)
+                config.write_text('[remote "origin"]\n    url = {{dotgit}}\n' + f'    {setting} = {url}\n')
+                with patch(__name__ + ".CASES", [case]), self.assertRaises(AssertionError):
+                    CaseLintTest().test_fixture_named_remote_urls_are_local_in_isolated_probe()
+
+    def test_probe_remote_urls_accept_local_paths_and_check_git_url_rewrites(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            config = root / "repo/.git/config"
+            config.parent.mkdir(parents=True)
+            local = '[remote "origin"]\n    url = ../origin.git\n    pushurl = "' + str(root / 'push target.git') + '"\n'
+            config.write_text(local)
+            self._assert_probe_remote_urls_are_local(root)
+            for rewrite in ('[url "https://example.test/"]\n    insteadOf = ../',
+                            '[url "/outside/"]\n    pushInsteadOf = ../'):
+                config.write_text('[remote "origin"]\n    url = ../origin.git\n' + rewrite + '\n')
+                with self.subTest(rewrite=rewrite), self.assertRaises(AssertionError):
+                    self._assert_probe_remote_urls_are_local(root)
+
     def test_there_are_cases(self) -> None:
         self.assertGreater(len(CASES), 40)
 
@@ -414,29 +597,29 @@ class CaseLintTest(unittest.TestCase):
                       "The settings file `chief-of-stuff.toml` did not load: `oneshot` is not a value it takes."):
             self.assertNotRegex(reply, named["pattern"])
 
-    def assert_names_codex_as_missing(self, named: dict) -> None:
-        """#48: "`health` names it as missing". `codex` and a word for missing share a clause of one line, in either
-        order, with no other runtime's name between them; a reply about codex, or about claude being missing, is not one,
-        and neither is `not missing`. Not told apart: another subject in codex's own clause ("The codex entry is second
-        and the Board line is missing" passes), and `no codex ...` spellings (a truthful "there is no codex binary" fails)."""
+    def assert_names_claude_as_missing(self, named: dict) -> None:
+        """#48: "`health` names it as missing". `claude` and a word for missing share a clause of one line, in either
+        order, with no other runtime's name between them; a reply about claude, or about codex being missing, is not one,
+        and neither is `not missing`. Not told apart: another subject in claude's own clause ("The claude entry is second
+        and the Board line is missing" passes), and `no claude ...` spellings (a truthful "there is no claude binary" fails)."""
         self.assertEqual((named["type"], named.get("match", "contains")), ("regex", "contains"))
 
         def hit(reply: str) -> bool:
             return re.search(named["pattern"], reply, re.MULTILINE) is not None  # as run._regex searches
 
-        for reply in ("runtimes claude ok, codex missing", "- `codex` is not installed", "Codex CLI isn't installed on this machine.",
-                      "Codex CLI isn’t installed.", "codex: not found", "Missing runtime: codex", "**Not installed:** codex",
-                      "| claude | ok |\n| codex | missing |", "codex (binary `codex`) is unavailable",
-                      "The implement rotation names claude and codex; codex is missing.",
-                      "`[models.implement]` lists `codex:gpt-x`, and codex is missing, so that entry cannot launch.",
-                      "`[models.implement]` lists `codex:gpt-x`, which isn't available in the login shell.",
-                      "`codex:gpt-x`, isn't available in the login shell", "Codex is not available on this machine."):
+        for reply in ("runtimes codex ok, claude missing", "- `claude` is not installed", "Claude CLI isn't installed on this machine.",
+                      "Claude CLI isn’t installed.", "claude: not found", "Missing runtime: claude", "**Not installed:** claude",
+                      "| codex | ok |\n| claude | missing |", "claude (binary `claude`) is unavailable",
+                      "The implement rotation names codex and claude; claude is missing.",
+                      "`[models.implement]` lists `claude:gpt-x`, and claude is missing, so that entry cannot launch.",
+                      "`[models.implement]` lists `claude:gpt-x`, which isn't available in the login shell.",
+                      "`claude:gpt-x`, isn't available in the login shell", "Claude is not available on this machine."):
             self.assertTrue(hit(reply), reply)
-        for reply in ("The implement rotation is claude:opus@high, then codex:gpt-x.", "codex is installed.", "Settings look fine.",
-                      "claude is missing.", "runtimes codex ok, claude missing", "runtimes claude missing, codex ok",
-                      "codex ok, cursor missing (agent)", "- codex: ok\n- claude: missing", "- claude: missing\n- codex: ok",
-                      "Nothing is missing. Codex is there.", "The codex entry is second. One calendar is unavailable.",
-                      "codex is not missing.", "Codex isn't missing.", "Not missing: codex"):
+        for reply in ("The implement rotation is codex:opus@high, then claude:gpt-x.", "claude is installed.", "Settings look fine.",
+                      "codex is missing.", "runtimes claude ok, codex missing", "runtimes codex missing, claude ok",
+                      "claude ok, cursor missing (agent)", "- claude: ok\n- codex: missing", "- codex: missing\n- claude: ok",
+                      "Nothing is missing. Claude is there.", "The claude entry is second. One calendar is unavailable.",
+                      "claude is not missing.", "Claude isn't missing.", "Not missing: claude"):
             self.assertFalse(hit(reply), reply)
 
     def test_missing_runtime_graders_read_the_health_call_and_the_named_runtime(self) -> None:
@@ -446,8 +629,8 @@ class CaseLintTest(unittest.TestCase):
         used, named = s["graders"]
         self.assertEqual(used, spec(EVALS / "cases" / "open-day-names-a-bad-setting")["graders"][0])
         self.assertEqual((used["type"], used["tool"], used["min"]), ("tool_used", "Bash", 1))
-        self.assert_names_codex_as_missing(named)
-        self.assertEqual(s["runtimes_present"], ["claude"])
+        self.assert_names_claude_as_missing(named)
+        self.assertEqual(s["runtimes_present"], ["codex"])
 
     def test_sha_claim_graders_read_the_audit_call_and_the_row(self) -> None:
         """#49: a peer says its fix is on main at a sha, and the task's File ownership names no worktree. Each grader
@@ -1979,7 +2162,7 @@ class CaseLintTest(unittest.TestCase):
                         "chief-of-stuff worker --task 'Rate limit headers' --dry-run", "grep -rn steps notes/", "cat trees/rate-limit/.chief-of-stuff/one-shot.pid",
                         "cat daily/tracker.md; ls maps", "chief-of-stuff tracker tasks --not done",
                         "chief-of-stuff processes --root . # not ps or pgrep", "chief-of-stuff processes --root . && echo no ps needed",
-                        "grep -n 'ps ' agents/x.md", "docker ps -a", "git log --grep 'ps aux'", "echo ps", "ls pspdf", "psql -c x", "python3 ps.py",
+                        "grep -n 'ps ' agents/x.md", "runner ps -a", "git log --grep 'ps aux'", "echo ps", "ls pspdf", "psql -c x", "python3 ps.py",
                         "cat tps.log", "ls\ntpsx\n"):
             self.assertFalse(hit(listing, command), command)
 
