@@ -62,6 +62,13 @@ def _clock(at: datetime, now: datetime) -> str:
     return f"{at:%H:%M}" if at.date() == now.date() else f"{at:%a %H:%M}"
 
 
+def _step_when(at: datetime, now: datetime) -> str:
+    """Weekday and time for a history step. Today's bare HH:MM is read as the previous step's day (#998)."""
+    if at.tzinfo is not None and now.tzinfo is not None:
+        at = at.astimezone(now.tzinfo)
+    return f"{at:%a %H:%M}"
+
+
 def _number(c: board_sources.Change) -> tuple[str, int]:
     """(repo, N): `!N`/`#N` is this repo's, `owner/repo#N` another's."""
     m = TRAILING_NUMBER.search(c.ref)
@@ -274,7 +281,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             # loses its end and counts nothing, pair across days if that shows up.
             runs[-1][2] = m
             what[m] = f"ended {escape(ENDED.get(m.stage, 'ended'))} · {escape(w[3])} · {escape(runs[-1][1][4])}"
-    steps = "\n".join(f'      <div class="step"><span class="when">{_clock(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'
+    steps = "\n".join(f'      <div class="step"><span class="when">{_step_when(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'
                       f"</span><span>{what.get(m) or markdown_inline(m.line.split(' ', 2)[2], linker.resolve)}</span></div>" for m in log)
     # (#200, #220) the same clipped rows end both a still-running worker's span and elapsed, below
     end = max((g.end for _, r in rows for g in r.segments if g.kind == "done"), default=now)
@@ -310,7 +317,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                                f'<span>{escape(seg.outcome or "running")} · {_dur(took)}</span></div>'))
         steps_list.extend((parse_stamp(entry.at, now), escape(entry.message))
                           for entry in db.log(item.issue_key))
-        steps = "\n".join(f'<div class="step"><span class="when">{_clock(at, now)}</span>'
+        steps = "\n".join(f'<div class="step"><span class="when">{_step_when(at, now)}</span>'
                           f'<span class="dot"></span><span>{text}</span></div>'
                           for at, text in sorted(steps_list))
         end = max((e for _, e in spans), default=now)
