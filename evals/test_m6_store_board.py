@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import http.client
+import json
 import re
 import sys
 import tempfile
@@ -193,6 +194,28 @@ class StoreGanttAndBoardTest(unittest.TestCase):
         self.assertIn("shares file with !22", html)
         self.assertIn("decision pending", html)
         self.assertIn("looping", html)
+
+
+class StoreBoardOpenChangesTest(unittest.TestCase):
+    """#896: the store board counts and draws the forge's open changes, though no tracker row names one."""
+
+    def test_store_board_shows_the_open_changes_the_forge_holds(self) -> None:
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        (root / "CLAUDE.md").write_text(CLAUDE_MD + "- Backlog: GitHub issues; repo example/repo\n", encoding="utf-8")
+        db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
+        pr = {"number": 21, "url": "https://github.com/example/repo/pull/21", "title": "Upload size limit",
+              "state": "OPEN", "baseRefName": "develop", "body": "Fixes #12"}
+
+        def gh(args, input_text=None):  # answers only what the query asks for, as GitHub does
+            query = args[args.index("-f") + 1]
+            data = {"merged": {"nodes": []}, **({"open": {"nodes": [pr]}} if "is:open" in query else {})}
+            return 0, json.dumps({"data": data}), ""
+
+        bs.refresh(root, NOW, gh=gh)
+        html = pg.write_board(root, now=NOW)[0].read_text(encoding="utf-8")
+        self.assertIn("1 merge request</div>", html)
+        self.assertIn(">#21</a>", html)
 
 
 def _seed_failed_attempt_fixtures(db: store.Store, *, live_worker: bool) -> None:

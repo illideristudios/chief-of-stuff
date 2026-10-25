@@ -5,7 +5,8 @@
 
 Only what today's tracker names is fetched: its tasks' issues, the pull or merge requests their rows
 mention (`!58` on GitLab, `PR #58` on GitHub, or the request's URL), and the requests merged today, in
-one GraphQL call per forge. Workers are the registered sessions process_status finds running, live
+one GraphQL call per forge. An engine workspace (one with a `store.db`) names its changes in no row, so there every open
+request is fetched too (#896). Workers are the registered sessions process_status finds running, live
 one-shot workers under the Worktrees dir, and the tracker's Sessions rows. The cache is
 `<pages dir>/.sources.json`. A source that cannot be read keeps its last good facts, and `errors` says why.
 `change_states` is the audit's read of the changes its rows name, neither drawn nor cached.
@@ -238,8 +239,9 @@ def _gh_change(key: str, p: dict, approver: str) -> Change:
                   p.get("headRefOid") or "", _stats(files), jobs, p.get("mergeable") == "CONFLICTING", threads)
 
 
-def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: datetime, approver: str, gh):
-    """(issues, changes, error) from one `gh api graphql` call; issues and changes are None when it failed."""
+def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: datetime, approver: str, gh, every_open: bool = False):
+    """(issues, changes, error) from one `gh api graphql` call; issues and changes are None when it failed.
+    `every_open` adds the home repo's open pull requests to the named ones."""
     repos = sorted(wanted)
     parts = []
     for i, repo in enumerate(repos):
@@ -250,6 +252,10 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
     search = f"repo:{home.repo} is:pr is:merged merged:>={since.replace(microsecond=0).isoformat()}"
     parts.append(f"merged: search(query: {json.dumps(search)}, type: ISSUE, first: 50) "
                  f"{{ nodes {{ ... on PullRequest {{ {GH_CHANGE} }} }} }}")
+    if every_open:
+        # shortcut: one unpaged search page, so past 100 open pull requests the rest go unread; page it once a repo has that many.
+        parts.append(f"open: search(query: {json.dumps(f'repo:{home.repo} is:pr is:open')}, type: ISSUE, first: 100) "
+                     f"{{ nodes {{ ... on PullRequest {{ {GH_CHANGE} }} }} }}")
     code, out, err = gh(["api", "graphql", "-f", "query=query { " + " ".join(parts) + " }"])
     try:
         body = json.loads(out)
@@ -274,6 +280,8 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
     for node in ((data.get("merged") or {}).get("nodes") or []):
         if node and _when(node.get("mergedAt")) and _when(node["mergedAt"]) >= since:
             changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver))
+    for node in filter(None, (data.get("open") or {}).get("nodes") or []):
+        changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver))
     return issues, changes, _graphql_errors(body) or (err.strip() if code else "")
 
 
@@ -309,9 +317,11 @@ def _gl_change(m: dict, approver: str) -> Change:
                   bool(m.get("conflicts")))
 
 
-def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], since: datetime, approver: str, call):
+def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], since: datetime, approver: str, call,
+           every_open: bool = False):
     """(issues, changes, errors) from the host's /api/graphql, with the Backlog's token: one POST per connection (a project's issues,
-    the named merge requests, the merged page), each under GitLab's complexity cap, then one for open changes' jobs and threads.
+    the named merge requests, the merged page, and with `every_open` the open page), each under GitLab's complexity cap, then one
+    for open changes' jobs and threads.
     A connection answers at most GL_PAGE nodes, so past that it goes again for the next GL_PAGE iids or the next merged page.
     `errors` maps a panel ("kanban": the issues; "merge requests": the rest) to its first error. A panel whose issues or changes
     failed is None, so the board keeps its last good cards; a failed jobs-and-threads request keeps the changes without them.
@@ -359,17 +369,19 @@ def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], si
                                 if m else None)
     for node in pages(home.project, "mergeRequests", sorted(mrs), GL_CHANGE, "merge requests"):
         changes.setdefault(f"!{node['iid']}", _gl_change(node, approver))
-    cursor = ""  # the merged page to ask for next, None once the last one is in
-    while cursor is not None:
-        after = f", after: {json.dumps(cursor)}" if cursor else ""
-        got = ask(home.project, f"merged: mergeRequests(state: merged, mergedAfter: {json.dumps(since.isoformat())}{after}) "
-                                f"{{ nodes {{ {GL_CHANGE} }} pageInfo {{ hasNextPage endCursor }} }}", "merge requests")
-        if got is None:
-            break
-        for node in (got.get("merged") or {}).get("nodes") or []:
-            changes.setdefault(f"!{node['iid']}", _gl_change(node, approver))  # a named change wins over the same one here
-        info = (got.get("merged") or {}).get("pageInfo") or {}
-        cursor = info.get("endCursor") if info.get("hasNextPage") else None
+    listed = {"merged": f"state: merged, mergedAfter: {json.dumps(since.isoformat())}", **({"open": "state: opened"} if every_open else {})}
+    for alias, args in listed.items():
+        cursor = ""  # the page to ask for next, None once the last one is in
+        while cursor is not None:
+            after = f", after: {json.dumps(cursor)}" if cursor else ""
+            got = ask(home.project, f"{alias}: mergeRequests({args}{after}) "
+                                    f"{{ nodes {{ {GL_CHANGE} }} pageInfo {{ hasNextPage endCursor }} }}", "merge requests")
+            if got is None:
+                break
+            for node in (got.get(alias) or {}).get("nodes") or []:
+                changes.setdefault(f"!{node['iid']}", _gl_change(node, approver))  # a named change wins over the same one here
+            info = (got.get(alias) or {}).get("pageInfo") or {}
+            cursor = info.get("endCursor") if info.get("hasNextPage") else None
     for node in pages(home.project, "mergeRequests", sorted(int(k[1:]) for k, c in changes.items() if c.state == "open"),
                       GL_DETAIL, "merge requests", lose=False):
         if (key := f"!{node['iid']}") in changes:
@@ -451,6 +463,7 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
     wanted: dict[str, set[int]] = {}
     changes: set[int] = set()
     github_home = isinstance(home, backlog.GitHubBacklog)
+    every_open = (root / "store.db").is_file()  # the store board's cards are store items, which no tracker row names
     for task in tracker.tasks:
         if task.standing:
             continue
@@ -461,9 +474,9 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
     if github_home:
         if changes:
             wanted.setdefault(home.repo, set()).update(changes)
-        issues, found, error = github(home, wanted, since, approver, gh)
+        issues, found, error = github(home, wanted, since, approver, gh, every_open)
         return issues, found, {"kanban": error, "merge requests": error} if error else {}
-    return gitlab(home, wanted, changes, since, approver, call)
+    return gitlab(home, wanted, changes, since, approver, call, every_open)
 
 
 # --- workers ---------------------------------------------------------------------------------------
