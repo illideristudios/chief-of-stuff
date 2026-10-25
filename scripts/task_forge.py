@@ -13,7 +13,7 @@ import board_sources
 import kanban as kanban_tool
 from settings import Kanban
 from tracker import Task, issue_key, launcher
-from tracker_log import Move
+from tracker_log import RELAUNCH_STAGE, Move
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
@@ -45,25 +45,59 @@ def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sour
     return tuple(c for c in named if c.state == "open") or tuple(named)
 
 
-def effective_stage(task: Task, sources: board_sources.Sources, lanes: dict) -> str:
-    """A task's real stage for drawing, drift and hold: the tracker's own cell, unless its change already
-    merged and the tracker hasn't caught up — then the lane's last stage. The forge already answered the only
-    question a stale `merge` cell was tracking; a stalled coordinator can otherwise leave it stuck for hours (#240)."""
+def _flow_stages(tasks: list[Task], moves: list[Move], lanes: dict) -> dict[Task, str]:
+    """The stage `flow_chart.build` keeps as each task's last move, when that stage belongs to some lane.
+    A `stage:` line counts, and a launcher line only from before the task's first `stage:` line. A relaunch
+    stop does not. A stage no lane lists is omitted, so the caller keeps the tracker cell (#887)."""
+    if not moves:
+        return {}
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    find = {**{t.item.strip().casefold(): t for t in tasks if t.item.strip()}, **by_name}
+    row_of = launcher(tasks)
+    known = {stage for lane in lanes.values() for stage in lane.stages}
+
+    def key_of(m: Move) -> str:
+        t = find.get(m.name.strip().casefold()) or (row_of(m.name)[0] if m.launch else None)
+        return t.name.strip().casefold() if t and t.name.strip() else m.name.casefold()
+
+    ordered = sorted(moves, key=lambda m: m.at)
+    first: dict[str, datetime] = {}
+    for m in ordered:
+        if not m.launch:
+            first.setdefault(key_of(m), m.at)
+    kept: dict[str, list[Move]] = {}
+    for m in ordered:
+        key = key_of(m)
+        if m.launch and (at := first.get(key)) is not None and m.at >= at:
+            continue
+        if m.launch and m.stage == RELAUNCH_STAGE:
+            continue
+        kept.setdefault(key, []).append(m)
+    return {t: stage for key, mine in kept.items()
+            if (stage := mine[-1].stage) in known and (t := by_name.get(key)) is not None}
+
+
+def effective_stage(task: Task, sources: board_sources.Sources, lanes: dict,
+                    moves: list[Move] | None = None, tasks: list[Task] | None = None) -> str:
+    """A task's real stage for drawing, drift and hold. A merged change moves it to the lane's last stage:
+    the forge already answered the only question a stale cell was tracking (#240). Otherwise the last stage
+    Flow keeps for it, when that stage belongs to some lane; else the tracker's own cell (#887)."""
     stage = task.stage.strip()
     changes = task_changes(task, sources)
     lane = lanes.get(task.lane.strip())
     if changes and changes[0].state == "merged" and lane and lane.stages:
         return lane.stages[-1]
-    return stage
+    logged = _flow_stages(tasks if tasks is not None else [task], moves or [], lanes)
+    return logged.get(task, stage)
 
 
 def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources.Sources, lanes: dict,
-                pending_refs: Container[str]) -> dict[Task, str]:
+                pending_refs: Container[str], moves: list[Move] | None = None) -> dict[Task, str]:
     """Each held task to its `hold_cause` at its effective stage, decided once: the BUILD flag, the NEEDS INPUT tile and
     the Flow note all read it (#228)."""
     workers = worker_names(sources)
     return {t: cause for t in tasks
-            if (cause := hold_cause(t, kanban, effective_stage(t, sources, lanes), workers=workers,
+            if (cause := hold_cause(t, kanban, effective_stage(t, sources, lanes, moves, tasks), workers=workers,
                                     pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip())))}
 
 

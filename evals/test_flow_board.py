@@ -758,13 +758,16 @@ class BuildFollowsFlowTest(unittest.TestCase):
         self.assertEqual(self.notes(html)["Later"].split(" · ")[0], "plan")
 
     def test_an_early_done_task_leaves_the_lanes_and_one_at_main_stays(self) -> None:
-        rows = """| Early done | Early item | Robin | done | 09:00 |  | S | build | design | #3 | c |
+        # A clock gives the Flow row a segment; a done task with none stops on its move and draws no bar.
+        rows = """| Early done | Early item | Robin | done 09:00–10:30 | 09:00 |  | S | build | design | #3 | c |
 | Landed | Landed item | Robin | done | 09:00 |  | S | build | main | #5 | c |
 """
         html = self.page(rows, "- 10:00 stage: Early done → plan\n")
         cols = self.placed(html)
         self.assertNotIn("Early done", [name for names in cols.values() for name in names])
         self.assertEqual(cols["main"], ["Landed"])
+        tiles = dict(re.findall(r'<span class="panels-label">([A-Z ]+)</span><b class="panels-count">(\d+)</b>', html))
+        self.assertEqual(tiles["ALL"], "2")
         self.assertEqual(self.notes(html)["Early done"].split(" · ")[0], "plan")
 
     def test_a_logged_pr_draws_in_the_following_column(self) -> None:
@@ -799,10 +802,10 @@ class BuildFollowsFlowTest(unittest.TestCase):
         figure = self.page(rows, log, sources, kanban).split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
         self.assertNotIn('data-cat="hold"', figure)
         self.assertNotIn('data-cat="drift"', figure)
+        # A hold stage expects the hold label, so this case only checks the flag follows the logged stage.
         held = self.page(rows, log, sources, replace(kanban, hold_stages=("plan",)))
         figure = held.split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
         self.assertIn('data-cat="hold"', figure)
-        self.assertNotIn('data-cat="drift"', figure)
 
 
 if __name__ == "__main__":

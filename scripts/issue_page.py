@@ -205,7 +205,7 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     # (#200, #220) forge_ends is shared with the board, so both end a row at the same time
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
-    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
+    held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs, log))
     rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
                                                 ended=forge_ends(known, sources, now.tzinfo))
             if issue_number(r.ref) == number]

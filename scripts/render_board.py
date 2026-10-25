@@ -157,11 +157,12 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
 
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
-                  held: dict[Task, str] | None = None) -> list[columns.Column]:
-    """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
-    a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
+                  held: dict[Task, str] | None = None, moves: list | None = None) -> list[columns.Column]:
+    """The Build board: a column per lane stage, a card per task at the stage Flow keeps for it. A done task whose
+    cell is not its lane's last stage draws no card. Task cards sort by issue number. Sources add each card's changes
+    and marks, and a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
-    held = hold_causes(tasks, kanban, sources, lanes, frozenset()) if held is None else held
+    held = hold_causes(tasks, kanban, sources, lanes, frozenset(), moves) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
 
     def issue_url(ref: str, cell: str = "") -> str:
@@ -192,14 +193,27 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
-    laned = [t for t in tasks if t.lane.strip() and t.stage.strip()]
-    at = {t: effective_stage(t, sources, lanes) for t in laned}
+    def on_board(task: Task) -> bool:
+        if not (task.lane.strip() and task.stage.strip()):
+            return False
+        lane = lanes.get(task.lane.strip())
+        # A done task leaves the lanes until its cell is the lane's last stage (#887). No stage list: it still draws.
+        return not (task.kind == "done" and lane and lane.stages and task.stage.strip() != lane.stages[-1])
+
+    laned = [t for t in tasks if on_board(t)]
+    at = {t: effective_stage(t, sources, lanes, moves, tasks) for t in laned}
     order = list(dict.fromkeys(stage_order(lanes) + list(at.values())))
     # No PR column: a card at `pr` draws in the stage after it, normally review.
     into = {"pr": order[order.index("pr") + 1]} if "pr" in order[:-1] else {}
     order = [s for s in order if s not in into]
-    cols = [columns.Column(stage, tuple(card(t, at[t]) for t in laned if into.get(at[t], at[t]) == stage),
-                           *(("gate", "gate") if stage in gates else ())) for stage in order]
+
+    def cards_at(stage: str) -> tuple[columns.Card, ...]:
+        # Numbered cards first, ascending; no number last; ties keep tracker order (#887).
+        group = [t for t in laned if into.get(at[t], at[t]) == stage]
+        group.sort(key=lambda t: ((n := issue_number(t.issue)) is None, n or 0))
+        return tuple(card(t, at[t]) for t in group)
+
+    cols = [columns.Column(stage, cards_at(stage), *(("gate", "gate") if stage in gates else ())) for stage in order]
     merged = merged_today(sources, now) if now else []
     if merged:
         cards = tuple(columns.Card(c.title, "merged today", tuple((i, page(i, issue_url(i))) for i in c.issues[:1]) + ((c.ref, change_href(c)),),
@@ -320,16 +334,17 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
 
     issues = sum(1 for t in tasks if t.issue.strip() and not t.workflow)
     changes = sum(1 for c in sources.changes.values() if c.state == "open")
-    # A task's stage for drift, computed once, keyed by the task: every nameless task shares the blank name.
-    stages = {t: effective_stage(t, sources, lanes or {}) for t in tasks}
-    # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
-    pending_refs = pending_refs or {}
-    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs)
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
-    build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
-                  f'{columns.render(build_cols)}</section>\n')
+    # The moves Flow reads, built first so a card, its drift and its hold share that stage (#887).
     flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
                   for m in tracker_log.moves(text, day, zone)]
+    # A task's stage for drift, computed once, keyed by the task: every nameless task shares the blank name.
+    stages = {t: effective_stage(t, sources, lanes or {}, flow_moves, tasks) for t in tasks}
+    # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
+    pending_refs = pending_refs or {}
+    held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs, flow_moves)
+    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, flow_moves)
+    build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
+                  f'{columns.render(build_cols)}</section>\n')
     look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
     began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks,
                        [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks])
