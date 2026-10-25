@@ -162,5 +162,79 @@ class OverlapTest(unittest.TestCase):
         self.assertIs(ownership.overlaps("`src/a/`", "`src/a/`"), True)
 
 
+class ScopeConsultContextTest(unittest.TestCase):
+    def test_context_includes_paths_issue_title_body_and_plan_text(self):
+        scopes = [("scripts/a.py", "write"), ("docs/a.md", "read")]
+        first = ownership.scope_consult_context(
+            title="Widget crash on empty input",
+            body="Acceptance: handle empty input without raising.",
+            plan_text="# Plan\n Guard empty input in scripts/a.py.",
+            scopes=scopes,
+        )
+        second = ownership.scope_consult_context(
+            title="Widget crash on empty input",
+            body="Acceptance: handle empty input without raising.",
+            plan_text="# Plan\n Guard empty input in scripts/a.py.",
+            scopes=scopes,
+        )
+        self.assertEqual(first, second)
+        self.assertTrue(first.startswith("Proposed file ownership: write: scripts/a.py; read: docs/a.md"))
+        self.assertIn("Issue title: Widget crash on empty input", first)
+        self.assertIn("Issue body:\nAcceptance: handle empty input without raising.", first)
+        self.assertIn("Plan:\n# Plan\n Guard empty input in scripts/a.py.", first)
+
+    def test_empty_title_body_and_missing_plan_use_explicit_placeholders(self):
+        ctx = ownership.scope_consult_context(
+            title="   ",
+            body="",
+            plan_text="",
+            scopes=[("scripts/a.py", "write")],
+        )
+        self.assertIn("Proposed file ownership: write: scripts/a.py", ctx)
+        self.assertIn("Issue title: (empty)", ctx)
+        self.assertIn("Issue body:\n(empty)", ctx)
+        self.assertIn("Plan: (not found in worktree)", ctx)
+
+    def test_oversized_plan_and_body_truncate_in_order_within_cap_while_preserving_paths(self):
+        scopes = [("scripts/a.py", "write"), ("docs/a.md", "read")]
+        huge_plan = "P" * (ownership.SCOPE_CONTEXT_CAP + 4000)
+        ctx = ownership.scope_consult_context(
+            title="Keep title intact",
+            body="Keep issue body intact.",
+            plan_text=huge_plan,
+            scopes=scopes,
+        )
+        self.assertLessEqual(len(ctx.encode("utf-8")), ownership.SCOPE_CONTEXT_CAP)
+        self.assertTrue(ctx.startswith("Proposed file ownership: write: scripts/a.py; read: docs/a.md"))
+        self.assertIn("Issue title: Keep title intact", ctx)
+        self.assertIn("Issue body:\nKeep issue body intact.", ctx)
+        self.assertIn("[plan truncated]", ctx)
+        self.assertNotIn("[issue body truncated]", ctx)
+
+        huge_body = "B" * (ownership.SCOPE_CONTEXT_CAP + 4000)
+        ctx_both = ownership.scope_consult_context(
+            title="Keep title intact",
+            body=huge_body,
+            plan_text="Plan details " * 200,
+            scopes=scopes,
+        )
+        self.assertLessEqual(len(ctx_both.encode("utf-8")), ownership.SCOPE_CONTEXT_CAP)
+        self.assertTrue(ctx_both.startswith("Proposed file ownership: write: scripts/a.py; read: docs/a.md"))
+        self.assertIn("Issue title: Keep title intact", ctx_both)
+        self.assertIn("[plan truncated]", ctx_both)
+        self.assertIn("[issue body truncated]", ctx_both)
+
+        huge_title = "T" * (ownership.SCOPE_CONTEXT_CAP + 4000)
+        ctx_title = ownership.scope_consult_context(
+            title=huge_title,
+            body="Body text",
+            plan_text="Plan text",
+            scopes=scopes,
+        )
+        self.assertLessEqual(len(ctx_title.encode("utf-8")), ownership.SCOPE_CONTEXT_CAP)
+        self.assertTrue(ctx_title.startswith("Proposed file ownership: write: scripts/a.py; read: docs/a.md"))
+        self.assertIn("[title truncated]", ctx_title)
+
+
 if __name__ == "__main__":
     unittest.main()

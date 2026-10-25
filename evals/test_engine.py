@@ -1871,6 +1871,68 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([w.decision_id[0] for w in waits], ["scope"])  # a real decision for the owner
         self.assertIn("scope_proposal", self.db.resume(KEY))  # kept until the owner answers
 
+    def test_a_scope_consult_context_carries_the_issue_title_body_and_plan_text(self):
+        self._trio()
+        self.proposal()
+        self.forge.rows[0].update(title="Distinctive issue title", body="Acceptance: must carry context.")
+        tree = self.trees / "issue-1-plan-1"
+        plan_file = tree / engine.ownership.plan_path(KEY)
+        plan_file.parent.mkdir(parents=True, exist_ok=True)
+        plan_file.write_text("# Plan\nDistinctive plan text covering src/a.py.\n", encoding="utf-8")
+        self.db.set_ownership(KEY, str(tree), "tree")
+        requests = []
+        votes = self._votes([("adopt", "approve")] * 3)
+
+        def capture(request):
+            requests.append(request)
+            return votes(request)
+
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=capture)
+        self.assertEqual(len(requests), 3)
+        described = json.loads(requests[0].prompt.rpartition("\nDecision: ")[2])
+        context = self.db.decisions(KEY)[-1].record["decision"]["context"]
+        self.assertEqual(described["context"], context)
+        self.assertIn("write: src/a.py; read: docs/design.md", context)
+        self.assertIn("Distinctive issue title", context)
+        self.assertIn("Acceptance: must carry context.", context)
+        self.assertIn("Distinctive plan text covering src/a.py.", context)
+
+    def test_settled_scope_decision_is_reused_for_the_same_proposal_and_reconsulted_when_the_plan_changes(self):
+        self._trio()
+        self.proposal()
+        self.forge.rows[0].update(title="Reuse check", body="Acceptance: reuse settled scope consult.")
+        tree = self.trees / "issue-1-plan-1"
+        plan_file = tree / engine.ownership.plan_path(KEY)
+        plan_file.parent.mkdir(parents=True, exist_ok=True)
+        plan_file.write_text("# Plan v1\nInitial plan.\n", encoding="utf-8")
+        self.db.set_ownership(KEY, str(tree), "tree")
+        votes = self._votes([("adopt", "approve"), ("concern", "reject"), ("adopt", "approve"),
+                             ("adopt", "approve"), ("adopt", "approve"), ("adopt", "approve")])
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
+            self.run_pass(model=votes)
+            self.assertEqual(votes.n, 3)
+            # Re-running the pass with the same proposal, issue body, and plan reuses the settled row without calling the model.
+            self.run_pass(model=votes)
+            self.assertEqual(votes.n, 3)
+            # Updating the plan text changes `context` and triggers a fresh consult.
+            plan_file.write_text("# Plan v2\nRevised plan after split.\n", encoding="utf-8")
+            self.run_pass(model=votes)
+            self.assertEqual(votes.n, 6)
+        self.assertNotIn("scope_proposal", self.db.resume(KEY))
+
+    def test_unreadable_forge_body_skips_scope_consult_until_next_pass(self):
+        self._trio()
+        self.proposal()
+        self.forge.rows[0].pop("body", None)
+        votes = self._votes([("adopt", "approve")] * 3)
+        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}), \
+             mock.patch.object(self.forge, "issue", return_value=SimpleNamespace(ok=False, issue=None, error="forge offline")):
+            self.run_pass(model=votes)
+        self.assertEqual(votes.n, 0)
+        self.assertIn("scope_proposal", self.db.resume(KEY))
+        self.assertTrue(any("ownership read failed: forge offline" in e.message for e in self.db.log(KEY)))
+
     def test_trio_consults_stop_starting_once_the_pass_budget_is_spent(self):
         # #927: consults run inside the pass, so a slow trio must not hold the pass (and worker collection) for long.
         self._trio()
