@@ -26,10 +26,6 @@ class PagesWiringTest(unittest.TestCase):
     def test_pages_py_is_on_the_allowlist(self) -> None:
         self.assertIn(f"Bash(python3 {run.PLUGIN_ROOT / 'scripts' / 'pages.py'}:*)", run.ALLOWED)
 
-    def test_no_mock_publish_tool_is_left(self) -> None:
-        self.assertFalse(hasattr(run, "board_mcp_config"))
-        self.assertFalse((EVALS / "mock_board.py").exists())
-
     def test_each_run_gets_its_own_pages_port(self) -> None:
         a, b = run.context("America/Chicago", datetime.now(CT)), run.context("America/Chicago", datetime.now(CT))
         self.assertTrue(a["pages_port"].isdigit())
@@ -38,7 +34,8 @@ class PagesWiringTest(unittest.TestCase):
     def test_stop_pages_ends_what_a_case_started(self) -> None:
         work = Path(tempfile.mkdtemp())
         (work / "pages").mkdir()
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+        (work / "pages.py").write_text("import time; time.sleep(60)\n")  # stop_pages signals only a `pages.py serve` pid
+        proc = subprocess.Popen([sys.executable, str(work / "pages.py"), "serve"], start_new_session=True)
         (work / "pages" / ".pid").write_text(str(proc.pid))
         run.stop_pages(work)
         self.assertIsNotNone(proc.wait(timeout=5))

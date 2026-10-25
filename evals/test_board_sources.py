@@ -21,6 +21,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "scripts"), str(Path(_
 
 import board_sources as bs  # noqa: E402
 import render_board as rb  # noqa: E402
+import workers_page  # noqa: E402
 from tracker import issue_key  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 import test_flow_chart as fc_test  # noqa: E402
@@ -1050,19 +1051,19 @@ class LaunchedWorkerNameTest(unittest.TestCase):
         cfg = parse_coordinator((root / "CLAUDE.md").read_text(), today=NOW.date())
         self.workers = bs.workers(root, cfg, rb.parse_tracker(text), text, NOW.date())
         self.by_tree = {w.tree: w for w in self.workers if w.kind == "one-shot"}
-        self.facts = {r.name: r.facts for r in rb.worker_panel(replace(bs.EMPTY, workers=self.workers), NOW).rows}
+        self.html = workers_page.render(text, replace(bs.EMPTY, workers=self.workers), NOW, root / "trees", None)
 
-    def test_the_workers_panel_names_the_row_a_launch_maps_to(self):
+    def test_the_workers_page_names_the_row_a_launch_maps_to(self):
         # Rules 1–2: a started line whose task begins with a row's item, or carries the row's issue ref, shows that
         # row's name; the prompt's later sentences appear nowhere.
         for tree, worker, name in (("upload", "impl-1", "Upload size limit"), ("keys", "impl-2", "Key rotation")):
             with self.subTest(task=name):
                 self.assertEqual(self.by_tree[tree].name, worker)
-                self.assertIn(name, self.facts[worker])
+                self.assertIn(name, self.html)
         for sentence in fc_test.PROMPT_SENTENCES:
             with self.subTest(sentence=sentence):
                 self.assertNotIn(sentence, repr(self.workers))
-                self.assertNotIn(sentence, repr(self.facts))
+                self.assertNotIn(sentence, self.html)
 
     def test_no_workers_fact_is_longer_than_its_rows_name(self):
         # Rule 4: no Workers fact is longer than the row name it maps to.

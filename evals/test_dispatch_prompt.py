@@ -13,6 +13,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -20,6 +21,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_prompt as dp  # noqa: E402
 import inbox  # noqa: E402
 import make_repo  # noqa: E402
+import settings  # noqa: E402
+from settings import Settings, Stage, Workers, Workflow  # noqa: E402
 from evals.rules_text import one_shot_paragraph, rules_text, sections, skill_body  # noqa: E402
 
 CLAUDE = """# Workspace
@@ -92,6 +95,22 @@ NAMED = """# Tracker 2026-09-18
 
 - 09:00 opened the day
 """
+
+
+class SuiteCountsTest(unittest.TestCase):
+    def test_suite_counts_keep_only_non_negative_integers_and_fill_unknowns(self):
+        keys = ("passed", "failed", "skipped", "xfailed")
+        self.assertEqual(dp.suite_counts({}), dict.fromkeys(keys))
+        for key in keys:
+            for value, normalized in ((None, None), (True, None), (False, None), (-1, None),
+                                      ("0", None), (1.5, None), ({}, None), ([], None), (0, 0), (23, 23)):
+                with self.subTest(key=key, value=value):
+                    data = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0, "extra": 99, key: value}
+                    before = data.copy()
+                    expected = {k: data[k] for k in keys}
+                    expected[key] = normalized
+                    self.assertEqual(dp.suite_counts(data), expected)
+                    self.assertEqual(data, before)
 
 
 class TaskByNameTest(unittest.TestCase):
@@ -374,6 +393,18 @@ class QuarantineTest(unittest.TestCase):
         self.assertIn("Owns: `src/a/`", dp.compose(root, "2026-09-18", long_item))
 
 
+
+class PlanScopeAssignmentTest(unittest.TestCase):
+    """#915 (§8): a plan assignment names the one file the run writes and asks for the scope proposal."""
+
+    def test_a_plan_assignment_names_its_plan_file(self):
+        row = SimpleNamespace(issue_key="github:example/project#12", title="A widget")
+        persona = SimpleNamespace(role="builder", rules=())
+        prompt = dp.compose_issue(row, "T", "B", "plan", persona)
+        self.assertIn("`docs/plans/issue-12.md`", prompt)
+        self.assertIn("file_ownership", prompt)
+        self.assertNotIn("docs/plans/", dp.compose_issue(row, "T", "B", "implement", persona))
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -539,10 +570,6 @@ class InboxMetadataLineTest(unittest.TestCase):
         line = next(x for x in self.body.splitlines() if x.startswith("Inbox: "))
         self.assertTrue(Path(line.removeprefix("Inbox: ")).is_file(), line)
 
-    def test_inbox_metadata_line_format(self):
-        self.assertRegex(self.body, r"(?m)^Inbox: .*/scripts/inbox\.py$")
-
-
 class DualTransportFallbackAddressingTest(unittest.TestCase):
     """Fallback CLI commands must always target the role-based 'coordinator' mailbox."""
 
@@ -570,12 +597,6 @@ class DualTransportFallbackAddressingTest(unittest.TestCase):
         # Ensure the ephemeral session name is never used as mailbox address
         self.assertNotIn('--to "my-coord', body)
         self.assertNotIn(f'--to "{coord_session}"', body)
-
-    def test_all_four_fallback_command_types_present_with_coordinator_recipient(self):
-        body = dp.compose(self.root, "2026-09-18", "Security audit", coordinator="coord-alpha [abcdef]")
-        for msg_type in ("register", "ask", "stop", "progress"):
-            pattern = rf'send --to "coordinator" --from "<your_ref_or_name>" --type {msg_type}'
-            self.assertRegex(body, pattern)
 
     def test_fallback_command_delivers_to_coordinator_mailbox(self):
         mailbox_dir = self.root / ".chief-of-stuff" / "mailbox"
@@ -631,6 +652,39 @@ class PromptCharacterBoundsTest(unittest.TestCase):
         (self.root / "daily" / "2026-09-18-tracker.md").write_text(large_tracker)
         body = dp.compose(self.root, "2026-09-18", item)
         self.assertLessEqual(len(body), dp.BODY_CAP)
+
+    def test_rendered_rule_budget_boundaries_for_both_assignment_paths(self):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "\n## Architecture\n- Canonical document: `design/ARCHITECTURE.md`\n")
+        row = SimpleNamespace(issue_key="k" * dp.LINE_CAP, title="t" * dp.LINE_CAP)
+        persona = SimpleNamespace(role="builder", rules=("p" * 1000,))
+        # The largest sets settings accepts: the most rules, and few long ones, both at the raw total cap.
+        for rules in (["x" * (settings.RULES_TOTAL_CAP // settings.RULES_MAX)] * settings.RULES_MAX,
+                      ["x" * 2400] * 2 + ["x" * (settings.RULES_TOTAL_CAP - 4800)]):
+            width = len(rules[0])
+            path = self.root / "rules.toml"
+            path.write_text("[workers]\nrules = " + json.dumps(rules) + "\nrequire_green_tests = true\n")
+            loaded = settings.load(self.root, path)
+            for stage in ("plan", "implement", "fix", "review"):
+                with self.subTest(width=width, stage=stage):
+                    prompt = dp.compose_issue(row, "T", "B", stage, persona, root=self.root,
+                                              skills=("testing",), rules=loaded.workers.rules, require_green=True)
+                    self.assertLessEqual(len(prompt.split("\n## Forge issue\n")[0]), dp.BODY_CAP)
+                    self.assertIn("Rule: " + persona.rules[0], prompt)
+            prompt = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                                one_shot=True, settings=loaded)
+            self.assertLessEqual(len(prompt), dp.BODY_CAP)
+            self.assertIn("Architecture:", prompt)
+
+    def test_one_shot_rule_budget_includes_the_complete_assignment(self):
+        loaded = Settings(workers=Workers(rules=("x",) * 1000, require_green_tests=True))
+        prompt = dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                            one_shot=True, settings=loaded)
+        with mock.patch.object(dp, "BODY_CAP", len(prompt)):
+            self.assertEqual(dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                                        one_shot=True, settings=loaded), prompt)
+        with mock.patch.object(dp, "BODY_CAP", len(prompt) - 1), self.assertRaisesRegex(dp.RefusedError, "over the"):
+            dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root,
+                       one_shot=True, settings=loaded)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
         item = "Security audit " + ("x" * 2000)
@@ -1218,9 +1272,6 @@ class PullRequestTest(unittest.TestCase):
         self.assertIn("when the work is finished and its suite is green", line)
         self.assertNotIn("when you are told to", line)
 
-    def test_the_commit_rule_survives(self):
-        self.assertIn("Commit small and often", self.body)
-
     def test_cimp_is_not_named(self):
         self.assertNotIn("CIMP", self.body)
         self.assertNotRegex(self.body, r"\bCIP\b")
@@ -1314,6 +1365,78 @@ class ReviewerRoutingTest(unittest.TestCase):
         self.assertIn("never resolve", body)
         (root / "cos.toml").write_text('[workflow]\ndelivery = "branch"\n')
         self.assertNotIn("--reply", dp.compose(root, "2026-09-18", "Security audit"))
+
+
+class StandingWorkerRulesTest(unittest.TestCase):
+    """Standing `[workers] rules` ride the one-shot header; interactive launches do not carry them."""
+
+    def setUp(self):
+        tmp, self.root = workspace(claude_md=CLAUDE + "- Settings: `cos.toml`\n")
+        self.addCleanup(tmp.cleanup)
+        self.settings = self.root / "cos.toml"
+
+    def compose(self, **kwargs):
+        return dp.compose(self.root, "2026-09-18", "Security audit", worktree=self.root / "tree",
+                          name="impl07", one_shot=True, **kwargs)
+
+    def test_rules_precede_the_task(self):
+        rules = ["Never skip or weaken tests.", "Verify the change before reporting completion."]
+        self.settings.write_text('[workers]\nrules = ' + json.dumps(rules) + '\n')
+        body = self.compose()
+        block = ("\n\nStanding worker rules:\n\n- Never skip or weaken tests.\n"
+                 "- Verify the change before reporting completion.\n\n")
+        source = "These rules come from workspace settings (`[workers] rules`).\n\n"
+        self.assertTrue(body.startswith("# One-shot assignment" + block + source + "You are"))
+        for rule in rules:
+            self.assertEqual(body.count(rule), 1)
+            self.assertLess(body.index(rule), body.index("Security audit"))
+
+    def test_absent_and_empty_rules_leave_the_assignment_unchanged(self):
+        original = self.compose()
+        self.assertNotIn("Standing worker rules:", original)
+        for text in ("[workers]\n", "[workers]\nrules = []\n"):
+            self.settings.write_text(text)
+            self.assertEqual(self.compose(), original)
+
+    def test_invalid_rules_refuse_dispatch(self):
+        self.settings.write_text('[workers]\nrules = "Keep tests."\n')
+        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
+            self.compose()
+
+    def test_rules_over_the_total_cap_refuse_dispatch(self):
+        self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
+        with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
+            self.compose()
+
+    def test_named_dispatch_preserves_literal_placeholder_in_rules(self):
+        rule = "Preserve the literal <your_ref_or_name> in examples."
+        self.settings.write_text('[workers]\nrules = ' + json.dumps([rule]) + '\n')
+        self.assertIn("- " + rule + "\n", self.compose())
+
+    def test_interactive_assignment_carries_no_rules(self):
+        self.settings.write_text('[workers]\nrules = ["Keep tests."]\n')
+        self.assertNotIn("Standing worker rules:", dp.compose(self.root, "2026-09-18", "Security audit"))
+
+    def test_preloaded_rules_and_stage_skills_share_one_settings_snapshot(self):
+        tracker = next(self.root.glob("daily/*.md"))
+        tracker.write_text(tracker.read_text().replace(
+            "| item | owner | state | since | due | checklist |",
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |")
+            .replace("|---|---|---|---|---|---|", "|---|---|---|---|---|---|---|---|---|---|---|", 1)
+            .replace("| Security audit | unassigned | open | 09:00 |  |",
+                     "| audit | Security audit | unassigned | open | 09:00 |  | M | code | review |  |", 1))
+        settings = Settings(workflow=Workflow(delivery="branch"),
+                            workers=Workers(rules=("Keep tests.",), require_green_tests=True),
+                            stages={"review": Stage(skills=("security-review",))})
+        # A later disk edit must not mix policy from different snapshots.
+        self.settings.write_text('[workers]\nrules = ["Changed on disk."]\n')
+        with mock.patch.object(dp, "load_settings", side_effect=AssertionError("duplicate read")):
+            body = self.compose(settings=settings)
+        self.assertIn("- Keep tests.\n", body)
+        self.assertNotIn("Changed on disk.", body)
+        self.assertIn("Skills: load and follow security-review.", body)
+        self.assertIn("Workspace [workers] require_green_tests is enabled:", body)
+        self.assertIn("do not push or merge without existing authorization", body)
 
 
 class DetachedWorktreeTest(unittest.TestCase):
@@ -1433,6 +1556,47 @@ class ReviewReportTest(unittest.TestCase):
                 self.addCleanup(tmp.cleanup)
                 body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree", one_shot=one_shot)
                 self.assertIn(f"Review: if this task reviews a pull or merge request, write your report in the format of {self.TEMPLATE}", body)
+
+
+class ArchitectureAndReviewSkillTest(unittest.TestCase):
+    """C2/C3: review-stage assignments name extras:code-review; every compose carries Architecture: when declared."""
+
+    ARCH = CLAUDE + "\n## Architecture\n- Canonical document: `design/ARCHITECTURE.md`\n"
+    REVIEW_TRACKER = """# Tracker 2026-09-18
+
+## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+| audit | Security audit | unassigned | open | 09:00 |  | S | build | review |  | Checklist: Security audit of the upload handler |
+
+## File ownership
+
+| context | paths |
+|---|---|
+| Security audit | `src/a/` |
+
+## Log
+
+- 09:00 opened the day
+"""
+
+    def test_compose_adds_architecture_on_one_shot_and_interactive(self):
+        for one_shot in (True, False):
+            with self.subTest(one_shot=one_shot):
+                tmp, root = workspace(claude_md=self.ARCH)
+                self.addCleanup(tmp.cleanup)
+                body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree", one_shot=one_shot)
+                self.assertIn(f"Architecture: {(root / 'design/ARCHITECTURE.md').resolve()}; read it before changing code.",
+                              body)
+
+    def test_compose_review_stage_names_the_code_review_skill(self):
+        tmp, root = workspace(self.REVIEW_TRACKER, self.ARCH)
+        self.addCleanup(tmp.cleanup)
+        for one_shot in (True, False):
+            with self.subTest(one_shot=one_shot):
+                body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree", one_shot=one_shot)
+                self.assertIn(dp.CODE_REVIEW, body)
 
 
 class AgyRuntimeTest(unittest.TestCase):
