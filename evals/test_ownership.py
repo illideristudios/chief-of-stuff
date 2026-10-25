@@ -235,6 +235,16 @@ class ScopeConsultContextTest(unittest.TestCase):
         self.assertTrue(ctx_title.startswith("Proposed file ownership: write: scripts/a.py; read: docs/a.md"))
         self.assertIn("[title truncated]", ctx_title)
 
+        multibyte_plan = "é🔧" * (ownership.SCOPE_CONTEXT_CAP // 2)
+        ctx_utf8 = ownership.scope_consult_context(
+            title="UTF-8 boundary",
+            body="Body text",
+            plan_text=multibyte_plan,
+            scopes=scopes,
+        )
+        self.assertLessEqual(len(ctx_utf8.encode("utf-8")), ownership.SCOPE_CONTEXT_CAP)
+        self.assertIn("[plan truncated]", ctx_utf8)
+
 
 if __name__ == "__main__":
     unittest.main()

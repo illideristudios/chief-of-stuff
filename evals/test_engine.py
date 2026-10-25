@@ -1912,6 +1912,15 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
             self.run_pass(model=votes)
             self.assertEqual(votes.n, 3)
+            self.assertEqual(
+                self.db.decisions(KEY)[-1].record["decision"]["context"],
+                engine.ownership.scope_consult_context(
+                    title="Reuse check",
+                    body="Acceptance: reuse settled scope consult.",
+                    plan_text="# Plan v1\nInitial plan.\n",
+                    scopes=[("src/a.py", "write"), ("docs/design.md", "read")],
+                ),
+            )
             # Re-running the pass with the same proposal, issue body, and plan reuses the settled row without calling the model.
             self.run_pass(model=votes)
             self.assertEqual(votes.n, 3)

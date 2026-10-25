@@ -118,11 +118,60 @@ def overlaps(a: str, b: str) -> bool:
 
 # #915 (§8): the plan stage's own files, one per issue, so plan runs never serialize on each other.
 PLAN_DIR = "docs/plans"
+# #1006: UTF-8 byte cap on Decision.context for topic `scope` within the trio's prompt budget; tune from real prompts.
+SCOPE_CONTEXT_CAP = 12_000
+_PLAN_TRUNCATED = "\n… [plan truncated]"
+_BODY_TRUNCATED = "\n… [issue body truncated]"
+_TITLE_TRUNCATED = " … [title truncated]"
 
 
 def plan_path(issue_key: str) -> str:
     """The one file an issue's plan run writes."""
     return f"{PLAN_DIR}/issue-{issue_key.rpartition('#')[2]}.md"
+
+
+def _truncate_utf8(text: str, budget: int, suffix: str) -> str:
+    if budget <= 0:
+        return suffix.lstrip()
+    head = text.encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+    return (head + suffix) if head else suffix.lstrip()
+
+
+def scope_consult_context(*, title: str, body: str, plan_text: str,
+                          scopes: list[tuple[str, str]] | tuple[tuple[str, str], ...]) -> str:
+    """#1006: bounded context for a `scope` trio consult — proposed paths first, then issue title, body, and plan."""
+    listed = "; ".join(f"{mode}: {path}" for path, mode in scopes) or "(none)"
+    title_part = title.strip() if isinstance(title, str) and title.strip() else "(empty)"
+    body_part = body.strip() if isinstance(body, str) and body.strip() else "(empty)"
+    has_plan = isinstance(plan_text, str) and bool(plan_text.strip())
+    plan_part = plan_text.strip() if has_plan else "(not found in worktree)"
+
+    def render(t: str, b: str, p: str) -> str:
+        plan_block = f"Plan:\n{p}" if has_plan else f"Plan: {p}"
+        return "\n\n".join((
+            f"Proposed file ownership: {listed}",
+            f"Issue title: {t}",
+            f"Issue body:\n{b}",
+            plan_block,
+        ))
+
+    out = render(title_part, body_part, plan_part)
+    if len(out.encode("utf-8")) <= SCOPE_CONTEXT_CAP:
+        return out
+    if has_plan:
+        overhead = len(render(title_part, body_part, "").encode("utf-8")) + len(_PLAN_TRUNCATED.encode("utf-8"))
+        plan_part = _truncate_utf8(plan_part, SCOPE_CONTEXT_CAP - overhead, _PLAN_TRUNCATED)
+        out = render(title_part, body_part, plan_part)
+        if len(out.encode("utf-8")) <= SCOPE_CONTEXT_CAP:
+            return out
+    overhead = len(render(title_part, "", plan_part).encode("utf-8")) + len(_BODY_TRUNCATED.encode("utf-8"))
+    body_part = _truncate_utf8(body_part, SCOPE_CONTEXT_CAP - overhead, _BODY_TRUNCATED)
+    out = render(title_part, body_part, plan_part)
+    if len(out.encode("utf-8")) <= SCOPE_CONTEXT_CAP:
+        return out
+    overhead = len(render("", body_part, plan_part).encode("utf-8")) + len(_TITLE_TRUNCATED.encode("utf-8"))
+    title_part = _truncate_utf8(title_part, SCOPE_CONTEXT_CAP - overhead, _TITLE_TRUNCATED)
+    return render(title_part, body_part, plan_part)
 
 
 def proposal_scopes(entries) -> list[tuple[str, str]] | None:

@@ -10,7 +10,7 @@ import os
 import sys
 import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import is_dataclass, replace
 from datetime import datetime, timedelta
 from functools import cache, partial
@@ -308,8 +308,28 @@ def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at
     store.add_log(key, f"permission {answer}: {ask.question}: {why}", at)
 
 
+def _plan_text(store: Any, key: str, stage: str, attempt: int, root: Path | None) -> str:
+    rel = ownership.plan_path(key)
+    data = _resume(store, key)
+    runs = data.get("runs") if isinstance(data.get("runs"), dict) else {}
+    run_entry = runs.get(f"{stage}-{attempt}") if isinstance(runs.get(f"{stage}-{attempt}"), dict) else {}
+    candidates = [
+        *(path for path in (run_entry.get("tree"), data.get("worktree")) if isinstance(path, str) and path),
+        *(row.path for row in reversed(store.ownership(key)) if row.mode == "tree"),
+    ]
+    for raw in dict.fromkeys(candidates):
+        tree = Path(raw) if Path(raw).is_absolute() or root is None else root / raw
+        try:
+            if (tree / rel).is_file():
+                return (tree / rel).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return ""
+
+
 def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at: str, clock: engine_clock.Clock,
-                   until: datetime | None = None) -> None:
+                   until: datetime | None = None, *, root: Path | None = None,
+                   bodies: Mapping[str, str] | None = None) -> None:
     """#915: a plan's file_ownership proposal is a trio decision (topic `scope`). On approval the engine writes the
     issue's section through the forge and its store rows; a rejection drops it. A split waits for the owner as a real
     decision, and an unavailable trio is asked again next pass. Nothing is written unapproved."""
@@ -329,9 +349,29 @@ def _settle_scopes(forge: Any, store: Any, policies: policy.Policies, model, at:
             continue
         if until is not None and clock() >= until:
             return
+        attempt = int(proposal.get("attempt") or 0)
+        body = bodies.get(key) if bodies is not None else None
+        if not isinstance(body, str):
+            try:
+                got = forge.issue(int(key.rpartition("#")[2]))
+                if not got.ok or got.issue is None:
+                    raise ForgeError(got.error or "issue not found")
+                body = got.issue.body if isinstance(got.issue.body, str) else ""
+            except (ForgeError, OSError, ValueError, TypeError) as exc:
+                message = f"ownership read failed: {exc}"
+                logged = store.log(key)
+                if not logged or logged[-1].message != message:
+                    store.add_log(key, message, at)
+                continue
+        context = ownership.scope_consult_context(
+            title=item.title,
+            body=body,
+            plan_text=_plan_text(store, key, stage, attempt, root),
+            scopes=scopes,
+        )
         choice = _choice(store, key, "scope", f"Approve this file ownership for {key}? {listed}", ("approve", "reject"),
-                         resolved, policies.personas, model, context=listed, stage=stage,
-                         attempt=int(proposal.get("attempt") or 0), clock=clock, until=until)
+                         resolved, policies.personas, model, context=context, stage=stage,
+                         attempt=attempt, clock=clock, until=until)
         if choice == "reject":
             store.update_resume(key, lambda data: data.pop("scope_proposal", None))
             store.add_log(key, f"file ownership proposal rejected: {listed}", at)
@@ -694,6 +734,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 row["stage"] = stored
     store.sync_from_forge(snapshots)
     scopes = {}
+    bodies: dict[str, str] = {}
     for row in snapshots:
         key = row["issue_key"]
         body = row.get("body")
@@ -707,6 +748,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 store.add_log(key, f"ownership read failed: {exc}", clock().isoformat())
                 # A failed read preserves prior declarations; a new issue waits without a scope.
                 continue
+        bodies[key] = body
         scopes[key] = ownership.issue_scopes(body)
     running = {segment.issue_key for segment in store.segments() if segment.ended_at is None}
     for key, declared in scopes.items():
@@ -833,7 +875,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     until = clock() + timedelta(seconds=TRIO_PASS_BUDGET_S)
     _route_asks(store, policies, model, at, clock, until)
-    _settle_scopes(forge, store, policies, model, at, clock, until)
+    _settle_scopes(forge, store, policies, model, at, clock, until, root=root, bodies=bodies)
     if is_dataclass(facts):
         # The trio may have answered asks since collect gathered them; plan from the answers it just stored.
         asks = tuple(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt)
