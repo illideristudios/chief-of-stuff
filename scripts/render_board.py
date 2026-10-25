@@ -25,6 +25,7 @@ from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
 from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 from task_forge import (current_tasks, drifts, effective_stage, epic_risk, forge_ends, held_names,  # noqa: E402
                         hold_began, hold_causes, looping, tab_counts, task_changes, went_held, worker_names)
+from backlog_ref import store_label  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
@@ -203,7 +204,7 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         url = issue_url(issue_key(task.issue, sources.home), task.issue)
         raw_issue = task.issue.strip()
         full_key = ":" in raw_issue and "#" in raw_issue and not raw_issue.startswith(("http://", "https://"))
-        issue = issue_key(task.issue, sources.home) if changes or url else raw_issue
+        issue = store_label(raw_issue, sources.home) if full_key else (issue_key(task.issue, sources.home) if changes or url else raw_issue)
         refs = ((issue, page(raw_issue if full_key else issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         lane = lanes.get(task.lane.strip())
         finished = task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1])
@@ -270,7 +271,7 @@ def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: i
             panels.Tile("ORPHANED", orphaned, "flow", "orphaned"), panels.Tile("DRIFT", drift, "flow", "drift")]
 
 
-def _render_store_decisions(decisions: list) -> str:
+def _render_store_decisions(decisions: list, home=None) -> str:
     if not decisions:
         return ""
     items: list[str] = []
@@ -296,7 +297,7 @@ def _render_store_decisions(decisions: list) -> str:
         )
         items.append(
             f'<div class="decision-item" data-status="{_esc(st_name)}">'
-            f'{badge} <a href="{_esc(issue_href(d.issue_key))}">{_esc(d.issue_key)}</a> '
+            f'{badge} <a href="{_esc(issue_href(d.issue_key))}">{_esc(store_label(d.issue_key, home))}</a> '
             f'<strong>{_esc(d.question)}</strong>{ans}{form}</div>'
         )
     return '<div class="board-decisions">\n' + "\n".join(items) + "\n</div>\n"
@@ -390,7 +391,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     earlier = list(rows.items())
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops)
-    decisions_html = _render_store_decisions(store_decisions)
+    decisions_html = _render_store_decisions(store_decisions, sources.home)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
