@@ -185,6 +185,13 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.permission(command=command), {"behavior": "allow"})
         self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
 
+    def test_fd_and_in_tree_redirects_are_allowed_without_anyone(self):
+        # #874: 2>&1 is a file descriptor, not a write. A redirect to a real file inside the worktree is in scope.
+        for command in ("ls 2>&1 | head", "ls > notes.txt"):
+            with self.subTest(command=command):
+                self.assertEqual(self.permission(command=command), {"behavior": "allow"})
+        self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
     def test_routine_reads_and_own_tree_git_writes_are_allowed_without_anyone(self):
         # #890: the shapes the engines' workers actually asked about (names invented), each now judged by rule.
         commands = (
