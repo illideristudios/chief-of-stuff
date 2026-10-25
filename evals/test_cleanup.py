@@ -200,7 +200,8 @@ class CleanupTest(unittest.TestCase):
         sibling.write_text("untracked\n")
         _, out = self.run_cleanup("--remove")
         self.assertNotIn("done", self.removable(out))
-        self.assertIn("done", self.kept(out))
+        self.assertIn("unsaved by git status --ignored (.cursor/", self.kept(out)["done"])
+        self.assertIn("1 uncommitted", self.kept(out)["done"])
         self.assertTrue(tree.is_dir())
         sibling.unlink()
 
@@ -210,10 +211,20 @@ class CleanupTest(unittest.TestCase):
         notes.write_text("only copy\n")
         _, out = self.run_cleanup("--remove")
         self.assertNotIn("done", self.removable(out))
-        self.assertIn("done", self.kept(out))
+        self.assertIn("1 unsaved by git status --ignored (.cursor/)", self.kept(out)["done"])
         self.assertTrue(tree.is_dir())
         gitignore.unlink()
         notes.unlink()
+
+        real_git = cleanup.git
+        for reply in ((128, "unreadable"), (0, "")):
+            with self.subTest(reply=reply), mock.patch.object(
+                cleanup, "git", side_effect=lambda args, cwd, view=None, r=reply: (
+                    r if args == ["status", "--porcelain", "--ignored", "--untracked-files=all", "--", ".cursor"]
+                    else real_git(args, cwd, view)
+                ),
+            ):
+                self.assertEqual(cleanup.git_guards(tree), ["1 unsaved by git status --ignored (.cursor/)"])
 
         code, out = self.run_cleanup()
         self.assertEqual(code, 0, out)

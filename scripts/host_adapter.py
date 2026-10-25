@@ -22,6 +22,7 @@ import make_worktree
 import runtimes
 from model_port import Failure, Reply, Request, quota_reset
 from shell_setup import ShellError, login_argv, resolve
+from tree_state import CURSOR_CHANNEL_EXCLUDE
 
 SCRIPTS = Path(__file__).resolve().parent
 HOSTS = ("codex", "cursor", "agy")
@@ -68,7 +69,7 @@ def _channel(env: dict[str, str]) -> tuple[str, list[str], dict[str, str]]:
 
 def _exclude(tree: Path, entry: str) -> None:
     """Keep a per-run file out of every commit without touching the tree's tracked .gitignore."""
-    # The real repository, not git_trees' sanitised view: the view's info/exclude is a throwaway copy.
+    # The real repository's exclude is what the worker's git reads; the audit view authors its own and does not copy this file.
     code, path = make_worktree.git_trusted(["rev-parse", "--git-path", "info/exclude"], tree)
     if code:
         raise ShellError("cannot locate the worker tree's info/exclude")
@@ -112,7 +113,7 @@ def _register_cursor(request: Request, command: str, args: list[str], binding: d
         raise ShellError("the worker tree already has .cursor/mcp.json; refusing to replace it")
     config.parent.mkdir(exist_ok=True)
     config.write_text(json.dumps({"mcpServers": {"engine": {"command": command, "args": args, "env": binding}}}))
-    _exclude(tree, "/.cursor/mcp.json")
+    _exclude(tree, CURSOR_CHANNEL_EXCLUDE)
 
 
 def _register_agy(request: Request, command: str, args: list[str], binding: dict[str, str]) -> str:
