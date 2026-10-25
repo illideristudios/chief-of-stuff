@@ -143,8 +143,8 @@ def claims(root: Path, trees: Path, tree: Path) -> list[str]:
     current = processes()
     if current is None:
         out.append("open processes cannot be checked")
-    else:
-        out += [f"live process in tree (pid {pid})" for pid, cwd in current if pid != os.getpid() and inside(cwd, tree)]
+    elif any(pid != os.getpid() and inside(cwd, tree) for pid, cwd in current):
+        out.append("live process in tree")
     # Adoption reads a dead worker's dispatch, result and logs until this run's launcher report exists. Do not parse
     # the worker-written pid file here: an unreadable claim must also keep its evidence, without scanning trackers.
     pidfile = tree / PIDFILE
