@@ -198,6 +198,61 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.forge.merges, [(10, True, KEY)])
         self.assertEqual(self.forge.writes, [(1, "review", "implement", True), (1, "merge", "review", True)])
         self.assertEqual(self.db.items()[0].stage, "merge")
+
+    def open_implement_pr(self):
+        data = self.db.resume(KEY)
+        data["work_branch"] = "work/issue-1-plan-1"
+        self.db.set_resume(KEY, data)
+        request = SimpleNamespace(branch=data["work_branch"], head="abc")
+        self.forge.requests = mock.Mock(return_value=[request])
+        self.forge.closing_request = mock.Mock(return_value=request)
+
+    def test_released_post_pr_hold_moves_to_review_without_another_implement_attempt(self):
+        self.run_pass()
+        self.open_implement_pr()
+        self.publish_exit()
+        data = self.db.resume(KEY)
+        data["runs"]["implement-1"]["runtime"] = "codex"
+        self.db.set_resume(KEY, data)
+        self.forge.kanban = SimpleNamespace(stage_map={}, hold_stages=())
+        with mock.patch.object(engine.worker.host_adapter, "moved_outside_engine",
+                               return_value="main gained commits the engine did not merge: abc"), \
+             mock.patch.object(engine.worker.host_adapter, "classify", return_value=model_port.Reply("finished", None, "", 0, 0)), \
+             mock.patch.object(engine.worker.host_adapter, "cleanup"), \
+             mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 1, 0), False, NOW)), \
+             mock.patch.object(self.forge, "add_human_hold", wraps=self.forge.add_human_hold) as hold:
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
+            hold.assert_called_once_with(1)
+        segment = self.db.segments(KEY)[0]
+        self.assertTrue(segment.required_human_review)
+        self.assertEqual(segment.outcome, "human_review")
+        self.forge.rows[0]["human_review"] = False
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 1, 0), False, NOW)):
+            self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder"), (KEY, "review", 1, "critic")])
+        self.assertEqual(self.db.items()[0].stage, "review")
+
+    def test_implement_blocked_with_a_clean_open_pr_closes_done_and_moves_to_review(self):
+        self.run_pass()
+        self.open_implement_pr()
+        self.publish_exit("blocked")
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 1, 0), False, NOW)):
+            self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder"), (KEY, "review", 1, "critic")])
+
+    def test_blocked_pr_run_keeps_its_outcome_when_unpushed_or_waiting_for_an_answer(self):
+        self.run_pass()
+        self.open_implement_pr()
+        segment = self.db.segments(KEY)[0]
+        for facts in (reconcile.Facts(open_prs=(KEY,), changed=((KEY, False),),
+                                     trees=((KEY, TreeState("work", 0, 1, 1)),)),
+                      reconcile.Facts(open_prs=(KEY,), changed=((KEY, False),),
+                                      asks=(engine.readiness.Ask(KEY, None, "implement", 1),))):
+            with self.subTest(facts=facts), mock.patch.object(engine, "_close_segment") as close:
+                engine._finish_worker(self.forge, self.db, segment, "blocked", "waiting", NOW,
+                                      policies=self.p, facts=facts)
+                self.assertEqual(close.call_args.args[5], "blocked")
         self.run_pass()
         self.assertEqual(self.db.items()[0].forge_state, "closed")
         self.assertEqual(len(self.launched), 2)

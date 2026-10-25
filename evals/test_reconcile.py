@@ -819,6 +819,55 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[Segment("implement", outcome="human_review")]),
                          [reconcile.Dispatch(KEY, "implement", "builder", 2)])
 
+    def pr_facts(self, **kwargs):
+        base = dict(claims=(readiness.Claim(KEY, "src/"),), blockers=(), changed=((KEY, False),), open_prs=(KEY,))
+        return reconcile.Facts(**{**base, **kwargs})
+
+    def test_released_implement_hold_with_an_open_pr_moves_to_review(self):
+        self.assertEqual(self.plan(history=[Segment("implement", outcome="human_review")], facts=self.pr_facts()),
+                         [reconcile.Review(KEY, 1)])
+
+    def test_released_implement_hold_recovers_after_a_failed_redundant_attempt(self):
+        history = [Segment("implement", outcome="human_review"),
+                   Segment("implement", 2, started_at=NOW, ended_at=NOW, outcome="failed")]
+        self.assertEqual(self.plan(history=history, facts=self.pr_facts()), [reconcile.Review(KEY, 1)])
+
+    def test_open_pr_recovery_preserves_holds_gates_and_new_fix_rounds(self):
+        facts = self.pr_facts()
+        self.assertEqual(self.plan(Item(human_review=True), [Segment("implement", outcome="human_review")],
+                                   facts=facts), [reconcile.Wait(KEY, "human review")])
+        self.p.stages["implement"] = policy.Place("implement", "builder", {"zach_gates": ("plan",)})
+        self.assertIsInstance(self.plan(history=[Segment("implement", outcome="human_review")], facts=facts)[0],
+                              reconcile.Ask)
+        self.assertIsInstance(self.plan(history=[Segment("implement"), Segment("review", started_at=NOW)],
+                                       facts=facts)[0], reconcile.Dispatch)
+
+    def test_open_pr_recovery_requires_readable_pushed_work_and_no_pending_ask(self):
+        from tree_state import TreeState
+        for facts in (self.pr_facts(unreadable=(KEY,)),
+                      self.pr_facts(trees=((KEY, TreeState("work", 0, 1, 1)),)),
+                      self.pr_facts(trees=((KEY, TreeState("work", 0, 1, None)),)),
+                      self.pr_facts(asks=(readiness.Ask(KEY, "", "implement", 1),))):
+            with self.subTest(facts=facts):
+                self.assertNotIsInstance(self.plan(history=[Segment("implement", outcome="human_review")],
+                                                   facts=facts)[0], reconcile.Review)
+
+    def test_implement_blocked_with_an_open_pr_is_not_a_failed_attempt(self):
+        self.p = replace(self.p, base=policy.Policy(retry_limit=0))
+        reports = (readiness.Report(KEY, "blocked", "implement", 1),)
+        self.assertEqual(self.plan(history=[Segment("implement", outcome="blocked")],
+                                   facts=self.pr_facts(reports=reports)), [reconcile.Review(KEY, 1)])
+
+    def test_implement_hold_or_block_without_a_clean_open_pr_still_reruns(self):
+        for outcome, facts in (("human_review", self.pr_facts(open_prs=())),
+                               ("human_review", self.pr_facts(changed=((KEY, True),))),
+                               ("human_review", self.pr_facts(changed=((KEY, None),))),
+                               ("blocked", self.pr_facts(open_prs=())),
+                               ("blocked", self.pr_facts(asks=(readiness.Ask(KEY, "go", "implement", 1),)))):
+            with self.subTest(outcome=outcome, facts=facts):
+                got = self.plan(history=[Segment("implement", outcome=outcome)], facts=facts)
+                self.assertNotIsInstance(got[0], reconcile.Review)
+
     def test_segment_without_outcome_retries_current_stage_instead_of_advancing(self):
         self.assertEqual(self.plan(history=[Segment("implement", outcome=None)]),
                          [reconcile.Dispatch(KEY, "implement", "builder", 2)])

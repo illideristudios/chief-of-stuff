@@ -60,6 +60,51 @@ class GatherTest(unittest.TestCase):
         forge = forge or mock.Mock(**{"blocked_by.return_value": {}})
         return engine_facts.gather(forge=forge, store=self.db, root=self.root, trees=self.trees, now=NOW)
 
+    def test_open_implement_prs_match_recorded_branches_with_one_forge_read(self):
+        self.db.set_resume(KEY, {"work_branch": "work/one"})
+        self.db.upsert_item(OTHER, stage="implement")
+        self.db.set_resume(OTHER, {"runs": {"implement-10": {"branch": "work/two"},
+                                          "implement-2": {"branch": "old"},
+                                          "review-1": {"branch": "review"}}})
+        requests = [SimpleNamespace(branch="work/one", head="abc"), SimpleNamespace(branch="work/two", head="def")]
+        source = mock.Mock(**{"blocked_by.return_value": {}, "requests.return_value": requests})
+        source.closing_request.side_effect = lambda key, requests: requests[0 if key == KEY else 1]
+        self.assertEqual(self.gather(source).open_prs, (KEY, OTHER))
+        source.requests.assert_called_once_with()
+        self.assertEqual(source.closing_request.call_args_list,
+                         [mock.call(KEY, requests=requests), mock.call(OTHER, requests=requests)])
+
+    def test_open_pr_facts_require_a_matching_branch_and_head_and_tolerate_forge_errors(self):
+        self.db.set_resume(KEY, {"work_branch": "work/one"})
+        source = mock.Mock(**{"blocked_by.return_value": {}, "requests.return_value": []})
+        for request in (None, SimpleNamespace(branch="other", head="abc"),
+                        SimpleNamespace(branch="work/one", head="")):
+            with self.subTest(request=request):
+                source.closing_request.return_value = request
+                self.assertEqual(self.gather(source).open_prs, ())
+        source.closing_request.side_effect = engine_facts.ForgeError("no closer")
+        self.assertEqual(self.gather(source).open_prs, ())
+        source.requests.side_effect = engine_facts.ForgeError("offline")
+        self.assertEqual(self.gather(source).open_prs, ())
+        source.requests.side_effect = None
+        source.requests.return_value = None
+        self.assertEqual(self.gather(source).open_prs, ())
+        self.assertEqual(self.gather(SimpleNamespace(blocked_by=lambda: {})).open_prs, ())
+
+    def test_no_pr_read_for_other_stages_or_missing_work_branch(self):
+        source = mock.Mock(**{"blocked_by.return_value": {}})
+        self.assertEqual(self.gather(source).open_prs, ())
+        self.db.set_resume(KEY, {"work_branch": "work/one"})
+        self.db.upsert_item(KEY, stage="review")
+        self.assertEqual(self.gather(source).open_prs, ())
+        source.requests.assert_not_called()
+
+    def test_a_blocked_report_cannot_stop_a_segment_accepted_as_done(self):
+        self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
+        self.assertFalse(self.gather().reports)
+        self.db.add_report(KEY, "implement", 1, "sess", "done", "complete", [])
+        self.assertEqual([r.outcome for r in self.gather().reports], ["done"])
+
     def test_a_worktree_row_is_not_a_file_claim_and_arms_no_read_only_check(self):
         self.db.upsert_item(OTHER, stage="implement")
         self.db.set_ownership(OTHER, str(self.trees / "issue-2-implement-1"))
