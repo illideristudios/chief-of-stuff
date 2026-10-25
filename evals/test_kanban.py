@@ -241,6 +241,16 @@ class GitLabUpdaterTest(unittest.TestCase):
         write.assert_not_called()
 
 
+def _select(name, *, owner="example", number=3):
+    return {"project": {"number": number, "owner": {"login": owner}},
+            "fieldValueByName": {"__typename": "ProjectV2ItemFieldSingleSelectValue", "name": name}}
+
+
+def _items(number, nodes, *, has_next=False):
+    return {"data": {"r0": {f"n{number}": {
+        "projectItems": {"pageInfo": {"hasNextPage": has_next}, "nodes": nodes}}}}}
+
+
 class GitHubUpdaterTest(unittest.TestCase):
     def setUp(self):
         self.ref = backlog.IssueRef("example/app", 7)
@@ -250,10 +260,21 @@ class GitHubUpdaterTest(unittest.TestCase):
         self.labels = ["kind::code"]
         self.status = "Plan"
         self.present = True
+        self.absent_nodes = []
         self.calls = []
 
-    def gh(self, args):
-        self.calls.append(args)
+    def _project_body(self):
+        project = self.config.github_project
+        if self.present:
+            value = None if self.status is None else {
+                "__typename": "ProjectV2ItemFieldSingleSelectValue", "name": self.status}
+            nodes = [{"project": {"number": project.number, "owner": {"login": project.owner}},
+                      "fieldValueByName": value}]
+        else:
+            nodes = self.absent_nodes
+        return _items(self.ref.number, nodes)
+
+    def _mutate(self, args):
         if args[:2] == ["issue", "view"]:
             return 0, json.dumps({"state": "OPEN", "url": self.ref.url,
                 "labels": [{"name": x} for x in self.labels]}), ""
@@ -262,9 +283,6 @@ class GitHubUpdaterTest(unittest.TestCase):
         if args[:2] == ["project", "field-list"]:
             return 0, json.dumps({"fields": [{"name": "Status", "options":
                 [{"name": x} for x in self.config.github_project.options]}]}), ""
-        if args[:2] == ["project", "item-list"]:
-            items = ([{"content": {"url": self.ref.url}, "status": self.status}] if self.present else [])
-            return 0, json.dumps({"items": items, "totalCount": len(items)}), ""
         if args[:2] == ["project", "item-add"]:
             self.present = True
             return 0, "{}", ""
@@ -278,6 +296,12 @@ class GitHubUpdaterTest(unittest.TestCase):
                 self.labels = [x for x in self.labels if x not in args[args.index("--remove-label") + 1].split(",")]
             return 0, "", ""
         raise AssertionError(args)
+
+    def gh(self, args):
+        self.calls.append(args)
+        if args[:2] == ["api", "graphql"]:
+            return 0, json.dumps(self._project_body()), ""
+        return self._mutate(args)
 
     def test_project_preview_reads_status_without_writing(self):
         got = kanban.sync_github(self.ref, self.config, "plan review", gh=self.gh)
@@ -323,8 +347,121 @@ class GitHubUpdaterTest(unittest.TestCase):
 
     def test_configured_status_field_is_requested(self):
         kanban.sync_github(self.ref, self.config, "implement", gh=self.gh)
-        call = next(a for a in self.calls if a[:2] == ["project", "item-list"])
-        self.assertEqual(call[call.index("--field") + 1], "Status")
+        call = next(a for a in self.calls if a[:2] == ["api", "graphql"])
+        query = next(part.split("=", 1)[1] for part in call if part.startswith("query="))
+        field = json.dumps(self.config.github_project.field)
+        self.assertIn(f"fieldValueByName(name: {field})", query)
+        self.assertIn("projectItems(first: 20)", query)
+        self.assertFalse(any(a[:2] == ["project", "item-list"] for a in self.calls))
+
+    def test_preview_reads_status_when_item_list_would_truncate(self):
+        # A 5,001-item list that omits the issue used to fail the read. The status comes from projectItems.
+        self.status = "Test"
+
+        def gh(args):
+            if args[:2] == ["project", "item-list"]:
+                self.calls.append(args)
+                return 0, json.dumps({"items": [], "totalCount": 5001}), ""
+            return self.gh(args)
+
+        got = kanban.sync_github(self.ref, self.config, "plan review", gh=gh)
+        self.assertTrue(got.ok, got.error)
+        self.assertEqual(got.current_status, "Test")
+        self.assertTrue(any(a[:2] == ["api", "graphql"] for a in self.calls))
+        self.assertFalse(any(a[:2] == ["project", "item-list"] for a in self.calls))
+
+    def test_empty_refs_do_not_call_gh(self):
+        def gh(args):
+            raise AssertionError(args)
+
+        self.assertEqual(kanban._project_items(gh, self.config.github_project, ()), ({}, ""))
+
+    def test_unset_field_is_present_with_no_status(self):
+        self.status = None
+        items, error = kanban._project_items(self.gh, self.config.github_project, (self.ref,))
+        self.assertEqual(error, "")
+        self.assertIsNone(items[self.ref.url])
+        self.calls = []
+        got = kanban.sync_github(self.ref, self.config, "implement", gh=self.gh)
+        self.assertTrue(got.ok, got.error)
+        self.assertIsNone(got.current_status)
+        self.assertFalse(got.project_add)
+
+    def test_another_project_is_absence_and_initialize_still_adds(self):
+        self.present = False
+        self.absent_nodes = [_select("Build", owner="elsewhere", number=9)]
+        got = kanban.sync_github(self.ref, self.config, "implement", gh=self.gh, commit=True, initialize=True)
+        self.assertTrue(got.done, got.error)
+        self.assertTrue(got.project_add)
+        self.assertTrue(any(a[:2] == ["project", "item-add"] for a in self.calls))
+
+    def test_short_or_failed_read_is_not_absence(self):
+        # A finished read that misses this Project is absence. A short or failed read must not item-add.
+        bodies = {
+            "next page": _items(7, [_select("Build")], has_next=True),
+            "null issue": {"data": {"r0": {"n7": None}}},
+            "two items": _items(7, [_select("Build"), _select("Build")]),
+            "text value": _items(7, [{"project": {"number": 3, "owner": {"login": "example"}},
+                                      "fieldValueByName": {"__typename": "ProjectV2ItemFieldTextValue", "text": "Build"}}]),
+            "graphql errors": {**_items(7, [_select("Build")]), "errors": [{"message": "denied"}]},
+        }
+        task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
+                               label="Build it", kind="open", item="Build it")
+        cfg = backlog.GitHubBacklog("example/app")
+        issue = backlog.Issue(7, "Build it", "opened", ())
+
+        def run(name, answer):
+            self.calls = []
+            self.labels = ["kind::code"]
+            self.status = "Plan"
+            self.present = True
+
+            def gh(args, answer=answer):
+                self.calls.append(args)
+                if args[:2] == ["api", "graphql"]:
+                    if answer is None:
+                        return 1, json.dumps(_items(7, [_select("Build")])), "gh failed"
+                    return 0, json.dumps(answer), ""
+                if args[:2] == ["project", "item-list"]:
+                    return 0, json.dumps({"items": [], "totalCount": 0}), ""
+                return self._mutate(args)
+
+            got = kanban.sync_github(self.ref, self.config, "implement", gh=gh, commit=True, initialize=True)
+            self.assertTrue(got.error, name)
+            self.assertNotIn("absent", got.error)
+            self.assertNotIn("changed outside", got.error)
+            self.assertFalse(any(a[:2] in (["project", "item-add"], ["project", "item-edit"]) for a in self.calls), name)
+            with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+                faults = audit_tasks.kanban_faults([task], cfg, self.config, gh=gh)
+            self.assertTrue(faults, name)
+            self.assertNotIn("absent", faults[0].why)
+            self.assertNotIn("expected project", faults[0].why)
+
+        for name, body in bodies.items():
+            with self.subTest(name=name):
+                run(name, body)
+        with self.subTest(name="gh failed"):
+            run("gh failed", None)
+
+    def test_missing_membership_is_reported_absent(self):
+        task = SimpleNamespace(standing=False, lane="build", stage="implement", issue="#7",
+                               label="Build it", kind="open", item="Build it")
+        cfg = backlog.GitHubBacklog("example/app")
+        issue = backlog.Issue(7, "Build it", "opened", ())
+        cases = {"empty": [], "other project": [_select("Build", owner="elsewhere", number=9)]}
+        for name, nodes in cases.items():
+            with self.subTest(name=name):
+                def gh(args, nodes=nodes):
+                    if args[:2] == ["project", "item-list"]:
+                        return 0, json.dumps({"items": [{"content": {"url": self.ref.url}, "status": "Build"}],
+                                              "totalCount": 1}), ""
+                    if args[:2] == ["api", "graphql"]:
+                        return 0, json.dumps(_items(7, nodes)), ""
+                    raise AssertionError(args)
+
+                with mock.patch.object(audit_tasks, "issue_states", return_value={7: issue}):
+                    faults = audit_tasks.kanban_faults([task], cfg, self.config, gh=gh)
+                self.assertEqual([f.why for f in faults], ["issue is absent from the configured GitHub Project"], name)
 
     def test_issue_label_mode_uses_add_remove_without_project(self):
         self.config = FLOW
@@ -523,13 +660,40 @@ class AuditTest(unittest.TestCase):
         mixed = Kanban(FLOW.stages, FLOW.human_review_label, FLOW.stage_map,
                        FLOW.hold_stages, FLOW.terminal_stages, GitHubProject("example", 3, options=FLOW.stages))
         tasks = [SimpleNamespace(standing=False, lane="build", stage="implement",
-                                 issue=f"#{n}", label=f"Build {n}", kind="open", item=f"Build {n}") for n in (7, 8)]
-        issues = {n: backlog.Issue(n, f"Build {n}", "opened", ()) for n in (7, 8)}
+                                 issue=f"#{n}", label=f"Build {n}", kind="open", item=f"Build {n}") for n in (7, 8, 9)]
+        issues = {n: backlog.Issue(n, f"Build {n}", "closed" if n == 9 else "opened", ()) for n in (7, 8, 9)}
         project_items = {backlog.IssueRef("example/app", n).url: FLOW.stages[3] for n in (7, 8)}
         with mock.patch.object(audit_tasks, "issue_states", return_value=issues), \
              mock.patch.object(kanban, "_project_items", return_value=(project_items, "")) as items:
             self.assertEqual(audit_tasks.kanban_faults(tasks, cfg, mixed), [])
         items.assert_called_once()
+        self.assertEqual(tuple(items.call_args.args[2]),
+                         (backlog.IssueRef("example/app", 7), backlog.IssueRef("example/app", 8)))
+
+    def test_audit_of_two_open_issues_survives_a_truncated_item_list(self):
+        cfg = backlog.GitHubBacklog("example/app")
+        config = Kanban(FLOW.stages, FLOW.human_review_label, FLOW.stage_map,
+                        FLOW.hold_stages, FLOW.terminal_stages,
+                        GitHubProject("example", 3, "Status", ("Plan", "Plan Review", "Test", "Build", "Review", "Fix")))
+        tasks = [SimpleNamespace(standing=False, lane="build", stage="implement",
+                                 issue=f"#{n}", label=f"Build {n}", kind="open", item=f"Build {n}") for n in (7, 8)]
+        issues = {n: backlog.Issue(n, f"Build {n}", "opened", ()) for n in (7, 8)}
+        calls = []
+
+        def gh(args):
+            calls.append(args)
+            if args[:2] == ["project", "item-list"]:
+                return 0, json.dumps({"items": [], "totalCount": 5001}), ""
+            if args[:2] == ["api", "graphql"]:
+                body = {"data": {"r0": {f"n{n}": _items(n, [_select("Build")])["data"]["r0"][f"n{n}"] for n in (7, 8)}}}
+                return 0, json.dumps(body), ""
+            raise AssertionError(args)
+
+        with mock.patch.object(audit_tasks, "issue_states", return_value=issues):
+            faults = audit_tasks.kanban_faults(tasks, cfg, config, gh=gh)
+        self.assertEqual(faults, [], [str(f) for f in faults])
+        self.assertEqual(sum(a[:2] == ["api", "graphql"] for a in calls), 1)
+        self.assertFalse(any(a[:2] == ["project", "item-list"] for a in calls))
 
     def test_rows_sharing_an_issue_expect_the_furthest_stage_only(self):
         """#87: one expected stage per issue — a further-stage row makes the earlier row's stage clean."""

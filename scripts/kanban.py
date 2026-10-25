@@ -181,27 +181,123 @@ def _github_issue(gh, ref: backlog.IssueRef):
     return tuple(str(x["name"]) for x in row["labels"] if isinstance(x, dict) and "name" in x), ""
 
 
-def _project_items(gh, project):
-    row, error = _gh_json(gh, ["project", "item-list", str(project.number), "--owner", project.owner,
-                               "--format", "json", "--limit", "5000", "--field", project.field])
-    if error:
-        return {}, error
-    if not isinstance(row, dict) or not isinstance(row.get("items"), list):
-        return {}, "GitHub Project items could not be parsed"
-    if row.get("totalCount", len(row["items"])) > len(row["items"]):
-        return {}, "GitHub Project item list was truncated"
-    items = {}
-    for item in row["items"]:
-        if isinstance(item, dict) and isinstance(item.get("content"), dict):
-            url = item["content"].get("url")
-            value = item.get(project.field.lower(), item.get(project.field))
-            if isinstance(url, str):
-                items[url] = str(value) if value is not None else None
-    return items, ""
+# shortcut: 20 memberships and chunks of 25, page or raise the chunk when a tracker or an issue exceeds that.
+_PROJECT_PAGE = 20
+_PROJECT_CHUNK = 25
+
+
+def _project_query(project, refs):
+    grouped, order = {}, []
+    for ref in refs:
+        if ref.repo not in grouped:
+            order.append(ref.repo)
+            grouped[ref.repo] = []
+        grouped[ref.repo].append(ref)
+    parts, layout = [], []
+    field = json.dumps(project.field)
+    for index, repo in enumerate(order):
+        owner, name = repo.split("/", 1)
+        issues = []
+        for ref in grouped[repo]:
+            alias = f"n{ref.number}"
+            issues.append(
+                f"{alias}: issue(number: {ref.number}) {{ "
+                f"projectItems(first: {_PROJECT_PAGE}) {{ pageInfo {{ hasNextPage }} nodes {{ "
+                f"project {{ number owner {{ ... on User {{ login }} ... on Organization {{ login }} }} }} "
+                f"fieldValueByName(name: {field}) {{ __typename "
+                f"... on ProjectV2ItemFieldSingleSelectValue {{ name }} }} }} }} }}")
+            layout.append((f"r{index}", alias, ref))
+        parts.append(f"r{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                     f"{{ {' '.join(issues)} }}")
+    return "query { " + " ".join(parts) + " }", layout
+
+
+def _graphql_messages(body) -> str:
+    errors = body.get("errors")
+    if not isinstance(errors, list):
+        return "GitHub Project query failed"
+    messages = [str(item.get("message", item)) if isinstance(item, dict) else str(item) for item in errors]
+    return "; ".join(message for message in messages if message) or "GitHub Project query failed"
+
+
+def _owner_login(item):
+    project_node = item.get("project") if isinstance(item, dict) else None
+    owner = project_node.get("owner") if isinstance(project_node, dict) else None
+    login = owner.get("login") if isinstance(owner, dict) else None
+    return login if isinstance(login, str) and login else None
+
+
+def _read_membership(node, project):
+    """(present, status, error). A missing membership is present=False with no error; a short read is an error."""
+    if not isinstance(node, dict):
+        return False, None, "GitHub issue could not be read"
+    connection = node.get("projectItems")
+    if not isinstance(connection, dict):
+        return False, None, "GitHub Project items could not be parsed"
+    page = connection.get("pageInfo")
+    if isinstance(page, dict) and page.get("hasNextPage") is True:
+        return False, None, "GitHub Project memberships exceed one page"
+    nodes = connection.get("nodes")
+    if not isinstance(page, dict) or page.get("hasNextPage") is not False or not isinstance(nodes, list):
+        return False, None, "GitHub Project items could not be parsed"
+    matched = None
+    for item in nodes:
+        login = _owner_login(item)
+        if login is None:
+            return False, None, "GitHub Project owner could not be read"
+        if item["project"].get("number") == project.number and login.casefold() == project.owner.casefold():
+            if matched is not None:
+                return False, None, "GitHub Project has two items for this issue"
+            matched = item
+    if matched is None:
+        return False, None, ""
+    value = matched.get("fieldValueByName")
+    if value is None:
+        return True, None, ""
+    if not isinstance(value, dict) or value.get("__typename") != "ProjectV2ItemFieldSingleSelectValue":
+        return False, None, "GitHub Project status is not a single-select value"
+    name = value.get("name")
+    if name is not None and not isinstance(name, str):
+        return False, None, "GitHub Project status is not a single-select value"
+    return True, name, ""
+
+
+def _project_items(gh, project, refs):
+    """Map each issue URL to its single-select value, or None when the field is unset. A missing key is absence."""
+    refs = tuple(refs)
+    if not refs:
+        return {}, ""
+    found = {}
+    for start in range(0, len(refs), _PROJECT_CHUNK):
+        query, layout = _project_query(project, refs[start:start + _PROJECT_CHUNK])
+        code, stdout, stderr = gh(["api", "graphql", "-f", f"query={query}"])
+        if code:
+            return {}, stderr.strip() or f"gh exited {code}"
+        try:
+            body = json.loads(stdout)
+        except ValueError:
+            return {}, "gh did not answer with JSON"
+        if not isinstance(body, dict):
+            return {}, "GitHub Project items could not be parsed"
+        if body.get("errors"):
+            return {}, _graphql_messages(body)
+        data = body.get("data")
+        if not isinstance(data, dict):
+            return {}, "GitHub Project items could not be parsed"
+        for repo_alias, issue_alias, ref in layout:
+            repo = data.get(repo_alias)
+            if not isinstance(repo, dict) or issue_alias not in repo:
+                return {}, "GitHub issue could not be read"
+            present, status, error = _read_membership(repo[issue_alias], project)
+            if error:
+                return {}, error
+            if present:
+                found[ref.url] = status
+    return found, ""
 
 
 def _project_item(gh, project, ref: backlog.IssueRef):
-    items, error = _project_items(gh, project)
+    items, error = _project_items(gh, project, (ref,))
     return ref.url in items, items.get(ref.url), error
 
 

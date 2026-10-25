@@ -327,11 +327,21 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
         except BacklogError as exc:
             return [KanbanFault("unknown", str(exc))]
     faults = []
-    project_items = None
-    project_error = ""
     grouped: dict[tuple[str, str, int], list] = {}
     for task, ref in selected:
         grouped.setdefault((ref.host, ref.repo, ref.number), []).append((task, ref))
+    open_github = []
+    if config.github_project is not None:
+        for rows in grouped.values():
+            ref = rows[0][1]
+            found = states[(ref.host, ref.repo)].get(ref.number)
+            if found is None or found.state == CLOSED or ref.host != GITHUB:
+                continue
+            open_github.append(ref)
+    project_items, project_error = {}, ""
+    if open_github:
+        project_items, project_error = kanban_tool._project_items(
+            gh or kanban_tool.backlog.run_gh, config.github_project, tuple(open_github))
     for rows in grouped.values():
         ref = rows[0][1]
         found = states[(ref.host, ref.repo)].get(ref.number)
@@ -356,9 +366,6 @@ def kanban_faults(tasks, home: Backlog | GitHubBacklog, config: Kanban, gh=None,
                        key=lambda pair: pair[0], default=(None, rows[0][0]))[1]
         status = None
         if ref.host == GITHUB and config.github_project:
-            if project_items is None:
-                project_items, project_error = kanban_tool._project_items(
-                    gh or kanban_tool.backlog.run_gh, config.github_project)
             if project_error:
                 faults.append(KanbanFault(clip_name(furthest.label), project_error))
                 continue
