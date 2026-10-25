@@ -1701,5 +1701,46 @@ class CommentTest(unittest.TestCase):
             self.assertEqual(f.comment(5, "again", commit=True), "HTTP 500")
 
 
+class GitLabBlockerReadTest(unittest.TestCase):
+    """#884: one GraphQL read of open blockers, retried on timeout, unknown when the retry is exhausted."""
+
+    HOST = "https://gitlab.example.test"
+
+    def source(self):
+        return forge.Forge(backlog.Backlog(self.HOST, "example/project"), token="t")
+
+    @staticmethod
+    def page(nodes):
+        return {"data": {"project": {"issues": {
+            "pageInfo": {"hasNextPage": False, "endCursor": None},
+            "nodes": [{"iid": str(iid), "blockedByIssues": {"pageInfo": {"hasNextPage": False}, "nodes": links}}
+                      for iid, links in nodes]}}}}
+
+    def test_a_timeout_then_a_success_on_retry_returns_the_open_blocker(self):
+        page = self.page([(1, [
+            {"iid": "2", "state": "opened", "webUrl": f"{self.HOST}/example/project/-/issues/2"},
+            {"iid": "4", "state": "closed", "webUrl": f"{self.HOST}/example/project/-/issues/4"},
+        ])])
+        answers = [(None, {}, "URLError: timed out"), (page, {}, "")]
+        with mock.patch.object(backlog, "_call_once", side_effect=answers) as call, \
+             mock.patch.object(backlog, "_sleep"):
+            got = self.source().blocked_by()
+        self.assertEqual(got, {"gitlab:gitlab.example.test/example/project#1":
+                               ("gitlab:gitlab.example.test/example/project#2",)})
+        self.assertEqual([c.args[1] for c in call.call_args_list], [f"{self.HOST}/api/graphql"] * 2)
+        self.assertFalse(any("/links" in c.args[1] for c in call.call_args_list))
+
+    def test_a_persistent_timeout_leaves_blockers_unknown(self):
+        import engine_facts
+        source = self.source()
+        with mock.patch.object(backlog, "_call_once", return_value=(None, {}, "URLError: timed out")), \
+             mock.patch.object(backlog, "_sleep"):
+            with self.assertRaisesRegex(forge.ForgeError, "timed out"):
+                source.blocked_by()
+            blockers, why = engine_facts._blockers(source)
+        self.assertIsNone(blockers)
+        self.assertIn("timed out", why)
+
+
 if __name__ == "__main__":
     unittest.main()

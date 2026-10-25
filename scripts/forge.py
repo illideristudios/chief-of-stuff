@@ -89,34 +89,89 @@ def _github_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
     return out
 
 
+# GitLab has no project-wide REST links list. One page of open issues carries their blockers.
+_GITLAB_BLOCKERS = """query($path: ID!, $after: String) {
+  project(fullPath: $path) {
+    issues(state: opened, first: 100, after: $after) {
+      pageInfo { hasNextPage endCursor }
+      nodes {
+        iid
+        blockedByIssues(first: 100) {
+          pageInfo { hasNextPage }
+          nodes { iid webUrl state }
+        }
+      }
+    }
+  }
+}"""
+
+
+def _gitlab_iid(raw: Any, label: str) -> int:
+    if type(raw) is int or (isinstance(raw, str) and raw.isdigit()):
+        return int(raw)
+    raise ForgeError(label)
+
+
+def _gitlab_issue_page(body: Any) -> dict:
+    if not isinstance(body, dict) or body.get("errors") or not isinstance(body.get("data"), dict):
+        raise ForgeError("GitLab blockers are unreadable")
+    project = body["data"].get("project")
+    issues = project.get("issues") if isinstance(project, dict) else None
+    nodes = issues.get("nodes") if isinstance(issues, dict) else None
+    page = issues.get("pageInfo") if isinstance(issues, dict) else None
+    if not isinstance(nodes, list) or not isinstance(page, dict) or "hasNextPage" not in page:
+        raise ForgeError("GitLab blockers are unreadable")
+    return issues
+
+
 def _gitlab_blocked(forge: Forge) -> dict[str, tuple[str, ...]]:
-    # shortcut: one links read per open issue; page the list when a workspace exceeds one issues() page
-    got = forge.issues()
-    if not got.ok:
-        raise ForgeError(got.error)
     secret = forge._token()
     if not secret:
         raise ForgeError(forge.home.missing_token)
+    url = f"{forge.home.host.rstrip('/')}/api/graphql"
     out: dict[str, tuple[str, ...]] = {}
-    for issue in got.issues:
-        body, headers, error = backlog._get(f"{forge.home.issues_url}/{issue.iid}/links", secret, backlog.TIMEOUT)
-        if error or not isinstance(body, list):
-            raise ForgeError(error or f"links of #{issue.iid} are not a list")
-        if (headers.get("x-next-page") or "").strip():
-            raise ForgeError(f"links of #{issue.iid} span more than one page")
-        keys = []
-        for link in body:
-            if not isinstance(link, dict) or link.get("link_type") != "is_blocked_by" or link.get("state") != "opened":
-                continue
-            if type(link.get("iid")) is not int:
-                raise ForgeError(f"a link of #{issue.iid} has no iid")
-            ref = backlog.issue_ref(link.get("web_url", ""), forge.home)
-            if ref is None:
-                raise ForgeError(f"a blocker of #{issue.iid} has no readable project URL")
-            keys.append(f"gitlab:{ref.host}/{ref.repo}#{ref.number}")
-        if keys:
-            out[forge.key(issue.iid)] = tuple(keys)
-    return out
+    after = None
+    for _page in range(backlog.MAX_PAGES):
+        body, _headers, error = backlog._call(
+            "POST", url, secret, backlog.TIMEOUT,
+            {"query": _GITLAB_BLOCKERS, "variables": {"path": forge.home.project, "after": after}},
+            retries=len(backlog.RETRY_BACKOFF))
+        if error:
+            raise ForgeError(error)
+        issues = _gitlab_issue_page(body)
+        for node in issues["nodes"]:
+            if not isinstance(node, dict):
+                raise ForgeError("an issue has no iid")
+            iid = _gitlab_iid(node.get("iid"), "an issue has no iid")
+            links = node.get("blockedByIssues")
+            link_nodes = links.get("nodes") if isinstance(links, dict) else None
+            info = links.get("pageInfo") if isinstance(links, dict) else None
+            if not isinstance(link_nodes, list) or not isinstance(info, dict) or "hasNextPage" not in info:
+                raise ForgeError(f"links of #{iid} are unreadable")
+            if info.get("hasNextPage"):
+                raise ForgeError(f"links of #{iid} span more than one page")
+            keys = []
+            for link in link_nodes:
+                if not isinstance(link, dict):
+                    raise ForgeError(f"a link of #{iid} has no iid")
+                state = link.get("state")
+                if state != "opened":
+                    if state not in ("closed", "locked"):
+                        raise ForgeError(f"a link of #{iid} has no state")
+                    continue
+                _gitlab_iid(link.get("iid"), f"a link of #{iid} has no iid")
+                ref = backlog.issue_ref(str(link.get("webUrl") or ""), forge.home)
+                if ref is None:
+                    raise ForgeError(f"a blocker of #{iid} has no readable project URL")
+                keys.append(f"gitlab:{ref.host}/{ref.repo}#{ref.number}")
+            if keys:
+                out[forge.key(iid)] = tuple(keys)
+        if not issues["pageInfo"].get("hasNextPage"):
+            return out
+        after = issues["pageInfo"].get("endCursor")
+        if not isinstance(after, str) or not after:
+            raise ForgeError("GitLab issues page has no cursor")
+    raise ForgeError(f"more than {backlog.MAX_PAGES} pages of issues; refusing a partial blocker read")
 
 
 def _gh_json(gh, args: list[str]):
