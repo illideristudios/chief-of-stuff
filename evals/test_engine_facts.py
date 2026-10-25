@@ -99,6 +99,13 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.gather(source).open_prs, ())
         source.requests.assert_not_called()
 
+    def test_malformed_branch_records_are_unknown(self):
+        for data in ([], {"runs": []}, {"work_branch": 42},
+                     {"runs": {"implement-bad": {"branch": "work"}}},
+                     {"runs": {"implement-1": None}}, {"runs": {"implement-1": {"branch": 42}}}):
+            with self.subTest(data=data):
+                self.assertEqual(engine_facts._implement_branch(data), "")
+
     def test_a_blocked_report_cannot_stop_a_segment_accepted_as_done(self):
         self.db.end_segment(KEY, "implement", 1, NOW.isoformat(), "done")
         self.assertFalse(self.gather().reports)

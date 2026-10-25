@@ -198,6 +198,10 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.forge.merges, [(10, True, KEY)])
         self.assertEqual(self.forge.writes, [(1, "review", "implement", True), (1, "merge", "review", True)])
         self.assertEqual(self.db.items()[0].stage, "merge")
+        self.run_pass()
+        self.assertEqual(self.db.items()[0].forge_state, "closed")
+        self.assertEqual(len(self.launched), 2)
+        self.cleanup.assert_called_with(self.root, self.trees, self.db, remove=True, completed=set())
 
     def open_implement_pr(self):
         data = self.db.resume(KEY)
@@ -214,7 +218,7 @@ class EngineTest(unittest.TestCase):
         data = self.db.resume(KEY)
         data["runs"]["implement-1"]["runtime"] = "codex"
         self.db.set_resume(KEY, data)
-        self.forge.kanban = SimpleNamespace(stage_map={}, hold_stages=())
+        self.forge.kanban = SimpleNamespace(stage_map={}, hold_stages=(), holds=lambda stage: False)
         with mock.patch.object(engine.worker.host_adapter, "moved_outside_engine",
                                return_value="main gained commits the engine did not merge: abc"), \
              mock.patch.object(engine.worker.host_adapter, "classify", return_value=model_port.Reply("finished", None, "", 0, 0)), \
@@ -253,10 +257,6 @@ class EngineTest(unittest.TestCase):
                 engine._finish_worker(self.forge, self.db, segment, "blocked", "waiting", NOW,
                                       policies=self.p, facts=facts)
                 self.assertEqual(close.call_args.args[5], "blocked")
-        self.run_pass()
-        self.assertEqual(self.db.items()[0].forge_state, "closed")
-        self.assertEqual(len(self.launched), 2)
-        self.cleanup.assert_called_with(self.root, self.trees, self.db, remove=True, completed=set())
 
     def test_standard_merge_waits_until_the_merged_commit_has_passing_main_ci(self):
         self.run_pass()

@@ -205,6 +205,18 @@ class Facts:
     suites: tuple[tuple[tuple[str, str, int], tuple], ...] = ()  # (issue, stage, attempt) → (counts, summary)
     require_green: bool = False
     scope_pending: tuple[str, ...] = ()  # issues whose plan's file_ownership proposal awaits the trio or the owner
+    open_prs: tuple[str, ...] = ()  # open closing PR with a head on the recorded implement branch
+
+
+def implement_pr_ready(key: str, segment: Segment, facts: Facts) -> bool:
+    """Published implementation can proceed once its hold is released and no answer is pending."""
+    tree = dict(facts.trees).get(key)
+    return (segment.stage == "implement" and key in facts.open_prs
+            and dict(facts.changed).get(key) is False and key not in facts.unreadable
+            and (tree is None or (tree.dirty == 0 and tree.unpushed == 0))
+            # An answered stop in this attempt requests more work; preserve its ordinary resume path.
+            and not any(a.issue_key == key and (not (a.answer or "").strip()
+                        or (a.stage == segment.stage and a.attempt == segment.attempt)) for a in facts.asks))
 
 
 def _time(value: datetime | str) -> datetime:
@@ -461,7 +473,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, workflow, history, policies, room)
-    if latest.outcome != "done":
+    if latest.outcome != "done" and not (stage == "implement" and facts is not None
+                                          and implement_pr_ready(key, latest, facts)):
         return _work(key, stage, workflow, history, policies, room)
     blocking = False
     if stage == "review":
@@ -556,9 +569,16 @@ def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment
     # Completion writes a forge hold before closure. A human's release must survive retained tree evidence.
     if not isinstance(action, (Dispatch, Review)):
         return action
+    reports = facts.reports
+    if isinstance(action, Review) and item.stage == "implement":
+        # A completed implementation (including recovery of an already-open PR) supersedes its blocked stop.
+        accepted = {(s.stage, s.attempt) for s in history if s.stage == "implement" and s.ended_at
+                    and (s.outcome == "done" or implement_pr_ready(item.issue_key, s, facts))}
+        reports = tuple(r for r in reports if not (r.issue_key == item.issue_key and r.outcome == "blocked"
+                        and (r.stage, r.attempt) in accepted))
     blockers = None if facts.blockers is None else dict(facts.blockers).get(item.issue_key, ())
     reason = readiness.why_not(item.issue_key, claims=facts.claims, running=running, blockers=blockers,
-                               asks=facts.asks, reports=facts.reports,
+                               asks=facts.asks, reports=reports,
                                stage=action.stage if isinstance(action, Dispatch) else "review")
     if reason == "dependency blockers unknown" and facts.blockers_error:
         reason = f"{reason}: {facts.blockers_error}"

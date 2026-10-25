@@ -41,6 +41,44 @@ def _record(store: Any, issue_key: str, stage: str, attempt: int) -> dict | None
     return record if isinstance(record, dict) else None
 
 
+def _implement_branch(data: dict) -> str:
+    if not isinstance(data, dict):
+        return ""
+    if data.get("work_branch"):
+        return data["work_branch"] if isinstance(data["work_branch"], str) else ""
+    runs = data.get("runs") or {}
+    if not isinstance(runs, dict):
+        return ""
+    attempts = [(int(name.removeprefix("implement-")), row) for name, row in runs.items()
+                if name.startswith("implement-") and name.removeprefix("implement-").isdecimal()
+                and isinstance(row, dict)]
+    branch = max(attempts, key=lambda pair: pair[0])[1].get("branch", "") if attempts else ""
+    return branch if isinstance(branch, str) else ""
+
+
+def _open_implement_prs(forge: Any, store: Any) -> tuple[str, ...]:
+    """Match open closers against recorded work branches, sharing one forge list across items."""
+    branches = [(item.issue_key, branch) for item in store.items() if item.stage == "implement"
+                and (branch := _implement_branch(store.resume(item.issue_key) or {}))]
+    if not branches or not callable(getattr(forge, "requests", None)) or not callable(getattr(forge, "closing_request", None)):
+        return ()
+    try:
+        requests = forge.requests()
+    except ForgeError:
+        return ()
+    if requests is None:
+        return ()
+    found = []
+    for key, branch in branches:
+        try:
+            request = forge.closing_request(key, requests=requests)
+        except ForgeError:
+            continue
+        if request is not None and request.branch == branch and request.head:
+            found.append(key)
+    return tuple(found)
+
+
 def _alive(record: dict | None) -> bool | None:
     if record is None:
         return None
@@ -266,7 +304,8 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
         segment = latest.get(item.issue_key)
         rows = (store.segment_reports(item.issue_key, segment.stage, segment.attempt) if segment else
                 sorted(store.reports(item.issue_key), key=lambda row: row.id))
-        reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt) for row in rows)
+        reports.extend(readiness.Report(row.issue_key, row.outcome, row.stage, row.attempt) for row in rows
+                       if not (segment and segment.ended_at and segment.outcome == "done" and row.outcome == "blocked"))
         if rows and rows[-1].outcome == "done":
             raw = rows[-1].suite if isinstance(rows[-1].suite, dict) else {}
             suites.append(((rows[-1].issue_key, rows[-1].stage, rows[-1].attempt),
@@ -278,4 +317,4 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
                  landing_heads=tuple(landing_heads.items()), landed_trees=tuple(landed_trees),
                  trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),
-                 suites=tuple(suites), require_green=require_green)
+                 suites=tuple(suites), require_green=require_green, open_prs=_open_implement_prs(forge, store))

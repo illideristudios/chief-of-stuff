@@ -661,12 +661,15 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
     item = next((item for item in store.items() if item.issue_key == key), None)
     workflow = policies.workflow_for(_resume(store, key).get("issue_type") or getattr(item, "issue_type", None))
     verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
-    held = verdict.human_review or reason.startswith("unreadable worker run:")
+    held = outcome == "human_review" or verdict.human_review or reason.startswith("unreadable worker run:")
     if verdict.human_review:
         outcome = verdict.outcome
         reason = "; ".join(part for part in (reason, verdict.reason) if part)
     if verdict.suite_hold:
         _arm_suite_hold(store, key, segment.stage, segment.attempt)
+    if (segment.stage == "implement" and outcome == "blocked" and not held
+            and reconcile.implement_pr_ready(key, segment, facts)):
+        outcome = "done"
     _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
 
 
