@@ -9,15 +9,16 @@ import sys
 from decision_escalation import ask_decision
 from guard_binding import Binding
 from guard_commands import denial_reason, permission_judgement
-from guard_rules import permission_ask, resume_state, stop_allowed
+from guard_rules import denial_binds, permission_ask, resume_state, stop_allowed
 from store import Store
 
 RELAY = "Call the engine MCP ask tool instead. An ask is not an approval. Report blocked, then stop and wait."
 
 
-def _earlier(db: Store, issue_key: str, event: dict) -> tuple[object, str | None] | None:
+def _earlier(db: Store, issue_key: str, event: dict) -> tuple[object, str | None, str | None] | None:
     """The newest permission ask this issue raised for the same tool, input and worktree, with its answer read from
-    the decision the engine links to it (the trio's or the guard's), else from the ask; None when there is none."""
+    the decision the engine links to it (the trio's or the guard's), else from the ask, and who decided it
+    (None with no linked decision); None when there is none."""
     same = (event.get("tool_name"), event.get("tool_input"), event.get("cwd"))
     for ask in reversed(db.asks(issue_key)):
         try:
@@ -26,7 +27,7 @@ def _earlier(db: Store, issue_key: str, event: dict) -> tuple[object, str | None
             continue
         if isinstance(asked, dict) and (asked.get("tool_name"), asked.get("tool_input"), asked.get("cwd")) == same:
             row = ask_decision(db.decisions(issue_key), ask)
-            return ask, ((row.answer if row is not None else None) or ask.answer or None)
+            return ask, ((row.answer if row is not None else None) or ask.answer or None), (row.decided_by if row is not None else None)
     return None
 
 
@@ -110,13 +111,14 @@ def handle(event_name: str, event: dict, binding: Binding) -> dict:
             # The trio answers after this hook has denied, so a retry of the same request takes that answer (#954).
             earlier = _earlier(db, binding.issue_key, event)
             if earlier is not None:
-                ask, answer = earlier
+                ask, answer, decided_by = earlier
                 if answer == "allow":
                     return {"hookSpecificOutput": {"hookEventName": event_name, "decision": {"behavior": "allow"}}}
-                if answer == "deny":
+                if answer == "deny" and denial_binds(decided_by, ask, binding):
                     return _deny(event_name, f"permission ask {ask.id} was denied. Report blocked, then stop.")
-                return _deny(event_name, f"{why}: permission ask {ask.id} is still waiting for the trio. "
-                                         "An ask is not an approval. Report blocked, then stop and wait.")
+                if answer != "deny":
+                    return _deny(event_name, f"{why}: permission ask {ask.id} is still waiting for the trio. "
+                                             "An ask is not an approval. Report blocked, then stop and wait.")
             question, context = permission_ask(event)
             # #750 ruling: the unjudged become an allow/deny ask that the trio is consulted on first.
             context = json.dumps({**json.loads(context), "why": why, "kind": "permission",

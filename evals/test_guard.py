@@ -179,6 +179,55 @@ class GuardTest(unittest.TestCase):
         self.assertIn(f"ask {ask.id}", decision["message"])
         self.assertEqual(len(self.db.asks(KEY)), 1)
 
+    def denied_ask(self, decided_by, *, row=True):
+        """A permission ask answered deny on attempt 2, with the linked decision the engine writes (when it writes one)."""
+        self.permission(command="touch /outside/file")
+        ask, = self.db.asks(KEY)
+        self.db.answer_ask(KEY, ask.id, "deny")
+        if row:
+            self.db.add_decision(KEY, "ask", ask.question, "deny", decided_by,
+                                 {"decision": {"instance": f"ask-{ask.id}", "context": ask.context, "options": ask.options}})
+        return ask
+
+    def asked_again_only_next_attempt(self):
+        self.assertEqual(self.permission(command="touch /outside/file")["behavior"], "deny")
+        self.assertEqual(len(self.db.asks(KEY)), 1)  # same attempt: stop, no second ask
+        self.env["CHIEF_ATTEMPT"] = "3"
+        self.assertEqual(self.permission(command="touch /outside/file")["behavior"], "deny")
+        _, second = self.db.asks(KEY)
+        self.assertEqual((second.attempt, second.answer), (3, None))
+
+    def test_a_split_deny_binds_only_the_attempt_that_received_it(self):
+        # #958: a split trio is asked again on the next attempt, not denied until a person reverses it.
+        self.denied_ask("guard")
+        self.asked_again_only_next_attempt()
+
+    def test_an_unavailable_trio_deny_with_no_decision_row_binds_only_its_attempt(self):
+        self.denied_ask("guard", row=False)
+        self.asked_again_only_next_attempt()
+
+    def test_a_trio_or_person_deny_stays_denied_on_the_next_attempt(self):
+        ask = self.denied_ask("trio")
+        self.env["CHIEF_ATTEMPT"] = "3"
+        decision = self.permission(command="touch /outside/file")
+        self.assertIn(f"ask {ask.id}", decision["message"])
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_deny_a_person_gave_stays_denied_on_the_next_attempt(self):
+        self.denied_ask("zach")
+        self.env["CHIEF_ATTEMPT"] = "3"
+        self.permission(command="touch /outside/file")
+        self.assertEqual(len(self.db.asks(KEY)), 1)
+
+    def test_a_person_reversing_a_trio_deny_lets_the_next_attempt_ask_again(self):
+        ask = self.denied_ask("trio")
+        self.db.add_decision(KEY, "ask", ask.question, None, "",
+                             {"reversed": True, "recommendation": "deny",
+                              "decision": {"instance": f"ask-{ask.id}", "context": ask.context, "options": ask.options}})
+        self.env["CHIEF_ATTEMPT"] = "3"
+        self.permission(command="touch /outside/file")
+        self.assertEqual(len(self.db.asks(KEY)), 2)
+
     def test_a_repeat_of_a_pending_ask_waits_on_it_and_a_different_request_asks_anew(self):
         self.permission(command="touch /outside/file")
         ask, = self.db.asks(KEY)
