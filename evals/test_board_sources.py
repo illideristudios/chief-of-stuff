@@ -192,6 +192,22 @@ class GitLabTest(unittest.TestCase):
             got = bs.refresh(root, NOW, call=lambda *a, **k: self.fail("no call without a token"))
         self.assertIn("no token", got.errors["kanban"])
 
+    def test_a_store_workspace_reads_every_open_merge_request(self):
+        # #896: a store board names its changes in no tracker row, so every open one is read.
+        root = workspace("GitLab issues; host https://labs.example.test; project team/app")
+        (root / "store.db").touch()
+        mr = {"iid": "77", "webUrl": "https://labs.example.test/team/app/-/merge_requests/77", "title": "Search",
+              "state": "opened", "draft": False, "mergedAt": None, "targetBranch": "develop", "description": "Closes #115",
+              "approved": False, "approvedBy": {"nodes": []}, "headPipeline": None, "diffStats": []}
+
+        def call(method, url, token, timeout, payload=None):
+            opened = {"open": {"nodes": [mr]}} if "state: opened" in payload["query"] else {}
+            return {"data": {"p0": {"issues": {"nodes": []}, "mergeRequests": {"nodes": []}, "merged": {"nodes": []}, **opened}}}, {}, ""
+
+        with mock.patch.dict(os.environ, {"CHIEF_OF_STUFF_GITLAB_TOKEN": "tok"}):
+            got = bs.refresh(root, NOW, call=call)
+        self.assertEqual((got.changes["!77"].state, got.changes["!77"].issues), ("open", ("#115",)))
+
 
 # Stage 2 of the issue page: per-file stats, pipeline jobs, conflicts, review threads and the issue body.
 def gh_comment(login, body, at, n):
