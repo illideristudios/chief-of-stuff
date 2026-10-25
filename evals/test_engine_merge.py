@@ -355,6 +355,16 @@ class ExecutorTest(unittest.TestCase):
         with mock.patch.object(forge.Forge, "merge", return_value="queued #21 at abc"):
             self.assertFalse(self.execute())
         self.assertEqual(self.db.log(self.key)[0].kind, "")
+        pending = self.db.resume(self.key)["merge_pending"]
+        self.assertEqual(pending["expected"], "merge")
+        self.assertEqual(pending["request"], 21)
+
+    def test_a_successful_merge_clears_merge_pending(self):
+        self.db.set_resume(self.key, {**self.db.resume(self.key),
+                                      "merge_pending": {"expected": "merge", "request": 21}})
+        self.planned()
+        self.assertTrue(self.execute())
+        self.assertNotIn("merge_pending", self.db.resume(self.key))
 
     def test_a_queued_github_request_is_logged_once_and_returns_false(self):
         def queued(args, input_text=None):

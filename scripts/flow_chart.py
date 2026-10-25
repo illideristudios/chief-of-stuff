@@ -31,8 +31,8 @@ H = timedelta(hours=1)
 WINDOWS = (("24 hours", 6 * H, 18 * H), ("7 days", 48 * H, 120 * H))
 COLOURS: dict[str, str | tuple[str, str]] = {stage: f"var(--stage-{stage})" for stage in gantt.PALETTE}
 # #217/#226: the chart's own bucket order, earliest-first within a group. A finished row's word is
-# "merged" or "closed" (task_forge.forge_ends); both read as merged. "open" is only the queued loop's
-# literal status; everything else moved (whatever its stage or tracker state word) counts as running.
+# "merged" or "closed" (task_forge.forge_ends); both read as merged. "open" is queued on the board;
+# a row is running only while a segment is open.
 BUCKETS = ("merged", "approved", "running", "needs input", "queued")
 
 
@@ -282,7 +282,7 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
             start = _parse_store_dt(s.started_at, now)
             if s.ended_at:
                 end = _parse_store_dt(s.ended_at, now)
-                kind = "done"
+                kind = "failed" if s.outcome == "failed" else "done"
             else:
                 end = now
                 kind = "running"
@@ -295,7 +295,8 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
         short_ref = f"#{key.rpartition('#')[2]}" if "#" in key else key
         stage = item.stage or (raw_segs[-1].stage if raw_segs else "implement")
         has_open_dec = bool(open_decs_by_key.get(key))
-        is_held = bool(item.human_review or has_open_dec)
+        is_held = bool(item.human_review or has_open_dec
+                       or (raw_segs and raw_segs[-1].outcome == "human_review"))
         if item.forge_state == "closed":
             status, note = "merged", "closed"
         elif is_held:
@@ -307,10 +308,9 @@ def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> l
             status, note = "approved", "approved"
         elif any(s.ended_at is None for s in raw_segs):
             status, note = "running", stage
-        elif raw_segs:
-            status, note = "running", stage
         else:
-            status, note = "open", f"queued · {stage}"
+            queued = "retry" if raw_segs and raw_segs[-1].outcome == "failed" else "queued"
+            status, note = "open", f"{queued} · {stage}"
         row = gantt.Row(
             ref=short_ref,
             name=item.title or key,
