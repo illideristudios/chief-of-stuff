@@ -18,7 +18,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import dispatch_prompt as dp  # noqa: E402
-import inbox  # noqa: E402
 import make_repo  # noqa: E402
 from evals.rules_text import one_shot_paragraph, rules_text, sections, skill_body  # noqa: E402
 
@@ -522,74 +521,27 @@ class ReportIsNotAStateChangeTest(unittest.TestCase):
         self.assertIn("assume you are idle", self.body)
 
 
-class InboxMetadataLineTest(unittest.TestCase):
-    """Dual-transport metadata line pointing to the inbox utility."""
+class EngineToolsInAssignmentTest(unittest.TestCase):
+    """Workers reach the coordinator through engine tools when IPC is unavailable."""
 
     def setUp(self):
         self.tmp, self.root = workspace()
         self.addCleanup(self.tmp.cleanup)
         self.body = dp.compose(self.root, "2026-09-18", "Security audit")
 
-    def test_inbox_metadata_line_is_present_in_compose_output(self):
-        expected_line = f"Inbox: {Path(inbox.__file__).resolve()}"
-        self.assertIn(expected_line, self.body)
+    def test_compose_names_engine_ask_and_report(self):
+        self.assertIn("engine MCP tool `ask`", self.body)
+        self.assertIn("engine MCP tool `report`", self.body)
 
-    def test_the_inbox_line_names_a_script_that_exists(self):
-        """It named `<workspace>/scripts/inbox.py`, which a workspace never has; the script ships in the plugin."""
-        line = next(x for x in self.body.splitlines() if x.startswith("Inbox: "))
-        self.assertTrue(Path(line.removeprefix("Inbox: ")).is_file(), line)
+    def test_compose_does_not_name_the_removed_inbox_command(self):
+        self.assertNotIn("chief-of-stuff inbox", self.body)
+        self.assertNotIn("inbox.py", self.body)
+        self.assertNotRegex(self.body, r"(?m)^Inbox:")
 
-    def test_inbox_metadata_line_format(self):
-        self.assertRegex(self.body, r"(?m)^Inbox: .*/scripts/inbox\.py$")
-
-
-class DualTransportFallbackAddressingTest(unittest.TestCase):
-    """Fallback CLI commands must always target the role-based 'coordinator' mailbox."""
-
-    def setUp(self):
-        self.tmp, self.root = workspace()
-        self.addCleanup(self.tmp.cleanup)
-
-    def test_fallback_commands_target_coordinator_when_no_coordinator_specified(self):
-        body = dp.compose(self.root, "2026-09-18", "Security audit")
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type register', body)
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type ask', body)
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type stop', body)
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type progress', body)
-
-    def test_fallback_commands_always_target_coordinator_when_coordinator_session_passed(self):
+    def test_coordinator_session_name_stays_in_ipc_prose(self):
         coord_session = "my-coord [123456]"
         body = dp.compose(self.root, "2026-09-18", "Security audit", coordinator=coord_session)
-        # IPC prose retains the specific session name
         self.assertIn(f"the chief-of-stuff coordinator `{coord_session}`", body)
-        # Mailbox fallback CLI commands always specify --to "coordinator"
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type register', body)
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type ask', body)
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type stop', body)
-        self.assertIn('send --to "coordinator" --from "<your_ref_or_name>" --type progress', body)
-        # Ensure the ephemeral session name is never used as mailbox address
-        self.assertNotIn('--to "my-coord', body)
-        self.assertNotIn(f'--to "{coord_session}"', body)
-
-    def test_all_four_fallback_command_types_present_with_coordinator_recipient(self):
-        body = dp.compose(self.root, "2026-09-18", "Security audit", coordinator="coord-alpha [abcdef]")
-        for msg_type in ("register", "ask", "stop", "progress"):
-            pattern = rf'send --to "coordinator" --from "<your_ref_or_name>" --type {msg_type}'
-            self.assertRegex(body, pattern)
-
-    def test_fallback_command_delivers_to_coordinator_mailbox(self):
-        mailbox_dir = self.root / ".chief-of-stuff" / "mailbox"
-        inbox.send_message(
-            recipient="coordinator",
-            sender="worker-test [999999]",
-            msg_type="register",
-            body="ref: worker-test, task: Security audit, state: planning",
-            mailbox_dir=mailbox_dir,
-        )
-        unread = inbox.list_messages(recipient="coordinator", mailbox_dir=mailbox_dir, unread_only=True)
-        self.assertEqual(len(unread), 1)
-        self.assertEqual(unread[0].type, "register")
-        self.assertEqual(unread[0].sender, "worker-test [999999]")
 
 
 class PromptCharacterBoundsTest(unittest.TestCase):
@@ -598,13 +550,6 @@ class PromptCharacterBoundsTest(unittest.TestCase):
     def setUp(self):
         self.tmp, self.root = workspace()
         self.addCleanup(self.tmp.cleanup)
-        # The assignment quotes the inbox script's path nine times, so pin it: otherwise these bounds
-        # move with wherever the repo is checked out, and a worktree's longer path tips the large case over.
-        inbox_script = Path("/Users/someone/.claude/plugins/cache/chief-of-stuff/chief-of-stuff/0.0.0/scripts/inbox.py")
-        patcher = mock.patch.object(dp, "INBOX_SCRIPT", inbox_script)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-
     def test_standard_assignment_is_well_under_body_cap(self):
         body = dp.compose(self.root, "2026-09-18", "Security audit")
         self.assertLess(len(body), dp.BODY_CAP)
@@ -633,9 +578,9 @@ class PromptCharacterBoundsTest(unittest.TestCase):
         self.assertLessEqual(len(body), dp.BODY_CAP)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
-        item = "Security audit " + ("x" * 2000)
-        chk = "Checklist: " + ("y" * 2000)
-        owns = "`src/" + ("z" * 2000) + "`"
+        item = "Security audit " + ("x" * 2600)
+        chk = "Checklist: " + ("y" * 2600)
+        owns = "`src/" + ("z" * 2600) + "`"
         oversized_tracker = f"""# Tracker 2026-09-18
 ## Tasks
 | item | owner | state | since | due | checklist |
@@ -664,9 +609,8 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertTrue(self.agent_file.exists(), f"Missing {self.agent_file}")
         self.content = rules_text()
 
-    def test_resume_step_2_script_paths_are_fully_qualified(self):
-        self.assertIn("chief-of-stuff inbox read <id> --ack", self.content)
-        self.assertIn("chief-of-stuff inbox drain --recipient coordinator", self.content)
+    def test_resume_step_2_reconciles_engine_store(self):
+        self.assertIn("engine store", self.content)
 
     def test_one_shot_workspace_requires_one_shot_for_every_task(self):
         self.assertIn('every task dispatch runs one-shot; the launcher enforces this without a flag', self.content)
@@ -739,11 +683,10 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertIn("stops update task state to `waiting` or `orphaned`", self.content)
         self.assertNotIn("stops update task state to `stopped` or `orphaned`", self.content)
 
-    def test_dual_transport_sending_and_registration_rules(self):
-        self.assertIn("Dual-transport sending", self.content)
-        self.assertIn("chief-of-stuff inbox send --to <recipient> --from coordinator", self.content)
-        self.assertIn("Dual-transport registration", self.content)
-        self.assertIn("chief-of-stuff inbox list --recipient coordinator --unread", self.content)
+    def test_session_sending_and_registration_rules(self):
+        self.assertIn("Sending:", self.content)
+        self.assertIn("engine store", self.content)
+        self.assertIn("Registration:", self.content)
 
     def test_the_board_is_served_from_this_mac(self):
         # Zach, 2026-09-24 14:07: "we should host our own webserver and ensure they are set up as part of the agent's boot loop."
@@ -762,13 +705,10 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
         self.assertIn("`review PR <url>`", self.content)
         self.assertIn("A gate yes covers every stage up to the next gate", self.content)
 
-    def test_the_reviewer_hand_off_names_its_mailbox(self):
-        # autonomous-review-pipeline-design, 22:45: without --mailbox-dir the reviewer's report landed in the reviewed repo.
+    def test_the_reviewer_hand_off_names_engine_report(self):
         pipeline = self._section("Pipeline")
-        self.assertIn("`Report by: chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to coordinator --from <reviewer session> --type review --task \"<task>\"`", pipeline)
-        self.assertNotIn("`inbox.py send --to reviewer", pipeline)
-        # A sonnet run sent the placeholder itself; the reviewer runs in another tree, so only an absolute path lands.
-        self.assertIn("`<workspace root>` written out as an absolute path", pipeline)
+        self.assertIn("engine MCP tool `report`", pipeline)
+        self.assertNotIn("chief-of-stuff inbox", pipeline)
 
     def _section(self, name):
         if name in ("Sessions", "Assign", "Brief"):
@@ -1170,14 +1110,12 @@ class SessionNameTest(unittest.TestCase):
         body = dp.compose(self.root, "2026-09-18", "Security audit")
         self.assertIn("**Your name is fixed.**", body)
         self.assertNotIn("You are `", body)
-        self.assertIn("<your_ref_or_name>", body)
+        self.assertIn("engine MCP tool `report`", body)
 
-    def test_a_name_is_stated_and_signs_every_mailbox_command(self):
+    def test_a_name_is_stated_in_the_header(self):
         body = dp.compose(self.root, "2026-09-18", "Security audit", name="impl07")
         self.assertIn("You are `impl07`.", body)
         self.assertNotIn("<your_ref_or_name>", body)
-        self.assertIn('--from "impl07"', body)
-        self.assertIn('--recipient "impl07"', body)
 
     def test_a_name_that_is_not_a_bare_session_name_is_refused(self):
         for bad in ("impl 07", "-x", "a;b", "impl07 [abc123]", "$(whoami)", ""):
@@ -1433,59 +1371,3 @@ class ReviewReportTest(unittest.TestCase):
                 self.addCleanup(tmp.cleanup)
                 body = dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree", one_shot=one_shot)
                 self.assertIn(f"Review: if this task reviews a pull or merge request, write your report in the format of {self.TEMPLATE}", body)
-
-
-class AgyRuntimeTest(unittest.TestCase):
-    """An agy session cannot list sessions or message one: the mailbox is its only channel."""
-
-    NAME = "implementer-GFlash38H-01"
-
-    def setUp(self):
-        self.tmp, self.root = workspace()
-        self.addCleanup(self.tmp.cleanup)
-
-    def test_the_agy_paragraph_is_present_for_agy_only(self):
-        agy = dp.compose(self.root, "2026-09-18", "Security audit", name=self.NAME, runtime="agy")
-        claude = dp.compose(self.root, "2026-09-18", "Security audit", name=self.NAME)
-        self.assertIn("**You run under Antigravity, not Claude Code.**", agy)
-        self.assertNotIn("Antigravity", claude)
-
-    def test_it_names_its_mailbox_and_no_self_review(self):
-        body = dp.compose(self.root, "2026-09-18", "Security audit", name=self.NAME, runtime="agy")
-        para = body.split("**You run under Antigravity, not Claude Code.**", 1)[1].split("\n\n", 1)[0]
-        self.assertIn(f'--recipient "{self.NAME}" --unread', para)
-        self.assertNotIn("ponytail-review", para)
-        self.assertIn(f'--from "{self.NAME}"', body)
-
-    def test_worker_mailbox_check_uses_each_hosts_available_mechanism(self):
-        expected = {"claude": ("CronList", "CronCreate"),
-                    "agy": ("Schedule", '/schedule "*/5 * * * *"'),
-                    "cursor": ("/loop 5m",),
-                    "codex": ("Codex CLI has no in-session scheduling interface",)}
-        for runtime, markers in expected.items():
-            with self.subTest(runtime=runtime):
-                body = dp.compose(self.root, "2026-09-18", "Security audit",
-                                  name=self.NAME, runtime=runtime)
-                self.assertIn("**Keep this mailbox live.** After registration", body)
-                self.assertIn(f'list --recipient "{self.NAME}" --unread', body)
-                self.assertLess(body.index("**Register first"), body.index("**Keep this mailbox live."))
-                for marker in markers:
-                    self.assertIn(marker, body)
-                if runtime != "codex":
-                    self.assertIn("*/5 * * * *" if runtime != "cursor" else "/loop 5m", body)
-
-
-class MailboxRootTest(unittest.TestCase):
-    """The inbox finds its mailbox through git's common dir, so a session in a fork worktree resolved the
-    fork's mailbox while the coordinator, in a workspace that is no repo, read the workspace's. Every
-    inbox command names the coordinator's mailbox, so a mailbox-only session is heard."""
-
-    def test_every_inbox_command_names_the_workspace_mailbox(self):
-        tmp, root = workspace()
-        self.addCleanup(tmp.cleanup)
-        body = dp.compose(root, "2026-09-18", "Security audit", name="implementer-GFlash38H-01", runtime="agy")
-        want = f"--mailbox-dir {root.resolve() / '.chief-of-stuff' / 'mailbox'}"
-        commands = [c for c in re.findall(r"`python3 [^`]*inbox\.py[^`]*`", body)]
-        self.assertTrue(commands)
-        for c in commands:
-            self.assertIn(want, c)

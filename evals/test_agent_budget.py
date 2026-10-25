@@ -135,7 +135,7 @@ TRACKER_RETAINED_RULES = (
     "The configured delivery and merge owner govern how code reaches main, and the reason the suite runs on main after it is that a merge can break main without either side's branch suite noticing.",
     'No script can watch a suite run, so the evidence is a claim with a citation: the owner reports the suite result and the commit main was at, and that sha goes in `Verified`.',
     "`audit_tasks.py` prints main's current sha on every run — when it no longer matches the one in `Verified`, the evidence is about a main that no longer exists and the task is not closed on it.",
-    'Before writing `done` on a task whose File ownership names a worktree, run `chief-of-stuff audit --date <today>`, check `chief-of-stuff inbox list --recipient coordinator --unread` for any pending worker reports or stops on that task, and believe the audit and verified evidence over any unverified claim.',
+    'Before writing `done` on a task whose File ownership names a worktree, run `chief-of-stuff audit --date <today>`, check the engine store for any pending worker reports or stops on that task, and believe the audit and verified evidence over any unverified claim.',
     'Tasks with no tree — a decision, a relay, a deletion, a console action — are unaffected: there is nothing to merge, and the rule never sends you looking.',
     "A task whose File ownership names no worktree closes on its owner's or its reporter's word; going through the workspace for a file a session says it wrote is checking their work, which is not yours to do.",
     'When that word names a sha as on main, check it first: `chief-of-stuff audit --sha <sha>` fetches and prints whether origin/main or local main holds it, and a sha it finds on neither closes nothing.',
@@ -186,7 +186,7 @@ REVIEW_PIPELINE_RULES = {
         'Never advance into a human-only action, a file another live session owns, an orphaned task, or a stage the yes did not reach; stop and ask instead.',
         "At `pr`, only for pull-request delivery: the owning session reports the pull request's URL and head sha.",
         'Write the URL in the item and set `stage` to `review`.',
-        'If `[workflow] reviewer_session` names a session, send it `review PR <url>` with a second line, `Report by: chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to coordinator --from <reviewer session> --type review --task "<task>"`, with `<workspace root>` written out as an absolute path, so its fallback report lands in the workspace mailbox and not in the repo it reviews (SendMessage; when it is not listed, use `chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to <reviewer session> --type review --task <task>`).',
+        'If `[workflow] reviewer_session` names a session, send it `review PR <url>` with a second line naming the engine MCP tool `report` for its fallback when SendMessage is unavailable.',
         'Its report comes back headed `Reviewer pass:`.',
         'Without a configured reviewer, ask the user how to review it.',
         'At `verify`: once every fix has reported, send the configured reviewer the R-numbers the user marked `fix`, quote the Decisions row that marked them, add the R-numbers of the automatic fixes with their Log line quoted, and add the same `Report by:` line.',
@@ -339,11 +339,8 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               'session calls itself: send the session `Name: <its name>. Use it everywhere; never take '
               'another.`, and tell the user in that reply that its tab needs `/rename <name>` — a session '
               'cannot rename itself, and only the user can.',
-              'Dual-transport sending: When sending to a session (poll, assignment, instruction, or reply), '
-              'attempt direct messaging (`send`) first.',
-              "If the send tool is missing, denied, or returns an error ('no agent reachable'), fall back "
-              'immediately to the mailbox: `chief-of-stuff inbox send --to <recipient> --from coordinator '
-              '--type <type> --body "<message>"`.',
+              'Sending: When sending to a session (poll, assignment, instruction, or reply), use direct messaging (`send`) when your host exposes it.',
+              "When it is missing, denied, or returns an error ('no agent reachable'), record the message in the engine store for that session.",
               'A status poll is one message: `Reply in 6 lines: current task, and one of planning, working, '
               'waiting, idle; waiting on whom, and for what; when free; blocked by a permission prompt or '
               'classifier, on what; standing constraints <user> has given you; any subagents you have '
@@ -360,13 +357,8 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               'A row that has never carried a ref is not gone, it is not there yet: leave its task alone.',
               'If it still has no ref an hour later it never registered — say that, which is a different '
               'fact from `orphaned`, and the tree it was given is still on disk.',
-              "Dual-transport registration: A session's registration may arrive via direct peer messaging "
-              '(IPC) OR via the coordinator inbox (`chief-of-stuff inbox`).',
-              'When polling or reviewing sessions, check `chief-of-stuff inbox list --recipient coordinator '
-              '--unread`.',
-              'If a registration message is present, write the ref into `## Sessions`, set `doing` to what '
-              'it said, `state` to `planning`, and acknowledge the message with `chief-of-stuff inbox read '
-              '<id> --ack`.',
+              "Registration: A session's registration arrives via direct peer messaging (IPC) or through the engine store.",
+              'When polling or reviewing sessions, reconcile pending registrations from the engine store the same way you would from IPC: write the ref into `## Sessions`, set `doing` to what it said, and `state` to `planning`.',
               '`doing` carries `ready for decommissioning HH:MM` when a `task` session reports its task '
               'finished.',
               'It is not a task state and never becomes one.',
@@ -376,13 +368,11 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               'Closing it is theirs; you never close a session, remove a tree, or delete a branch.',
               'An agy session is in no native listing and cannot be sent to or polled directly.',
               'Its row carries `agy` in `ref`, and its ref is its name; it registers, asks, reports and '
-              'stops only through the inbox, and everything you send it goes through `inbox.py send --to '
-              '<its name>`.',
+              'stops through the engine store when IPC is unavailable.',
               'Check its registered PID with `process_status.py` for the orphan check.',
-              "A poll to it is a mailbox message, and its row's `waiting on` reads `<its name> — its mailbox "
-              'reply` until the reply arrives.')}
-CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bfcd742acbf3dd1ef9',
- 'Relay': '3a31080acd47efa080232fac9d181f81dd0c1b30c1721fe7177c78dfbd6469e7'}
+              "A poll to it is recorded in the engine store, and its row's `waiting on` reads `<its name> — engine reply` until the reply arrives.")}
+CHECK_RELAY_SHA256 = {'Check': 'e74a3d6841f351ccb6983f83eee7158b1cdb0863bfb0f27e29ff74271d3f72bd',
+ 'Relay': '3410566f55cb8cdbe16bcb4a903355b1a53ff06c1f72c2412af0bde24e22c365'}
 
 # Slice 8 (#491): captured once from git show origin/main:agents/chief-of-stuff.md
 # (## Dispatch, 14,905 B). Split like slice 7: strip list prefixes and fences, split at
@@ -483,7 +473,7 @@ DISPATCH_RULES = {
         'A Claude session passes its explicitly chosen `--model <id>` and optional `--effort <high|medium|low>`; neither is derived from the session name.',
         "A standing session's placeholder row (`<name>: standing <role> …`, launched as that name) needs no issue.",
         'Codex sessions add `--runtime codex` and optionally `--model <id>`; Cursor sessions add `--runtime cursor` and optionally `--model <id>`.',
-        'They start with a plan gate, use the mailbox, and register their process.',
+        'They start with a plan gate and register their process.',
         'Their `--type` is ignored.',
         'Codex starts read-only and the user resumes the same session with write access after approving its plan.',
     ),

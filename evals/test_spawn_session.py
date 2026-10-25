@@ -681,7 +681,7 @@ class TaskFlagTest(unittest.TestCase):
 
 class AgyTest(unittest.TestCase):
     """Zach, 2026-09-23 18:42: "within the next hour I need agy instances going"; registration and reporting
-    through the mailbox only. agy has no `--agent` and no `--name`; `--mode plan` is its plan-first gate."""
+    through the engine store when IPC is unavailable. agy has no `--agent` and no `--name`; `--mode plan` is its plan-first gate."""
 
     AGY = Path("/opt/homebrew/bin/agy")
 

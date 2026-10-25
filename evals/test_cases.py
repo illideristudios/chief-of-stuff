@@ -556,10 +556,10 @@ class CaseLintTest(unittest.TestCase):
         """#454: every rule-bearing grader of the two check cases quotes one sentence the agent file carries, and the
         regex that grades a silent reply takes an empty reply or exactly `.` and nothing else."""
         check = sections((EVALS.parent / "agents" / "chief-of-stuff.md").read_text())["Check"]
-        silent, changed = (spec(EVALS / "cases" / c) for c in ("silent-check-says-nothing", "changed-check-says-only-the-change"))
-        quiet = [g for s in (silent, changed) for t in s["turns"] for g in t["graders"] if g.get("rule") == SILENT_CHECK_RULE[0]]
-        self.assertEqual(len(quiet), 3, "two quiet checks in the first case, one in the second")
-        for s in (silent, changed):
+        silent = spec(EVALS / "cases" / "silent-check-says-nothing")
+        quiet = [g for t in silent["turns"] for g in t["graders"] if g.get("rule") == SILENT_CHECK_RULE[0]]
+        self.assertEqual(len(quiet), 1, "one quiet scheduled check in the case")
+        for s in (silent,):
             for turn in s["turns"]:
                 for g in turn["graders"]:
                     if "rule" in g:
@@ -574,7 +574,7 @@ class CaseLintTest(unittest.TestCase):
 
     def test_silent_check_fixtures_have_pages_serving_before_every_turn(self) -> None:
         """#454: pages maintenance must contribute no change, including the audit-report turn."""
-        for name in ("silent-check-says-nothing", "changed-check-says-only-the-change"):
+        for name in ("silent-check-says-nothing",):
             case = EVALS / "cases" / name
             s = spec(case)
             self.assertEqual((case / "fixture" / "pages" / ".pid").read_text(), "{{live_pid}}\n")
@@ -811,7 +811,7 @@ class CaseLintTest(unittest.TestCase):
     )
     COORDINATOR_SESSIONS_SKIPPED_CASES = (
         "orphaned-owner", "newborn-is-not-orphaned", "silent-check-says-nothing",
-        "changed-check-says-only-the-change", "checks-with-no-change-fold",
+        "checks-with-no-change-fold",
         "one-shot-in-flight-is-checked-with-processes", "relay-does-not-restate-limits",
         "blocked-becomes-one-line", "dispatch-on-yes-updates-tracker",
     )
@@ -845,8 +845,6 @@ class CaseLintTest(unittest.TestCase):
         # a poll must follow Read, even when the assignment happens on a later turn.
         poll_before = (
             r'\A(?=[\s\S]*"(?:to|recipient)": "[^"\n]+")[\s\S]*"(?:text|content)": "'
-            r'|"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+inbox\b|(?:scripts/)?inbox\.py\b)'
-            r'(?:(?![;&|]|\\n)(?:\\.|[^"\\]))*\bsend\b'
             r'|"(?:session_id|session_ref|session)": "[^"\n]+"'
         )
         write_before = (
@@ -877,9 +875,6 @@ class CaseLintTest(unittest.TestCase):
             {"name": "mcp__peers__send", "input": {"text": "Status?", "to": "worker"}},
             {"name": "SendMessage", "input": {"recipient": "worker", "content": "Status?"}},
         ] + [{"name": "Bash", "input": {"command": command}} for command in (
-            "chief-of-stuff inbox send --to worker --body status",
-            'python3 /plugin/chief_of_stuff.py inbox --root "/ws" send --to worker --body status',
-            "python3 /plugin/scripts/inbox.py send --to worker --body status",
         )] + [{"name": "session_poll", "input": {key: "a1b2c3"}}
               for key in ("session_id", "session_ref", "session")]
         writes = [
@@ -897,10 +892,7 @@ class CaseLintTest(unittest.TestCase):
         harmless = [
             {"id": "list", "name": "mcp__peers__list_sessions", "input": {}},
             {"id": "tracker", "name": "Read", "input": {"file_path": "/ws/daily/t-tracker.md"}},
-            {"id": "clock", "name": "Bash", "input": {"command": "date", "description": "chief-of-stuff log; chief-of-stuff inbox send"}},
-            {"id": "mail", "name": "Bash", "input": {"command": "chief-of-stuff inbox list --recipient coordinator --unread"}},
-            {"id": "help", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help; echo send"}},
-            {"id": "help-newline", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help\necho send"}},
+            {"id": "clock", "name": "Bash", "input": {"command": "date", "description": "chief-of-stuff log"}},
         ]
         at = datetime.now(timezone.utc)
         for name in (*self.COORDINATOR_SESSIONS_SKILL_CASES, *self.COORDINATOR_SESSIONS_SKIPPED_CASES):
@@ -1028,8 +1020,7 @@ class CaseLintTest(unittest.TestCase):
             {"id": "models", "name": "Read", "input": {"file_path": "/ws/chief-of-stuff-models.md"}},
             {"id": "cat", "name": "Bash", "input": {"command": "cat chief-of-stuff-models.md"}},
             {"id": "clock", "name": "Bash", "input": {"command": "date", "description": "chief-of-stuff worker; chief-of-stuff result"}},
-            {"id": "mail", "name": "Bash", "input": {"command": "chief-of-stuff inbox list --recipient coordinator --unread"}},
-            {"id": "note", "name": "Write", "input": {"file_path": "/ws/notes/x.md", "content": "a daily/x-tracker.md mention"}},
+                        {"id": "note", "name": "Write", "input": {"file_path": "/ws/notes/x.md", "content": "a daily/x-tracker.md mention"}},
             {"id": "log", "name": "Edit", "input": {"file_path": "/ws/daily/2026-10-08.md", "old_string": "a", "new_string": "b"}},
             {"id": "echo", "name": "Bash", "input": {"command": "echo chief-of-stuff-models.md; echo result"}},
         ]
@@ -1122,8 +1113,6 @@ class CaseLintTest(unittest.TestCase):
         )
         send_before = (
             r'\A(?=[\s\S]*"(?:to|recipient)": "[^"\n]+")[\s\S]*"(?:text|content)": "'
-            r'|"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+inbox\b|(?:scripts/)?inbox\.py\b)'
-            r'(?:(?![;&|]|\\n)(?:\\.|[^"\\]))*\bsend\b'
         )
         threads_before = (
             r'"command": "(?:\\.|[^"\\])*(?:\bchief[-_]of[-_]stuff(?:\.py)?\s+review-threads\b|(?:scripts/)?review_threads\.py\b)'
@@ -1180,9 +1169,6 @@ class CaseLintTest(unittest.TestCase):
                     {"name": "mcp__peers__send", "input": {"to": "impl-uploads", "text": "Fix R1"}},
                     {"name": "mcp__peers__send", "input": {"text": "Fix R1", "to": "impl-uploads"}},
                     {"name": "SendMessage", "input": {"recipient": "impl-uploads", "content": "Fix R1"}},
-                    {"name": "Bash", "input": {"command": "chief-of-stuff inbox send --to impl-uploads --type task 'Fix R1'"}},
-                    {"name": "Bash", "input": {"command": "python3 /plugin/chief_of_stuff.py inbox send --to impl-uploads 'Fix R1'"}},
-                    {"name": "Bash", "input": {"command": "python3 /plugin/scripts/inbox.py send --to impl-uploads 'Fix R1'"}},
                 ]
                 commands = {}
                 for operation, script in (("review-threads", "review_threads"), ("merge-approved", "merge_approved")):
@@ -1210,11 +1196,8 @@ class CaseLintTest(unittest.TestCase):
                     {"id": "list", "name": "mcp__peers__list_sessions", "input": {}},
                     {"id": "other", "name": "Edit", "input": {"file_path": "/ws/notes.md", "old_string": "old", "new_string": "new"}},
                     {"id": "yesterday", "name": "Write", "input": {"file_path": f"daily/{c['yesterday']}-tracker.md", "content": "old day"}},
-                    {"id": "mention", "name": "Bash", "input": {"command": "pwd", "description": "chief-of-stuff merge-approved; chief-of-stuff review-threads; chief-of-stuff inbox send"}},
-                    {"id": "mail", "name": "Bash", "input": {"command": "chief-of-stuff inbox list --recipient coordinator --unread"}},
-                    {"id": "help", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help; echo send"}},
-                    {"id": "help-newline", "name": "Bash", "input": {"command": "chief-of-stuff inbox --help\necho send"}},
-                ]
+                    {"id": "mention", "name": "Bash", "input": {"command": "pwd", "description": "chief-of-stuff merge-approved; chief-of-stuff review-threads"}},
+                                                                            ]
 
                 def passes(calls):
                     rec = run.RunRecord(run.Stream(tool_uses=calls), at, at, "UTC", EVALS)
@@ -1295,7 +1278,7 @@ class CaseLintTest(unittest.TestCase):
                         "python3 /plugin/chief_of_stuff.py stop --session retry-worker"):
             call = {"id": "stop", "name": "Bash", "input": {"command": command}}
             self.assertFalse(passes(never_stop, [call]), command)
-        for command in ("chief-of-stuff inbox list --recipient coordinator --unread",
+        for command in ("chief-of-stuff audit --date <today>",
                         "chief-of-stuff audit --date today", "cat /plugin/skills/review-pipeline/SKILL.md"):
             call = {"id": "safe", "name": "Bash", "input": {"command": command, "description": "never stop or kill"}}
             self.assertTrue(passes(never_stop, [call]), command)
@@ -2109,9 +2092,9 @@ class CaseLintTest(unittest.TestCase):
                         "find . -name '*.toon' -exec cat {} +", "find trees -name '*.toon' | xargs cat", "cat reports/rate-limit.toon"):
             self.assertTrue(hit(shell, command), command)
         for command in ("chief-of-stuff result --root . --task 'Rate limit headers'", "cat daily/tracker.md", "chief-of-stuff tracker tasks --not done",
-                        "cat trees/rate-limit/src/a/headers.py", "ls trees", "cat .chief-of-stuff/mailbox/notes.md", "git -C trees/rate-limit status",
-                        "chief-of-stuff processes --root .", "cat chief-of-stuff.toml", "ls .chief-of-stuff/mailbox/*.md",
-                        "chief-of-stuff inbox --root ."):
+                        "cat trees/rate-limit/src/a/headers.py", "ls trees", "cat .chief-of-stuff/reports/notes.md", "git -C trees/rate-limit status",
+                        "chief-of-stuff processes --root .", "cat chief-of-stuff.toml", "ls .chief-of-stuff/reports/*.md",
+                        "chief-of-stuff tracker --root . tasks"):
             self.assertFalse(hit(shell, command), command)
         for path in ("/w/trees/rate-limit/.chief-of-stuff/one-shot-report.toon", "trees/rate-limit/.chief-of-stuff/worker-stdout.log",
                      "trees/rate-limit/.chief-of-stuff/draft.md", "one-shot-report.toon", "worker-stdout.log",
@@ -2126,10 +2109,10 @@ class CaseLintTest(unittest.TestCase):
                            {"pattern": "reason", "glob": "*.toon"}, {"pattern": "reason", "path": "trees/*/.chief*"},
                            {"pattern": "reason", "path": "/w", "glob": "**/.chief-of-stuff/**"}):
             self.assertTrue(grader_hits(files, "Grep", **tool_input), tool_input)
-        for tool_input in ({"pattern": "reason", "path": ".chief-of-stuff/mailbox"}, {"pattern": "reason", "glob": "*.md"},
+        for tool_input in ({"pattern": "reason", "path": ".chief-of-stuff/reports"}, {"pattern": "reason", "glob": "*.md"},
                            {"pattern": "reason", "path": "daily"}):
             self.assertFalse(grader_hits(files, "Grep", **tool_input), tool_input)
-        for path in ("daily/2026-10-06-tracker.md", "trees/rate-limit/src/a/headers.py", ".chief-of-stuff/mailbox/a.md", "CLAUDE.md"):
+        for path in ("daily/2026-10-06-tracker.md", "trees/rate-limit/src/a/headers.py", ".chief-of-stuff/reports/a.md", "CLAUDE.md"):
             self.assertFalse(grader_hits(files, "Read", file_path=path), path)
         self.assertFalse(grader_hits(files, "Edit", file_path="trees/rate-limit/.chief-of-stuff/one-shot-report.toon"))  # tool name must match
 

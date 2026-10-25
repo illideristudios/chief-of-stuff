@@ -61,7 +61,7 @@ class CoordinatorLaunchTest(unittest.TestCase):
         with ThreadPoolExecutor(max_workers=3) as pool:
             paths = list(pool.map(lambda _: start.install(ROOT, self.install_dir), range(3)))
         self.assertEqual(paths, [paths[0]] * 3)
-        self.assertTrue((paths[0] / "scripts" / "inbox.py").is_file())
+        self.assertTrue((paths[0] / "scripts" / "dispatch_prompt.py").is_file())
 
     def test_commands_pin_rules_and_use_host_flags(self):
         release = start.install(ROOT, self.install_dir)
@@ -96,9 +96,9 @@ class CoordinatorLaunchTest(unittest.TestCase):
         front = (ROOT / "agents" / "chief-of-stuff.md").read_text().split("---", 2)[1]
         self.assertIn(f'initialPrompt: "{start.START}"', front)
 
-    def test_coordinator_prompts_use_host_mailbox_checks(self):
+    def test_coordinator_prompts_use_host_reconciliation_checks(self):
         release = start.install(ROOT, self.install_dir)
-        expected = {"claude": "[Mailbox check] chief-of-stuff",
+        expected = {"claude": "[Scheduled check] chief-of-stuff",
                     "agy": "Antigravity `Schedule` at `*/5 * * * *`",
                     "cursor": "Cursor in-session `/loop 5m`",
                     "codex": "Codex CLI has no in-session schedule"}
@@ -106,7 +106,7 @@ class CoordinatorLaunchTest(unittest.TestCase):
             with self.subTest(runtime=runtime):
                 rendered = start.prompt(runtime, release, self.root)
                 self.assertIn(marker, rendered)
-                self.assertIn("list --recipient coordinator --unread", rendered)
+                self.assertNotIn("chief-of-stuff inbox", rendered)
                 self.assertIn("chief-of-stuff processes --root", rendered)
                 self.assertIn(f"Read {release}/skills/review-pipeline/SKILL.md", rendered)
                 self.assertIn(f"Read {release}/skills/coordinator-sessions/SKILL.md", rendered)
@@ -200,24 +200,22 @@ class CoordinatorLaunchTest(unittest.TestCase):
         self.assertFalse(worker.is_alive())
         self.assertEqual(len(calls), 1)
 
-    def test_watcher_ignores_clean_audit_summary_and_counts_unread(self):
+    def test_watcher_ignores_clean_audit_summary_and_reports_findings(self):
         release = start.install(ROOT, self.install_dir)
-        clean = [mock.Mock(returncode=0, stdout="[]"),
-                 mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
+        clean = [mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
                  mock.Mock(returncode=0, stdout="[]")]
         with mock.patch.object(start.subprocess, "run", side_effect=clean):
             self.assertEqual(start.check_once(self.root, release), "")
-        unread = [mock.Mock(returncode=0, stdout='[1]{type}:\n  register'),
-                  mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
-                  mock.Mock(returncode=0, stdout="[]")]
-        with mock.patch.object(start.subprocess, "run", side_effect=unread):
-            self.assertIn("1 unread", start.check_once(self.root, release))
+        finding = [mock.Mock(returncode=0, stdout="orphaned work: task Build it — owner gone\n"
+                                                   "tasks=1 trees=0 orphaned=1 stopped=0\n"),
+                   mock.Mock(returncode=0, stdout="[]")]
+        with mock.patch.object(start.subprocess, "run", side_effect=finding):
+            self.assertIn("orphaned work: task Build it", start.check_once(self.root, release))
 
     def test_watcher_notifies_on_kanban_drift(self):
         release = start.install(ROOT, self.install_dir)
-        outputs = [mock.Mock(returncode=0, stdout="[]"),
-                   mock.Mock(returncode=1, stdout="kanban: Build it — expected 03, found 00\n"
-                                                      "tasks=1 trees=0 kanban=1\n"),
+        outputs = [mock.Mock(returncode=1, stdout="kanban: Build it — expected 03, found 00\n"
+                                                   "tasks=1 trees=0 kanban=1\n"),
                    mock.Mock(returncode=0, stdout="[]")]
         with mock.patch.object(start.subprocess, "run", side_effect=outputs):
             self.assertIn("kanban: Build it", start.check_once(self.root, release))
@@ -225,24 +223,22 @@ class CoordinatorLaunchTest(unittest.TestCase):
     def test_watcher_audits_the_workspace_day_not_the_hosts(self):
         # Between the host's midnight and the workspace's, the host's date names the wrong tracker.
         release = start.install(ROOT, self.install_dir)
-        clean = [mock.Mock(returncode=0, stdout="[]"),
-                 mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
+        clean = [mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
                  mock.Mock(returncode=0, stdout="[]")]
         host = mock.Mock(wraps=start.date, **{"today.return_value": start.date(2000, 1, 1)})
         with mock.patch.object(start.subprocess, "run", side_effect=clean) as run, \
                 mock.patch.object(start, "date", host):
             start.check_once(self.root, release)
-        self.assertNotIn("2000-01-01", run.call_args_list[1].args[0])
+        self.assertNotIn("2000-01-01", run.call_args_list[0].args[0])
 
     def test_watcher_uses_batch_process_helper_and_reports_reused_pid(self):
         release = start.install(ROOT, self.install_dir)
         rows = [{"pid": 123, "name": "impl01", "runtime": "cursor", "status": "pid_reused"}]
-        outputs = [mock.Mock(returncode=0, stdout="[]"),
-                   mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
+        outputs = [mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
                    mock.Mock(returncode=0, stdout=process_status.toon_encode(rows))]
         with mock.patch.object(start.subprocess, "run", side_effect=outputs) as run:
             self.assertIn("worker impl01 process is pid_reused", start.check_once(self.root, release))
-        self.assertEqual(Path(run.call_args_list[2].args[0][1]).name, "process_status.py")
+        self.assertEqual(Path(run.call_args_list[1].args[0][1]).name, "process_status.py")
 
     def test_watcher_reads_what_processes_prints_for_a_live_one_shot_run_with_and_without_a_registered_worker(self):
         # The real `processes` output, not a canned one: the watcher decodes it as one list of rows.
@@ -259,8 +255,7 @@ class CoordinatorLaunchTest(unittest.TestCase):
                 with contextlib.redirect_stdout(out), mock.patch.object(
                         process_status.subprocess, "run", return_value=mock.Mock(returncode=0, stdout=f" {os.getpid()} /bin/agent\n")):
                     self.assertEqual(process_status.main(["--root", str(self.root)]), 0)
-                outputs = [mock.Mock(returncode=0, stdout="[]"),
-                           mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
+                outputs = [mock.Mock(returncode=0, stdout="tasks=1 trees=0 orphaned=0 stopped=0\n"),
                            mock.Mock(returncode=0, stdout=out.getvalue())]
                 with mock.patch.object(start.subprocess, "run", side_effect=outputs):
                     self.assertNotIn("could not be parsed", start.check_once(self.root, release))
@@ -310,15 +305,14 @@ class WorkerRuntimeTest(unittest.TestCase):
             self.assertIn("--registry", text)
             self.assertIn("--login-shell", text)
 
-    def test_assignment_names_real_host_tools_and_mailbox(self):
+    def test_assignment_names_engine_tools_and_plan_gates(self):
         for runtime in runtimes.NAMES:
             body = dispatch.compose(self.root, "2026-09-18", "Security audit",
                                     worktree=Path("/tmp/wt"), name="impl01", runtime=runtime)
-            self.assertIn('wait --recipient "impl01" --timeout 300', body)
-            self.assertIn("do not create polling scripts", body)
+            self.assertIn("engine MCP tool `report`", body)
+            self.assertNotIn("chief-of-stuff inbox", body)
             if runtime in ("codex", "cursor"):
-                self.assertIn("--from \"impl01\" --type register", body)
-                self.assertNotIn("List your sessions", body)
+                self.assertIn("List your sessions", body)
                 self.assertIn("/plan", body)
             if runtime == "codex":
                 self.assertIn("resume-codex", body)

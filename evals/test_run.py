@@ -528,7 +528,7 @@ class NoShellEditsTest(unittest.TestCase):
         return run.grade({"type": "no_shell_edits"}, rec)[0]
 
     def test_pinned_helpers_are_allowed(self) -> None:
-        for command in ("python3 /installed/scripts/inbox.py list --recipient coordinator",
+        for command in ("python3 /installed/scripts/tracker_read.py --root . section Resume",
                         "python3 /installed/chief_of_stuff.py board --root .",
                         "python3 /installed/scripts/render_board.py --root .", "mkdir -p Resources && mv receipt.txt Resources/",
                         "python3 /installed/chief_of_stuff.py tracker --root . tasks --not done",
@@ -995,7 +995,7 @@ class GitIsNotANewFileTest(unittest.TestCase):
 class AllowedToolsTest(unittest.TestCase):
     def test_pinned_coordinator_scripts_are_runnable(self) -> None:
         allowed = " ".join(run.ALLOWED)
-        for script in ("probe_health.py", "audit_tasks.py", "backlog.py", "inbox.py", "kanban.py", "process_status.py"):
+        for script in ("probe_health.py", "audit_tasks.py", "backlog.py", "kanban.py", "process_status.py"):
             self.assertIn(script, allowed)
         self.assertNotIn("Bash(git", allowed)
         self.assertNotIn("Bash(curl", allowed)

@@ -30,11 +30,13 @@ DRAWS_NOTHING = (
     "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "ownership", "forge_review",
     "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
-    "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
+    "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog",
     "probe_health", "runtimes", "estimate", "task_forge", "tracker_log", "findings", "tree_state", "orphans",
     "git_trees", "git_view", "tree_claims", "notify_service", "tracker_read",
     "one_shot_report", "flow", "sync_page_theme",
 )
+
+REMOVED = ("inbox",)
 
 PROBE = "import sys; sys.path.insert(0, sys.argv[1]); import {name}; print(' '.join(sorted(set(sys.modules) & set(sys.argv[2:]))))"
 
@@ -114,6 +116,29 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
 
 
 class DependencyRuleTest(unittest.TestCase):
+    def test_a_removed_script_is_gone_and_no_file_imports_it(self) -> None:
+        search_roots = (SCRIPTS, ROOT, ROOT / "evals", ROOT / "hooks")
+        py_files = [p for root in search_roots if root.is_dir() for p in root.rglob("*.py")]
+        for name in REMOVED:
+            with self.subTest(removed=name):
+                self.assertFalse((SCRIPTS / f"{name}.py").is_file(), f"scripts/{name}.py should be deleted")
+                importers = sorted({str(path.relative_to(ROOT)) for path in py_files
+                                    if script(name) in {script(n) for n in imports(path)}})
+                self.assertEqual(importers, [], f"{name} is still imported from {importers}")
+
+    def test_every_command_routes_to_a_script_that_exists(self) -> None:
+        chief = ast.parse((ROOT / "chief_of_stuff.py").read_text(encoding="utf-8"))
+        commands = None
+        for node in chief.body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == "COMMANDS":
+                        commands = ast.literal_eval(node.value)
+        self.assertIsInstance(commands, dict)
+        for rel in commands.values():
+            path = ROOT / rel
+            self.assertTrue(path.is_file(), f"COMMANDS routes to missing file {rel}")
+
     def test_every_script_is_classified(self) -> None:
         scripts = {p.stem for p in SCRIPTS.glob("*.py")}
         self.assertEqual(sorted(scripts - PAGES - set(DRAWS_NOTHING)), [])
