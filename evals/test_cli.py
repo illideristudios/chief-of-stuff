@@ -70,16 +70,31 @@ class CommandHelpTest(unittest.TestCase):
         retired = {"install", "start", "models", "worker", "result", "adopt", "processes",
                    "inbox", "log", "tracker", "tick", "audit", "notify", "decision", "sources",
                    "merge-approved", "merge-ready", "review-threads"}
-        self.assertTrue(all(cli.COMMAND_REGISTRY[name][1] is None for name in retired))
+        self.assertTrue(all(cli.COMMAND_REGISTRY[name][1] is None
+                            for name in retired & cli.COMMAND_REGISTRY.keys()))
         help_text = self.run_cli("--help", check=True).stdout
         docs = self.run_cli("docs", check=True).stdout
         for name in retired:
             self.assertNotRegex(help_text, rf"(?m)^  {re.escape(name)}  ")
             self.assertNotIn(f"### `{name}`", docs)
-        with patch.object(cli.os, "execv") as execute:
-            self.assertEqual(cli.main(["tracker", "--help"]), 0)
+        registry = {"docs": (None, "observability"), "retiring-fixture": ("chief_of_stuff.py", None)}
+        with patch.object(cli, "COMMAND_REGISTRY", registry), \
+                patch.object(cli, "COMMANDS", {"retiring-fixture": "chief_of_stuff.py"}), \
+                patch.object(cli.os, "execv") as execute:
+            self.assertNotIn("retiring-fixture", cli.top_level_help())
+            self.assertNotIn("retiring-fixture", cli.command_reference())
+            self.assertEqual(cli.main(["retiring-fixture", "--help"]), 0)
         self.assertEqual(execute.call_args.args[1][-2:],
-                         [str(ROOT / "scripts/tracker_read.py"), "--help"])
+                         [str(ROOT / "chief_of_stuff.py"), "--help"])
+
+    def test_failed_help_names_the_command(self):
+        with patch.object(cli.subprocess, "run", return_value=subprocess.CompletedProcess(
+                [], 2, "", "parser unavailable")):
+            with self.assertRaisesRegex(ValueError, "help failed for worktree.*parser unavailable"):
+                cli.command_help("worktree")
+        with patch.object(cli.subprocess, "run", side_effect=subprocess.TimeoutExpired("help", 30)):
+            with self.assertRaisesRegex(ValueError, "help failed for worktree"):
+                cli.command_help("worktree")
 
     def test_reference_is_fresh_and_independent_of_terminal_environment(self):
         done = self.run_cli("docs", check=True,
