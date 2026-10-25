@@ -18,6 +18,11 @@ def permission_ask(event: dict) -> tuple[str, str]:
     return f"Permission requested for {event.get('tool_name', 'tool')}", context
 
 
+def denial_binds(decided_by: str | None, ask, binding) -> bool:
+    """#958: only a trio verdict outlives its attempt; a split or an unavailable trio stops just the attempt that got it."""
+    return decided_by == "trio" or (ask.stage, ask.attempt) == (binding.stage, binding.attempt)
+
+
 def resume_state(binding, item, asks, reports) -> dict:
     return {
         "issue_key": binding.issue_key,
