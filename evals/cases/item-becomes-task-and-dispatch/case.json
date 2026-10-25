@@ -44,11 +44,8 @@
       "max": 0
     },
     {
-      "name": "no git or railway attempt",
-      "type": "tool_used",
-      "tool": "Bash",
-      "input_match": "\\b(railway|git (commit|add|push|merge))\\b",
-      "max": 0
+      "name": "only allowlisted PATH git reads",
+      "type": "path_git_write"
     },
     {
       "name": "Log times are this move's clock reads",

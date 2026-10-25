@@ -27,7 +27,7 @@ import backlog
 import process_status
 from _vendor.toon_format import encode as toon_encode
 from clock import leading
-from forge_review import GITLAB_PIPELINE, github_approval as _github_approval, github_pipeline as _github_pipeline
+from forge_review import GITLAB_PIPELINE, closes as _closes, github_approval as _github_approval, github_pipeline as _github_pipeline
 from md import section as _section
 from settings import SettingsError, load as load_settings
 from tracker import Tracker, bare_name as _bare_name, launcher, parse_tracker
@@ -35,7 +35,6 @@ from tracker_log import STARTED_DETAIL
 from workspace import Config, ConfigError, read_config, worktrees_dir
 
 CACHE = ".sources.json"
-CLOSES = re.compile(r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(#\d+)")
 GH_PR = re.compile(r"(?i)\bPR\s*#(\d+)\b")
 GL_MR = re.compile(r"(?<![\w&])!(\d+)\b")
 GL_STATE = {"opened": "open", "locked": "closed"}
@@ -203,10 +202,6 @@ def load(pages_dir: Path) -> Sources:
 def pages_dir(root: Path, cfg: Config, day: str) -> Path:
     """Where the board is written: the Board line's dir, else beside the tracker (as render_board does)."""
     return root / cfg.pages_dir if cfg.pages_dir else (root / cfg.tracker_path(day)).parent
-
-
-def _closes(body: str | None) -> tuple[str, ...]:
-    return tuple(dict.fromkeys(CLOSES.findall(body or "")))
 
 
 def _graphql_errors(body) -> str:

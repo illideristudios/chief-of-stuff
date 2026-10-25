@@ -49,7 +49,7 @@ def report(task: str = "Rate limit headers", **over) -> dict:
     """What `one_shot.reconcile` writes for a worker that finished and left the tracker updated."""
     return {"status": "human_review", "task": task, "worker": "rate-limit", "runtime_exit": 0,
             "reason": "the 429 path sends Retry-After in milliseconds", "changes": "M src/a/headers.py\nWorking tree clean",
-            "errors": [], **over}
+            "errors": [], **dict.fromkeys(dispatch_prompt.SUITE_KEYS), **over}
 
 
 def padded(data: dict, size: int) -> str:
@@ -175,6 +175,152 @@ class ResultTests(unittest.TestCase):
     def test_the_entry_point_routes_result_to_its_script(self):
         self.assertEqual(chief_of_stuff.COMMANDS.get("result"), "scripts/one_shot_result.py")
         self.assertEqual(self.result().returncode, 0)  # not "unknown chief-of-stuff command"
+
+    def suite_policy(self, enabled=True):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `chief-of-stuff.toml`\n")
+        (self.root / "chief-of-stuff.toml").write_text(
+            f"[workers]\nrequire_green_tests = {str(enabled).lower()}\n")
+
+    def test_suite_counts_survive_both_report_sites_and_the_result_command(self):
+        counts = {"passed": 23, "failed": 0, "skipped": 2, "xfailed": 11}
+        for _, changed in SITES:
+            with self.subTest(changed=changed):
+                written = self.reconcile("rate-limit", changed=changed, result={
+                    "status": "done", "reason": "finished", "changes": "tested", **counts})
+                self.assertEqual({k: written[k] for k in counts}, counts)
+                shown = self.one("--task", "Rate limit headers")
+                self.assertEqual({k: shown[k] for k in counts}, counts)
+                for key, value in counts.items():
+                    self.assertIn(f"{key}={value}", shown["changes"])
+
+    def test_opted_in_completion_requires_known_green_suite_counts(self):
+        self.suite_policy()
+        green = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
+        for counts in (green, {**green, "passed": 0}, {**green, "skipped": 2}, {**green, "xfailed": 11}, {**green, "failed": 1}):
+            with self.subTest(counts=counts):
+                report = self.reconcile("rate-limit", result={
+                    "status": "done", "reason": "completed audit", "changes": "tested", **counts})
+                bad = counts["passed"] == 0 or any(counts[k] for k in ("failed", "skipped", "xfailed"))
+                self.assertEqual(report["status"], "human_review" if bad else "done")
+                self.assertEqual(report["errors"], [])
+                if bad:
+                    for key, value in counts.items():
+                        self.assertIn(f"{key}={value}", report["reason"])
+                    self.assertIn("completed audit", report["reason"])
+                    self.assertIn("HUMAN REVIEW NEEDED", self.tracker_path().read_text())
+
+    def test_missing_or_invalid_counts_are_unknown_and_hold_opted_in_completion(self):
+        self.suite_policy()
+        green = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
+        missing = object()
+        for key in green:
+            for bad in (missing, None, True, False, -1, "0", 1.5, {}, []):
+                with self.subTest(key=key, value=bad):
+                    counts = {**green, key: bad}
+                    if bad is missing:
+                        del counts[key]
+                    report = self.reconcile("rate-limit", result={
+                        "status": "done", "reason": "finished", "changes": "tested", **counts})
+                    self.assertEqual(report["status"], "human_review")
+                    self.assertIsNone(report[key])
+                    self.assertIn(f"{key}=missing or invalid", report["reason"])
+
+    def test_opt_out_keeps_completion_but_reports_missing_counts(self):
+        for enabled in (None, False):
+            if enabled is not None:
+                self.suite_policy(enabled)
+            report = self.reconcile("rate-limit", result={
+                "status": "done", "reason": "finished", "changes": "tested", "skipped": 2, "xfailed": 11})
+            self.assertEqual(report["status"], "done")
+            self.assertEqual(report["skipped"], 2)
+            self.assertEqual(report["xfailed"], 11)
+            for key in ("passed", "failed"):
+                self.assertIsNone(report[key])
+                self.assertIn(f"{key}=missing or invalid", report["changes"])
+
+    def test_suite_policy_preserves_relaunch_and_failed_worker_results(self):
+        self.suite_policy()
+        for status, exit_code, expected in (("relaunch", 0, "relaunch"), ("human_review", 0, "human_review"),
+                                             ("done", 1, "human_review")):
+            with self.subTest(status=status, exit_code=exit_code):
+                report = self.reconcile("rate-limit", exit_code=exit_code, result={
+                    "status": status, "reason": "premise moved", "changes": "checked", "skipped": 2})
+                self.assertEqual(report["status"], expected)
+                self.assertEqual(report["skipped"], 2)
+                self.assertNotIn("suite is not green", report["reason"])
+                self.assertEqual(report["reason"], "worker exited 1: premise moved" if exit_code else "premise moved")
+
+    def test_one_shot_assignment_requests_observed_counts_and_explains_the_opt_in_gate(self):
+        self.suite_policy()
+        body = dispatch_prompt.compose(self.root, self.tracker_path().name[:10], "Rate limit headers",
+                                       worktree=self.root / "tree", one_shot=True)
+        for key in ("passed", "failed", "skipped", "xfailed"):
+            self.assertIn(f"{key}: null", body)
+        self.assertIn("non-negative integers", body)
+        self.assertIn("null when unknown", body)
+        self.assertIn("require_green_tests", body)
+        self.assertNotIn("exactly three string fields", body)
+        self.assertIn("passed > 0", body)
+        self.assertIn("launcher holds done as human_review", body)
+        self.assertIn("Completed runs still report status: done with observed counts", body)
+        self.suite_policy(False)
+        body = dispatch_prompt.compose(self.root, self.tracker_path().name[:10], "Rate limit headers",
+                                       worktree=self.root / "tree", one_shot=True)
+        self.assertNotIn("require_green_tests", body)
+
+    def test_git_violations_take_precedence_over_the_suite_gate(self):
+        self.suite_policy()
+        for counts in ({}, {"passed": 1, "failed": 0, "skipped": 1, "xfailed": 0}):
+            for read_only, actual, commits, expected in (
+                (True, " M pending.py", one_shot.NO_COMMITS, "read-only task left changes"),
+                (True, "", "abc123 changed tracked files", "read-only task left changes"),
+                (False, " M pending.py", one_shot.NO_COMMITS, "worktree is not clean"),
+            ):
+                with self.subTest(counts=counts, read_only=read_only, actual=actual):
+                    cwd = self.launched("rate-limit", result={
+                        "status": "done", "reason": "finished", "changes": "tested", **counts})
+                    with mock.patch.object(one_shot, "changed_files", return_value=actual), mock.patch.object(
+                            one_shot, "committed_changes", return_value=commits):
+                        written = one_shot.reconcile(self.root, self.tracker_path().name[:10],
+                                                     "Rate limit headers", "rate-limit", cwd, 0, read_only=read_only)
+                    self.assertEqual(written["status"], "human_review")
+                    self.assertIn(expected, written["reason"])
+                    self.assertNotIn("suite is not green", written["reason"])
+
+    def test_result_command_normalizes_report_suite_counts(self):
+        green = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
+        for key in green:
+            for value in (None, True, False, -1, "0", 1.5, [], {}):
+                with self.subTest(key=key, value=value):
+                    self.plant("rate-limit", report(**{**green, key: value}))
+                    shown = self.one("--task", "Rate limit headers")
+                    self.assertIsNone(shown[key])
+                    self.assertEqual({k: shown[k] for k in green if k != key},
+                                     {k: v for k, v in green.items() if k != key})
+        for value in (0, 17):
+            self.plant("rate-limit", report(**dict.fromkeys(green, value)))
+            shown = self.one("--task", "Rate limit headers")
+            self.assertEqual({k: shown[k] for k in green}, dict.fromkeys(green, value))
+
+    def test_long_worker_changes_preserve_launcher_evidence_in_reports_and_tracker(self):
+        counts = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
+        for _, changed in SITES:
+            with self.subTest(changed=changed), mock.patch.object(
+                    one_shot, "changed_files", return_value=" M pending.py\n" + "other.py\n" * 10000), mock.patch.object(
+                    one_shot, "committed_changes", return_value="abc123 committed fix\n" + "file.py\n" * 1000):
+                written = self.reconcile("rate-limit", changed=changed, result={
+                    "status": "done", "reason": "finished", "changes": "worker details " * 10000, **counts})
+                shown = self.one("--task", "Rate limit headers")
+                self.assertLessEqual(len(written["changes"]), one_shot.FIELD_MAX)
+                for summary in (written["changes"], shown["changes"]):
+                    for token in ("Suite:", "passed=23", "failed=0", "skipped=0", "xfailed=0",
+                                  "Commits from this run:", "abc123", "Working tree:", "pending.py", "worker details"):
+                        self.assertIn(token, summary)
+                if not changed:
+                    log = self.tracker_path().read_text().split("## Log", 1)[1].split("Changes: ", 1)[1]
+                    for token in ("Suite:", "passed=23", "failed=0", "skipped=0", "xfailed=0",
+                                  "Commits from this run:", "abc123", "Working tree:", "pending.py"):
+                        self.assertIn(token, log)
 
     # The launcher keeps its own copy of the report, outside the tree.
 
@@ -367,13 +513,7 @@ class ResultTests(unittest.TestCase):
                               capture_output=True, text=True, timeout=WAIT, check=False)
         self.assertEqual(done.returncode, 0, done.stderr)
 
-    def test_the_launchers_copy_is_utf8_whatever_the_locale_encoding(self):
-        for reason in ("caf\u00e9 fix", "the 429 path \u2192 Retry-After"):  # the first is encodable in ISO-8859-1 (written, then unreadable as UTF-8); the second is not
-            with self.subTest(reason):
-                shutil.rmtree(self.root / ".chief-of-stuff", ignore_errors=True)
-                self.locale_reconcile(reason)
-                self.assertEqual(self.one("--task", "Rate limit headers")["reason"], reason)
-                self.only_skipped_none()
+    # The ISO-8859-1 locale case is removed until the CI image generates that locale (#855).
 
     def test_a_link_planted_at_the_launchers_copy_is_replaced_not_followed(self):
         victim = self.root / "victim.txt"
@@ -494,7 +634,8 @@ class ResultTests(unittest.TestCase):
         self.plant("other", report("Search pagination", reason="not this one"))
         done = self.result("--task", "Rate limit headers")
         self.assertEqual((done.returncode, done.stderr), (0, ""))
-        self.assertEqual(toon_decode(done.stdout), {**mine, "worktree": "rate-limit"})
+        self.assertEqual(toon_decode(done.stdout), {
+            **mine, **dict.fromkeys(("passed", "failed", "skipped", "xfailed")), "worktree": "rate-limit"})
         self.assertNotIn("not this one", done.stdout)
 
     def test_a_task_is_matched_exactly_not_by_prefix_or_case(self):

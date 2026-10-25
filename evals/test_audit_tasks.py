@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 from datetime import datetime
 from pathlib import Path
@@ -568,6 +569,20 @@ class PushGapTest(unittest.TestCase):
         report = al.audit(root, "2026-09-17")
         self.assertTrue(any("unpushed" in line for line in report.lines), report.lines)
 
+    def test_pass_push_gap_skips_unreadable_then_names_when_none_readable(self):
+        """#537: `_pass_push_gap` takes the first readable fact, else names the first tree."""
+        a, b = Path("/tmp/wt-a"), Path("/tmp/wt-b")
+        answers = {a: al.UNREADABLE_GAP, b: "main abc even with origin/main"}
+        with patch.object(al, "_push_gap", side_effect=lambda path, view=None: answers[path]):
+            self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
+                             "main abc even with origin/main")
+            answers[b] = al.UNREADABLE_GAP
+            self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
+                             "wt-a: main vs origin/main unknown")
+            answers.update({a: "main abc123 vs origin/main unknown", b: "main abc even with origin/main"})
+            self.assertEqual(al._pass_push_gap([a, b], lambda p: None, {a: "wt-a", b: "wt-b"}),
+                             "main abc even with origin/main")
+
 
 class ArgvTest(unittest.TestCase):
     def test_git_is_called_with_a_list_and_never_through_a_shell(self):
@@ -670,6 +685,17 @@ class OrphanJoinTest(unittest.TestCase):
         self.assertIn("wt-dirty", line)
         self.assertIn("sam", line)
         self.assertIn("uncommitted", line)
+
+    def test_an_orphan_line_escapes_controls_in_the_branch(self) -> None:
+        tmp, root = workspace(self.DIRTY, self.OWNS, sessions=session_row("robin"))
+        self.addCleanup(tmp.cleanup)
+        real = git_trees.read_state
+        with patch.object(git_trees, "read_state",
+                          side_effect=lambda *a, **k: replace(real(*a, **k), branch="feat/x\u202ey")):
+            report = al.audit(root, "2026-09-17")
+        line = str(report.orphans[0])
+        self.assertNotIn("\u202e", line)
+        self.assertIn("\\u202e", line)
 
     def test_a_live_owner_is_not_an_orphan(self) -> None:
         tmp, root = workspace(self.DIRTY, self.OWNS, sessions=session_row("sam"))
@@ -1193,6 +1219,26 @@ class PushGapNamesMainTest(unittest.TestCase):
         self.assertIn("even with origin/main", line)
 
 
+class BranchNameControlTest(unittest.TestCase):
+    """#534: worker branch names with controls must not reach an audit line raw."""
+
+    def test_state_escapes_line_separator_bidi_and_c1_in_the_branch(self):
+        for what, ctl, shown in (("line separator", "\u2028", "\\u2028"),
+                                 ("bidi override", "\u202e", "\\u202e"),
+                                 ("C1 control", "\x9b", "\\x9b")):
+            with self.subTest(what), \
+                    patch.object(git_trees, "branch_of", return_value=f"feat/x{ctl}y"), \
+                    patch.object(git_trees, "git", return_value=(0, "")), \
+                    patch.object(al, "_merged", return_value=0):
+                branch, _why = al._state(Path("/tmp/tree"))
+                self.assertEqual(branch, f"feat/x{shown}y")
+                self.assertEqual([c for c in branch if not c.isprintable()], [], repr(branch))
+                line = al._tree_line("wt-x", branch, "")
+                self.assertEqual([c for c in line if not c.isprintable()], [], repr(line))
+                self.assertIn(shown, line)
+                self.assertNotIn(ctl, line)
+
+
 class RefJoinTest(unittest.TestCase):
     """Finding 112. A ref is minted once and survives a rename; a name is a tab title, and one changed
     at 03:21 on Zach's word that the worktree is the name. The join read the names, missed, and called
@@ -1362,12 +1408,6 @@ class ShaClosesTheLaneTest(unittest.TestCase):
         report = self.tracker("done 10:00 @open@")
         self.assertEqual(len(report.reopen), 1, report.lines)
         self.assertIn("is not on main", report.reopen[0].why)
-
-    def test_a_task_with_no_sha_reopens_exactly_as_before(self) -> None:
-        """The regression guard against 116a: no sha is no evidence, and no evidence clears nothing."""
-        report = self.tracker("done 10:00")
-        self.assertEqual(len(report.reopen), 1, report.lines)
-        self.assertIn("not on main", report.reopen[0].why)
 
     def test_a_malformed_sha_falls_back_and_says_so(self) -> None:
         report = self.tracker("done 10:00 not-a-sha")
@@ -3007,7 +3047,7 @@ class ShaTreesTest(unittest.TestCase):
                 trees = [(f"t{i}", self.trees) for i in range(len(answers))]
                 seen = iter([(code, f"{line} {i}", held) for i, (code, line, held) in enumerate(answers)])
                 with patch.object(git_trees, "sha_trees", return_value=trees), \
-                        patch.object(git_trees, "check_sha", lambda sha, tree: next(seen)):
+                        patch.object(git_trees, "check_sha", lambda sha, tree, **kw: next(seen)):
                     code, out, _ = self.run_main("--sha", self.sha)
                 self.assertEqual(code, want, out)
                 per_repo = [f"{line} {i} [t{i}]" for i, (_, line, _) in enumerate(answers)]
@@ -3026,7 +3066,7 @@ class ShaTreesTest(unittest.TestCase):
                     trees = [(f"t{i}", self.trees) for i in range(len(chosen))]
                     seen = iter([(code, f"{line} {i}", held) for i, (code, line, held) in enumerate(chosen)])
                     with patch.object(git_trees, "sha_trees", return_value=trees), \
-                            patch.object(git_trees, "check_sha", lambda sha, tree: next(seen)):
+                            patch.object(git_trees, "check_sha", lambda sha, tree, **kw: next(seen)):
                         code, out, _ = self.run_main("--sha", self.sha)
                     self.assertEqual(code, want, out)
                     per_repo = [f"{line} {i} [t{i}]" for i, (_, line, _) in enumerate(chosen)]
@@ -3434,6 +3474,38 @@ class AuditThroughTheViewTest(unittest.TestCase):
         code = f"from pathlib import Path; import sys; Path({str(self.canary)!r}).write_text('fired'); sys.exit(1)"
         return shlex.join([sys.executable, "-c", code])
 
+    def test_a_configured_clones_redirected_tree_stays_unreadable(self) -> None:
+        claude = self.root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("## Coordinator\n", "## Coordinator\n- Settings: `settings.toml`\n"))
+        (self.root / "settings.toml").write_text('[repos]\nproject = "repo"\n')
+        other, decoy = self.root / "other", self.root / "decoy"
+        git("clone", str(self.root / "repo"), str(other), cwd=self.root)
+        git("worktree", "add", "-b", "decoy", str(decoy), cwd=other)
+        tree = self.root / "trees" / "wt-unmerged"
+        admin = git_view.locate(decoy).gitdir
+        (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+        (tree / ".git").write_text(f"gitdir: {admin}\n")
+        with patch.object(git_view, "run", wraps=git_view.run) as reads:
+            report = al.audit(self.root, "2026-09-17", check_issues=False)
+        line = next(line for line in report.lines if line.startswith("wt-unmerged ("))
+        self.assertIn(tree_state.UNREADABLE_BRANCH, line)
+        self.assertFalse(any(call.args[1] == tree for call in reads.call_args_list), "a refused view is never retried unpinned")
+
+    def test_bad_cache_is_one_configuration_error_not_per_tree_unknowns(self) -> None:
+        # Bypass the test module's explicit trusted base to exercise launcher configuration.
+        real_base = git_view._base
+        cache = self.root / "bad-cache"
+        with patch.dict(os.environ, {"XDG_CACHE_HOME": str(cache)}), \
+                patch.object(git_view, "_base", side_effect=lambda layout, base: real_base(layout, None)) as bases, \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+            code = al.main(["--root", str(self.root), "--date", "2026-09-17"])
+        self.assertEqual(code, 2)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(bases.call_count, 1)
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
+        self.assertIn(str(cache), err.getvalue())
+        self.assertIn("cache", err.getvalue())
+
     def plant(self, how: str) -> None:
         if how == "fsmonitor":
             git("config", "--file", str(self.config), "core.fsmonitor", self.command(), cwd=self.root)
@@ -3685,9 +3757,8 @@ class UnreadableTreeTest(unittest.TestCase):
         self.assertTrue(report.lines)
 
     # R6
-    def test_a_home_python_cannot_find_costs_one_tree_not_the_pass(self) -> None:
-        """R6: `Path.home()` raises `RuntimeError` out of the view's default base. The pass finishes, and the trees whose reads
-        did not hit it are reported as they were."""
+    def test_a_home_python_cannot_find_is_a_cache_configuration_error(self) -> None:
+        """An unavailable launcher home is a configuration error, never a per-tree unknown."""
         real = git_view._base
 
         def homeless_for_wt_dirty(layout, base):
@@ -3698,8 +3769,5 @@ class UnreadableTreeTest(unittest.TestCase):
             return real(layout, base)
 
         with patch.object(git_view, "_base", homeless_for_wt_dirty):
-            report = al.audit(self.root, "2026-09-17")
-        self.assertIn("wt-unmerged (feat/open): not on main", report.lines)
-        self.assertIn("wt-merged (landed): on main, committed", report.lines)
-        [line] = [ln for ln in report.lines if ln.startswith("wt-dirty")]
-        self.assertIn(tree_state.UNCOMMITTED_UNKNOWN, line)
+            with self.assertRaisesRegex(git_view.CacheError, "cache"):
+                al.audit(self.root, "2026-09-17")

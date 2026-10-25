@@ -16,13 +16,14 @@ Markup contract these tests read (keep to it; everything else is free):
   auto or scroll.
 """
 
+import json
 import re
 import shutil
 import sys
 import tempfile
 import threading
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import unescape
 from html.parser import HTMLParser
 from pathlib import Path
@@ -121,7 +122,7 @@ def tabs(html: str) -> dict[str, Node]:
     return {name(t): t for t in navs[0].children} if navs else {}
 
 
-def served(pending: int, answered: int) -> dict[str, str]:
+def served(pending: int, answered: int, lead_counts: bool = False) -> dict[str, str]:
     """The five pages as the server renders them for a workspace with `pending` open decisions and `answered` ones
     a Decisions row has answered. The decision page shown is `alpha`, the first."""
     root = Path(tempfile.mkdtemp())
@@ -139,11 +140,23 @@ def served(pending: int, answered: int) -> dict[str, str]:
         pages.mkdir()
         for s in slugs:
             (pages / f"decision-{s}.json").write_text(decision(s))
+        if lead_counts:
+            import store
+            path = root / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            try:
+                db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
+                db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
+                db.add_decision("github:example/repo#110", "scope", "First choice")
+                db.add_decision("github:example/repo#110", "design", "Second choice")
+            finally:
+                db.engine.dispose()
         server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         try:
             out = {}
-            for kind, route in ROUTES.items():
+            for kind, route in {**ROUTES, **({"workers": "/workers"} if lead_counts else {})}.items():
                 resp = get(server.server_address[1], route)
                 assert resp.status == 200, f"{route} answered {resp.status}"
                 out[kind] = resp.body.decode()
@@ -269,6 +282,46 @@ class EpicsBadgeTest(unittest.TestCase):
                 self.assertEqual([(b.all_text(), b.attrs["title"]) for b in badges(t)], [(text, f"milestones: {text}")])
                 self.assertEqual(name(t), "Epics")
         self.assertEqual(badges(tabs(fragment.tab_bar("Board", 0))["Epics"]), [])
+
+
+class LeadCountsTest(unittest.TestCase):
+    """#224: every page keeps the other pages' lead counts visible in its navigation."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pages = served(2, 0, lead_counts=True)
+
+    def test_counts_are_present_on_every_page_including_unbuilt_tabs(self):
+        # M6 changes board/issue/source/workers; separate legacy decision pages are retiring.
+        for page in ("board", "task", "source", "workers"):
+            html = self.pages[page]
+            with self.subTest(page=page):
+                got = tabs(html)
+                expected = {"Workers": ("1", "need"), "Dispatch": ("1", "ready"),
+                            "Decisions": ("2", "pending")}
+                for label, (count, why) in expected.items():
+                    found = badges(got[label])
+                    self.assertEqual([b.all_text() for b in found], [count], f"{page}: {label}")
+                    self.assertIn(why, found[0].attrs["title"])
+                for label in ("Board", "Limits", "Epics", "Since you last looked"):
+                    self.assertEqual(badges(got[label]), [])
+                self.assertNotIn("href", got["Dispatch"].attrs)
+                self.assertNotIn("href", got["Epics"].attrs)
+
+    def test_badge_colours_distinguish_attention_ready_pending_and_risk(self):
+        import fragment
+        got = tabs(fragment.tab_bar("Board", 2, workers=1, dispatch=3, since=(4, "09:00"), epics=(1, 0)))
+        tones = {label: got[label].attrs.get("data-tone") for label in TABS}
+        self.assertEqual(tones["Workers"], tones["Since you last looked"])
+        self.assertEqual(len({tones[k] for k in ("Workers", "Dispatch", "Decisions", "Epics")}), 4)
+        for label in ("Workers", "Dispatch", "Decisions", "Epics"):
+            self.assertTrue(tones[label])
+            self.assertRegex(fragment.TAB_CSS, rf'nav\.tabs>\[data-tone={tones[label]}\] \.badge\{{color:var\(--[^)]+\)\}}')
+        self.assertEqual(badges(got["Since you last looked"])[0].all_text(), "4")
+
+    def test_zero_counts_leave_out_badges(self):
+        import fragment
+        self.assertTrue(all(not badges(t) for t in tabs(fragment.tab_bar("Board", 0)).values()))
 
 
 if __name__ == "__main__":

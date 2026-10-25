@@ -1,5 +1,7 @@
-"""Escaping and validation shared by the HTML-fragment charts (gantt.py, columns.py) and the pages' links and tab bar.
-It imports nothing from the plugin, so each chart lifts out with this file and no other."""
+"""Shared HTML escaping, links, theme and tab bar.
+
+Charts use this helper without importing page, workspace or third-party modules.
+"""
 
 from __future__ import annotations
 
@@ -53,7 +55,23 @@ TAB_CSS = """nav.tabs{display:flex;flex-wrap:wrap;align-items:flex-end;column-ga
 nav.tabs>*{display:inline-flex;align-items:baseline;gap:7px;min-height:34px;box-sizing:border-box;padding:8px 0 7px;margin-bottom:-1px;font:600 15.5px "Cormorant SC",Georgia,serif;letter-spacing:.08em;text-decoration:none;color:var(--muted)}
 nav.tabs>[aria-current=page]{color:var(--fg);box-shadow:inset 0 -3px 0 var(--fg)}
 nav.tabs>.tab-parent{color:var(--fg);box-shadow:inset 0 -1px 0 var(--fg)}
+nav.tabs>[data-tone=hot] .badge{color:var(--dl)}
+nav.tabs>[data-tone=ready] .badge{color:var(--stage-review)}
+nav.tabs>[data-tone=pending] .badge{color:var(--brass)}
+nav.tabs>[data-tone=risk] .badge{color:var(--stage-triage)}
 nav.tabs .badge{font:700 11.5px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0;color:var(--link,var(--brass))}
+"""
+
+
+PROSE_CSS = """
+.prose{min-width:0;overflow-wrap:anywhere}
+.prose>:first-child{margin-top:0}.prose>:last-child{margin-bottom:0}
+.prose p+p{margin-top:6px}
+.prose pre{overflow-x:auto;padding:10px;background:var(--bg);border-radius:4px}
+.prose pre code{white-space:pre;background:none;padding:0}
+.prose table{display:block;overflow-x:auto;border-collapse:collapse;max-width:100%}
+.prose th,.prose td{border:1px solid var(--line);padding:4px 8px}
+.prose img{max-width:100%}
 """
 
 
@@ -61,24 +79,38 @@ def theme() -> str:
     """The vendored theme's CSS, to sit at the top of a page's own `<style>` block, ahead of the page's rules —
     cascade order (theme first, page rules second) is all that decides what wins while the pages keep their own look.
     One block per page, as the tests that slice the pages' CSS expect; the comment marks where the theme ends."""
-    return THEME_PATH.read_text() + "\n/* the canonical theme ends here; the page's own rules follow */\n"
+    return THEME_PATH.read_text() + PROSE_CSS + "\n/* the canonical theme ends here; the page's own rules follow */\n"
 
 
 def tab_bar(tab: str, pending: int, parent: bool = False, since: tuple[int, str] = (0, ""),
-            epics: tuple[int, int] = (0, 0)) -> str:
+            epics: tuple[int, int] = (0, 0), workers: int = 0, dispatch: int = 0, decisions: int | None = None) -> str:
     """The nav, `tab` marked as this page's (`aria-current`), or as its parent's on a detail page (`parent`).
-    Decisions carries `pending`, the count decisions.html heads PENDING with, when there is any. Since you last looked
-    carries `since`'s count of holds begun after its HH:MM (#229), and Epics `epics`' milestones at risk and late,
-    zeros left out (#230), when there is any; only the board passes those two."""
+    Counts come from the pages' shared context; zero badges are omitted. Unbuilt pages still carry their counts.
+    Epics preserves its at-risk/late breakdown (#230); `since` preserves the last-look time (#229)."""
+    pending = pending if decisions is None else decisions
     mark = ' class="tab-parent"' if parent else ' aria-current="page"'
     at_risk = " · ".join(f"{n} {what}" for n, what in zip(epics, ("at risk", "late")) if n)
-    badges = {"Decisions": (f"{pending}" if pending else "", f"{pending} pending"),
-              "Since you last looked": (f"{since[0]}" if since[0] else "", f"{since[0]} went needs input since {since[1]}"),
-              "Epics": (at_risk, f"milestones: {at_risk}")}
+    badges = {"Workers": (str(workers) if workers else "", f"{workers} need input", "hot"),
+              "Dispatch": (str(dispatch) if dispatch else "", f"{dispatch} ready to dispatch", "ready"),
+              "Decisions": (str(pending) if pending else "", f"{pending} pending", "pending"),
+              "Since you last looked": (str(since[0]) if since[0] else "", f"{since[0]} went needs input since {since[1]}", "hot"),
+              "Epics": (at_risk, f"milestones: {at_risk}", "hot" if epics[1] else "risk")}
     out = []
     for name, url in TABS:
-        text, title = badges.get(name, ("", ""))
-        badge = f'<span class="badge" title="{title}">{text}</span>' if text else ""
-        attrs = mark if name == tab else ""
+        text, title, tone = badges.get(name, ("", "", ""))
+        badge = f'<span class="badge" title="{esc(title)}">{esc(text)}</span>' if text else ""
+        attrs = (mark if name == tab else "") + (f' data-tone="{tone}"' if text else "")
         out.append(f"<a {href(url)}{attrs}>{name}{badge}</a>" if url else f"<span{attrs}>{name}{badge}</span>")
     return '<nav class="tabs" aria-label="Board sections">' + "".join(out) + "</nav>\n"
+
+
+def issue_href(key: str | int) -> str:
+    """An issue identity as one encoded route component, including its forge namespace."""
+    from urllib.parse import quote
+    return "/issues/" + quote(str(key), safe="")
+
+
+def issue_page_name(key: str | int, source: bool = False) -> str:
+    raw = str(key)
+    token = raw if raw.isdecimal() else "k" + raw.encode().hex()
+    return f"issue-{token}{'-source' if source else ''}.html"
