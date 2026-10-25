@@ -3749,17 +3749,43 @@ class PolicyFingerprintTest(unittest.TestCase):
     def test_a_changed_policy_is_logged_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            logged = []
-            for data in ({"policy": {"retry_limit": 3}}, {"policy": {"retry_limit": 3}}, {"policy": {"retry_limit": 5}}):
-                err = io.StringIO()
-                with contextlib.redirect_stderr(err):
-                    engine._note_policy(root, data, "policy.toml")
-                logged.append(err.getvalue())
-        self.assertIn("engine: policy changed:", logged[0])
-        self.assertIn("overlay policy.toml", logged[0])
-        self.assertEqual(logged[1], "")
-        self.assertNotEqual(logged[2], "")
-        self.assertNotEqual(logged[0], logged[2])
+            path = root / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            try:
+                def note(data, overlay):
+                    err = io.StringIO()
+                    with contextlib.redirect_stderr(err):
+                        engine._note_policy(root, data, overlay, db)
+                    return err.getvalue()
+
+                first = note({"policy": {"retry_limit": 3}}, "policy.toml")
+                rows = db.engine_log()
+                self.assertIn("engine: policy changed:", first)
+                self.assertIn("overlay policy.toml", first)
+                self.assertEqual(len(rows), 1)
+                fingerprint = first.split("policy changed:", 1)[1].split()[0]
+                self.assertIn(fingerprint, rows[0].message)
+                self.assertIn("overlay policy.toml", rows[0].message)
+                self.assertEqual(rows[0].kind, "policy_change")
+
+                again = note({"policy": {"retry_limit": 3}}, "policy.toml")
+                self.assertEqual(again, "")
+                self.assertEqual(len(db.engine_log()), 1)
+
+                second = note({"policy": {"retry_limit": 5}}, "policy.toml")
+                self.assertNotEqual(second, "")
+                self.assertNotEqual(first, second)
+                self.assertEqual(len(db.engine_log()), 2)
+
+                shipped = note({"policy": {"retry_limit": 7}}, "")
+                self.assertIn("shipped policy", shipped)
+                rows = db.engine_log()
+                self.assertEqual(len(rows), 3)
+                self.assertIn("shipped policy", rows[-1].message)
+                self.assertNotIn("overlay", rows[-1].message)
+            finally:
+                db.engine.dispose()
 
 
 class TrioPortTest(unittest.TestCase):

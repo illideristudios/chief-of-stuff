@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from evals.rules_text import rules_text
@@ -28,6 +29,7 @@ from test_board_flow_design import outline  # noqa: E402
 import tracker as tr  # noqa: E402
 from backlog import Backlog, GitHubBacklog  # noqa: E402
 import settings as st  # noqa: E402
+import task_forge  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 9, 16, 14, 30, tzinfo=CT)
@@ -362,6 +364,17 @@ class RenderTest(unittest.TestCase):
             with self.subTest(cell=bad):
                 html = rb.render(LANED_TRACKER.replace("| 09:00 | 17:00 |", f"| {bad} | {bad} |", 1), self.cfg, NOW)
                 self.assertIn("Write eval README", html)
+
+    def test_the_header_shows_the_latest_policy_change(self) -> None:
+        early = SimpleNamespace(kind="policy_change", message="engine: policy changed: aaaaaaaaaaaa (overlay policy.toml)")
+        late = SimpleNamespace(kind="policy_change", message="engine: policy changed: bbbbbbbbbbbb (overlay policy.toml)")
+        page = task_forge.PageData((), (), (), (), {}, (), (early, late))
+        html = rb.render(TRACKER, self.cfg, NOW, db=page)
+        self.assertIn("bbbbbbbbbbbb", html)
+        self.assertIn("overlay policy.toml", html)
+        self.assertNotIn("aaaaaaaaaaaa", html)
+        quiet = rb.render(TRACKER, self.cfg, NOW, db=task_forge.PageData((), (), (), (), {}))
+        self.assertNotIn("policy changed", quiet)
 
 
 class ShortNameTest(unittest.TestCase):
