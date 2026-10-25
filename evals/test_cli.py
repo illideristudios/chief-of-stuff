@@ -2,11 +2,13 @@
 
 import io
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest import mock
 
@@ -14,8 +16,48 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import limits_cli  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
+
+HELP_SECTIONS = ("Purpose", "When not to use", "Options", "Output", "Exit codes", "Side effects", "Examples")
+# A per-command help issue opts in here after bringing its parser up to the standard.
+ENFORCED = frozenset({"limits"})
+
+
+def missing_sections(help_text: str, name: str) -> list[str]:
+    """Check the shared help contract; Purpose is argparse's description."""
+    problems = []
+    if not re.match(rf"usage: chief-of-stuff {re.escape(name)}(?:\s|$)", help_text):
+        problems.append("usage must name the installed command")
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    purpose = body[:headings[0].start()].strip() if headings else body.strip()
+    if not purpose:
+        problems.append("Purpose")
+    sections = {}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    for section in getattr(cli, "HELP_SECTIONS", HELP_SECTIONS)[1:]:
+        if not sections.get(section.casefold()):
+            problems.append(section)
+    if not re.search(rf"^\s*chief-of-stuff {re.escape(name)}(?:\s|$)",
+                     sections.get("examples", ""), re.MULTILINE):
+        problems.append("Examples must invoke the installed command")
+    return problems
+
+
+def _help_sections(help_text: str) -> dict[str, str]:
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    sections = {"purpose": body[:headings[0].start()].strip() if headings else body.strip()}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    return sections
 
 
 class InstallTest(unittest.TestCase):
@@ -329,6 +371,129 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     if target.startswith("scripts/") and target.count("/") == 1
                     and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
         self.assertEqual(reaching, set(cli.STORE_BACKED))
+
+
+class LimitsHelpTest(unittest.TestCase):
+    """#849: `chief-of-stuff limits --help` is the reference an agent discovers and trusts."""
+
+    def run_limits(self, *args):
+        env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "limits", *args],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_limits_help_meets_shared_standard_and_covers_limits_contract(self):
+        self.assertIn("limits", ENFORCED)
+        done = self.run_limits("--help")
+        short = self.run_limits("-h")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (0, done.stdout, ""))
+        self.assertEqual(missing_sections(done.stdout, "limits"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = limits_cli.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = limits_cli.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in (
+            "chief-of-stuff health",
+            "not TOON",
+            "not JSON",
+            "unknown:",
+            "read in 1.1",
+            "warn_at",
+            "0.8",
+            "XDG_STATE_HOME",
+            ".local/state/chief-of-stuff/limits.sqlite",
+            "claude_as_profile",
+            "No preview",
+            "--commit gate",
+            "cedar-workspace",
+            "CLAUDE_CONFIG_DIR",
+            "claude-profiles",
+            "issue store",
+            "header row",
+            "Columns (space-separated)",
+        ):
+            self.assertIn(phrase, help_text, phrase)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff limits")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "limits"])
+            parser.parse_args(tokens[2:])
+
+    def test_help_does_not_collect_or_touch_history(self):
+        with mock.patch("limits_cli.load") as load, mock.patch("limits_cli.read_all") as read_all, \
+                mock.patch("limits_cli.LimitsHistory") as history:
+            with self.assertRaises(SystemExit) as raised:
+                limits_cli.main(["--help"])
+        self.assertEqual(raised.exception.code, 0)
+        load.assert_not_called()
+        read_all.assert_not_called()
+        history.assert_not_called()
+
+    def test_parser_fault_exits_two_without_collection(self):
+        with mock.patch("limits_cli.load") as load, mock.patch("limits_cli.read_all") as read_all, \
+                mock.patch("limits_cli.LimitsHistory") as history:
+            with self.assertRaises(SystemExit) as raised:
+                limits_cli.main(["--root"])
+        self.assertEqual(raised.exception.code, 2)
+        load.assert_not_called()
+        read_all.assert_not_called()
+        history.assert_not_called()
+
+
+class LimitsCommandTest(unittest.TestCase):
+    """#849: limits stdout/stderr and exit codes through the public CLI surface."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        (self.root / "CLAUDE.md").write_text("## Coordinator\n- Settings: `settings.toml`\n")
+        (self.root / "settings.toml").write_text("[workers]\n")
+
+    def test_mixed_known_and_unknown_readings_print_six_fields_and_succeed(self):
+        from datetime import datetime, timezone
+        from limits import Reading
+
+        stamp = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        rows = [
+            Reading("claude", "default", "five_hour", 40, 100, "%", stamp, stamp, ""),
+            Reading("codex", "", "limits", None, None, "", None, stamp, "read in 1.1"),
+        ]
+        output = io.StringIO()
+        with mock.patch("limits_cli.read_all", return_value=rows), mock.patch("limits_cli.LimitsHistory") as history, \
+                redirect_stdout(output):
+            self.assertEqual(limits_cli.main(["--root", str(self.root)]), 0)
+        text = output.getvalue()
+        self.assertIn("runtime  account  limit  used/cap  reset  observed", text)
+        self.assertIn("40/100%", text)
+        self.assertIn("unknown: read in 1.1", text)
+        history.return_value.record.assert_called_once_with(rows)
+
+    def test_history_failure_exits_one_with_diagnostic_and_no_table(self):
+        errors = io.StringIO()
+        with mock.patch("limits_cli.LimitsHistory", side_effect=OSError("database unavailable")), \
+                redirect_stderr(errors), redirect_stdout(io.StringIO()):
+            self.assertEqual(limits_cli.main(["--root", str(self.root)]), 1)
+        self.assertIn("limits: database unavailable", errors.getvalue())
+        self.assertNotIn("runtime  account", errors.getvalue())
 
 
 if __name__ == "__main__":
