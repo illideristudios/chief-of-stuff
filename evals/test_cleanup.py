@@ -31,6 +31,7 @@ import git_trees  # noqa: E402
 import make_repo  # noqa: E402
 import one_shot  # noqa: E402
 import session_exec  # noqa: E402
+import shell_setup  # noqa: E402
 import store  # noqa: E402
 from evals import git_taint as taint  # noqa: E402
 from tree_state import unsaved  # noqa: E402
@@ -103,6 +104,11 @@ class CleanupTest(unittest.TestCase):
         exe = self.bin / name
         exe.write_text(f"#!{sys.executable}\n{body}")
         exe.chmod(0o755)
+
+    def configure_workers(self, **workers: str) -> None:
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `settings.toml`\n")
+        lines = "[workers]\n" + "".join(f"{key} = {json.dumps(value)}\n" for key, value in workers.items())
+        (self.root / "settings.toml").write_text(lines)
 
     # the preview
 
@@ -854,6 +860,34 @@ class CleanupTest(unittest.TestCase):
         _, out = self.run_cleanup("--remove")
         self.assertIn("not a linked worktree", self.kept(out)["mirror"])
         self.assertTrue((self.trees / "mirror").is_dir())
+
+    def test_remove_runs_teardown_before_the_mount_check_and_deletes_a_released_tree(self) -> None:
+        self.configure_workers(teardown="down the stack")
+        tree = (self.trees / "done").resolve()
+        admin = cleanup.git_view.locate(tree).gitdir
+        mounted = [tree / "data"]
+        order: list[str] = []
+
+        def containers() -> list[Path]:
+            order.append("mounts")
+            return list(mounted)
+
+        def teardown(root: Path, cwd: Path, name: str, command: str) -> list[str]:
+            order.append("teardown")
+            self.assertEqual((root, cwd, name, command), (self.root, tree, "done", "down the stack"))
+            mounted.clear()
+            return []
+
+        with mock.patch.object(cleanup, "containers", side_effect=containers), \
+                mock.patch.object(shell_setup, "teardown", side_effect=teardown):
+            code, out = self.run_cleanup("--remove")
+        self.assertEqual(code, 0, out)
+        self.assertEqual(order, ["teardown", "mounts"])
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse(tree.exists())
+        self.assertFalse(admin.exists())
+        self.assertNotIn(str(tree), self.worktrees())
+        self.assertIn("removed", self.store.log(f"{KEY}-done")[0].message)
 
     def test_a_missing_store_removes_nothing(self) -> None:
         self.db.unlink()
