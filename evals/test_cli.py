@@ -17,12 +17,13 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import backlog  # noqa: E402
 import chief_of_stuff as cli  # noqa: E402
+import pipeline_cli  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
 
 HELP_SECTIONS = ("Purpose", "When not to use", "Options", "Output", "Exit codes", "Side effects", "Examples")
 # A per-command help issue opts in here after bringing its parser up to the standard.
-ENFORCED = frozenset({"backlog"})
+ENFORCED = frozenset({"backlog", "pipeline"})
 
 
 def missing_sections(help_text: str, name: str) -> list[str]:
@@ -484,6 +485,42 @@ class BacklogHelpTest(unittest.TestCase):
         self.assertEqual(failed.stdout, "")
         self.assertIn("backlog: unknown", failed.stderr)
         self.assertNotIn("0 open", failed.stderr)
+
+
+class PipelineHelpTest(unittest.TestCase):
+    """#845: `chief-of-stuff pipeline --help` is the reference an agent discovers and trusts."""
+
+    def run_pipeline(self, *args):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "pipeline", *args],
+            capture_output=True, text=True,
+        )
+
+    def test_pipeline_help_meets_shared_standard_and_covers_pipeline_contract(self):
+        self.assertIn("pipeline", ENFORCED)
+        done = self.run_pipeline("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(missing_sections(done.stdout, "pipeline"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = pipeline_cli.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = pipeline_cli.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in ("--id", "--ref", "aggregate", "every workflow", "ID and URL", "latest", "merge-ready"):
+            self.assertIn(phrase, help_text, phrase)
+        self.assertTrue("status: none" in help_text or ("null" in help_text and "none" in help_text))
 
 
 if __name__ == "__main__":
