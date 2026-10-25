@@ -799,6 +799,19 @@ class CleanupTest(unittest.TestCase):
         self.assertIn("container", self.kept(out)["done"])
         self.assertTrue((self.trees / "done").is_dir())
 
+    def test_a_container_bound_to_a_parent_of_the_tree_keeps_it(self) -> None:
+        self.plant("docker", "import sys\nprint('c1') if sys.argv[1] == 'ps' else print(%r)\n" % str(self.trees))
+        _, out = self.run_cleanup("--remove")
+        self.assertIn("container", self.kept(out)["done"])
+        self.assertTrue((self.trees / "done").is_dir())
+
+    def test_a_container_mount_of_a_sibling_tree_does_not_keep_done(self) -> None:
+        mount = self.trees / "done-not"
+        self.plant("docker", "import sys\nprint('c1') if sys.argv[1] == 'ps' else print(%r)\n" % str(mount))
+        _, out = self.run_cleanup("--remove")
+        self.assertEqual(self.removable(out), ["done"])
+        self.assertFalse((self.trees / "done").exists())
+
     def test_a_container_runtime_that_cannot_answer_keeps_every_tree(self) -> None:
         self.plant("docker", "import sys\nsys.exit('Cannot connect to the Docker daemon')\n")
         _, out = self.run_cleanup("--remove")
@@ -818,7 +831,23 @@ class CleanupTest(unittest.TestCase):
         with mock.patch.object(cleanup, "containers", return_value=[]) as mounts, \
                 mock.patch.object(cleanup, "trees_lock", mount_then_lock):
             _, out = self.run_cleanup("--remove")
-        self.assertIn("a container binds a path in it", self.kept(out)["done"])
+        self.assertIn("a container mount overlaps it", self.kept(out)["done"])
+        self.assertTrue(tree.is_dir())
+
+    def test_a_container_mount_of_a_parent_that_appears_before_the_delete_keeps_the_tree(self) -> None:
+        tree = self.trees / "done"
+        real = cleanup.trees_lock
+
+        @contextlib.contextmanager
+        def mount_then_lock(trees: Path):
+            mounts.return_value = [tree.parent]
+            with real(trees):
+                yield
+
+        with mock.patch.object(cleanup, "containers", return_value=[]) as mounts, \
+                mock.patch.object(cleanup, "trees_lock", mount_then_lock):
+            _, out = self.run_cleanup("--remove")
+        self.assertIn("a container mount overlaps it", self.kept(out)["done"])
         self.assertTrue(tree.is_dir())
 
     def test_a_failing_final_container_query_keeps_the_tree(self) -> None:

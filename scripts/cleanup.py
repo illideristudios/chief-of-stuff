@@ -95,6 +95,10 @@ def inside(path: Path, tree: Path) -> bool:
     return path == tree or path.is_relative_to(tree)
 
 
+def binds(mounts: list[Path], tree: Path) -> bool:
+    return any(inside(m, tree) or inside(tree, m) for m in (mount.resolve() for mount in mounts))
+
+
 def processes() -> list[tuple[int, Path]] | None:
     """The resolved cwd of every live process; None when lsof cannot say."""
     found: list[tuple[int, Path]] = []
@@ -220,8 +224,8 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
         kept += claims(root, trees, tree)
         if mounts is None:
             kept.append("containers cannot be checked")
-        elif any(inside(mount.resolve(), tree) for mount in mounts):
-            kept.append("a container binds a path in it")
+        elif binds(mounts, tree):
+            kept.append("a container mount overlaps it")
         if layout is not None and layout.tree is not None:
             kept += git_guards(tree, common)
         if not kept and remove:
@@ -235,8 +239,8 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
                     current_mounts = containers()
                     if current_mounts is None:
                         kept.append("containers cannot be checked")
-                    elif any(inside(mount.resolve(), tree) for mount in current_mounts):
-                        kept.append("a container binds a path in it")
+                    elif binds(current_mounts, tree):
+                        kept.append("a container mount overlaps it")
                     try:
                         items, owners_kept = owner_guards(tree, owned_items(root, db), completed)
                         kept += owners_kept
