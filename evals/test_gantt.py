@@ -238,6 +238,10 @@ class Palette(unittest.TestCase):
         for kind in ("done", "forecast", "hold", "failed"):
             self.assertIn(f".gantt-bar.gantt-{kind}", gantt.css())
 
+    def test_failed_bars_do_not_look_like_needs_input_bars(self) -> None:
+        rule = lambda kind: re.search(rf"\.gantt-bar\.gantt-{kind}\{{([^}}]*)\}}", gantt.css())[1]  # noqa: E731
+        self.assertNotEqual(rule("failed"), rule("hold"))
+
     def test_the_legend_lists_categories_then_kinds(self) -> None:
         html = gantt.legend({"alpha": "#123456", "beta": "#654321"})
         self.assertEqual(re.findall(r"</span>([^<]+)</span>", html),
