@@ -54,7 +54,7 @@ Before proposing a new task for dispatch, validate its Tasks and File ownership 
 
 `<repo>` is the repository's checkout directory; when the settings' `[repos]` table names that repository, pass the name instead. When the block names no `Agent:` lines, use `--type implementer` on the worktree call (its required role label) and omit `--type` on the worker call; the worker then runs the default agent and its skills. An agy session adds `--runtime agy --model <the id from agy models>` to the second call; it has no agent types, so `--type` does nothing there. A Claude session passes its explicitly chosen `--model <id>` and optional `--effort <high|medium|low>`; neither is derived from the session name. A standing session's placeholder row (`<name>: standing <role> …`, launched as that name) needs no issue.
 
-Codex sessions add `--runtime codex` and optionally `--model <id>`; Cursor sessions add `--runtime cursor` and optionally `--model <id>`. They start with a plan gate, use the mailbox, and register their process. Their `--type` is ignored. Codex starts read-only and the user resumes the same session with write access after approving its plan.
+Codex sessions add `--runtime codex` and optionally `--model <id>`; Cursor sessions add `--runtime cursor` and optionally `--model <id>`. They start with a plan gate and register their process. Their `--type` is ignored. Codex starts read-only and the user resumes the same session with write access after approving its plan.
 
 ### One-shot
 

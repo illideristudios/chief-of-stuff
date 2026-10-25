@@ -17,7 +17,7 @@ When the Settings TOML has `[kanban]`, its stage map projects the tracker's prec
 
 ### Review
 
-- At `pr`, only for pull-request delivery: the owning session reports the pull request's URL and head sha. Write the URL in the item and set `stage` to `review`. If `[workflow] reviewer_session` names a session, send it `review PR <url>` with a second line, `Report by: chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to coordinator --from <reviewer session> --type review --task "<task>"`, with `<workspace root>` written out as an absolute path, so its fallback report lands in the workspace mailbox and not in the repo it reviews (SendMessage; when it is not listed, use `chief-of-stuff inbox --mailbox-dir <workspace root>/.chief-of-stuff/mailbox send --to <reviewer session> --type review --task <task>`). Its report comes back headed `Reviewer pass:`. Without a configured reviewer, ask the user how to review it.
+- At `pr`, only for pull-request delivery: the owning session reports the pull request's URL and head sha. Write the URL in the item and set `stage` to `review`. If `[workflow] reviewer_session` names a session, send it `review PR <url>` with a second line naming the engine MCP tool `report` for its fallback when SendMessage is unavailable. Its report comes back headed `Reviewer pass:`. Without a configured reviewer, ask the user how to review it.
 
 ### Verify
 
