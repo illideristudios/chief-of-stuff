@@ -163,6 +163,70 @@ class CleanupTest(unittest.TestCase):
         self.assertIn("git cannot read this tree", self.kept(out)["done"])
         self.assertTrue(tree.is_dir() and admin.is_dir())
 
+    def repository_workspace(self, name: str) -> Path:
+        return make_repo.build(self.root / name, {
+            "trees": "repo/trees",
+            "files": {".gitignore": "*.db\nnode_modules/\n", "CLAUDE.md": CLAUDE},
+            "worktrees": [{"name": "done", "branch": "done"}],
+        })
+
+    def test_repository_workspace_rejects_a_decoy_before_and_during_removal(self) -> None:
+        for during_removal in (False, True):
+            with self.subTest(during_removal=during_removal):
+                root = self.repository_workspace(f"workspace-{during_removal}")
+                tree = root / "trees" / "done"
+                self.store.set_ownership(f"{KEY}-done", str(tree))
+                original = (tree / ".git").read_text()
+                original_admin = cleanup.git_view.locate(tree).gitdir
+                decoy_root = self.root / f"decoy-{during_removal}"
+                make_repo.build(decoy_root, {
+                    "files": {".gitignore": "*.db\nnode_modules/\n", "CLAUDE.md": CLAUDE,
+                              "scratch.txt": "only copy\n"},
+                    "worktrees": [{"name": "decoy", "branch": "decoy"}],
+                })
+                admin = cleanup.git_view.locate(decoy_root / "trees" / "decoy").gitdir
+                (admin / "gitdir").write_text(str(tree / ".git") + "\n")
+
+                def redirect() -> None:
+                    (tree / "scratch.txt").write_text("only copy\n")
+                    (tree / ".git").write_text(f"gitdir: {admin}\n")
+
+                lock = cleanup.trees_lock
+
+                @contextlib.contextmanager
+                def redirect_then_check(trees: Path):
+                    with lock(trees):
+                        redirect()
+                        yield
+
+                if not during_removal:
+                    redirect()
+                    # The decoy hides the real tree's unsaved file; the trusted common must reject it.
+                    self.assertEqual(cleanup.git_guards(tree), [])
+                with mock.patch.object(cleanup, "trees_lock", redirect_then_check if during_removal else lock), \
+                        mock.patch.object(cleanup.git_view, "_opened", wraps=cleanup.git_view._opened) as opened, \
+                        redirect_stdout(io.StringIO()) as out:
+                    code = cleanup.main(["--root", str(root), "--store", str(self.db), "--remove"])
+                self.assertEqual(code, 0, out.getvalue())
+                self.assertIn("git cannot read this tree", self.kept(out.getvalue()).get("done", out.getvalue()))
+                self.assertEqual((tree / "scratch.txt").read_text(), "only copy\n")
+                self.assertTrue(original_admin.is_dir() and admin.is_dir())
+                if not during_removal:
+                    self.assertFalse(any(call.args[0] == tree for call in opened.call_args_list))
+                (tree / ".git").write_text(original)
+
+    def test_repository_workspace_removes_a_clean_finished_tree(self) -> None:
+        root = self.repository_workspace("workspace")
+        tree = root / "trees" / "done"
+        admin = cleanup.git_view.locate(tree).gitdir
+        self.store.set_ownership(f"{KEY}-done", str(tree))
+        with redirect_stdout(io.StringIO()) as out:
+            code = cleanup.main(["--root", str(root), "--store", str(self.db), "--remove"])
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(self.removable(out.getvalue()), ["done"])
+        self.assertFalse(tree.exists())
+        self.assertFalse(admin.exists())
+
 
     def test_remove_deletes_the_clean_finished_tree_and_its_build_output_and_logs_it(self) -> None:
         admin = cleanup.git_view.locate(self.trees / "done").gitdir
