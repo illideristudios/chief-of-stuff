@@ -486,6 +486,33 @@ class RenderOnRequestTest(unittest.TestCase):
         self.assertIn(b"Cache TTL", resp.body)
         self.assertIn(b"Cache TTL", get(self.port, "/decisions").body)
 
+    def test_a_settings_file_reference_is_not_a_tracker_blob(self):
+        # #889: a workspace file that is not in the backlog repository stays text; an issue still links.
+        text = (self.root / "CLAUDE.md").read_text()
+        (self.root / "CLAUDE.md").write_text(
+            text + "- Backlog: GitLab; host https://forge.example; project team/tracker\n")
+        (self.root / "chief-of-stuff.toml").write_text("[workers]\nclaude_profile = \"default\"\n")
+        (self.pages / "decision-settings-profile.json").write_text(json.dumps({
+            "headline": "Which profile",
+            "ask": "See chief-of-stuff.toml:54 and `chief-of-stuff.toml:54`.",
+            "options": [{"key": "A", "title": "Keep", "text": "stay"},
+                        {"key": "B", "title": "Drop", "text": "change"}],
+            "recommended": "A", "why": "fine", "default": "A stays",
+            "references": [
+                {"kind": "code", "value": "chief-of-stuff.toml:54", "label": "the [workers] claude_profile line"},
+                {"kind": "issue", "value": "#12", "label": "the tracker"},
+            ],
+        }))
+        resp = get(self.port, "/decisions/settings-profile")
+        body = resp.body.decode()
+        self.assertEqual(resp.status, 200)
+        self.assertIn("chief-of-stuff.toml:54", body)
+        self.assertIn("the [workers] claude_profile line", body)
+        self.assertIn("<code>chief-of-stuff.toml:54</code>", body)
+        self.assertNotIn("/-/blob/", body)
+        self.assertNotRegex(body, r"<a\b[^>]*>[^<]*chief-of-stuff\.toml:54")
+        self.assertIn('href="https://forge.example/team/tracker/-/issues/12"', body)
+
     def test_pages_are_routes_and_their_files_are_not_served(self):
         # The user, 2026-09-26: "pages should be: / /decisions /decisions/id actually an app".
         (self.pages / "decision-cache-ttl.json").write_text(
