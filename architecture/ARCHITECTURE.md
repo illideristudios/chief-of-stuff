@@ -199,6 +199,24 @@ Del only by an explicit step   [1.1]
 ∴ no abort or recovery path can destroy work, and the abort machinery needs no content hashing, ignore rules or retire predicate
 ```
 
+On the engine path, a person's release of a human-review hold on an implement run accepts that run's work when its work product exists (issue #1030).
+- **Release is observed, never assumed.** A release counts only when this pass's forge read shows the hold label gone. An omitted field is unknown, never a release.
+- **The work product is the request review would open.** It is the open request `forge.closing_request` selects, the newest that closes only this issue, on the run's recorded branch. Its CI, approval and merge verdict do not matter here; the later gates still apply.
+- **Present advances, absent reruns, unknown waits.** With the request present, the planner takes implement's success edge and every gate on it, as for a `done` run. With the request read and absent, implement runs again. When the hold, the branch or the request read is unknown, the issue waits with that reason.
+- **The acceptance is derived, not stored.** The run's `human_review` outcome stays as recorded. A suite hold keeps its own acceptance path and is never accepted here. `engine_facts.py` gathers the evidence, and `reconcile.py` judges it.
+
+```
+H := this pass observed the hold cleared on the latest implement run, which ended human_review
+W := the open request closing only this issue is on that run's recorded branch
+Kw := W is known (the hold, the branch and the request read were all read)
+A := the planner takes implement's success edge      Ri := implement runs again      Wt := the issue waits
+
+1.  H ∧ Kw ∧ W → A        [#1030: the person's release accepts the pushed work]
+2.  H ∧ Kw ∧ ¬W → Ri      [nothing to accept]
+3.  ¬H ∨ ¬Kw → Wt         [missing evidence is never a release or an absence]
+∴ a released implement run advances only to the request review would open, and never launches a duplicate attempt on a guess
+```
+
 ## 9. Agent performance
 
 Agent performance is measured from the store's stage segments, as the 1.0 ledger's owner decision A3 settles: a query over segments, not a parser of Log lines. A run is one segment, keyed (issue, stage, attempt), with its start and end times and its outcome. The engine records the segment when it launches a worker, through `store.record_segment` with the runtime, model, effort and agent type it launched with, and closes it with the outcome when it collects the worker. The tracker Log, the one-shot reports and interactive sessions are not sources.
