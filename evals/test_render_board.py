@@ -2005,3 +2005,24 @@ class DensityTest(unittest.TestCase):
         html = rb.render(TRACER_TRACKER, cfg, NOW)
         self.assertLess(len(html), 32_000,
                         f"Board page is {len(html)} bytes, budget is 32 000")
+
+
+class StoreDecisionLabelTest(unittest.TestCase):
+    """#903: a decision row for the workspace backlog reads `#N`; another project names itself. The href stays the full key."""
+
+    def test_anchor_text_follows_issue_ref_label(self) -> None:
+        from types import SimpleNamespace
+
+        from fragment import issue_href
+
+        home = GitHubBacklog("team/app")
+        own, foreign = "github:team/app#9", "github:o/n#4"
+
+        def row(n: int, key: str, question: str):
+            return SimpleNamespace(id=n, issue_key=key, question=question, answer=None, rerouted_to="",
+                                   record={"status": "open"})
+
+        html = rb._render_store_decisions([row(1, own, "Ship?"), row(2, foreign, "Wait?")], home)
+        self.assertIn(f'href="{issue_href(own)}">#9</a>', html)
+        self.assertIn(f'href="{issue_href(foreign)}">o/n#4</a>', html)
+        self.assertNotIn(">github:", html)

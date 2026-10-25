@@ -16,6 +16,7 @@ HERE = Path(__file__).resolve().parent
 sys.path[:0] = [str(HERE.parent / "scripts"), str(HERE)]
 import backlog_ref as backlog  # noqa: E402
 import board_sources as bs  # noqa: E402
+import fragment  # noqa: E402
 import columns  # noqa: E402
 import decision_page  # noqa: E402
 import panels  # noqa: E402
@@ -840,6 +841,32 @@ class EpicsOnTheBoardTest(unittest.TestCase):
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         self.assertIn('title="milestones: 1 late">1 late</span>', rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=sources))
         self.assertNotIn("milestones:", rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=SOURCES))
+
+
+class StoreKeyCardTest(unittest.TestCase):
+    """#903: a card for the workspace's own backlog reads `#N`, with or without a change. Another project names itself."""
+
+    HOME = backlog.GitHubBacklog("team/app")
+    OWN = "github:team/app#9"
+    FOREIGN = "github:o/n#9"
+
+    def card(self, issue: str, changes=()):
+        sources = bs.Sources({}, {}, {c.ref: c for c in changes}, (), {}, self.HOME)
+        task = rb.Task("Ship the release", "Robin", "open", "09:00", "", "c",
+                       name="Ship it", issue=issue, lane="build", stage="implement")
+        return card_named(rb.build_columns([task], LANES, KANBAN, sources, NOW), "Ship it")
+
+    def test_a_home_store_key_reads_as_a_number_with_or_without_a_change(self):
+        bare = self.card(self.OWN)
+        self.assertEqual(bare.refs[0], ("#9", fragment.issue_href(self.OWN)))
+        changed = self.card(self.OWN, (change("!60", issues=(self.OWN,)),))
+        self.assertEqual(changed.refs[0], ("#9", fragment.issue_href(self.OWN)))
+
+    def test_another_projects_store_key_names_the_project(self):
+        bare = self.card(self.FOREIGN)
+        self.assertEqual(bare.refs[0], ("o/n#9", fragment.issue_href(self.FOREIGN)))
+        changed = self.card(self.FOREIGN, (change("!61", issues=(self.FOREIGN,)),))
+        self.assertEqual(changed.refs[0], ("o/n#9", fragment.issue_href(self.FOREIGN)))
 
 
 if __name__ == "__main__":
