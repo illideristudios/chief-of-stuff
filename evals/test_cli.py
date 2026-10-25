@@ -2,6 +2,8 @@
 
 import io
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -14,8 +16,49 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 import chief_of_stuff as cli  # noqa: E402
+import probe_health  # noqa: E402
 import shell_setup  # noqa: E402
 import supervisor  # noqa: E402
+
+HELP_SECTIONS = ("Purpose", "When not to use", "Options", "Output", "Exit codes", "Side effects", "Examples")
+# A per-command help issue opts in here after bringing its parser up to the standard.
+ENFORCED = frozenset({"health"})
+
+
+def missing_sections(help_text: str, name: str) -> list[str]:
+    """Check the shared help contract; Purpose is argparse's description."""
+    problems = []
+    if not re.match(rf"usage: chief-of-stuff {re.escape(name)}(?:\s|$)", help_text):
+        problems.append("usage must name the installed command")
+    # Usage may wrap across several indented lines. Description follows a blank line.
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    purpose = body[:headings[0].start()].strip() if headings else body.strip()
+    if not purpose:
+        problems.append("Purpose")
+    sections = {}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    for section in getattr(cli, "HELP_SECTIONS", HELP_SECTIONS)[1:]:
+        if not sections.get(section.casefold()):
+            problems.append(section)
+    if not re.search(rf"^\s*chief-of-stuff {re.escape(name)}(?:\s|$)",
+                     sections.get("examples", ""), re.MULTILINE):
+        problems.append("Examples must invoke the installed command")
+    return problems
+
+
+def _help_sections(help_text: str) -> dict[str, str]:
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    sections = {"purpose": body[:headings[0].start()].strip() if headings else body.strip()}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    return sections
 
 
 class InstallTest(unittest.TestCase):
@@ -329,6 +372,73 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
                     if target.startswith("scripts/") and target.count("/") == 1
                     and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
         self.assertEqual(reaching, set(cli.STORE_BACKED))
+
+
+class HealthHelpTest(unittest.TestCase):
+    """#846: `chief-of-stuff health --help` is the reference an agent discovers and trusts."""
+
+    def run_health(self, *args):
+        env = dict(os.environ, COLUMNS="100", NO_COLOR="1", PYTHON_COLORS="0", PYTHONHASHSEED="0")
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "health", *args],
+            env=env, capture_output=True, text=True,
+        )
+
+    def test_health_help_meets_shared_standard_and_covers_health_contract(self):
+        self.assertIn("health", ENFORCED)
+        done = self.run_health("--help")
+        short = self.run_health("-h")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual((short.returncode, short.stdout, short.stderr), (0, done.stdout, ""))
+        self.assertEqual(missing_sections(done.stdout, "health"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = probe_health.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = probe_health.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            if action.option_strings:
+                self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        help_text = " ".join(done.stdout.split())
+        for phrase in (
+            "(advice)",
+            "absent, defaults",
+            "invalid",
+            "runtimes claude",
+            "runtimes not checked",
+            "no Health: targets",
+            "processes",
+            "init",
+            "audit",
+            "--config",
+            "--timeout",
+            "does not change the exit code",
+            "codex, cursor, and agy are not probed",
+            "not TOON",
+            "not JSON",
+            "Reads only",
+            "no --commit",
+            "cedar-desk",
+        ):
+            self.assertIn(phrase, help_text, phrase)
+        for other in ("runtimes codex", "runtimes cursor", "runtimes agy"):
+            self.assertNotIn(other, help_text)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff health")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "health"])
+            parser.parse_args(tokens[2:])
 
 
 if __name__ == "__main__":
