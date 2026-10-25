@@ -231,6 +231,21 @@ class ShimTest(unittest.TestCase):
                                    capture_output=True, text=True)
             self.assertEqual(other.returncode, 1, "a mutation is not a case's answer")
 
+    def test_gh_shim_answers_repo_settings_for_merge_approved_and_blocks_other_api_paths(self) -> None:
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as d:
+            shims = Path(d)
+            run.write_shims(shims)
+            shim = str(shims / "gh")
+            repo = subprocess.run([sys.executable, shim, "api", "repos/o/app"], capture_output=True, text=True)
+            self.assertEqual(repo.returncode, 0)
+            self.assertEqual(json.loads(repo.stdout), {"allow_merge_commit": True, "allow_squash_merge": True,
+                                                       "allow_rebase_merge": True})
+            blocked = subprocess.run([sys.executable, shim, "api", "repos/o/app/pulls/1"], capture_output=True, text=True)
+            self.assertEqual(blocked.returncode, 1)
+
     def test_no_legacy_gh_issue_shim_is_written(self) -> None:
         with tempfile.TemporaryDirectory() as d:
             shims = Path(d)

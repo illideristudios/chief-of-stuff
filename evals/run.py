@@ -1444,6 +1444,8 @@ elif args[:2] == ["pr", "list"]:
 elif args[:2] == ["api", "graphql"] and "mutation" not in " ".join(args):
     graph = Path(__file__).parent / "graphql.json"
     print(graph.read_text() if graph.exists() else '{"data": {"repository": {"pullRequests": {"nodes": []}}}}')
+elif args[:2] == ["api", "repos/o/app"] and args[2:] == []:
+    print(json.dumps({"allow_merge_commit": True, "allow_squash_merge": True, "allow_rebase_merge": True}))
 elif args[:1] == ["api"] and len(args) > 1 and args[1].endswith("/replies"):
     print("{}")
 else:

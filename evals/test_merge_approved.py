@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -44,14 +46,24 @@ PRS = [
 ]
 
 
+ALL_MERGE_METHODS = {"allow_merge_commit": True, "allow_squash_merge": True, "allow_rebase_merge": True}
+
+
 class FakeGh:
-    def __init__(self, prs):
+    def __init__(self, prs, repo_settings=ALL_MERGE_METHODS, api_repos_exit=0, api_repos_err="", api_repos_body=None):
         self.prs, self.calls = prs, []
+        self.repo_settings, self.api_repos_exit = repo_settings, api_repos_exit
+        self.api_repos_err, self.api_repos_body = api_repos_err, api_repos_body
 
     def __call__(self, args, input_text=None):
         self.calls.append(args)
         if args[:2] == ["pr", "list"]:
             return 0, json.dumps(self.prs), ""
+        if args[:1] == ["api"] and len(args) == 2 and args[1].startswith("repos/"):
+            if self.api_repos_exit:
+                return self.api_repos_exit, "", self.api_repos_err or "api failed"
+            body = self.api_repos_body if self.api_repos_body is not None else json.dumps(self.repo_settings)
+            return 0, body, ""
         if args[:2] == ["pr", "merge"]:
             return 0, "", ""
         return 1, "", "unexpected"
@@ -59,6 +71,10 @@ class FakeGh:
     @property
     def merges(self):
         return [c for c in self.calls if c[:2] == ["pr", "merge"]]
+
+    @property
+    def repo_api_calls(self):
+        return [c for c in self.calls if c[:1] == ["api"] and len(c) == 2 and c[1].startswith("repos/")]
 
 
 def graphql_node(number, threads=(), sha=HEAD, run=None, more=False):
@@ -138,19 +154,22 @@ class GitLabReadinessTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
-    def workspace(self, toml):
+    DEFAULT_CLAUDE = (
+        "## Coordinator\n- User: Robin\n- Timezone: America/Chicago\n"
+        "- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+        "- Settings: `chief-of-stuff.toml`\n- Backlog: GitHub issues; repo o/app\n"
+    )
+
+    def workspace(self, toml, claude=None):
         root = Path(tempfile.mkdtemp())
-        (root / "CLAUDE.md").write_text(
-            "## Coordinator\n- User: Robin\n- Timezone: America/Chicago\n"
-            "- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
-            "- Settings: `chief-of-stuff.toml`\n- Backlog: GitHub issues; repo o/app\n")
+        (root / "CLAUDE.md").write_text(claude or self.DEFAULT_CLAUDE)
         (root / "chief-of-stuff.toml").write_text(toml)
         return root
 
-    def run_main(self, root, *args, gh):
+    def run_main(self, root, *args, gh=None, call=None):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            code = ma.main(["--root", str(root), *args], gh=gh)
+            code = ma.main(["--root", str(root), *args], gh=gh, call=call)
         return code, out.getvalue(), err.getvalue()
 
     OPT_IN = '[workflow]\nmerge_owner = "approval"\napprover = "robin"\n'
@@ -161,6 +180,9 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len(gh.merges), 1)
         self.assertIn("12", gh.merges[0])
+        self.assertIn("--merge", gh.merges[0])
+        self.assertNotIn("--squash", gh.merges[0])
+        self.assertNotIn("--rebase", gh.merges[0])
         self.assertEqual(gh.merges[0][gh.merges[0].index("--match-head-commit") + 1], HEAD)
         self.assertIn("merged", out)
 
@@ -184,6 +206,74 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(gh.calls, [])
         self.assertIn("merge_owner", err)
+
+    GITLAB_CLAUDE = (
+        "## Coordinator\n- User: Robin\n- Timezone: America/Chicago\n- Daily log dir: `daily/`\n"
+        "- Tracker: `daily/<date>-tracker.md`\n- Settings: `chief-of-stuff.toml`\n"
+        "- Backlog: GitLab; host https://labs.example.test; project team/app\n"
+    )
+
+    def test_gitlab_merge_puts_only_the_head_sha(self):
+        mrs = [{"iid": 5, "approved_by": ["robin"]}]
+        call, calls = GitLabReadinessTest().fake(mrs)
+
+        root = self.workspace(self.OPT_IN, claude=self.GITLAB_CLAUDE)
+        with mock.patch.dict(os.environ, {"CHIEF_OF_STUFF_GITLAB_TOKEN": "tok"}):
+            code, out, err = self.run_main(root, "--merge", "5", call=call)
+        self.assertEqual(code, 0, err)
+        put = next(c for c in calls if c[0] == "PUT")
+        self.assertEqual(put[2], {"sha": HEAD})
+        self.assertIn("merged", out)
+
+
+class GitHubMergeFlagTest(unittest.TestCase):
+    def gh(self, **repo_settings):
+        return FakeGh([], repo_settings=repo_settings)
+
+    def test_it_picks_the_first_allowed_method_in_githubs_order(self):
+        table = (
+            ({"allow_merge_commit": False, "allow_squash_merge": True, "allow_rebase_merge": False}, "--squash"),
+            ({"allow_merge_commit": False, "allow_squash_merge": False, "allow_rebase_merge": True}, "--rebase"),
+            ({"allow_merge_commit": False, "allow_squash_merge": True, "allow_rebase_merge": True}, "--squash"),
+            ({"allow_merge_commit": True, "allow_squash_merge": False, "allow_rebase_merge": True}, "--merge"),
+        )
+        for settings, want in table:
+            with self.subTest(**settings):
+                flag, why = ma.github_merge_flag("o/app", self.gh(**settings))
+                self.assertEqual((flag, why), (want, ""))
+
+    def test_it_refuses_when_no_method_is_allowed_or_settings_are_unreadable(self):
+        gh_none = self.gh(allow_merge_commit=False, allow_squash_merge=False, allow_rebase_merge=False)
+        self.assertEqual(ma.github_merge_flag("o/app", gh_none), (None, "repository allows no merge method"))
+        gh_fail = FakeGh([], api_repos_exit=1)
+        self.assertEqual(ma.github_merge_flag("o/app", gh_fail)[0], None)
+        gh_bad_json = FakeGh([], api_repos_body="not-json")
+        self.assertEqual(ma.github_merge_flag("o/app", gh_bad_json)[0], None)
+        missing = FakeGh([], repo_settings={"allow_merge_commit": True, "allow_squash_merge": True})
+        self.assertEqual(ma.github_merge_flag("o/app", missing)[0], None)
+        non_bool = self.gh(allow_merge_commit="true", allow_squash_merge=False, allow_rebase_merge=False)
+        self.assertEqual(ma.github_merge_flag("o/app", non_bool)[0], None)
+
+    def test_a_blocked_merge_never_reads_settings_or_merges(self):
+        gh = FakeGh(PRS)
+        main = MainTest()
+        code, _, err = main.run_main(main.workspace(MainTest.OPT_IN), "--merge", "13", gh=gh)
+        self.assertEqual(code, 1)
+        self.assertEqual(gh.repo_api_calls, [])
+        self.assertEqual(gh.merges, [])
+        self.assertIn("no approval from robin", err)
+
+    def test_unreadable_settings_refuse_without_merging(self):
+        main = MainTest()
+        for gh in (FakeGh(PRS, api_repos_exit=1),
+                   FakeGh(PRS, repo_settings={"allow_merge_commit": False, "allow_squash_merge": False,
+                                              "allow_rebase_merge": False})):
+            with self.subTest(gh=gh):
+                code, _, err = main.run_main(main.workspace(MainTest.OPT_IN), "--merge", "12", gh=gh)
+                self.assertEqual(code, 1)
+                self.assertEqual(gh.merges, [])
+                self.assertEqual(len(gh.repo_api_calls), 1)
+                self.assertIn("not merged", err)
 
 
 def request(**kw):
