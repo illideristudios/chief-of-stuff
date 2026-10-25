@@ -61,6 +61,24 @@ def adopt_login_path(environ=os.environ) -> None:
         environ["PATH"] = path
 
 
+def _promote_merge_pending(store: Any, item: Any) -> None:
+    """After a merge queue accepts a submission, move to merge once the forge reports merged."""
+    data = _resume(store, item.issue_key)
+    pending = data.get("merge_pending")
+    if not pending:
+        return
+    key = item.issue_key
+    if item.merge_state == "merged" and item.stage != "merge":
+        data = dict(data)
+        data["pending_stage"] = {"stage": "merge", "expected": pending["expected"]}
+        data.pop("merge_pending")
+        store.set_resume(key, data)
+    elif item.forge_state == "closed" and item.merge_state != "merged":
+        data = dict(data)
+        data.pop("merge_pending", None)
+        store.set_resume(key, data)
+
+
 def _resume(store: Any, key: str) -> dict:
     data = store.resume(key)
     return dict(data) if isinstance(data, dict) else {}
@@ -751,6 +769,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     now = clock()
     at = now.isoformat()
     _sync_suite_holds(forge, store, snapshots, at)
+    for item in store.items():
+        _promote_merge_pending(store, item)
     for item in store.items():
         data = _resume(store, item.issue_key)
         quota = data.get("quota")

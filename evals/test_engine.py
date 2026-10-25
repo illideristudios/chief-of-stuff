@@ -324,7 +324,7 @@ class EngineTest(unittest.TestCase):
                                       "failed", "exit 1", NOW, policies=self.p, facts=facts)
                 self.assertEqual(close.call_args.args[7], not bool(others))
 
-    def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message):
+    def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message, *, merge_pending=False):
         self.run_pass()
         self.finish("implement")
         self.run_pass()
@@ -340,13 +340,50 @@ class EngineTest(unittest.TestCase):
                 self.assertEqual(self.forge.rows[0]["forge_state"], "open")
                 self.assertEqual(self.forge.writes, writes)
                 self.assertNotIn("pending_stage", self.db.resume(KEY))
+                if merge_pending:
+                    self.assertEqual(self.db.resume(KEY)["merge_pending"],
+                                     {"expected": "review", "request": 10})
+                else:
+                    self.assertNotIn("merge_pending", self.db.resume(KEY))
                 self.assertEqual(self.db.log(KEY)[-1].message, message)
                 self.assertEqual(merge.call_args_list, [mock.call(10, commit=True, issue_key=KEY,
                                                                  approval="", head=tf.tma.HEAD,
                                                                  stage_mark=None)] * attempt)
 
     def test_queued_merge_keeps_stage_and_is_planned_again_next_pass(self):
-        self.assert_unconfirmed_merge_keeps_review_stage("queued #10", "queued #10")
+        self.assert_unconfirmed_merge_keeps_review_stage("queued #10", "queued #10", merge_pending=True)
+
+    def test_merge_queue_reaches_terminal_stage_when_forge_confirms_merge(self):
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        with mock.patch.object(self.forge, "merge", return_value="queued #10"):
+            self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(self.db.resume(KEY)["merge_pending"], {"expected": "review", "request": 10})
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged")
+        self.run_pass()
+        self.assertEqual(self.db.items()[0].stage, "merge")
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.assertNotIn("merge_pending", self.db.resume(KEY))
+        self.assertEqual(self.forge.writes[-1], (1, "merge", "review", True))
+
+    def test_merge_queue_gitlab_reaches_terminal_stage_when_forge_confirms_merge(self):
+        self.run_pass()
+        self.finish("implement")
+        self.run_pass()
+        self.finish("review")
+        self.findings()
+        with mock.patch.object(self.forge, "merge", return_value="queued !10"):
+            self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(self.db.resume(KEY)["merge_pending"], {"expected": "review", "request": 10})
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged")
+        self.run_pass()
+        self.assertEqual(self.db.items()[0].stage, "merge")
+        self.assertNotIn("pending_stage", self.db.resume(KEY))
+        self.assertNotIn("merge_pending", self.db.resume(KEY))
+        self.assertEqual(self.forge.writes[-1], (1, "merge", "review", True))
 
     def test_unknown_merge_keeps_stage_and_is_planned_again_next_pass(self):
         self.assert_unconfirmed_merge_keeps_review_stage("unknown #10", "unknown #10")
