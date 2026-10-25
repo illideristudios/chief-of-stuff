@@ -85,6 +85,10 @@ Record actual passed, failed, skipped, and xfailed counts. The plan-stage suite 
 
 After installation by the release process, rerun the issue's read-only aggregation on both stores with `created_at` filtered to the installation timestamp. Count failures by runtime/kind, pending retryable outages, exhausted retries, malformed verdicts, and owner escalations. New host no-readable/no-structured failures must use `model failure (unknown)`, never `model failure (error)`. They must remain pending until recovery or explicit retry exhaustion; complete valid matching votes must adopt. Compare timeout rates separately: this patch changes outage routing, and does not promise a lower underlying host failure rate or unanimity for genuine disagreements. No live-store reads or writes are needed for deterministic implementation tests.
 
+## Plan-stage validation
+
+`git diff --check` passed. Full unittest discovery was attempted on the assigned older worktree with Python 3.15, then interrupted after more than 20 minutes while constructing git-view test fixtures. It did not produce a final suite result; passed, failed, skipped, and xfailed counts are unknown. This is incomplete baseline validation, not a green implementation suite. Only this plan file changed.
+
 ## Proposed implementation file ownership
 
 | Path | Mode | Purpose |
