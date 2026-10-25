@@ -497,6 +497,48 @@ class PerformanceHelpTest(unittest.TestCase):
             self.assertEqual(out.getvalue(), "")
             self.assertIn(f"performance: no store at {root.resolve() / 'store.db'}", err.getvalue())
 
+    def test_printed_table_columns_and_empty_key_dash_match_documented_output(self):
+        import store
+
+        help_out = io.StringIO()
+        with redirect_stdout(help_out):
+            with self.assertRaises(SystemExit):
+                performance_report.main(["--help"])
+        output_section = _help_sections(help_out.getvalue())["output"]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text(
+                "# Workspace\n\n## Coordinator\n\n- User: Robin\n- Daily log dir: `daily/`\n"
+                "- Tracker: `daily/<date>-tracker.md`\n- Timezone: UTC\n")
+            store.migrate(root / "store.db")
+            db = store.Store(root / "store.db")
+            try:
+                db.upsert_item("github:example/repo#1", title="sample")
+                db.record_segment(
+                    "github:example/repo#1", "implement", 1,
+                    started_at="2026-10-08T09:00:00+00:00",
+                    ended_at="2026-10-08T09:15:00+00:00",
+                    outcome="done", runtime="claude", model="sonnet", effort="", agent_type="",
+                )
+            finally:
+                db.engine.dispose()
+
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                code = performance_report.main([
+                    "--root", str(root), "--since", "2026-10-08", "--until", "2026-10-08", "--by", "week",
+                ])
+        self.assertEqual(code, 0)
+        self.assertEqual(err.getvalue(), "")
+        lines = [line.split() for line in out.getvalue().strip().splitlines()]
+        self.assertEqual(len(lines), 2, lines)
+        headers, row = lines
+        for col in headers:
+            self.assertIn(f"- {col}:", output_section, col)
+        # Thursday 2026-10-08 buckets to Monday 2026-10-05; empty effort and agent_type print as "-".
+        self.assertEqual(row, ["2026-10-05", "claude", "sonnet", "-", "-", "1", "1", "0", "0", "15"])
+
 
 if __name__ == "__main__":
     unittest.main()
