@@ -10,7 +10,11 @@ Install one command from this checkout:
 python3 chief_of_stuff.py install --bin-dir /usr/local/bin
 ```
 
-This writes a stable launcher in `/usr/local/bin` and a versioned release under `~/.local/share/chief-of-stuff/`. The system directory needs write permission only when first installing or explicitly replacing a different launcher; later installs update the user-owned `current` pointer. Use `--dry-run` to preview the paths without writing. The command routes a fixed set of operations: `start`, `init`, `models`, `worktree`, `worker`, `audit`, `processes`, `result`, `board`, `inbox`, `backlog`, `kanban`, `notify`, `health`, `pages`, `decision`, `log`, `merge-approved`, `merge-ready`, `review-threads`, `sources`, `tracker`, and `tick`. Use `chief-of-stuff <command> --help` for each command's options.
+This writes a stable launcher in `/usr/local/bin` and a versioned release under `~/.local/share/chief-of-stuff/`. The system directory needs write permission only when first installing or explicitly replacing a different launcher; later installs update the user-owned `current` pointer. Use `--dry-run` to preview the paths without writing. Discover current commands by purpose and group with `chief-of-stuff --help`, or read the generated [command reference](docs/commands.md). Use `chief-of-stuff <command> --help` for each command's options.
+
+Command help is the source of truth. The shared standard covers purpose (the argparse description), when not to use the command, options, output, exit codes, side effects and examples; each per-command help issue enables its check in `ENFORCED` in `evals/test_cli.py`. Retiring commands are excluded from discovery and the reference while their routes remain available until removal.
+
+Regenerate the reference with `python3 chief_of_stuff.py docs > docs/commands.md` using Python 3.14, the CI version. The freshness test rejects stale output; resolve generated-file conflicts by regenerating, and edit the command's parser help instead of the generated Markdown.
 
 For a new workspace, create a minimal `## Coordinator` block and settings file, then launch a coordinator:
 
