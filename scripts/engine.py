@@ -719,7 +719,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
 
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
-                                  now=clock(), require_green=require_green),
+                                  now=clock(), require_green=require_green,
+                                  hold_observations=tuple((row["issue_key"], row.get("human_review")) for row in snapshots)),
                    finish=partial(_finish_worker, forge, store, policies=policies),
                    require_green=require_green, teardown_command=teardown_command)
 

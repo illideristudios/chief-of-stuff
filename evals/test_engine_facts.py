@@ -5,13 +5,14 @@ import os
 import sys
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import engine_facts
+import forge_review
 import forge
 import readiness
 import store
@@ -43,6 +44,112 @@ class GatherTest(unittest.TestCase):
         self.db.set_resume(KEY, {"runs": {"implement-1": {
             "pid": 42, "session_id": "sess", "identity": "gone",
             "runner_pid": 43, "runner_identity": "runner-gone"}}})
+
+    def released_request(self, branch="work/issue-1", closes=("#1",), number=10, **kwargs):
+        return forge_review.Request(number, "Work", "", "head", "none", "running", "yes",
+                                    branch=branch, closes=closes, **kwargs)
+
+    def released_segment(self, key=KEY, attempt=1, branch="work/issue-1"):
+        self.db.upsert_item(key, stage="implement", forge_state="open", human_review=False)
+        for segment in self.db.segments(key):
+            if segment.ended_at is None:
+                self.db.drop_segment(key, segment.stage, segment.attempt)
+        self.db.record_segment(key, "implement", attempt, started_at=(NOW-timedelta(hours=2)).isoformat(),
+                               ended_at=(NOW-timedelta(hours=1)).isoformat(), outcome="human_review")
+        self.db.set_resume(key, {"runs": {f"implement-{attempt}": {"branch": branch}}})
+
+    def release_forge(self, requests, home=None):
+        f = forge.Forge(home or backlog.GitHubBacklog("example/project"))
+        return SimpleNamespace(requests=mock.Mock(return_value=requests), blocked_by=lambda: {},
+                               branch_head=lambda branch: None, key=f.key,
+                               closing_request=mock.Mock(wraps=f.closing_request))
+
+    def release_gather(self, f, observations=((KEY, False),)):
+        return engine_facts.gather(forge=f, store=self.db, root=self.root, trees=self.trees, now=NOW,
+                                   hold_observations=observations)
+
+    def test_released_request_uses_closing_selector_for_both_forges(self):
+        from evals import test_forge as tf
+        for home in (backlog.GitHubBacklog("example/project"), tf.GL):
+            f = self.release_forge([self.released_request(draft=True)], home)
+            key = f.key(1)
+            self.db.upsert_item(KEY, forge_state="closed")
+            self.released_segment(key)
+            facts = self.release_gather(f, ((key, False),))
+            self.assertEqual(dict(facts.implementation_requests)[(key, "implement", 1)], True)
+            f.requests.assert_called_once_with()
+            f.closing_request.assert_called_once_with(key, f.requests.return_value)
+
+    def test_empty_wrong_branch_wrong_issue_and_multiple_closes_are_absent(self):
+        self.released_segment()
+        for requests in ([], [self.released_request(branch="other")], [self.released_request(closes=("#2",))],
+                         [self.released_request(closes=("#1", "#2"))],
+                         [self.released_request(closes=("other/project#1",))],
+                         [self.released_request(), self.released_request(branch="other", number=11)]):
+            with self.subTest(requests=requests):
+                facts = self.release_gather(self.release_forge(requests))
+                self.assertIs(dict(facts.implementation_requests)[(KEY, "implement", 1)], False)
+
+    def test_request_failures_and_malformed_reads_are_unknown(self):
+        self.released_segment()
+        for requests in (None, [object()], [self.released_request(closes=None)],
+                         [self.released_request(number="10")], [self.released_request(branch=None)],
+                         [self.released_request(), object()]):
+            with self.subTest(requests=requests):
+                facts = self.release_gather(self.release_forge(requests))
+                self.assertIsNone(dict(facts.implementation_requests).get((KEY, "implement", 1)))
+        f = self.release_forge([])
+        for exc in (forge.ForgeError("partial read"), OSError("offline"), ValueError("bad response")):
+            f.requests.side_effect = exc
+            self.assertIsNone(dict(self.release_gather(f).implementation_requests).get((KEY, "implement", 1)))
+
+    def test_branch_provenance_and_safe_legacy_fallback(self):
+        self.released_segment(attempt=2)
+        f = self.release_forge([self.released_request()])
+        for data, expected in (({}, None), ({"work_branch": "  "}, None),
+                               ({"work_branch": "work/issue-1"}, True),
+                               ({"work_branch": "other", "runs": {"implement-2": {"branch": "work/issue-1"}}}, True),
+                               ({"work_branch": "work/issue-1", "runs": {"implement-2": {"branch": 42}}}, None)):
+            with self.subTest(data=data):
+                self.db.set_resume(KEY, data)
+                self.assertIs(dict(self.release_gather(f).implementation_requests).get((KEY, "implement", 2)), expected)
+        self.db.record_segment(KEY, "implement", 3, started_at=NOW.isoformat(), ended_at=NOW.isoformat(), outcome="failed")
+        f.requests.reset_mock()
+        self.assertEqual(self.release_gather(f).implementation_requests, ())
+        f.requests.assert_not_called()
+
+    def test_no_request_read_without_an_eligible_release(self):
+        self.released_segment()
+        for observations in ((), ((KEY, None),), ((KEY, True),)):
+            with self.subTest(observations=observations):
+                f = self.release_forge([])
+                self.assertEqual(self.release_gather(f, observations).implementation_requests, ())
+                f.requests.assert_not_called()
+        for fields, data in (({"human_review": True}, {}), ({"stage": "review"}, {}),
+                              ({"forge_state": "closed"}, {}), ({}, {"suite_hold": {}})):
+            self.db.upsert_item(KEY, stage="implement", forge_state="open", human_review=False)
+            self.db.upsert_item(KEY, **fields)
+            self.db.set_resume(KEY, data)
+            f = self.release_forge([])
+            self.assertEqual(self.release_gather(f).implementation_requests, ())
+            f.requests.assert_not_called()
+
+    def test_multiple_releases_share_one_request_read_and_isolate_unknown_branch(self):
+        self.released_segment()
+        self.released_segment(OTHER, branch="work/issue-2")
+        requests = [self.released_request(), self.released_request(branch="work/issue-2", closes=("#2",), number=11)]
+        f = self.release_forge(requests)
+        observations = ((KEY, False), (OTHER, False))
+        facts = self.release_gather(f, observations)
+        self.assertEqual(dict(facts.implementation_requests), {(KEY, "implement", 1): True, (OTHER, "implement", 1): True})
+        f.requests.assert_called_once_with()
+        self.assertEqual(f.closing_request.call_count, 2)
+        for call in f.closing_request.call_args_list:
+            self.assertIs(call.args[1], requests)
+        self.db.set_resume(KEY, {})
+        facts = self.release_gather(f, observations)
+        self.assertIsNone(dict(facts.implementation_requests).get((KEY, "implement", 1)))
+        self.assertTrue(dict(facts.implementation_requests)[(OTHER, "implement", 1)])
 
     def test_gather_reads_store_rows_and_a_dead_worker(self):
         forge = mock.Mock()
