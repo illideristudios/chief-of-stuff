@@ -15,11 +15,15 @@ head pipeline is green, so this command only lists. Each open request prints its
 pipeline id, status and sha, conflicts, unresolved threads), ready ones first, then one line naming the ready
 ones for their owning worker. It never merges and refuses `--merge`. Here a request with no pipeline is not ready: a
 green pipeline on the head sha is what a worker merges on. With `user` merging stays the user's.
+
+On GitHub, a merge uses the first method the repository allows (merge commit, then squash, then rebase), read from
+the repository settings; if none are allowed or the settings cannot be read, the merge is refused.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -32,6 +36,35 @@ from settings import SettingsError
 def blocked(r: Request) -> list[str]:
     """What stops an approved request, for `approval`: a request with no pipeline stays ready, as its docstring says."""
     return [b for b in r.blockers if b != NO_PIPELINE]
+
+
+_MERGE_SETTING_KEYS = ("allow_merge_commit", "allow_squash_merge", "allow_rebase_merge")
+_MERGE_FLAGS = ("--merge", "--squash", "--rebase")
+
+
+def github_merge_flag(repo: str, gh) -> tuple[str | None, str]:
+    """Return the `gh pr merge` flag GitHub allows for this repository, or refuse with why."""
+    code, out, err = gh(["api", f"repos/{repo}"])
+    if code != 0:
+        return None, (err.strip() or "could not read repository settings")
+    try:
+        data = json.loads(out)
+    except json.JSONDecodeError:
+        return None, "could not read repository settings"
+    if not isinstance(data, dict):
+        return None, "could not read repository settings"
+    settings: dict[str, bool] = {}
+    for key in _MERGE_SETTING_KEYS:
+        if key not in data:
+            return None, "could not read repository settings"
+        val = data[key]
+        if not isinstance(val, bool):
+            return None, "could not read repository settings"
+        settings[key] = val
+    for key, flag in zip(_MERGE_SETTING_KEYS, _MERGE_FLAGS, strict=True):
+        if settings[key]:
+            return flag, ""
+    return None, "repository allows no merge method"
 
 
 def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -> int:
@@ -86,8 +119,11 @@ def main(argv: list[str] | None = None, gh=backlog.run_gh, call=backlog._call) -
         print(f"merge-approved: {mark}{one.number} not merged: {'; '.join(blocked(one))}", file=sys.stderr)
         return 1
     if github:
-        # ponytail: squash, as this plugin's own repo merges; a [workflow] merge_method when a workspace differs.
-        code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, "--squash", "--match-head-commit", one.head])
+        flag, why = github_merge_flag(repo, gh)
+        if flag is None:
+            print(f"merge-approved: {mark}{one.number} not merged: {why}", file=sys.stderr)
+            return 1
+        code, _, err = gh(["pr", "merge", str(one.number), "-R", repo, flag, "--match-head-commit", one.head])
         err = err.strip() if code else ""
     else:
         _, _, err = call("PUT", f"{home.api(repo)}/merge_requests/{one.number}/merge", secret,
