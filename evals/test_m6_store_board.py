@@ -20,7 +20,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "scripts"), str(ROOT / "evals")]
 
 import board_sources as bs  # noqa: E402
+import decision_actions  # noqa: E402
 import flow_chart as fc  # noqa: E402
+import gantt  # noqa: E402
 import issue_page  # noqa: E402
 import pages as pg  # noqa: E402
 import render_board as rb  # noqa: E402
@@ -36,6 +38,9 @@ ZONE = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 10, 9, 14, 0, tzinfo=ZONE)
 KEY = "github:example/repo#12"
 KEY2 = "github:example/repo#15"
+KEY_A = "github:example/repo#20"
+KEY_B = "github:example/repo#21"
+KEY_C = "github:example/repo#22"
 
 CLAUDE_MD = """# Workspace
 
@@ -188,6 +193,107 @@ class StoreGanttAndBoardTest(unittest.TestCase):
         self.assertIn("shares file with !22", html)
         self.assertIn("decision pending", html)
         self.assertIn("looping", html)
+
+
+def _seed_failed_attempt_fixtures(db: store.Store, *, live_worker: bool) -> None:
+    fail_at = NOW - timedelta(hours=1)
+    db.upsert_item(KEY_A, workflow="build", stage="plan", forge_state="open", title="Failed start")
+    db.record_segment(
+        KEY_A, "plan", 1,
+        started_at=fail_at.isoformat(),
+        ended_at=fail_at.isoformat(),
+        outcome="failed",
+        runtime="claude", model="opus", agent_type="plan",
+    )
+    t0 = NOW - timedelta(hours=2)
+    db.upsert_item(KEY_B, workflow="build", stage="review", forge_state="open", title="Between stages")
+    db.record_segment(
+        KEY_B, "implement", 1,
+        started_at=t0.isoformat(),
+        ended_at=(t0 + timedelta(hours=1)).isoformat(),
+        outcome="done",
+        runtime="claude", model="opus", agent_type="implementer",
+    )
+    if live_worker:
+        live_start = NOW - timedelta(minutes=30)
+        db.upsert_item(KEY_C, workflow="build", stage="implement", forge_state="open", title="Live worker")
+        db.record_segment(
+            KEY_C, "implement", 1,
+            started_at=live_start.isoformat(),
+            ended_at=None,
+            outcome=None,
+            runtime="claude", model="opus", agent_type="implementer", runner="worker-c",
+        )
+
+
+class FailedAttemptBoardParityTest(unittest.TestCase):
+    """#885: failed or idle attempts draw as open/queued; running counts match dispatch and the RUNNING tile."""
+
+    def _row(self, db: store.Store, key: str) -> tuple[str, gantt.Row]:
+        quoted = urllib.parse.quote(key, safe="")
+        return next((status, row) for status, row in fc.build_from_store(db, NOW, include_hold_bars=True)
+                    if row.href.endswith(quoted))
+
+    def _parity(self, root: Path, db: store.Store) -> None:
+        data = task_forge.page_data(db)
+        flow = fc.build_from_store(db, NOW)
+        counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        cfg = st.load(root, "cos.toml")
+        tasks, *_ = rb._tasks_from_store(data, cfg, cfg.lanes, cfg.kanban, NOW.date())
+        running_tasks = [t for t in tasks if t.kind == "running"]
+        open_flow = sum(1 for status, _ in flow if status == "open")
+        self.assertEqual(counts["dispatch"], open_flow)
+        self.assertEqual(len(running_tasks), sum(1 for status, _ in flow if status == "running"))
+
+    def test_build_from_store_status_and_segment_kinds(self) -> None:
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        _seed_failed_attempt_fixtures(db, live_worker=True)
+        status_a, row_a = self._row(db, KEY_A)
+        status_b, row_b = self._row(db, KEY_B)
+        status_c, row_c = self._row(db, KEY_C)
+        self.assertEqual((status_a, row_a.note), ("open", "retry · plan"))
+        self.assertEqual((status_b, row_b.note), ("open", "queued · review"))
+        self.assertEqual((status_c, row_c.note), ("running", "implement"))
+        self.assertEqual([s.kind for s in row_a.segments], ["failed"])
+        self.assertEqual([s.kind for s in row_b.segments], ["done"])
+        self.assertEqual([s.kind for s in row_c.segments], ["running"])
+
+    def test_dispatch_and_running_counts_without_live_worker(self) -> None:
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        _seed_failed_attempt_fixtures(db, live_worker=False)
+        self._parity(root, db)
+
+    def test_dispatch_and_running_counts_with_live_worker(self) -> None:
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        _seed_failed_attempt_fixtures(db, live_worker=True)
+        self._parity(root, db)
+        data = task_forge.page_data(db)
+        counts = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        flow = fc.build_from_store(db, NOW)
+        self.assertEqual(sum(1 for status, _ in flow if status == "running"), 1)
+        self.assertEqual(counts["dispatch"], sum(1 for status, _ in flow if status == "open"))
+
+    def test_flow_section_and_issue_page_show_open_not_running(self) -> None:
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        _seed_failed_attempt_fixtures(db, live_worker=False)
+        rows = fc.build_from_store(db, NOW, include_hold_bars=True)
+        html = fc.section(rows, NOW)
+        self.assertIn("queued", html)
+        self.assertNotRegex(html, r"\brunning\b")
+        self.assertIn("gantt-failed", html)
+        self.assertRegex(html, r'data-cat="plan"[^>]*title="[^"]*failed"')
+        data = task_forge.page_data(db)
+        body = issue_page.render(KEY_A, [], bs.EMPTY, NOW, root=root, db=data)
+        self.assertEqual(self._row(db, KEY_A)[0], "open")
+        self.assertNotIn('class="chip running"', body)
+
+    def test_gantt_legend_names_failed(self) -> None:
+        html = gantt.legend(fc.COLOURS)
+        self.assertIn("failed", html)
 
 
 class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
