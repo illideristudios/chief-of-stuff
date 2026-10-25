@@ -22,7 +22,7 @@ from task_forge import PageData, source_key
 import tracker_log
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, write_if_changed
 from fragment import href, tab_bar, issue_href, issue_page_name
-from page_common import markdown_blocks, markdown_inline
+from page_common import drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
@@ -153,7 +153,7 @@ def _review(c: board_sources.Change, now: datetime, linker: Linker = Linker()) -
         when = f" · {_clock(t.at.astimezone(now.tzinfo), now)}" if t.at else ""
         link = f' · <a {href(t.url)}>thread</a>' if t.url else ""
         rows.append(f'      <div class="rv"><span class="mk{" passed" if t.resolved else ""}">{"Resolved" if t.resolved else "Open"}</span>'
-                    f"<span><b>{escape(t.author)}</b>{when}{link}</span><div class=\"prose\">{markdown_blocks(t.body, linker.resolve)}</div></div>")
+                    f"<span><b>{escape(t.author)}</b>{when}{link}</span><div class=\"prose\">{markdown_blocks(drop_html_comments(t.body), linker.resolve)}</div></div>")
     resolved = sum(t.resolved for t in c.threads)
     return _section(f"Review · {len(c.threads) - resolved} open · {resolved} resolved",
                     '    <div class="card">\n' + "\n".join(rows) + "\n    </div>")
