@@ -1089,5 +1089,40 @@ class ViewMainTest(unittest.TestCase):
         self.assertEqual(out, "")
 
 
+class RetryTest(unittest.TestCase):
+    """A timed-out GitLab read is retried with backoff. A status, bad JSON, a refusal, or a write is not."""
+
+    def calls(self, answers, method="GET", **kwargs):
+        seen, slept = [], []
+        with patch.object(bl, "_call_once", side_effect=lambda *a, **k: seen.append(a) or answers[len(seen) - 1]), \
+             patch.object(bl, "_sleep", side_effect=slept.append):
+            got = bl._call(method, "https://gl.example/x", "t", 5, **kwargs)
+        return got, len(seen), slept
+
+    def test_a_timeout_then_a_success_uses_three_attempts_and_both_backoffs(self):
+        got, n, slept = self.calls([
+            (None, {}, "URLError: timed out"),
+            (None, {}, "URLError: The handshake operation timed out"),
+            ({"ok": True}, {}, ""),
+        ])
+        self.assertEqual((got, n, slept), (({"ok": True}, {}, ""), 3, list(bl.RETRY_BACKOFF)))
+
+    def test_five_timeouts_return_the_error_after_three_attempts_and_two_sleeps(self):
+        got, n, slept = self.calls([(None, {}, "URLError: timed out")] * 5)
+        self.assertEqual((got[2], n, slept), ("URLError: timed out", 3, list(bl.RETRY_BACKOFF)))
+
+    def test_http_status_bad_json_and_a_refusal_are_one_attempt(self):
+        for error in ("HTTP 404 from GitLab", "HTTP 502 from GitLab", "GitLab did not answer with JSON",
+                      "URLError: [Errno 61] Connection refused"):
+            with self.subTest(error=error):
+                self.assertEqual(self.calls([(None, {}, error)] * 3)[1], 1)
+
+    def test_a_write_is_one_attempt_unless_the_caller_passes_retries(self):
+        self.assertEqual(self.calls([(None, {}, "URLError: timed out")] * 3, method="PUT")[1], 1)
+        self.assertEqual(self.calls([(None, {}, "URLError: timed out")] * 3, method="POST")[1], 1)
+        got, n, slept = self.calls([(None, {}, "URLError: timed out")] * 5, method="POST", retries=2)
+        self.assertEqual((got[2], n, slept), ("URLError: timed out", 3, list(bl.RETRY_BACKOFF)))
+
+
 if __name__ == "__main__":
     unittest.main()
