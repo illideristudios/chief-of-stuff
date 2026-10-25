@@ -2060,6 +2060,47 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([a.answer for a in self.db.asks(KEY)], ["allow", "allow"])  # the rule, then the trio's choice
         self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
 
+    def test_a_permission_marker_is_settled_by_the_rule_without_the_question_prefix(self):
+        # #893: kind marks the ask, so recognition does not depend on the question text.
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        context = json.dumps({"kind": "permission", "tool_name": "Bash",
+                              "tool_input": {"command": "git ls-files"}, "cwd": str(self.root)})
+        self.db.add_ask(KEY, "implement", 1, "session", "May this run?", ["allow", "deny"], context)
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        self.assertEqual(self.db.asks(KEY)[0].answer, "allow")
+        self.assertTrue(any("the guard's rule" in e.message for e in self.db.log(KEY)))
+
+    def test_a_commit_whose_hooks_are_inside_the_worktree_is_not_settled_by_the_rule(self):
+        # #893: re-judging the stored hooks path keeps an in-tree commit from being auto-allowed on the next pass.
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        context = json.dumps({"kind": "permission", "tool_name": "Bash",
+                              "tool_input": {"command": "git commit -m x"}, "cwd": str(self.root),
+                              "hooks_path": ".husky", "hooks_root": str(self.root)})
+        self.db.add_ask(KEY, "implement", 1, "session", "May this run?", ["allow", "deny"], context)
+        self.run_pass()
+        self.assertEqual(self.db.asks(KEY)[0].answer, "deny")
+        messages = [e.message for e in self.db.log(KEY)]
+        # No model: the trio is not consulted, so the deny is the trio's, not the guard's rule.
+        self.assertTrue(any("the trio did not adopt an answer" in message for message in messages))
+        self.assertFalse(any("the guard's rule" in message for message in messages))
+
+    def test_a_commit_with_unset_hooks_is_still_allowed_by_the_rule(self):
+        # #893: a null hooks path, and an ask stored before hooks were recorded, stay the #890 allow.
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        marked = {"kind": "permission", "tool_name": "Bash", "tool_input": {"command": "git commit -m x"},
+                  "cwd": str(self.root)}
+        self.db.add_ask(KEY, "implement", 1, "session", "May this run?", ["allow", "deny"],
+                        json.dumps({**marked, "hooks_path": None}))
+        self.db.add_ask(KEY, "implement", 1, "session", "Permission requested for Bash", ["allow", "deny"],
+                        json.dumps({"tool_name": "Bash", "tool_input": {"command": "git commit -m x"},
+                                    "cwd": str(self.root)}))
+        model = mock.Mock()
+        self.run_pass(model=model)
+        model.assert_not_called()
+        self.assertEqual([a.answer for a in self.db.asks(KEY)], ["allow", "allow"])
+
     def test_a_split_trio_denies_a_permission_and_never_asks_the_owner(self):
         # #890 (2): unjudged goes to the trio only; a split denies with the reason on the run.
         self._trio()

@@ -290,8 +290,14 @@ def _permission(ask: Any) -> dict | None:
         event = json.loads(ask.context or "")
     except (TypeError, ValueError):
         return None
+    if not isinstance(event, dict):
+        return None
+    # #893: new asks carry kind, so recognition does not depend on the question text.
+    if event.get("kind") == "permission" and "tool_name" in event:
+        return event
     # Asks raised before #874 carry no options; they are permission requests all the same (#890 follow-up).
-    if (isinstance(event, dict) and "tool_name" in event and tuple(ask.options) in (("allow", "deny"), ())
+    # Contexts with no kind keep the prefix check, so asks already on the store still settle as permissions.
+    if ("kind" not in event and "tool_name" in event and tuple(ask.options) in (("allow", "deny"), ())
             and str(ask.question).startswith("Permission requested for ")):
         return event
     return None

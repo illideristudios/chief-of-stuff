@@ -25,10 +25,14 @@ class GuardTest(unittest.TestCase):
         self.db = store.Store(self.root / "store.db")
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, title="Implement a widget", stage="implement")
+        global_git = self.root / "global.gitconfig"
+        global_git.write_text("")
+        # An empty global file, so a developer-global core.hooksPath cannot flip the suite (#893).
         self.env = {**os.environ, "CHIEF_ISSUE_KEY": KEY, "CHIEF_STAGE": "implement",
                     "CHIEF_ATTEMPT": "2", "CHIEF_SESSION_ID": "session-two", "CHIEF_ROOT": str(self.root),
                     "CHIEF_LAUNCHED_AT": datetime.now(timezone.utc).isoformat(),
-                    "CHIEF_PYTHON": sys.executable, "CHIEF_PROTECTED_BRANCHES": '["main", "master", "develop", "release"]'}
+                    "CHIEF_PYTHON": sys.executable, "CHIEF_PROTECTED_BRANCHES": '["main", "master", "develop", "release"]',
+                    "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(global_git)}
 
     def hook(self, event, **fields):
         proc = subprocess.run([sys.executable, str(ROOT / "scripts/worker_guard.py"), event],
@@ -134,9 +138,15 @@ class GuardTest(unittest.TestCase):
     def test_unrelated_tools_are_ignored(self):
         self.assertEqual(self.hook("PreToolUse", tool_name="Read", tool_input={"file_path": "README.md"}), {})
 
-    def permission(self, tool="Bash", **given):
-        result = self.hook("PermissionRequest", tool_name=tool, tool_input=given, cwd=str(self.root))
+    def permission(self, tool="Bash", *, cwd=None, **given):
+        result = self.hook("PermissionRequest", tool_name=tool, tool_input=given,
+                           cwd=str(self.root if cwd is None else cwd))
         return result["hookSpecificOutput"]["decision"]
+
+    def repo(self):
+        repo = str(self.root.resolve())
+        subprocess.run(["git", "init", "-q", repo], check=True, env=self.env)
+        return repo
 
     def test_an_unjudgeable_permission_is_an_ask_the_trio_is_consulted_on_first(self):
         # #874, then the #750 ruling (rule 11: it names the separate permission decision wrong): an outside write is an
@@ -203,6 +213,34 @@ class GuardTest(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(self.permission(command=command), {"behavior": "allow"})
         self.assertEqual((self.db.asks(KEY), self.db.decisions(KEY)), ([], []))
+
+    def test_commit_is_allowed_when_hooks_are_unset_or_outside_the_worktree(self):
+        # #893: no core.hooksPath, and one that resolves outside the tree, stay auto-allowed. Default .git/hooks is not
+        # consulted: the worker cannot write .git.
+        repo = self.repo()
+        self.assertEqual(self.permission(command="git commit -m x", cwd=repo), {"behavior": "allow"})
+        outside = tempfile.TemporaryDirectory()
+        self.addCleanup(outside.cleanup)
+        subprocess.run(["git", "-C", repo, "config", "core.hooksPath", outside.name], check=True, env=self.env)
+        self.assertEqual(self.permission(command="git commit -m x", cwd=repo), {"behavior": "allow"})
+        self.assertEqual(self.db.asks(KEY), [])
+
+    def test_commit_with_hooks_inside_the_worktree_goes_to_the_trio(self):
+        # #893: a husky-style hooks path is a directory the worker may already write, so commit would run that code.
+        from guard_commands import inside
+        repo = self.repo()
+        subprocess.run(["git", "-C", repo, "config", "core.hooksPath", ".husky"], check=True, env=self.env)
+        for command in ("git commit -m x", "git add f && git commit -m x"):
+            with self.subTest(command=command):
+                self.assertNotEqual(self.permission(command=command, cwd=repo)["behavior"], "allow")
+        asks = self.db.asks(KEY)
+        self.assertEqual(len(asks), 2)
+        for ask in asks:
+            self.assertEqual(ask.question, "Permission requested for Bash")
+            recorded = json.loads(ask.context)
+            self.assertEqual(recorded["kind"], "permission")
+            self.assertEqual(recorded["hooks_root"], repo)
+            self.assertTrue(inside(recorded["hooks_path"], recorded["hooks_root"]))
 
     def test_sed_scripts_that_write_or_run_and_history_rewrites_are_not_auto_allowed(self):
         for command in ("sed -n '1p;w /tmp/x' notes.md", "sed -n 'e touch x' notes.md", "sed -n '1r /etc/hosts' a",
