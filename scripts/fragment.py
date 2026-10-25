@@ -60,6 +60,8 @@ nav.tabs>[data-tone=ready] .badge{color:var(--stage-review)}
 nav.tabs>[data-tone=pending] .badge{color:var(--brass)}
 nav.tabs>[data-tone=risk] .badge{color:var(--stage-triage)}
 nav.tabs .badge{font:700 11.5px ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:0;color:var(--link,var(--brass))}
+nav.tabs>span[title]{opacity:.55;cursor:default}
+nav.tabs>span[title] .badge{color:var(--muted)}
 """
 
 
@@ -99,8 +101,8 @@ def tab_bar(tab: str, pending: int, parent: bool = False, since: tuple[int, str]
     for name, url in TABS:
         text, title, tone = badges.get(name, ("", "", ""))
         badge = f'<span class="badge" title="{esc(title)}">{esc(text)}</span>' if text else ""
-        attrs = (mark if name == tab else "") + (f' data-tone="{tone}"' if text else "")
-        out.append(f"<a {href(url)}{attrs}>{name}{badge}</a>" if url else f"<span{attrs}>{name}{badge}</span>")
+        attrs = (mark if name == tab else "") + (f' data-tone="{tone}"' if text and url else "")
+        out.append(f"<a {href(url)}{attrs}>{name}{badge}</a>" if url else f'<span{attrs} title="not available yet">{name}{badge}</span>')
     return '<nav class="tabs" aria-label="Board sections">' + "".join(out) + "</nav>\n"
 
 

@@ -308,15 +308,58 @@ class LeadCountsTest(unittest.TestCase):
                 self.assertNotIn("href", got["Dispatch"].attrs)
                 self.assertNotIn("href", got["Epics"].attrs)
 
+    def test_unbuilt_tabs_read_as_inactive(self):
+        import fragment
+        unbuilt = ("Dispatch", "Since you last looked", "Epics", "Limits")
+        got = tabs(fragment.tab_bar("Board", 2, workers=1, dispatch=3, since=(4, "09:00"), epics=(2, 1)))
+        for label in unbuilt:
+            t = got[label]
+            self.assertEqual(t.tag, "span", label)
+            self.assertEqual(t.attrs.get("title"), "not available yet", label)
+            self.assertNotIn("data-tone", t.attrs, label)
+            self.assertNotIn("href", t.attrs, label)
+            self.assertEqual([n for n in t.walk() if "href" in n.attrs or n.tag == "a"], [], label)
+        self.assertEqual([b.all_text() for b in badges(got["Dispatch"])], ["3"])
+        self.assertIn("ready", badges(got["Dispatch"])[0].attrs["title"])
+        self.assertEqual([b.all_text() for b in badges(got["Since you last looked"])], ["4"])
+        self.assertEqual([(b.all_text(), b.attrs["title"]) for b in badges(got["Epics"])],
+                         [("2 at risk · 1 late", "milestones: 2 at risk · 1 late")])
+        self.assertEqual(badges(got["Limits"]), [])
+        for label in BUILT:
+            self.assertNotEqual(got[label].attrs.get("title"), "not available yet", label)
+        self.assertEqual(got["Workers"].attrs.get("data-tone"), "hot")
+        self.assertEqual(got["Decisions"].attrs.get("data-tone"), "pending")
+        self.assertIn("nav.tabs>span[title]{opacity:.55;cursor:default}", fragment.TAB_CSS)
+        self.assertIn("nav.tabs>span[title] .badge{color:var(--muted)}", fragment.TAB_CSS)
+        for page, html in self.pages.items():
+            with self.subTest(page=page):
+                page_tabs = tabs(html)
+                for label in unbuilt:
+                    t = page_tabs[label]
+                    self.assertEqual(t.tag, "span", f"{page}: {label}")
+                    self.assertEqual(t.attrs.get("title"), "not available yet", f"{page}: {label}")
+                    self.assertNotIn("data-tone", t.attrs, f"{page}: {label}")
+                    self.assertNotIn("href", t.attrs, f"{page}: {label}")
+                    self.assertEqual([n for n in t.walk() if "href" in n.attrs or n.tag == "a"], [], f"{page}: {label}")
+                for label in BUILT:
+                    self.assertNotEqual(page_tabs[label].attrs.get("title"), "not available yet", f"{page}: {label}")
+        for page in ("board", "task", "source", "workers"):
+            with self.subTest(lead_page=page):
+                dispatch_tab = tabs(self.pages[page])["Dispatch"]
+                self.assertEqual([b.all_text() for b in badges(dispatch_tab)], ["1"])
+                self.assertNotIn("data-tone", dispatch_tab.attrs)
+
     def test_badge_colours_distinguish_attention_ready_pending_and_risk(self):
         import fragment
         got = tabs(fragment.tab_bar("Board", 2, workers=1, dispatch=3, since=(4, "09:00"), epics=(1, 0)))
         tones = {label: got[label].attrs.get("data-tone") for label in TABS}
-        self.assertEqual(tones["Workers"], tones["Since you last looked"])
-        self.assertEqual(len({tones[k] for k in ("Workers", "Dispatch", "Decisions", "Epics")}), 4)
-        for label in ("Workers", "Dispatch", "Decisions", "Epics"):
-            self.assertTrue(tones[label])
-            self.assertRegex(fragment.TAB_CSS, rf'nav\.tabs>\[data-tone={tones[label]}\] \.badge\{{color:var\(--[^)]+\)\}}')
+        self.assertEqual(tones["Workers"], "hot")
+        self.assertEqual(tones["Decisions"], "pending")
+        self.assertNotEqual(tones["Workers"], tones["Decisions"])
+        for label in ("Dispatch", "Since you last looked", "Epics"):
+            self.assertIsNone(tones[label], label)
+        for tone in ("hot", "ready", "pending", "risk"):
+            self.assertRegex(fragment.TAB_CSS, rf'nav\.tabs>\[data-tone={tone}\] \.badge\{{color:var\(--[^)]+\)\}}')
         self.assertEqual(badges(got["Since you last looked"])[0].all_text(), "4")
 
     def test_zero_counts_leave_out_badges(self):
