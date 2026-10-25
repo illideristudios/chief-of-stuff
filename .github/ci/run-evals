@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+docker build -t chief-of-stuff-ci -f "$ROOT/.github/ci/Dockerfile" "$ROOT"
+if [ "$#" -eq 0 ]; then
+    set -- -m unittest discover -s evals -p "test_*.py"
+fi
+exec docker run --rm --network none -v "$ROOT":/repo:ro chief-of-stuff-ci \
+    sh -c 'cp -R /repo/. . && exec python3 -B "$@"' sh "$@"

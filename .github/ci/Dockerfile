@@ -5,6 +5,14 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git zsh procps curl ca-certificates nodejs \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/zsh ci
+COPY --chmod=755 .github/ci/git /usr/local/share/chief-of-stuff/ci-git
+RUN cp -p /usr/bin/git /usr/lib/git-core/git-real \
+    && for p in $(find /usr/lib/git-core -samefile /usr/bin/git); do \
+         ln -f /usr/local/share/chief-of-stuff/ci-git "$p"; \
+       done \
+    && ln -f /usr/local/share/chief-of-stuff/ci-git /usr/bin/git \
+    && ln -f /usr/local/share/chief-of-stuff/ci-git /usr/lib/git-core/git \
+    && ln -sf /usr/local/bin/python3 /usr/bin/python3
 COPY --chmod=755 .github/ci/agy /usr/local/bin/agy
 # The engine's pinned packages (requirements.txt), installed at image build, which has network; the test run has none.
 COPY requirements.txt /tmp/requirements.txt
