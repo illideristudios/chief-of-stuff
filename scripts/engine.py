@@ -12,7 +12,7 @@ import threading
 import time
 from collections.abc import Callable, Collection
 from dataclasses import is_dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import cache, partial
 from pathlib import Path
 from typing import Any
@@ -1116,6 +1116,7 @@ def main(argv: list[str] | None = None) -> int:
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+            supervisor.record_engine_start(root, datetime.now(timezone.utc).astimezone().isoformat(), os.getpid())
             text, config, source = startup.workspace_forge(root)
             if source is None:
                 refused = issue_gate.start(None, None, "")
