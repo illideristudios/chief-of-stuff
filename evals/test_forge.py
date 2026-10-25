@@ -52,7 +52,7 @@ class FakeGh(tma.FakeGhGraphql):
     round-trip can be verified. `fail` names the `gh` subcommands (`("issue", "list")`) that answer an error."""
 
     def __init__(self, issues=(), prs=(), merged=(), bodies=None, fail=(), status=None, project=PROJECT):
-        super().__init__([{**p, "body": (bodies or {}).get(p["number"], "")} for p in prs])
+        super().__init__([{**p, "body": (bodies or {}).get(p["number"], p.get("body", ""))} for p in prs])
         self.issues = {i["number"]: i for i in issues}
         self.merged = [{**p, "body": (bodies or {}).get(p["number"], p.get("body", ""))} for p in merged]
         self.fail = set(fail)
@@ -463,7 +463,7 @@ class LandingTest(unittest.TestCase):
                         self.assertEqual(args[args.index("--state") + 1], "open")
                         self.assertEqual(args[args.index("--base") + 1], "main")
                         self.assertEqual(set(args[args.index("--json") + 1].split(",")),
-                                         {"number", "headRefOid", "baseRefName", "closingIssuesReferences"})
+                                         {"number", "body", "headRefOid", "baseRefName", "closingIssuesReferences"})
                         call.assert_not_called()
                     else:
                         call.assert_called_once()
@@ -559,6 +559,10 @@ class LandingTest(unittest.TestCase):
         adapter.gh.prs = [{**opened, "number": 21, "headRefOid": "old-head"}]
         self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
                                           [key])[key], (True, True))
+        body_only = {"number": 22, "headRefOid": "new-head", "baseRefName": "main", "body": "Closes #3"}
+        adapter = forge.Forge(GH, gh=FakeGh(merged=[merged], prs=[body_only]))
+        self.assertEqual(adapter.landings(forge.Pipeline(1, "main", "squashed", "passed", ""),
+                                          [key])[key], (None, None))
 
     def test_landing_comparison_errors_are_attached_to_the_affected_issue(self):
         merged = {"number": 21, "body": "Closes #3", "baseRefName": "main", "headRefOid": "head", "mergeCommit": {"oid": "merge"}}
