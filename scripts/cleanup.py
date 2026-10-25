@@ -211,7 +211,10 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
     trees_dir = str(trees) if trees is not None else ""
     trees = trees if trees is not None else root
     settings = load_settings(root, settings_path((root / "CLAUDE.md").read_text()))
-    commons = trusted_commons([root / path for path in settings.repos.values()])
+    clones = [root / path for path in settings.repos.values()]
+    if not clones and (root / ".git").exists():
+        clones.append(root)  # the engine cuts from the workspace when [repos] is omitted
+    commons = trusted_commons(clones)
     owned = owned_items(root, db)
     mounts = containers()
     failed = False
