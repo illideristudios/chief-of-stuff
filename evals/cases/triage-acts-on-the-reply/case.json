@@ -1,7 +1,7 @@
 {
   "tz": "America/Chicago",
   "peers": "sessions.json",
-  "description": "Robin's triage reply is carried out without a second yes: fix goes to the implementer in plan mode, file is filed and the architecture finding goes to frank-lloyd-aight, discard is recorded. The fix report goes to the reviewer as a verify pass with the workspace mailbox, and a clean verify stops at the merge gate.",
+  "description": "Robin's triage reply is carried out without a second yes: fix goes to the implementer in plan mode, file is filed and the architecture finding goes to frank-lloyd-aight, discard is recorded. The fix report goes to the reviewer as a verify pass through the engine report tool, and a clean verify stops at the merge gate.",
   "turns": [
     {
       "prompt": "R1 fix, R2 file, R3 discard",
@@ -80,12 +80,12 @@
       "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/6021.sock\" from-name=\"impl-uploads\" from-mode=\"prompting\">\nR1 fixed: resolve() before the prefix check, with a symlink test. Pushed to uploads; PR 12 head is now 7d1e0b4. Suite 42/42 (`pytest -q`).\n</cross-session-message>",
       "graders": [
         {
-          "name": "the verify pass goes to the reviewer with the workspace mailbox",
+          "name": "the verify pass names the engine report tool",
           "type": "peer_calls",
           "tool": "send",
           "to_ref": "a1b2c3",
           "ok": true,
-          "text_match": "(?s)(?=.*R1)(?=.*--mailbox-dir /\\S*/\\.chief-of-stuff/mailbox )",
+          "text_match": "(?s)(?=.*R1)(?=.*engine MCP tool `report`)",
           "min": 1
         },
         {
@@ -116,7 +116,7 @@
       ]
     },
     {
-      "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: verify @ 7d1e0b4\nPR: https://github.com/o/app/pull/12\nTests: pass — 42/42 — `pytest -q`\nAxes examined: Correctness, Test run\nResolved: R1 — src/a/upload.py:4, resolve() now precedes the prefix check; symlink test at tests/test_upload.py:31\nFindings: none\n</cross-session-message>",
+      "prompt": "<cross-session-message from=\"uds:/tmp/cc-socks/5120.sock\" from-name=\"reviewer\" from-mode=\"prompting\">\nReviewer pass: verify @ 7d1e0b4\nPR: https://github.com/o/app/pull/12\nTests: pass \u2014 42/42 \u2014 `pytest -q`\nAxes examined: Correctness, Test run\nResolved: R1 \u2014 src/a/upload.py:4, resolve() now precedes the prefix check; symlink test at tests/test_upload.py:31\nFindings: none\n</cross-session-message>",
       "graders": [
         {
           "name": "the task sits at the merge gate",
