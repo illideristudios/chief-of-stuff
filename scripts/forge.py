@@ -616,7 +616,7 @@ class Forge:
                 rows, error = _gh_json(self.gh, [
                     "pr", "list", "-R", self.home.repo, "--state", "open", "--base", base,
                     "--limit", str(limit), "--json",
-                    "number,headRefOid,baseRefName,closingIssuesReferences"])
+                    "number,body,headRefOid,baseRefName,closingIssuesReferences"])
                 if error:
                     raise ForgeError(error)
             else:
