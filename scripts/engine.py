@@ -1031,8 +1031,11 @@ def _judges(runtime: str) -> bool:
                                    and host_adapter.available(runtime))
 
 
-def _note_policy(root: Path, data: dict, overlay: str) -> None:
-    """Log the merged policy's fingerprint when it differs from the one this workspace last ran (#827)."""
+def _note_policy(root: Path, data: dict, overlay: str, db) -> None:
+    """Log the merged policy's fingerprint when it differs from the one this workspace last ran (#827).
+
+    The row is stored before the fingerprint file advances, so a failed insert is retried next start.
+    """
     fingerprint = hashlib.sha256(json.dumps(data, sort_keys=True, default=str).encode()).hexdigest()[:12]
     seen = supervisor.state_dir(root) / "policy.fingerprint"
     try:
@@ -1040,8 +1043,9 @@ def _note_policy(root: Path, data: dict, overlay: str) -> None:
             return
     except OSError:
         pass
-    print(f"engine: policy changed: {fingerprint} ({'overlay ' + overlay if overlay else 'shipped policy'})",
-          file=sys.stderr, flush=True)
+    message = f"engine: policy changed: {fingerprint} ({'overlay ' + overlay if overlay else 'shipped policy'})"
+    print(message, file=sys.stderr, flush=True)
+    db.add_engine_log(message, "policy_change")
     seen.parent.mkdir(parents=True, exist_ok=True)
     seen.write_text(fingerprint + "\n")
 
@@ -1123,7 +1127,6 @@ def main(argv: list[str] | None = None) -> int:
             if config.kanban is None:
                 raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
             policies = settings.workspace_policy(root, config.policy_overlay)
-            _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay)
             # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
             unmapped = settings.unmapped_stages(config.kanban, policies)
             if unmapped:
@@ -1132,6 +1135,7 @@ def main(argv: list[str] | None = None) -> int:
             trees = root / worktrees_dir(text)
             trees.mkdir(parents=True, exist_ok=True)
             db = store_access.migrated_store(root, engine_owned=True)
+            _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay, db)
             # Match the forge repository to a configured clone; a repository workspace needs no [repos] entry.
             repo = source.home.repo if getattr(source, "github", False) else getattr(getattr(source, "home", None), "project", "")
             selected = config.repos.get(repo) or config.repos.get(repo.rpartition("/")[2])

@@ -143,6 +143,15 @@ class LogEntry(Base):
     kind: Mapped[str] = mapped_column(String, default="", server_default="")
 
 
+class EngineLog(Base):
+    """A workspace row. A policy change has no issue key to hang on."""
+    __tablename__ = "engine_log"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    at: Mapped[str] = mapped_column(String)
+    message: Mapped[str] = mapped_column(String)
+    kind: Mapped[str] = mapped_column(String, default="", server_default="")
+
+
 class Resume(Base):
     __tablename__ = "resume"
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"), primary_key=True)
@@ -475,6 +484,13 @@ class Store:
         if issue_key is not None:
             stmt = stmt.where(LogEntry.issue_key == issue_key)
         return self._all(stmt)
+
+    def add_engine_log(self, message: str, kind: str = "") -> None:
+        with self.session() as s:
+            s.add(EngineLog(at=self._stamp(), message=message, kind=kind))
+
+    def engine_log(self) -> list[EngineLog]:
+        return self._all(select(EngineLog).order_by(EngineLog.id))
 
     # resume
     def set_resume(self, issue_key: str, data: Any) -> None:
