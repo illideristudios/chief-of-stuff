@@ -705,5 +705,105 @@ class EpicsOnTheBoardTest(unittest.TestCase):
         self.assertNotIn("milestones:", rb.render(TRACKER, cfg, NOW, lanes=LANES, sources=SOURCES))
 
 
+class BuildFollowsFlowTest(unittest.TestCase):
+    """#887: a Build card uses the stage Flow keeps, done tasks leave an earlier column, and cards sort by issue number."""
+
+    LANES = {"build": st.Lane(("design", "plan", "main")), "fix": st.Lane(("design", "plan", "pr", "main"))}
+
+    def page(self, rows: str, log: str = "", sources=bs.EMPTY, kanban=None) -> str:
+        tracker = f"""# Tracker 2026-09-16
+
+## Tasks
+
+| name | item | owner | state | since | due | size | lane | stage | issue | checklist |
+|---|---|---|---|---|---|---|---|---|---|---|
+{rows}
+## Log
+
+{log}
+"""
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        return rb.render(tracker, cfg, NOW, lanes=self.LANES, kanban=kanban, sources=sources)
+
+    def placed(self, html: str) -> dict[str, list[str]]:
+        figure = re.search(r'<figure class="columns".*?</figure>', html, re.S).group(0)
+        out = {}
+        for label, body in re.findall(r'<section class="columns-col[^"]*" aria-label="([^"]+)">(.*?)</section>', figure, re.S):
+            out[label.split(",", 1)[0]] = re.findall(r'class="columns-card-name"[^>]*>([^<]*)<', body)
+        return out
+
+    def notes(self, html: str) -> dict[str, str]:
+        return dict(re.findall(
+            r'class="gantt-name">([^<]*)</span></span><span class="gantt-track">.*?</span><span class="gantt-note">([^<]*)</span>',
+            html, re.S))
+
+    def test_open_cards_follow_the_log_and_sort_by_issue_number(self) -> None:
+        # Tracker order is #10 then #2. Both moved to plan, so plan holds #2 then #10. A cell with no move stays.
+        # No issue number sorts after the numbered cards; equal numbers keep tracker order. A stage no lane has stays on the cell.
+        rows = """| Later | Later item | Robin | open | 09:00 |  | S | build | design | #10 | c |
+| Earlier | Earlier item | Robin | open | 09:00 |  | S | build | design | #2 | c |
+| Stays | Stays item | Robin | open | 09:00 |  | S | build | design | #4 | c |
+| Odd | Odd item | Robin | open | 09:00 |  | S | build | design | #12 | c |
+| Plain | Plain item | Robin | open | 09:00 |  | S | build | plan |  | c |
+| Zed | Zed item | Robin | open | 09:00 |  | S | build | plan | #7 | c |
+| Abe | Abe item | Robin | open | 09:00 |  | S | build | plan | #7 | c |
+"""
+        log = "- 10:00 stage: Later → plan\n- 11:00 stage: Earlier → plan\n- 12:00 stage: Odd → kitchen\n"
+        html = self.page(rows, log)
+        cols = self.placed(html)
+        self.assertEqual(cols["plan"], ["Earlier", "Zed", "Abe", "Later", "Plain"])
+        self.assertEqual(cols["design"], ["Stays", "Odd"])
+        self.assertNotIn("pr", cols)
+        self.assertEqual(self.notes(html)["Earlier"].split(" · ")[0], "plan")
+        self.assertEqual(self.notes(html)["Later"].split(" · ")[0], "plan")
+
+    def test_an_early_done_task_leaves_the_lanes_and_one_at_main_stays(self) -> None:
+        rows = """| Early done | Early item | Robin | done | 09:00 |  | S | build | design | #3 | c |
+| Landed | Landed item | Robin | done | 09:00 |  | S | build | main | #5 | c |
+"""
+        html = self.page(rows, "- 10:00 stage: Early done → plan\n")
+        cols = self.placed(html)
+        self.assertNotIn("Early done", [name for names in cols.values() for name in names])
+        self.assertEqual(cols["main"], ["Landed"])
+        self.assertEqual(self.notes(html)["Early done"].split(" · ")[0], "plan")
+
+    def test_a_logged_pr_draws_in_the_following_column(self) -> None:
+        rows = "| Review it | Review item | Robin | open | 09:00 |  | S | fix | design | #6 | c |\n"
+        cols = self.placed(self.page(rows, "- 10:00 stage: Review it → pr\n"))
+        self.assertNotIn("pr", cols)
+        self.assertEqual(cols["main"], ["Review it"])
+        self.assertEqual(cols["design"], [])
+
+    def test_a_launcher_line_places_the_card_until_a_stage_line(self) -> None:
+        rows = "| Built | Write the build | Robin | open | 09:00 |  | S | fix | design | #11 | c |\n"
+        started = "- 10:00 one-shot w1 started: claude, task Write the build\n- 11:00 one-shot w1: completed; awaiting integration\n"
+        self.assertEqual(self.placed(self.page(rows, started))["main"], ["Built"])
+        stayed = "- 09:30 stage: Built → plan\n" + started
+        self.assertEqual(self.placed(self.page(rows, stayed))["plan"], ["Built"])
+
+    def test_merged_today_cards_stay_the_tail_of_main_newest_first(self) -> None:
+        rows = """| Landed | Landed item | Robin | done | 09:00 |  | S | build | main | #5 | c |
+| Also | Also item | Robin | open | 09:00 |  | S | build | main | #1 | c |
+"""
+        newer = change("!70", state="merged", merged_at=NOW - timedelta(hours=1), issues=("#20",), title="Newer merge")
+        older = change("!71", state="merged", merged_at=NOW - timedelta(hours=3), issues=("#21",), title="Older merge")
+        sources = replace(bs.EMPTY, changes={c.ref: c for c in (older, newer)})
+        self.assertEqual(self.placed(self.page(rows, sources=sources))["main"],
+                         ["Also", "Landed", "Newer merge", "Older merge"])
+
+    def test_a_hold_and_drift_use_the_logged_stage(self) -> None:
+        rows = "| Moved | Moved item | Robin | open | 09:00 |  | S | build | design | #2 | c |\n"
+        log = "- 10:00 stage: Moved → plan\n"
+        kanban = st.Kanban(("stage::design", "stage::plan"), "needs-human", {"design": 0, "plan": 1})
+        sources = replace(bs.EMPTY, issues={"#2": bs.Issue("#2", "https://forge/i/2", "Moved", "open", ("stage::plan",))})
+        figure = self.page(rows, log, sources, kanban).split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
+        self.assertNotIn('data-cat="hold"', figure)
+        self.assertNotIn('data-cat="drift"', figure)
+        held = self.page(rows, log, sources, replace(kanban, hold_stages=("plan",)))
+        figure = held.split('<figure class="columns"', 1)[1].split("</figure>", 1)[0]
+        self.assertIn('data-cat="hold"', figure)
+        self.assertNotIn('data-cat="drift"', figure)
+
+
 if __name__ == "__main__":
     unittest.main()
