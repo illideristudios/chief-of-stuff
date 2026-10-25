@@ -785,6 +785,23 @@ class EngineTest(unittest.TestCase):
         self.assertFalse(self.db.items()[0].human_review)
         self.assertIn("close failed: forge offline", self.db.log(KEY)[-1].message)
 
+    def test_a_failed_suite_label_arms_nothing(self):
+        self.run_pass()
+        self.publish_exit()
+        self.db.add_report(KEY, "implement", 1, "fake-session", "done", "red suite", [],
+                           suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
+        self.forge.add_human_hold = mock.Mock(return_value="forge offline")
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), False, NOW)):
+            self.run_pass(require_green=True)
+        self.forge.add_human_hold.assert_called_with(1)
+        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
+        self.assertFalse(self.db.items()[0].human_review)
+        evidence = "\n".join(row.message for row in self.db.log(KEY))
+        self.assertIn("close failed: forge offline", evidence)
+        self.assertNotIn("suite hold must reference", evidence)
+
     def test_snapshot_bodies_avoid_per_issue_reads_even_for_closed_issues(self):
         self.run_pass()
         self.publish_exit()

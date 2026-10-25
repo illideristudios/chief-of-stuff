@@ -665,9 +665,9 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
     if verdict.human_review:
         outcome = verdict.outcome
         reason = "; ".join(part for part in (reason, verdict.reason) if part)
+    _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
     if verdict.suite_hold:
         _arm_suite_hold(store, key, segment.stage, segment.attempt)
-    _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
 
 
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
