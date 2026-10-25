@@ -32,7 +32,6 @@ COMMANDS = {
     "result": "scripts/one_shot_result.py",
     "adopt": "scripts/adopt_one_shots.py",
     "board": "scripts/render_board.py",
-    "inbox": "scripts/inbox.py",
     "backlog": "scripts/backlog.py",
     "kanban": "scripts/kanban.py",
     "notify": "scripts/notify_service.py",

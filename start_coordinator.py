@@ -74,24 +74,21 @@ def prompt(runtime: str, release: Path, root: Path) -> str:
     rules = rules.split("---", 2)[-1].strip()
     rules = rules.replace("${CLAUDE_PLUGIN_ROOT}", str(release))
     if runtime != "claude":
-        mailbox_check = (f'python3 "{release / "scripts" / "inbox.py"}" '
-                         f'--mailbox-dir "{root / ".chief-of-stuff" / "mailbox"}" '
-                         'list --recipient coordinator --unread')
         host = runtimes.get(runtime)
         if not host.schedules:
             host_schedule = (f"{host.display} has no in-session schedule. The session-scoped watcher checks "
-                             "every five minutes and notifies on new messages. At the start of every "
-                             "turn, read the inbox and reconcile the tracker and board; do not claim "
+                             "every five minutes and notifies on new findings. At the start of every "
+                             "turn, reconcile the tracker and board; do not claim "
                              "that a notification woke this conversation.")
         else:
             host_schedule = {
                 "agy": ("After opening the day, create one Antigravity `Schedule` at `*/5 * * * *` "
-                        f"to run `{mailbox_check}` and process unread worker messages as a normal "
+                        "to reconcile worker registry, audit findings and ready one-shot dispatch as a normal "
                         "coordinator turn. The CLI `/schedule \"*/5 * * * *\" ...` is the equivalent "
                         "when the Schedule tool is unavailable. Avoid duplicates and cancel a "
                         "persistent schedule when this session ends."),
-                "cursor": ("After opening the day, start one Cursor in-session `/loop 5m` to run "
-                           f"`{mailbox_check}` and process unread worker messages as a normal "
+                "cursor": ("After opening the day, start one Cursor in-session `/loop 5m` to reconcile "
+                           "worker registry, audit findings and ready one-shot dispatch as a normal "
                            "coordinator turn. Stop the loop when this session ends. If `/loop` is "
                            "unavailable, rely on the watcher and check at the start of each turn."),
             }[runtime]
@@ -101,9 +98,9 @@ def prompt(runtime: str, release: Path, root: Path) -> str:
         rules = rules.replace("list sessions,", "inspect registered workers,")
         silence = re.search(r"^## Check\n.*?\n\n(The standing waiting-on list[^\n]+)\n\n(?=## Sessions\n)",
                             rules, flags=re.M | re.S).group(1)
-        check = ("## Check\n\nWhile this CLI is open, its session-scoped watcher checks inbox and task audit "
+        check = ("## Check\n\nWhile this CLI is open, its session-scoped watcher checks task audit "
                  "every five minutes, notifying on new findings without editing tracker or board. "
-                 "Next turn, read clock, inbox, "
+                 "Next turn, read clock, "
                  "audit and worker registry; reconcile task state; board renders itself. "
                  "Dispatch ready one-shot tasks automatically under Dispatch authority. New interactive sessions need approval.\n\n"
                  + host_schedule + "\n\n" + silence + "\n\n")
@@ -113,7 +110,7 @@ def prompt(runtime: str, release: Path, root: Path) -> str:
                     "run `chief-of-stuff processes --root <workspace>` to check "
                     "registered PIDs in one batch. Its assigned name, worktree and process "
                     "identify it; do not invent a Claude ref. Receive registrations and reports "
-                    "and send replies through the shared mailbox. No registration "
+                    "through direct messaging when available and through the engine store otherwise. No registration "
                     "is `starting`; a dead registered process can orphan its task after audit. "
                     "Preserve tracker `## Sessions` states: planning, working, waiting, idle.\n\n")
         rules = re.sub(r"## Sessions\n.*?(?=## Relay\n)", sessions, rules, flags=re.S)
@@ -124,8 +121,8 @@ def prompt(runtime: str, release: Path, root: Path) -> str:
                   "script, and never pipe command output into the edit tool. "
                   "The `Sessions:` line in CLAUDE.md describes Claude's peer tools; you do not have those tools. "
                   "Check non-Claude workers with the `chief-of-stuff processes --root <workspace>` "
-                  "batch helper; use the shared `chief-of-stuff inbox` "
-                  "mailbox for their messages. Claude workers retain their native session tools when available. "
+                  "batch helper. Worker asks and reports use the engine tools when direct messaging is unavailable. "
+                  "Claude workers retain their native session tools when available. "
                   "Next turn, reconcile tracker and board and dispatch ready one-shot tasks automatically. "
                   "If the named calendar tool is unavailable, "
                   "report it, leave calendar facts unverified, and continue work that does not depend on it.\n")
@@ -152,23 +149,11 @@ def command(runtime: str, binary: str, release: Path, root: Path) -> list[str]:
 
 def check_once(root: Path, release: Path) -> str:
     scripts = release / "scripts"
-    mailbox = root / ".chief-of-stuff" / "mailbox"
-    inbox = subprocess.run([sys.executable, str(scripts / "inbox.py"), "--mailbox-dir", str(mailbox),
-                            "list", "--recipient", "coordinator", "--unread"], capture_output=True,
-                           text=True, timeout=30)
     audit = subprocess.run([sys.executable, str(scripts / "audit_tasks.py")],  # its default day is the workspace zone's, not the host's
                            cwd=root, capture_output=True, text=True, timeout=60)
     workers = subprocess.run([sys.executable, str(scripts / "process_status.py"), "--root", str(root)],
                              capture_output=True, text=True, timeout=10)
-    if inbox.returncode:
-        return f"inbox exit {inbox.returncode}; audit exit {audit.returncode}"
     lines = []
-    try:
-        unread = [] if inbox.stdout.strip() == "[]" else toon_decode(inbox.stdout)
-        if isinstance(unread, list) and unread:
-            lines.append(f"{len(unread)} unread coordinator message(s)")
-    except (ValueError, ToonDecodeError):
-        lines.append("coordinator inbox could not be parsed")
     findings = [line for line in audit.stdout.splitlines() if FINDING.match(line)]
     lines.extend(findings)
     if audit.returncode and not findings:

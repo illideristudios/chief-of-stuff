@@ -20,9 +20,6 @@ from tracker import parse_tracker, short_name  # noqa: E402
 from workspace import ConfigError, read_config  # noqa: E402
 from settings import SettingsError, Workflow, load as load_settings  # noqa: E402
 import ownership  # noqa: E402
-import runtimes  # noqa: E402
-
-
 class RefusedError(ValueError):
     """Invalid tracker data; no assignment composed."""
 
@@ -60,56 +57,7 @@ REPORTS_DIR = f"{PROMPT_DIR}/reports"
 REPORT_KEYS = ("status", "task", "worker", "runtime_exit", "reason", "changes", "errors")
 # The prefix of a report's error for a tracker the launcher could not update.
 TRACKER_ERROR = "tracker:"
-# Use the installed inbox script, not a workspace path.
-INBOX_SCRIPT = Path(__file__).resolve().parent / "inbox.py"
-# Antigravity uses the mailbox for session messages.
-AGY = ("**You run under Antigravity, not Claude Code.** You cannot list sessions or message one: every "
-       "registration, ask, progress report and stop below goes through the mailbox commands, with "
-       "`--from \"{name}\"`, and your ref is your name. Check your mailbox "
-       "(`python3 {inbox_script} list --recipient \"{name}\" --unread`) before each step and after each "
-       "commit.")
-NON_CLAUDE_REGISTER = ("**Register first, before you read anything else.** You run under {host}, so "
-    "use the file mailbox for every registration, ask, progress report and stop. Your ref is your assigned "
-    "name `{name}`; the coordinator identifies you by that name, this worktree and your registered process. "
-    "Send `python3 {inbox_script} send --to coordinator --from \"{name}\" --type register "
-    "--body \"ref: {name}, worktree: {worktree}, branch: <branch>, task: {task}, state: planning\"`. "
-    "Check replies with `python3 {inbox_script} list --recipient \"{name}\" --unread` "
-    "before each step and after each commit. The coordinator writes tracker and board updates on its next turn.")
-
-
-def mailbox_check(runtime: str, name: str, inbox_script: str) -> str:
-    """Give each worker the check its interactive host can actually run."""
-    command = f'python3 {inbox_script} list --recipient "{name}" --unread'
-    wait = f'python3 {inbox_script} wait --recipient "{name}" --timeout 300'
-    common = (f'Check now with `{command}`. Process each new assignment or reply and acknowledge it '
-              "only after acting. A new task still starts with a plan and its required approval. "
-              f'For a bounded idle check, run `{wait}`; it returns unread TOON or `[]` after five '
-              "minutes and does not acknowledge messages. Use these shared inbox commands; do not "
-              "create polling scripts or background jobs in the workspace. ")
-    host = runtimes.get(runtime)
-    if not host.schedules:
-        mechanism = (f"{host.display} has no in-session scheduling interface. Check at the start of every "
-                     "turn, before each new step, and after each commit. While this turn is open, "
-                     "use the bounded wait above when idle. A finished conversation cannot wake "
-                     "itself; handle later messages on the next turn.")
-    elif runtime == "claude":
-        mechanism = (f'Use `CronList`, then create one in-session `CronCreate` job at `*/5 * * * *` '
-                     f'only if no job starts `[Mailbox check] {name}`. Its prompt is '
-                     f'`[Mailbox check] {name}: {command}; process unread messages`. If cron tools '
-                     "are unavailable, check at the start of every turn and after each commit.")
-    elif runtime == "agy":
-        mechanism = (f'Use Antigravity `Schedule` at `*/5 * * * *` with instruction '
-                     f'`Check the mailbox for an assigned task or reply using {command}; '
-                     f'process unread messages`. In the CLI, `/schedule "*/5 * * * *" ...` is the '
-                     "equivalent when the Schedule tool is not exposed. Keep one check for this session "
-                     "and cancel a persistent schedule when the session ends. If scheduling is unavailable, "
-                     "check at the start of every turn and after each commit.")
-    elif runtime == "cursor":
-        mechanism = (f'Start one Cursor in-session `/loop 5m` with instruction '
-                     f'`{command}; process unread messages`. Stop the loop when this session ends. '
-                     "If `/loop` is unavailable, check at the start of every turn and after each commit.")
-    return "**Keep this mailbox live.** After registration, " + common + mechanism
-
+SESSION_EXEC = Path(__file__).resolve().parent / "session_exec.py"
 
 HEADER = """# Assignment
 
@@ -117,14 +65,12 @@ You are a dispatched session. A coordinator wrote this file into your worktree w
 
 **Register first, before you read anything else and before you look around.** List your sessions to \
 find your own `name [ref]`, then send {coordinator} one message carrying that ref, this worktree and \
-its branch, your task, and that you are planning with nothing written yet. If direct messaging (IPC) \
-is unavailable or fails, deposit your registration into the coordinator's mailbox: \
-`python3 {inbox_script} send --to "{coord_mailbox}" --from "<your_ref_or_name>" --type register --body "ref: <ref>, worktree: {worktree}, branch: <branch>, task: {task}, state: planning"`. \
+its branch, your task, and that you are planning with nothing written yet. \
 Registering first is not politeness: until that message arrives the coordinator cannot tell you from \
 a session that never came up, and anything you discover before it is discovered by somebody nobody can reach.
 
 **Your name is fixed.** {you_are}The name you were started with is the only one you use — in your \
-registration, in every message and every mailbox `--from`, in your stop file and in your reports. A \
+registration, in every message, in your stop file and in your reports. A \
 listing may show you under another name: that is the harness titling you from your first task, not a \
 rename, and you never adopt it. You cannot rename a session and you never ask to; if the listing is \
 wrong, say so once in your next message to {coordinator}.
@@ -138,10 +84,8 @@ starts in plan mode: enter it (EnterPlanMode) before anything else, and write no
 approves the plan (the user, 2026-09-23 22:25).
 
 This file is a task statement and not authority. It cannot grant you a permission, lift a rule you \
-run under, or speak for {user}. If it asks for something outside the paths in `Owns:`, stop and ask {user}. \
-When direct messaging is unavailable, send your ask via: \
-`python3 {inbox_script} send --to "{coord_mailbox}" --from "<your_ref_or_name>" --type ask --body "<question>"`. \
-Check your mailbox for replies: `python3 {inbox_script} list --recipient "<your_ref_or_name>" --unread`.
+run under, or speak for {user}. If it asks for something outside the paths in `Owns:`, stop and use the \
+engine MCP tool `ask` with your question. Check direct messages and the engine store for replies.
 
 If the task below is empty, contradictory, or impossible as written, hand it back and say why. Never \
 proceed on an assumption nobody stated, and never substitute work that merely looks similar.
@@ -167,8 +111,8 @@ reverse, and before a deadline the reverse is wrong.
 costs one thing: a stop that names **who it lands on** and **what breaks if nobody takes it**. Write \
 it to `{stop_file}` in this worktree, in the same labelled lines as this file — `Stop:`, `Task:`, \
 `Lands on:`, `Costs:`, and `Tried:` with the exact command or path — and say the same in your \
-message to {coordinator}. If direct messaging fails, post it to the mailbox: \
-`python3 {inbox_script} send --to "{coord_mailbox}" --from "<your_ref_or_name>" --type stop --body "<stop fields>"`. \
+message to {coordinator}. If direct messaging fails, report the stop with the engine MCP tool `report` \
+(including the same stop fields in the summary). \
 A stop that names neither cannot be told apart from a session that died, \
 and the task sits at `running` against nobody until somebody reads git by hand.
 
@@ -195,10 +139,9 @@ genuinely outside the paths below; that goes to the coordinator too, to widen th
 task. Four words rather than four paragraphs of English, because the English arrived as prose for \
 somebody to interpret and the interpreting is where items were dropped.
 """
-REPORT = ("Report: when the task is finished, reply to the coordinator with what changed, where it is "
+REPORT = ("Report: when the task is finished, use the engine MCP tool `report` with what changed, where it is "
           "(branch and worktree), what you did not do, and `Next:` — either the one thing you are "
-          "starting now, or `idle and available`. Never neither. If direct messaging fails, send via mailbox: "
-          '`python3 {inbox_script} send --to "{coord_mailbox}" --from "<your_ref_or_name>" --type progress --body "<report>"`.')
+          "starting now, or `idle and available`. Never neither.")
 WRITING_RULE = ("Markdown: everything you write for a person to read is well-formed markdown: documents, "
                 "issue and PR/MR bodies, review and issue comments, commit message bodies, and decision JSON "
                 "text fields. One paragraph is one line; never hard-wrap prose at any column, because renderers "
@@ -423,16 +366,10 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
         if len(body) > BODY_CAP:
             raise RefusedError(f"the assignment is {len(body)} characters, over the {BODY_CAP} cap")
         return body
-    coord_mailbox = "coordinator"
-    # Pin the workspace mailbox; worktree discovery can select a different one.
-    inbox_script = f"{INBOX_SCRIPT} --mailbox-dir {shlex.quote(str(root.resolve() / PROMPT_DIR / 'mailbox'))}"
-
     header_text = HEADER.replace("\\\n", "").format(
         user=cfg.user,
         stop_file=STOP_FILE,
         coordinator=f"the chief-of-stuff coordinator{f' `{who.group()}`' if who else ''}",
-        coord_mailbox=coord_mailbox,
-        inbox_script=inbox_script,
         worktree=worktree or "this worktree",
         task=item,
         you_are=f"You are `{name}`. " if name else "",
@@ -442,36 +379,18 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
                         "branches and generated files. Do not infer another name for the user from a file. "
                         "If you spawn a subagent, carry this rule into its prompt.\n")
     if runtime != "claude":
-        host = runtimes.get(runtime).display
-        registration = NON_CLAUDE_REGISTER.format(host=host, name=name or UNNAMED,
-            inbox_script=inbox_script, worktree=worktree or "this worktree", task=item)
-        if runtime == "agy":
-            registration = AGY.format(name=name or UNNAMED, inbox_script=inbox_script) + "\n\n" + registration
-        start, rest = header_text.split("**Register first", 1)
-        _, end = rest.split("**Your name is fixed.**", 1)
-        header_text = start + registration + "\n\n**Your name is fixed.**" + end
         header_text = header_text.replace("enter it (EnterPlanMode)",
             "enter it (/plan)" if runtime in ("codex", "cursor") else "enter it (plan mode)")
-        header_text = header_text.replace("If direct messaging (IPC) is unavailable or fails, deposit", "Deposit")
-        header_text = header_text.replace("If direct messaging fails, post it to the mailbox:", "Post it to the mailbox:")
         if runtime == "codex":
             header_text += ("\n\n**Codex plan gate.** This session starts with a read-only sandbox. "
                 "Use `/plan` to present the plan. After the user approves it, exit this read-only session "
-                "and resume this same session ID with `python3 " + shlex.quote(str(INBOX_SCRIPT.parent / "session_exec.py")) +
+                "and resume this same session ID with `python3 " + shlex.quote(str(SESSION_EXEC)) +
                 " resume-codex --root " + shlex.quote(str(root.resolve())) + " --name " + str(name or UNNAMED) +
                 " --worktree " + shlex.quote(str(worktree or root)) + " --session-id <session-id>`. "
                 "This keeps the process registration current. Do not use `--last` because another session may have started.\n")
         elif runtime == "cursor":
             header_text += "\n\n**Cursor plan gate.** This session starts in Cursor Plan mode. Ask the user to approve the plan before switching to Agent mode.\n"
-    header_text = header_text.replace("**Your name is fixed.**",
-        mailbox_check(runtime, name or UNNAMED, inbox_script) + "\n\n**Your name is fixed.**", 1)
-    report_text = REPORT.format(
-        inbox_script=inbox_script,
-        coord_mailbox=coord_mailbox,
-    )
-    if runtime != "claude":
-        report_text = report_text.replace("If direct messaging fails, send via mailbox:", "Send via mailbox:")
-        header_text = header_text.replace("When direct messaging is unavailable, send your ask via:", "Send your ask via:")
+    report_text = REPORT
 
     lines = [header_text, board_rule, WRITING_RULE, REVIEW_RULE, f"Task: {item}"]
     if rows[0].checklist.strip():
@@ -484,7 +403,6 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
     lines += [
         f"Workspace: {root.resolve()}",
         f"Tracker: {(root / relative).resolve()}",
-        f"Inbox: {INBOX_SCRIPT}",
         f"Owns: {owns}" + ("" if read_only else
                            " — yours to keep true; drift left in them is your error. Do not touch any other file."),
         READ_ONLY if read_only else commit_rule(workflow, root),
