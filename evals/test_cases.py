@@ -212,7 +212,8 @@ class CaseLintTest(unittest.TestCase):
         remote.*.url/pushurl (including URL rewrites) relative to the fixture checkout and require
         containment in root. Includes are evaluated in the probe's gitdir, not the fixture's.
         It does not inspect branch.*.remote/pushRemote, remote.pushDefault, host/environment config,
-        or command-line URLs. It does not prove runtime confinement (#770).
+        or command-line URLs. Runtime confinement of standard git paths holds in CI via `.github/ci` (#770);
+        this static lint checks fixture remote URLs independently.
         """
         configs = [p for p in root.rglob("config") if p.parent.name == ".git" or p.parent.suffix == ".git"]
         if not configs:
