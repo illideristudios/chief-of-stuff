@@ -802,6 +802,53 @@ class EngineTest(unittest.TestCase):
         self.assertIn("close failed: forge offline", evidence)
         self.assertNotIn("suite hold must reference", evidence)
 
+    def test_a_finished_suite_hold_stays_until_the_label_is_removed(self):
+        self.run_pass()
+        self.publish_exit()
+        self.db.add_report(KEY, "implement", 1, "fake-session", "done", "red suite", [],
+                           suite={"passed": 0, "failed": 1, "skipped": 0, "xfailed": 0})
+        self.forge.rows[0]["human_review"] = False
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), False, NOW)), \
+             mock.patch.object(self.forge, "add_human_hold", wraps=self.forge.add_human_hold) as hold:
+            self.run_pass(require_green=True)
+            self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+            self.assertEqual(self.db.resume(KEY)["suite_hold"],
+                             {"stage": "implement", "attempt": 1, "published": True})
+            self.assertTrue(self.db.items()[0].human_review)
+            self.assertEqual(hold.call_count, 2)  # close publishes; sync confirms after the earlier snapshot
+            self.run_pass(require_green=True)
+            self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+            self.assertIn("suite_hold", self.db.resume(KEY))
+            self.assertTrue(self.db.items()[0].human_review)
+            self.forge.rows[0]["human_review"] = False
+            self.run_pass(require_green=True)
+            self.assertNotIn("suite_hold", self.db.resume(KEY))
+            self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+            self.assertFalse(self.db.items()[0].human_review)
+            self.assertEqual(hold.call_count, 2)
+
+    def test_a_close_suite_hold_records_the_label_it_wrote(self):
+        self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
+        self.db.upsert_item(KEY, stage="implement")
+        self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
+        self.launch(KEY, "implement", 1, "builder")
+        action = reconcile.Close(KEY, "implement", 1, "human_review", "red suite", True, True)
+        with mock.patch.object(self.forge, "add_human_hold", wraps=self.forge.add_human_hold) as hold:
+            with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
+                self.run_pass(require_green=True)
+            self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+            self.assertEqual(self.db.resume(KEY)["suite_hold"],
+                             {"stage": "implement", "attempt": 1, "published": True})
+            self.assertTrue(self.db.items()[0].human_review)
+            hold.assert_called_once_with(1)
+            self.forge.rows[0]["human_review"] = False
+            self.run_pass(require_green=True)
+            self.assertNotIn("suite_hold", self.db.resume(KEY))
+            self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+            self.assertFalse(self.db.items()[0].human_review)
+            hold.assert_called_once_with(1)
+
     def test_snapshot_bodies_avoid_per_issue_reads_even_for_closed_issues(self):
         self.run_pass()
         self.publish_exit()
@@ -852,11 +899,16 @@ class EngineTest(unittest.TestCase):
         self.db.upsert_item(KEY, stage="implement")
         self.db.record_segment(KEY, "implement", 1, started_at=NOW.isoformat())
         self.launch(KEY, "implement", 1, "builder")
-        action = reconcile.Close(KEY, "implement", 1, "done", "read-only run left changes", True)
-        with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
-            self.run_pass()
-        self.assertIsNone(self.db.segments(KEY)[0].ended_at)
-        self.assertIn("forge offline", self.db.log(KEY)[-1].message)
+        for outcome, reason, suite_hold in (("done", "read-only run left changes", False),
+                                            ("human_review", "red suite", True)):
+            action = reconcile.Close(KEY, "implement", 1, outcome, reason, True, suite_hold)
+            with self.subTest(suite_hold=suite_hold), \
+                 mock.patch.object(engine.reconcile, "plan", return_value=[action]):
+                self.run_pass()
+                self.assertIsNone(self.db.segments(KEY)[0].ended_at)
+                self.assertNotIn("suite_hold", self.db.resume(KEY))
+                self.assertFalse(self.db.items()[0].human_review)
+                self.assertIn("forge offline", self.db.log(KEY)[-1].message)
 
     def test_closed_forge_snapshot_is_not_dispatched(self):
         self.db.upsert_item(KEY, forge_state="open")

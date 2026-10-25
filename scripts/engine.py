@@ -85,9 +85,9 @@ def _remember_verified(store: Any, facts: reconcile.Facts) -> None:
         store.set_resume(key, data)
 
 
-def _arm_suite_hold(store: Any, key: str, stage: str, attempt: int) -> None:
+def _arm_suite_hold(store: Any, key: str, stage: str, attempt: int, published: bool = False) -> None:
     data = _resume(store, key)
-    data["suite_hold"] = {"stage": stage, "attempt": attempt, "published": False}
+    data["suite_hold"] = {"stage": stage, "attempt": attempt, "published": published}
     store.set_resume(key, data)
 
 
@@ -640,17 +640,20 @@ def _sync_suite_holds(forge: Any, store: Any, snapshots: list[dict], at: str) ->
 
 
 def _close_segment(forge: Any, store: Any, key: str, stage: str, attempt: int,
-                   outcome: str, reason: str, human_review: bool, now: datetime) -> None:
+                   outcome: str, reason: str, human_review: bool, now: datetime) -> bool:
     """Both closure paths persist a forge hold before ending the segment."""
+    published = False
     if human_review:
         if getattr(forge, "kanban", None) is not None:
             error = forge.add_human_hold(int(key.rpartition("#")[2]))
             if error:
                 raise ForgeError(error)
+            published = True
         store.upsert_item(key, human_review=True)
     store.end_segment(key, stage, attempt, now.isoformat(), outcome)
     store.add_log(key, f"worker {stage} attempt {attempt}: {outcome}" +
                   (f": {reason}" if reason else ""), now.isoformat())
+    return published
 
 
 def _finish_worker(forge: Any, store: Any, segment: Any,
@@ -667,6 +670,7 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
         reason = "; ".join(part for part in (reason, verdict.reason) if part)
     _close_segment(forge, store, key, segment.stage, segment.attempt, outcome, reason, held, now)
     if verdict.suite_hold:
+        # This pass's snapshot predates the write; sync must publish before removal can accept it.
         _arm_suite_hold(store, key, segment.stage, segment.attempt)
 
 
@@ -954,10 +958,11 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     _clear_waived_gates(store, key)
             elif isinstance(action, reconcile.Close):
                 worker.teardown_once(store, root, key, action.stage, action.attempt, teardown_command, at)
+                published = _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
+                                           action.reason, action.human_review, now)
                 if action.suite_hold:
-                    _arm_suite_hold(store, key, action.stage, action.attempt)
-                _close_segment(forge, store, key, action.stage, action.attempt, action.outcome,
-                               action.reason, action.human_review, now)
+                    # Sync already ran, so remember this write for the next pass's removal check.
+                    _arm_suite_hold(store, key, action.stage, action.attempt, published=published)
             elif isinstance(action, reconcile.Ask):
                 resolved = _resolved(policies, store, key, action.source)
                 if _consultation_blocked(store, key, resolved, at, stage=action.source):
