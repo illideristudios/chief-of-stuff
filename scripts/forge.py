@@ -611,7 +611,7 @@ class Forge:
     def _open_closers(self, base: str) -> list[dict]:
         """One bounded list of open closing identities, without CI, reviews or discussions."""
         try:
-            limit = backlog.GH_LIMIT if self.github else forge_review.REQUEST_LIMIT
+            limit = backlog.GH_LIMIT
             if self.github:
                 rows, error = _gh_json(self.gh, [
                     "pr", "list", "-R", self.home.repo, "--state", "open", "--base", base,
@@ -620,8 +620,23 @@ class Forge:
                 if error:
                     raise ForgeError(error)
             else:
-                rows = self._pipeline_read("merge_requests?" + urlencode({
-                    "state": "opened", "target_branch": base, "per_page": limit}))
+                token = self._token()
+                if not token:
+                    raise ForgeError(self.home.missing_token)
+                rows = []
+                for page in range(1, backlog.MAX_PAGES + 1):
+                    batch, _, error = backlog._call("GET", f"{self.home.api()}/merge_requests?" + urlencode({
+                        "state": "opened", "target_branch": base, "per_page": backlog.PER_PAGE, "page": page}),
+                        token, backlog.TIMEOUT)
+                    if error:
+                        raise ForgeError(error)
+                    if not isinstance(batch, list) or any(not isinstance(row, dict) for row in batch):
+                        raise ValueError("expected a complete list of open closing identities")
+                    rows.extend(batch)
+                    if len(batch) < backlog.PER_PAGE:
+                        break
+                else:
+                    raise ValueError("expected a complete list of open closing identities")
             if (not isinstance(rows, list) or len(rows) >= limit
                     or any(not isinstance(row, dict) for row in rows)):
                 raise ValueError("expected a complete list of open closing identities")
