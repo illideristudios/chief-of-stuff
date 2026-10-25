@@ -11,7 +11,8 @@ verified:
 - `git status --porcelain --ignored` lists nothing but build output or engine metadata (`tree_state.unsaved`);
 - no index flags hide tracked files from git status;
 - no in-progress Git operation or initialized submodule metadata remains (submodule contents are never inspected);
-- no container binds a path inside it;
+- no container binds a path inside it; when `[workers] teardown` is set, `--remove` runs that command
+  under the worktree lock before this guard, and a teardown error keeps the tree;
 - nothing on it is unpushed or unmerged (`tree_state.at_risk`).
 
 A guard that cannot be verified keeps the tree. Worker-written repositories are read only through git_view, and a tree
@@ -32,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy.exc import SQLAlchemyError  # noqa: E402
 
 import git_view  # noqa: E402
+import shell_setup  # noqa: E402
 from git_trees import audit_env, clean, discover, git, read_state, trusted_commons  # noqa: E402
 from one_shot import launcher_copy, trees_lock  # noqa: E402
 from process_status import PIDFILE, check, one_shot_runs, registrations  # noqa: E402
@@ -207,9 +209,11 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
     trees_dir = str(trees) if trees is not None else ""
     trees = trees if trees is not None else root
     settings = load_settings(root, settings_path((root / "CLAUDE.md").read_text()))
+    command = settings.workers.teardown
     commons = trusted_commons([root / path for path in settings.repos.values()])
     owned = owned_items(root, db)
-    mounts = containers()
+    # A configured removal must not treat a pre-teardown mount snapshot as a reason to skip the stack.
+    mounts = None if remove and command else containers()
     failed = False
     for tree in discover(root, trees_dir):
         common = commons.get(tree)
@@ -218,10 +222,11 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
         items, owners_kept = owner_guards(tree, owned, completed)
         kept += owners_kept
         kept += claims(root, trees, tree)
-        if mounts is None:
-            kept.append("containers cannot be checked")
-        elif any(inside(mount.resolve(), tree) for mount in mounts):
-            kept.append("a container binds a path in it")
+        if not (remove and command):
+            if mounts is None:
+                kept.append("containers cannot be checked")
+            elif any(inside(mount.resolve(), tree) for mount in mounts):
+                kept.append("a container binds a path in it")
         if layout is not None and layout.tree is not None:
             kept += git_guards(tree, common)
         if not kept and remove:
@@ -232,17 +237,38 @@ def execute(root: Path, trees: Path | None, db: Store, *, remove: bool = False,
                     kept += claims(root, trees, tree)
                     if layout is not None and layout.tree is not None:
                         kept += git_guards(tree, common)
-                    current_mounts = containers()
-                    if current_mounts is None:
-                        kept.append("containers cannot be checked")
-                    elif any(inside(mount.resolve(), tree) for mount in current_mounts):
-                        kept.append("a container binds a path in it")
-                    try:
-                        items, owners_kept = owner_guards(tree, owned_items(root, db), completed)
-                        kept += owners_kept
-                    except SQLAlchemyError as exc:
-                        failed = True
-                        kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
+                    # Stop a stack the mount guard would otherwise keep, then re-read every fact the command can change.
+                    check_mounts = True
+                    if command and not kept:
+                        try:
+                            items, owners_kept = owner_guards(tree, owned_items(root, db), completed)
+                            kept += owners_kept
+                        except SQLAlchemyError as exc:
+                            failed = True
+                            kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
+                        if not kept:
+                            warnings = shell_setup.teardown(root, tree, tree.name, command)
+                            if warnings:
+                                failed = True
+                            layout, kept = layout_guards(tree, common)
+                            kept += claims(root, trees, tree)
+                            if layout is not None and layout.tree is not None:
+                                kept += git_guards(tree, common)
+                            kept = warnings + kept
+                        else:
+                            check_mounts = False  # the pre-teardown refusal already names the owner; do not repeat it
+                    if check_mounts:
+                        current_mounts = containers()
+                        if current_mounts is None:
+                            kept.append("containers cannot be checked")
+                        elif any(inside(mount.resolve(), tree) for mount in current_mounts):
+                            kept.append("a container binds a path in it")
+                        try:
+                            items, owners_kept = owner_guards(tree, owned_items(root, db), completed)
+                            kept += owners_kept
+                        except SQLAlchemyError as exc:
+                            failed = True
+                            kept.append(f"store ownership cannot be checked ({type(exc).__name__})")
                     if not kept:
                         removal_started = True
                         shutil.rmtree(tree)
