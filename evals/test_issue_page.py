@@ -32,6 +32,8 @@ import one_shot  # noqa: E402
 import pages as pg  # noqa: E402
 import render_board as rb  # noqa: E402
 import task_forge  # noqa: E402
+from backlog_ref import Backlog  # noqa: E402
+from tracker import issue_key  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 import tracker_write as tw  # noqa: E402
 from test_flow_chart import BoardTest, CT, KANBAN, LANES, NOW, TODAY, TODAY_TRACKER, YESTERDAY, at, flow_launch_tracker, merged  # noqa: E402
@@ -883,6 +885,55 @@ def flow_section(html: str) -> str:
     assert start, "no Flow section"
     after = next((m.start() for m in re.finditer(r"<h2[^>]*>\s*(?!Flow\b)", html[start.end():])), None)
     return text(html[start.start():start.end() + after if after is not None else len(html)])
+
+
+class ClosedIssueHeaderTest(unittest.TestCase):
+    """#886: closed forge issues whose tracker rows are done match the board header, not OPEN."""
+
+    HOME = Backlog("https://labs.example.test", "team/app")
+    URL = "https://labs.example.test/team/app/-/issues/109"
+
+    def closed_sources(self) -> tuple[bs.Sources, bs.Issue]:
+        from datetime import timezone
+
+        closed_at = at(TODAY, "01:00").astimezone(timezone.utc)
+        key = issue_key(self.URL, self.HOME)
+        issue = replace(ISSUE, ref=key, url=self.URL, state="closed", closed_at=closed_at)
+        return bs.Sources({}, {key: issue}, {}, (), {}, home=self.HOME), issue
+
+    def header_chip(self, html: str) -> str:
+        header = re.search(r"<header\b.*?</header>", html, re.S)[0]
+        return re.search(r'<span class="chip[^"]*">([^<]+)</span>', header)[1]
+
+    def test_done_tracker_and_closed_issue_show_done_or_closed_not_open(self):
+        src, _ = self.closed_sources()
+        tracker = DONE_TRACKER.replace("#109", self.URL)
+        chip = self.header_chip(page(109, src=src, trackers=[(TODAY, tracker)]))
+        self.assertNotRegex(chip, r"(?i)^(open|waiting|running)$")
+        self.assertRegex(chip, r"(?i)^(done|closed)$")
+
+    def test_render_passes_sources_home_to_flow_chart_build(self):
+        src, _ = self.closed_sources()
+        with mock.patch.object(fc, "build", wraps=fc.build) as build:
+            page(109, src=src, trackers=[(TODAY, DONE_TRACKER)])
+        self.assertIs(build.call_args.kwargs.get("home"), src.home)
+
+    def test_the_board_and_task_page_agree_on_a_closed_issues_flow_status(self):
+        src, issue = self.closed_sources()
+        tracker = DONE_TRACKER.replace("#109", self.URL)
+        cfg = BoardTest().cfg()
+        board_rows = ForgeMergedTaskPageTest.flow_rows(
+            lambda: rb.render(tracker, cfg, NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
+                               stage_log=[(YESTERDAY, YESTERDAY_TRACKER)], sources=src))
+        task_html = ip.render(109, [(TODAY, tracker)], src, NOW, LANES)
+        task_chip = re.search(r'<span class="chip (\w+)">', re.search(r"<header\b.*?</header>", task_html, re.S)[0])[1]
+        status, row = board_rows["Upload size limit"]
+        self.assertEqual((status, row.note), ("closed", f"closed {at(TODAY, '01:00'):%H:%M}"))
+        card = next(c for col in rb.build_columns(rb.parse_tracker(tracker).tasks, LANES, KANBAN, src, NOW, {})
+                    for c in col.cards if c.name == "Upload size limit")
+        self.assertEqual(task_chip, card.kind)
+        refs = text(section(task_html, "References"))
+        self.assertRegex(refs, r"(?i)\bclosed\b")
 
 
 class DoneClockAfterMidnightTest(unittest.TestCase):

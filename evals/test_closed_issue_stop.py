@@ -209,6 +209,15 @@ class TaskPageEndedRowsTest(unittest.TestCase):
         html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES)
         self.assertRegex(tip.text(html), r"(?i)\bWorked\s+4h25m\s+of\s+5h35m\s+elapsed\s*·\s*1h10m\s+waiting\b")
 
+    def test_a_closed_issue_header_is_not_open(self):
+        closed_at = at(TODAY, "01:40").astimezone(timezone.utc)
+        issue = replace(tip.ISSUE, state="closed", closed_at=closed_at)
+        html = ip.render(109, tip.work_trackers(), tip.sources(issue=issue), NOW, LANES)
+        header = re.search(r"<header\b.*?</header>", html, re.S)[0]
+        chip = re.search(r'<span class="chip[^"]*">([^<]+)</span>', header)[1]
+        self.assertNotRegex(chip, r"(?i)^open$")
+        self.assertRegex(chip, r"(?i)^(closed|done)$")
+
 
 # --- #409: issue state is keyed by host and project, not by number alone ---------------------------------
 

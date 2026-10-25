@@ -23,7 +23,7 @@ from fragment import href, tab_bar
 from module_graph import section as _graph
 from clock import dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
-from tracker import TRAILING_NUMBER, issue_number, parse_tracker, resolve_due as _resolve_due
+from tracker import TRAILING_NUMBER, issue_key, issue_number, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, daily_trackers, read_config
 from settings import Graph, Kanban, SettingsError, load as load_settings
 
@@ -190,12 +190,13 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
            pending_refs: Container[str] = frozenset()) -> str | None:
     """The page, or None when no task in `trackers` names issue `number`. `cfg` resolves a task's due (the board's
     deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
-    ref = f"#{number}"
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
     mine = [t for t in known if issue_number(t.issue) == number]
     if not mine:
         return None
+    issue_keys = {issue_key(t.issue, sources.home) for t in mine if t.issue.strip()}
+    ref = next(iter(issue_keys)) if len(issue_keys) == 1 else f"#{number}"
     keys = set().union(*map(names, mine))
     log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
@@ -206,22 +207,34 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
     held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
-    rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                                ended=forge_ends(known, sources, now.tzinfo))
-            if issue_number(r.ref) == number]
+    ended = forge_ends(known, sources, now.tzinfo)
+    rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now, ended=ended,
+                                                home=sources.home)
+            if r.ref in issue_keys or issue_number(r.ref) == number]
     log = [m for m in log if m.name.strip().casefold() in keys]
-    issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
-    status = rows[0][0] if rows else mine[-1].kind
-    name = rows[0][1].name if rows else mine[0].label
+    issue = next((sources.issues[k] for k in issue_keys if k in sources.issues), sources.issues.get(f"#{number}"))
+    latest = {k: t for t in known for k in names(t)}  # later trackers win
+    current_tasks = list({t.name.strip().casefold(): t for t in mine}.values())
+    matched = [(s, r) for s, r in rows if r.ref in issue_keys] or rows
+    if all(t.kind == "done" for t in current_tasks):
+        status = "done"
+    elif any(ended.get(t.name.strip(), (None, ""))[1] == word for t in mine for word in ("merged", "closed")):
+        status = next(word for word in ("merged", "closed")
+                      if any(ended.get(t.name.strip(), (None, ""))[1] == word for t in mine))
+    elif matched:
+        status = matched[0][0]
+    else:
+        status = mine[-1].kind
+    name = matched[0][1].name if matched else mine[0].label
 
     order = {"open": 0, "merged": 1}
-    changes = sorted((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2))
+    changes = sorted((c for c in sources.changes.values() if issue_keys & set(c.issues) or f"#{number}" in c.issues),
+                     key=lambda c: order.get(c.state, 2))
     every = list(sources.changes.values())
     cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {ref} yet.</p></div>')
     change = changes[0] if changes else None
-    current = {t.name.strip().casefold(): t for t in mine}.values()
     why_not = ("the issue is closed" if issue and issue.state == "closed" else
-               "the task is done" if status == "merged" or all(t.kind == "done" for t in current) else "")
+               "the task is done" if status == "merged" or all(t.kind == "done" for t in current_tasks) else "")
     ahead = _next(rows, change, every, why_not, now) + (_files(change, every, number) if change and _paths(change) else "")
     ahead += _graph(change, graph, pages, root, "Architecture", f"No change names {ref} to graph.")
 
