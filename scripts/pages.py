@@ -1,26 +1,38 @@
 #!/usr/bin/env python3
-"""Serve the workspace's pages locally: the board and any page a session writes beside it.
+"""Purpose
+Start or confirm the workspace's page server on 127.0.0.1 when its Board line should be served. A GET re-renders a route when its sources change; this command does not open the board for the user.
 
-The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
-`/decisions/<slug>` a decision page, `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
-and diff. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
-`issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
-A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
-`.sources.json`) is newer than its last render, or differs in bytes from what that render read, and `/workers` on every GET (it reads the session logs too), and a thread refreshes `.sources.json` from the forge every minute. An open tab
-reloads itself when the file changes.
+When not to
+To write one file without a server, use chief-of-stuff board or chief-of-stuff decision instead. Do not use pages to open a browser. Agents should not run the internal serve command: --ensure starts it detached.
 
-    python3 pages.py --ensure [--root R]              # start it unless it is already serving; print status only
-    python3 pages.py serve --dir D --port P --root R  # what --ensure starts, detached
+Options
+--ensure: flag, default off. With no command, pages already ensures the server is running and prints status; this flag has the same effect as the bare command and matches the agent rules.
+--root: path, default . (current directory) when ensuring. Workspace whose CLAUDE.md ## Coordinator Board: line supplies URL http://127.0.0.1:<port>/ and dir `<pages dir>`. With serve, omitted means no workspace rendering or forge refresh.
+command: optional positional string, only choice serve, default omitted (ensure). serve runs the server in the foreground; --ensure starts this detached.
+--dir: path, default none. Pages directory, required with serve; ignored when ensuring.
+--port: integer, default none. Listen port, required with serve; ignored when ensuring.
+-h, --help: flag, default off. Print this help on stdout and exit 0 without starting a server or writing files.
 
-A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
-The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
-redirects back to the page, which then shows the decision answered.
+Output
+Text, not TOON or JSON; there are no structured fields. Ensuring prints exactly one stdout status line, never the URL: pages: serving (the same or a newer version already answers), pages: started (a new server answered), or pages: restarted (an older pages server was replaced).
+serve prints no status line. Its detached stdout and stderr append to <root>/.chief-of-stuff/pages.log. Ensuring failures print pages: not served — <reason> on stderr; usage faults print argparse usage and an error on stderr. Help goes to stdout.
 
-The `## Coordinator` block's `Board:` line names both halves: `URL http://127.0.0.1:<port>/` and
-``dir `<pages dir>` ``. It listens on 127.0.0.1 only, and it answers only requests whose Host is
-127.0.0.1 or localhost. `/` is today's board once today's tracker exists, else the newest one; `/all` lists every other file a session
-wrote there. Binding to loopback does not stop a page elsewhere from rebinding its own
-name to 127.0.0.1, but that page still sends its own name as the Host.
+Exit codes
+0: the server is serving, started or restarted, or help was printed; serve normally runs until stopped.
+1: ensuring failed (missing Board line or unreadable config, a foreign server owns the port, an older server cannot be identified or stopped, the new server did not come up, or a connection was denied, often by a sandbox). Unhandled file or serve startup errors also exit 1 with a traceback on stderr.
+2: usage fault (unknown argument, command other than serve, --port not an integer, or serve without --dir or --port).
+
+Side effects
+Ensuring reads the Board line, probes HEAD http://127.0.0.1:<port>/all, and, for an older server, reads <pages dir>/.pid and checks that process's command line. It creates the pages and log directories, appends <root>/.chief-of-stuff/pages.log, writes .pid only after a new server answers, and may SIGTERM an older pages.py serve on that port. It never switches to another port.
+The server binds only to 127.0.0.1 and accepts only a 127.0.0.1 or localhost Host. Routes: / is today's board once today's tracker exists, else the newest board; /workers shows running workers and today's ends; /decisions lists decisions; /decisions/<slug> shows one decision; /issues/<n> shows a tracker issue; /issues/<n>/source shows its change's source and diff; /all lists other non-hidden files a session wrote there. Rendered HTML files are served only through their routes, not their filenames.
+With a workspace root, GET (and HEAD) re-renders HTML when trackers, CLAUDE.md, settings TOML, decision JSON, .sources.json or renderer code/theme changes in time or bytes. /workers renders on every request and reads session logs too. Rendering writes HTML files in the pages directory, preserving unchanged files; an open tab reloads itself when its file changes. A render failure keeps the last good page with an error banner.
+A background thread reads forge and worker facts immediately and about every 60 seconds, writing <pages dir>/.sources.json. Issue source pages read local git files and diffs. Browser navigation to the board records local last-look files. POST /decisions/<slug> accepts form-encoded key and/or words and writes that decision JSON's answer {key, words, at} for the coordinator, then redirects back to the page.
+No store or forge writes. There is no --commit, preview or dry run: writes happen automatically. This command does not open a browser, and nothing here ever opens the board for the user.
+
+Examples
+chief-of-stuff pages --ensure --root ~/work/field-notes
+chief-of-stuff pages --root ~/work/field-notes
+chief-of-stuff pages --help
 """
 
 from __future__ import annotations
@@ -503,14 +515,18 @@ def from_config(root: Path) -> tuple[Path, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
-    ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
-    ap.add_argument("command", nargs="?", choices=("serve",))
-    ap.add_argument("--dir")
-    ap.add_argument("--port", type=int)
+    ap = argparse.ArgumentParser(prog="chief-of-stuff pages", description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    # shortcut: --ensure is unused; the bare command already ensures; drop the flag when every caller stops passing it.
+    ap.add_argument("--ensure", action="store_true", help="flag; default off; ensure the server (also the bare command's behavior)")
+    ap.add_argument("--root", help="path; default . when ensuring, none with serve; workspace holding CLAUDE.md")
+    ap.add_argument("command", nargs="?", choices=("serve",), help="string; default omitted (ensure); internal foreground server")
+    ap.add_argument("--dir", help="path; default none; required with serve, ignored when ensuring; pages directory")
+    ap.add_argument("--port", type=int, help="integer; default none; required with serve, ignored when ensuring; listen port")
     args = ap.parse_args(argv)
     if args.command == "serve":
+        if args.dir is None or args.port is None:
+            ap.error("serve requires --dir and --port")
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
         return 0
     root = Path(args.root or ".")

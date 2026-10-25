@@ -12,6 +12,36 @@ sys.path.insert(0, str(ROOT))
 import chief_of_stuff as cli  # noqa: E402
 
 
+def assert_command_help(text):
+    """Shared command-reference sections; each command opts in through its help test."""
+    for heading in ("Purpose", "When not to", "Options", "Output", "Exit codes", "Side effects", "Examples"):
+        assert heading in text.splitlines(), f"missing command help section: {heading}"
+
+
+class PagesCommandTest(unittest.TestCase):
+    def pages(self, *args):
+        return subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), "pages", *args],
+                              capture_output=True, text=True)
+
+    def test_help_is_the_agent_command_reference(self):
+        done = self.pages("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        assert_command_help(done.stdout)
+        for text in ("chief-of-stuff pages", "--ensure", "/workers", "re-render", "does not open"):
+            self.assertIn(text, done.stdout)
+        self.assertNotIn("pages: started", done.stdout.splitlines())
+
+    def test_serve_requires_directory_and_port(self):
+        for args in (("serve",), ("serve", "--dir", "."), ("serve", "--port", "8787")):
+            with self.subTest(args=args):
+                done = self.pages(*args)
+                self.assertEqual(done.returncode, 2, done.stderr)
+                self.assertEqual(done.stdout, "")
+                self.assertIn("usage:", done.stderr)
+                self.assertNotIn("Traceback", done.stderr)
+
+
 class InstallTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
