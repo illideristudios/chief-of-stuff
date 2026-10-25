@@ -21,7 +21,7 @@ import tracker_log
 from decision_page import HEAD, _md, _section, context, entries, held_refs, span, write_if_changed
 from fragment import href, tab_bar
 from module_graph import section as _graph
-from clock import dur as _dur
+from clock import done_clock, dur as _dur
 from task_forge import forge_ends, held_names, hold_causes
 from tracker import TRAILING_NUMBER, issue_number, parse_tracker, resolve_due as _resolve_due
 from workspace import Config, ConfigError, daily_trackers, read_config
@@ -184,6 +184,33 @@ def _next(rows, change: board_sources.Change | None, changes, why_not: str, now:
     return _section("What happens next", '    <div class="card">\n' + "\n".join(f"      <p>{x}</p>" for x in lines) + "\n    </div>")
 
 
+def _account_end(status: str, tasks, completions: dict[str, tuple[datetime, str]], now: datetime,
+                 segment_end: datetime, *, terminal_stage: bool) -> datetime:
+    """Where the worked/elapsed total stops (#913). An open task runs to `now`, so the idle time after the last
+    worker counts as waiting. A merge, a close, a done clock, or a move into a lane's last stage freezes it.
+    A finished row with no recorded time keeps `segment_end`."""
+    finished = status in ("merged", "closed", "done") or (bool(tasks) and all(t.kind == "done" for t in tasks))
+    # A grouped row can still read needs-input when one of its tasks has reached the lane's last stage (#220).
+    # Those bars already stop at that move, so the segment end is the completion.
+    if terminal_stage and not finished:
+        return min(segment_end, now)
+    if not finished:
+        return now
+    names = {t.name.strip() for t in tasks}
+    forge = [completions[name][0] for name in names if name in completions]
+    clocks = [clock for t in tasks if t.kind == "done" and t.state_time
+              and (clock := done_clock(t.state_time, now, now.tzinfo))]
+    if forge and clocks:
+        bound = min(max(forge), max(clocks))  # a forge time clips a later done clock, and does not extend an earlier one
+    elif forge:
+        bound = max(forge)
+    elif clocks:
+        bound = max(clocks)
+    else:
+        bound = segment_end
+    return min(bound, now)
+
+
 def render(number: int, trackers: list[tuple[date, str]], sources: board_sources.Sources, now: datetime,
            lanes: dict | None = None, cfg: Config | None = None, graph: Graph | None = None, pages: Path | None = None,
            root: Path | None = None, pending: int = 0, kanban: Kanban | None = None,
@@ -206,8 +233,8 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
     # #228: held as the board holds it, from today's tasks less the standing ones, so both name the same cause.
     today = [t for t in parse_tracker(trackers[-1][1]).tasks if not t.standing]
     held = held_names(hold_causes(today, kanban, sources, lanes or {}, pending_refs))
-    rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                                ended=forge_ends(known, sources, now.tzinfo))
+    completions = forge_ends(known, sources, now.tzinfo)
+    rows = [(s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now, ended=completions)
             if issue_number(r.ref) == number]
     log = [m for m in log if m.name.strip().casefold() in keys]
     issue, latest = sources.issues.get(ref), {k: t for t in known for k in names(t)}  # later trackers win
@@ -242,8 +269,12 @@ def render(number: int, trackers: list[tuple[date, str]], sources: board_sources
             what[m] = f"ended {escape(ENDED.get(m.stage, 'ended'))} · {escape(w[3])} · {escape(runs[-1][1][4])}"
     steps = "\n".join(f'      <div class="step"><span class="when">{_clock(m.at, now)}</span><span class="dot" data-k="{escape(m.stage)}">'
                       f"</span><span>{what.get(m) or _md(m.line.split(' ', 2)[2])}</span></div>" for m in log)
-    # (#200, #220) the same clipped rows end both a still-running worker's span and elapsed, below
-    end = max((g.end for _, r in rows for g in r.segments if g.kind == "done"), default=now)
+    # (#200, #220) a still-running worker stops at the same boundary as elapsed.
+    # (#913) done bars stop at the last move while a task is held; that graphic is not the elapsed end.
+    segment_end = max((g.end for _, r in rows for g in r.segments if g.kind == "done"), default=now)
+    last_stage = {lane.stages[-1] for lane in (lanes or {}).values() if lane.stages}
+    terminal_stage = any(not m.launch and m.stage in last_stage for m in log)
+    end = _account_end(status, tuple(current), completions, now, segment_end, terminal_stage=terminal_stage)
     lines, spans = [], []
     for who, runs in workers.items():
         task = latest.get(runs[-1][0].name.strip().casefold())

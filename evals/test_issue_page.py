@@ -18,7 +18,7 @@ import tempfile
 import threading
 import unittest
 from dataclasses import replace
-from datetime import datetime, time
+from datetime import date, datetime, time, timezone
 from html import unescape
 from pathlib import Path
 from unittest import mock
@@ -883,6 +883,151 @@ def flow_section(html: str) -> str:
     assert start, "no Flow section"
     after = next((m.start() for m in re.finditer(r"<h2[^>]*>\s*(?!Flow\b)", html[start.end():])), None)
     return text(html[start.start():start.end() + after if after is not None else len(html)])
+
+
+# 17:16 yesterday plus 8h25m is 01:41 today; an hour later is 02:41. One minute of work is 17:16–17:17.
+OPEN_NOW = at(TODAY, "01:41")
+OPEN_LATER = at(TODAY, "02:41")
+ATTEMPT_TREE = "worktree `trees/upload` (feat/upload)"
+SIDE_TREE = "worktree `trees/side` (feat/side)"
+
+
+def _tracker(rows: str, ownership: str, log: str = "") -> str:
+    return f"""# Tracker
+
+## Tasks
+
+{HEAD}{rows}
+## File ownership
+
+| context | paths |
+|---|---|
+{ownership}
+## Log
+
+{log}"""
+
+
+def _launch(path: Path, item: str, worker: str, tree: str, start: str, end: str | None, status: str) -> None:
+    one_shot.record_launch(path, item, worker, tree, "claude", "opus", start)
+    if end is not None:
+        one_shot.update_tracker(path, item, worker, "Robin", status, "attempt ended", "src/upload/limits.py", end)
+
+
+def ended_attempts(runs: tuple[tuple[str, str, str], ...], log: str = "",
+                   final: tuple[str, str] | None = None) -> str:
+    """One open issue, each run `(start, end, status)` on Cap uploads. `final` rewrites the last owner cell."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "tracker.md"
+        path.write_text(_tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n",
+            "| Upload size limit | `src/upload/` |\n", log))
+        for start, end, status in runs:
+            if "| Robin | waiting |" in path.read_text():
+                path.write_text(path.read_text().replace("| Robin | waiting |", "| unassigned | open |"))
+            _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, start, end, status)
+        text_out = path.read_text()
+    if final:
+        text_out = text_out.replace(*final)
+    return text_out
+
+
+def overlapping_attempts() -> str:
+    """Two ended workers on one issue, 17:16–18:16 and 17:46–18:16, so the second hour overlaps."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "tracker.md"
+        path.write_text(_tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n"
+            f"| Side pass | Side item | unassigned | open | {YESTERDAY} |  | S | build | implement | #109 | c |\n",
+            "| Upload size limit | `src/upload/` |\n| Side pass | `src/side/` |\n"))
+        _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, "17:16", "18:16", "human_review")
+        _launch(path, "Side item", "impl-2", SIDE_TREE, "17:46", "18:16", "human_review")
+        return path.read_text()
+
+
+def worked_line(html: str) -> str:
+    got = flow_section(html)
+    found = re.search(r"Worked .+? waiting", got)
+    if not found:
+        raise AssertionError(f"no worked line in {got!r}")
+    return found.group(0)
+
+
+def open_page(tracker: str, now: datetime, *, pending: bool = False, issue: bs.Issue = ISSUE,
+              day: date | None = None) -> str:
+    refs = {"#109": None} if pending else frozenset()
+    return ip.render(109, [(day or YESTERDAY, tracker)], sources(issue=issue), now, LANES, pending_refs=refs)
+
+
+class OpenTaskWaitingTest(unittest.TestCase):
+    """(#913) Elapsed for an open task runs to the render clock, so time after the last worker counts as waiting.
+    A close still freezes the total. Worker outcome, a hold, and a forecast do not."""
+
+    def test_a_failed_attempt_counts_the_wait_after_it_ends(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_the_same_open_task_counts_another_hour_when_rendered_later(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, pending=True)),
+                         "Worked 1m of 9h25m elapsed · 9h24m waiting")
+
+    def test_a_completed_attempt_does_not_freeze_an_open_task(self):
+        tracker = ended_attempts((("17:16", "17:17", "done"),))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_a_hold_without_a_pending_decision_still_counts_idle_time(self):
+        # Waiting on a person, and an open row with no owner, neither of which has an unanswered decision.
+        held = ended_attempts((("17:16", "17:17", "human_review"),))
+        free = ended_attempts((("17:16", "17:17", "human_review"),),
+                              final=("| Robin | waiting |", "| unassigned | open |"))
+        for name, tracker in (("held", held), ("free slot", free)):
+            with self.subTest(name=name):
+                self.assertEqual(worked_line(open_page(tracker, OPEN_NOW)),
+                                 "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_a_stage_move_at_the_worker_end_does_not_stop_an_open_task(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),),
+                                 log="- 17:00 stage: Upload size limit → implement\n- 17:17 stage: Upload size limit → review\n")
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 1m of 8h25m elapsed · 8h24m waiting")
+
+    def test_waiting_includes_the_gap_and_the_time_after_the_last_attempt(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"), ("18:00", "18:10", "human_review")))
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, pending=True)),
+                         "Worked 11m of 8h25m elapsed · 8h14m waiting")
+
+    def test_overlapping_workers_count_once_and_idle_time_after_them_still_waits(self):
+        self.assertEqual(worked_line(open_page(overlapping_attempts(), OPEN_NOW, pending=True)),
+                         "Worked 1h00m of 8h25m elapsed · 7h25m waiting")
+
+    def test_a_worker_still_running_counts_as_work_through_now(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "tracker.md"
+            path.write_text(_tracker(
+                f"| Upload size limit | Cap uploads | unassigned | open | {TODAY} |  | M | build | implement | #109 | c |\n",
+                "| Upload size limit | `src/upload/` |\n"))
+            _launch(path, "Cap uploads", "impl-1", ATTEMPT_TREE, "00:41", None, "human_review")
+            tracker = path.read_text()
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, day=TODAY)),
+                         "Worked 1h00m of 1h00m elapsed · 0m waiting")
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, day=TODAY)),
+                         "Worked 2h00m of 2h00m elapsed · 0m waiting")
+
+    def test_a_close_after_the_worker_ends_includes_the_wait_and_then_freezes(self):
+        tracker = ended_attempts((("17:16", "17:17", "human_review"),))
+        closed = replace(ISSUE, state="closed", closed_at=at(YESTERDAY, "20:00").astimezone(timezone.utc))
+        line = "Worked 1m of 2h44m elapsed · 2h43m waiting"
+        self.assertEqual(worked_line(open_page(tracker, OPEN_NOW, issue=closed)), line)
+        self.assertEqual(worked_line(open_page(tracker, OPEN_LATER, issue=closed)), line)
+
+    def test_a_task_with_no_launches_has_no_worked_line(self):
+        tracker = _tracker(
+            f"| Upload size limit | Cap uploads | unassigned | open | {YESTERDAY} |  | M | build | implement | #109 | c |\n",
+            "", "- 17:00 stage: Upload size limit → implement\n")
+        self.assertNotIn("Worked", flow_section(open_page(tracker, OPEN_NOW)))
 
 
 class DoneClockAfterMidnightTest(unittest.TestCase):
