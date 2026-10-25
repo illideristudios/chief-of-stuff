@@ -621,6 +621,41 @@ class ReconcileTest(unittest.TestCase):
                 item = replace(Item(), stage="merge", review_state=state, merge_state="ready")
                 self.assertEqual(self.plan(item, [Segment("implement")], {}), [expected])
 
+    def test_forge_only_workflow_merges_when_worker_findings_are_unknown(self):
+        # findings omitted: open_findings has no key, so counts stay None.
+        self.p.workflows["standard"] = replace(self.p.workflows["standard"], edges=(policy.Edge("implement", "merge"),))
+        approved = replace(Item(), stage="merge", review_state="approved", merge_state="ready")
+        history = [Segment("implement")]
+        cases = (
+            ("approved", self.plan(approved, history), [reconcile.Merge(KEY)]),
+            ("none", self.plan(replace(approved, review_state="none"), history),
+             [reconcile.Wait(KEY, "review has not run")]),
+            ("changes_requested", self.plan(replace(approved, review_state="changes_requested"), history),
+             [reconcile.Wait(KEY, "changes requested on the forge")]),
+            ("blocking", self.plan(approved, history, {"critical": 1}),
+             [reconcile.Wait(KEY, "blocking review findings")]),
+        )
+        for name, actual, expected in cases:
+            with self.subTest(workflow="implement-merge", case=name):
+                self.assertEqual(actual, expected)
+        saved = self.p
+        self.p = policy.parse({
+            "default_workflow": "merge_only",
+            "stages": {"merge": {}},
+            "workflows": {"merge_only": {"start": "merge", "edges": []}},
+        })
+        with self.subTest(workflow="start-merge"):
+            self.assertEqual(self.plan(approved), [reconcile.Merge(KEY)])
+        self.p = policies()
+        with self.subTest(workflow="standard"):
+            self.assertEqual(self.plan(approved, [Segment("review")]),
+                             [reconcile.Wait(KEY, "review findings are unknown")])
+        self.p = saved
+        self.p.stages["merge"] = policy.Place("merge", None, {"architect": True})
+        with self.subTest(workflow="architect"):
+            self.assertEqual(self.plan(approved, history),
+                             [reconcile.Wait(KEY, "architect consultation is required")])
+
     def test_start_merge_without_edges_merges(self):
         self.p = policy.parse({
             "default_workflow": "merge_only",
