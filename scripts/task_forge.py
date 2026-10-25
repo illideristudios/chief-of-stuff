@@ -309,6 +309,7 @@ class PageData:
     stage_reports: tuple
     resumes: dict[str, Any]
     issue_logs: tuple = ()
+    engine_logs: tuple = ()
 
     def items(self):
         return self.work_items
@@ -337,4 +338,4 @@ def page_data(store) -> PageData:
     items = tuple(store.items())
     # Decision rows are append-only; presenters see each decision's latest row only.
     return PageData(items, tuple(store.segments()), tuple(decision_actions.current_rows(store.decisions())), tuple(store.reports()),
-                    {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()))
+                    {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()), tuple(store.engine_log()))

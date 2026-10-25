@@ -434,6 +434,9 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     meta = [f"tracker {(tracker_at or now).astimezone(zone):%H:%M}",
             *(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in ("kanban", "merge requests", "workers") if k in sources.fetched),
             _tasks(len(tasks))]
+    if db is not None and (latest := next((row.message for row in reversed(db.engine_logs)
+                                           if row.kind == "policy_change"), "")):
+        meta.append(latest)
     head = panels.Header(f"Board · {now.strftime('%a %d %b')}", tuple(meta), now, nearest.name, nearest.at,
                          tuple(f"{k}: {why}" for k, why in sources.errors.items()))
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
