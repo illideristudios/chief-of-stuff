@@ -113,6 +113,12 @@ class GatherTest(unittest.TestCase):
             with self.subTest(data=data):
                 self.db.set_resume(KEY, data)
                 self.assertIs(dict(self.release_gather(f).implementation_requests).get((KEY, "implement", 2)), expected)
+        self.db.record_segment(KEY, "implement", 3, started_at=(NOW-timedelta(hours=4)).isoformat(),
+                               ended_at=(NOW-timedelta(hours=3)).isoformat(), outcome="done")
+        self.db.set_resume(KEY, {"work_branch": "work/issue-1"})
+        f.requests.reset_mock()
+        self.assertIsNone(dict(self.release_gather(f).implementation_requests).get((KEY, "implement", 2)))
+        f.requests.assert_not_called()
         self.db.record_segment(KEY, "implement", 3, started_at=NOW.isoformat(), ended_at=NOW.isoformat(), outcome="failed")
         f.requests.reset_mock()
         self.assertEqual(self.release_gather(f).implementation_requests, ())

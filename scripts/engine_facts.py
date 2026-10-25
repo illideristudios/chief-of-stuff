@@ -183,7 +183,9 @@ def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | 
         record = _record(store, key, latest.stage, latest.attempt)
         branch = record.get("branch") if record else None
         if branch is None or (isinstance(branch, str) and not branch.strip()):
-            branch = data.get("work_branch")
+            # The shared branch belongs to the current attempt, never to an older segment with a later clock.
+            current_attempt = max(s.attempt for s in history if s.stage == "implement")
+            branch = data.get("work_branch") if latest.attempt == current_attempt else None
         candidates.append(((key, latest.stage, latest.attempt), branch))
     result = {identity: None for identity, _ in candidates}
     if not any(isinstance(branch, str) and branch.strip() for _, branch in candidates):
