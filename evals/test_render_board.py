@@ -333,7 +333,7 @@ class RenderTest(unittest.TestCase):
 
     def test_the_page_declares_its_charset_first(self) -> None:
         """The Artifact wrapper sets one; a local open of the written file showed `Â·` for every ` · ` (C7's visual check)."""
-        self.assertTrue(self.html.startswith('<meta charset="utf-8">\n'), self.html[:80])
+        self.assertTrue(self.html.startswith('<!doctype html>\n<html lang="en">\n<meta charset="utf-8">\n'), self.html[:80])
 
     def test_embeds_tracker_hash_and_instants(self) -> None:
         sha = hashlib.sha256(TRACKER.encode()).hexdigest()
@@ -2039,3 +2039,38 @@ class StoreDecisionLabelTest(unittest.TestCase):
         self.assertIn(f'href="{issue_href(own)}">#9</a>', html)
         self.assertIn(f'href="{issue_href(foreign)}">o/n#4</a>', html)
         self.assertNotIn(">github:", html)
+
+
+class BoardDecisionsBlockTest(unittest.TestCase):
+    """#971: the decisions block has a heading, open rows first, and answered rows folded away, not mixed in."""
+
+    def rows(self):
+        from types import SimpleNamespace
+
+        def row(n: int, status: str, answer=None):
+            return SimpleNamespace(id=n, issue_key=f"github:team/app#{n}", question=f"Q{n}?", answer=answer,
+                                   rerouted_to="", blocked_reason="", record={"status": status})
+        return [row(1, "answered", "allow"), row(2, "open"), row(3, "answered", "allow"), row(4, "blocked")]
+
+    def test_open_rows_lead_under_a_heading_and_answered_rows_fold(self) -> None:
+        html = rb._render_store_decisions(self.rows(), GitHubBacklog("team/app"))
+        self.assertIn("<h3>Decisions · 2 open</h3>", html)
+        head, _, fold = html.partition("<details")
+        self.assertIn("Q2?", head)
+        self.assertIn("Q4?", head)
+        self.assertNotIn("Q1?", head)
+        self.assertIn("<summary>2 answered</summary>", fold)
+        self.assertIn("Q1?", fold)
+        self.assertIn("Q3?", fold)
+
+    def test_no_open_rows_reads_none_open(self) -> None:
+        html = rb._render_store_decisions(self.rows()[:1], GitHubBacklog("team/app"))
+        self.assertIn("<h3>Decisions · none open</h3>", html)
+
+    def test_board_page_is_a_styled_standards_mode_document(self) -> None:
+        """#968: no doctype rendered the board in quirks mode; the decision forms had no rules at all."""
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        html = rb.render(TRACER_TRACKER, cfg, NOW)
+        self.assertTrue(html.startswith('<!doctype html>\n<html lang="en">'))
+        for rule in (".board-decisions", ".decision-item", ".decision-form"):
+            self.assertIn(rule + "{", html)
