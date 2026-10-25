@@ -127,7 +127,8 @@ def render(rows: list[Row], win: Window, ticks: list[tuple[datetime, str]] | Non
     return "\n".join(out)
 
 
-def legend(colors: dict[str, str | tuple[str, str]] = PALETTE, kinds: tuple[str, ...] = ("forecast", "hold")) -> str:
+def legend(colors: dict[str, str | tuple[str, str]] = PALETTE,
+           kinds: tuple[str, ...] = ("forecast", "hold", "failed")) -> str:
     """One swatch per category, then one per kind other than solid; `hold` displays as `needs input`."""
     keys = [f'<span class="gantt-bar gantt-done" data-cat="{_esc(c)}"></span>{_esc(c)}' for c in colors]
     keys += [f'<span class="gantt-bar gantt-{_kind(k)}"></span>{_esc("needs input" if k == "hold" else k)}' for k in kinds]
@@ -157,6 +158,7 @@ BASE_CSS = """\
 .gantt-bar.gantt-done{background:var(--c);box-shadow:inset 0 0 0 1px var(--e)}
 .gantt-bar.gantt-forecast{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--c) 40%,transparent) 0 3px,transparent 3px 6px);box-shadow:inset 0 0 0 1px var(--c)}
 .gantt-bar.gantt-hold{background:repeating-linear-gradient(135deg,var(--gantt-hold) 0 2px,var(--gantt-bg) 2px 5px);box-shadow:inset 0 0 0 1px var(--gantt-hold)}
+.gantt-bar.gantt-failed{background:var(--gantt-bg);box-shadow:inset 0 0 0 2px var(--gantt-hold)}
 .gantt-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;color:var(--gantt-muted)}
 .gantt-key{display:inline-flex;align-items:center;gap:5px}
 .gantt-legend .gantt-bar{position:static;width:18px;height:10px}
