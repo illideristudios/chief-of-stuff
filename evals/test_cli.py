@@ -331,5 +331,164 @@ class StoreBackedVenvRoutingTest(unittest.TestCase):
         self.assertEqual(reaching, set(cli.STORE_BACKED))
 
 
+# #838: one shared help check. A per-command issue adds its name to ENFORCED.
+HELP_PROSE = ("When not to use", "Output", "Exit codes", "Side effects", "Examples")
+ENFORCED = frozenset({"init"})
+
+
+def missing_sections(help_text: str, name: str) -> list[str]:
+    """Problems in one command's --help. Empty means the #838 sections are present."""
+    problems = []
+    lines = help_text.splitlines()
+    usage = next((line for line in lines if line.startswith("usage: ")), "")
+    if not usage.startswith(f"usage: chief-of-stuff {name}"):
+        problems.append(f"usage does not start chief-of-stuff {name}")
+    options_at = next((i for i, line in enumerate(lines) if line.rstrip(":") in ("options", "optional arguments")), None)
+    if options_at is None:
+        problems.append("missing heading: Options")
+        description = ""
+    else:
+        description = " ".join(line.strip() for line in lines[:options_at]
+                               if line.strip() and not line.startswith("usage:") and not line[:1].isspace())
+    if not description:
+        problems.append("empty description")
+    headings = [line.strip() for line in lines]
+    for heading in HELP_PROSE:
+        if heading not in headings:
+            problems.append(f"missing heading: {heading}")
+    example_at = next((i for i, line in enumerate(headings) if line == "Examples"), None)
+    tail = "\n".join(lines[example_at + 1:]) if example_at is not None else ""
+    if f"chief-of-stuff {name}" not in tail:
+        problems.append(f"no chief-of-stuff {name} line under Examples")
+    return problems
+
+
+def _help_section(help_text: str, heading: str) -> str:
+    lines = help_text.splitlines()
+    headings = [line.strip() for line in lines]
+    start = headings.index(heading)
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if headings[index] in HELP_PROSE:
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
+class InitHelpTest(unittest.TestCase):
+    """#839: `chief-of-stuff init --help` is the reference an agent discovers."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+
+    def init(self, *args):
+        return subprocess.run([sys.executable, str(ROOT / "chief_of_stuff.py"), "init", *args],
+                              cwd=self.cwd, capture_output=True, text=True)
+
+    def test_missing_sections_rejects_a_deficient_sample(self):
+        complete = "\n".join([
+            "usage: chief-of-stuff init [-h]", "", "Bootstrap a workspace.", "", "options:", "  -h, --help  show help",
+            "", "When not to use", "  models", "Output", "  text", "Exit codes", "  0", "Side effects", "  files",
+            "Examples", "  chief-of-stuff init --help",
+        ])
+        self.assertEqual(missing_sections(complete, "init"), [])
+        bare = missing_sections("usage: init_workspace.py\n\noptions:\n", "init")
+        self.assertIn("usage does not start chief-of-stuff init", bare)
+        self.assertIn("empty description", bare)
+        self.assertIn("missing heading: Examples", bare)
+
+    def test_public_help_meets_the_shared_standard_and_writes_nothing(self):
+        self.assertIn("init", ENFORCED)
+        done = self.init("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(list(self.cwd.iterdir()), [])
+        self.assertEqual(missing_sections(done.stdout, "init"), [], done.stdout)
+        self.assertNotIn("init_workspace.py", done.stdout.splitlines()[0])
+        text = done.stdout
+        options = " ".join(text.split("When not to use", 1)[0].split())
+        for flag in ("-h, --help", "--root", "--user", "--timezone", "--daily-dir", "--worktrees", "--agent",
+                     "--launcher", "--worker-mode", "--board-port", "--github-repo", "--gitlab-host",
+                     "--gitlab-project", "--gitlab-token-env", "--dry-run"):
+            self.assertIn(flag, options, flag)
+        for fact in ("default false", "required, no default", "default daily/", "default worktrees/",
+                     "default ghostty", "default interactive", "default unset",
+                     "default CHIEF_OF_STUFF_GITLAB_TOKEN", "1-65535", "mutually exclusive",
+                     "NAME:task or NAME:standing"):
+            self.assertIn(fact, options, fact)
+        avoided = " ".join(_help_section(text, "When not to use").split())
+        self.assertIn("chief-of-stuff models --root PATH", avoided)
+        self.assertIn("not an update", avoided)
+        self.assertIn("#825", avoided)
+        self.assertIn("not implemented", avoided)
+        self.assertIn("[workspaces]", avoided)
+        output = " ".join(_help_section(text, "Output").split())
+        for fact in ("Not TOON and not JSON", "stdout", "stderr", "configured ROOT", "would append to",
+                     "would create", "would keep existing", "label not created"):
+            self.assertIn(fact, output, fact)
+        codes = " ".join(_help_section(text, "Exit codes").split())
+        for fact in ("0", "1", "2", "usage fault", "still exit 0"):
+            self.assertIn(fact, codes, fact)
+        effects = " ".join(_help_section(text, "Side effects").split())
+        for fact in ("Appends one ## Coordinator block", "never replaced", "only when absent",
+                     "needs human", "--dry-run", "no --commit", "immediately", "gh", "token value is never written",
+                     "does not create a store", "no rollback"):
+            self.assertIn(fact, effects, fact)
+        examples = [line.strip() for line in _help_section(text, "Examples").splitlines()
+                    if line.strip().startswith("mkdir")]
+        self.assertEqual(len(examples), 3, examples)
+        self.assertIn("Robin", examples[0])
+        self.assertIn("/tmp/alder", examples[0])
+        self.assertIn("--dry-run", examples[0])
+        self.assertIn("America/Chicago", examples[0])
+        self.assertIn("Morgan", examples[1])
+        self.assertIn("/tmp/birch", examples[1])
+        self.assertIn("example-team/birch", examples[1])
+        self.assertIn("implementer:task", examples[1])
+        self.assertIn("--launcher tmux", examples[1])
+        self.assertIn("Casey", examples[2])
+        self.assertIn("/tmp/cedar", examples[2])
+        self.assertIn("https://gitlab.example.test", examples[2])
+        self.assertIn("example-team/cedar", examples[2])
+        self.assertIn("CEDAR_GITLAB_TOKEN", examples[2])
+        roots = ("/tmp/alder", "/tmp/birch", "/tmp/cedar")
+        for example, root in zip(examples, roots):
+            self.assertIn(root, example)
+            self.assertIn("chief-of-stuff init", example)
+            for other in roots:
+                if other != root:
+                    self.assertNotIn(other, example)
+
+    def test_usage_faults_exit_2_and_write_nothing(self):
+        missing = self.init()
+        self.assertEqual(missing.returncode, 2, missing.stderr)
+        self.assertIn("usage:", missing.stderr)
+        self.assertEqual(list(self.cwd.iterdir()), [])
+        workspace = self.cwd / "workspace"
+        workspace.mkdir()
+        clash = self.init("--root", str(workspace), "--user", "Morgan", "--timezone", "America/Chicago",
+                          "--github-repo", "example-team/birch", "--gitlab-host", "https://gitlab.example.test")
+        self.assertEqual(clash.returncode, 2, clash.stderr)
+        self.assertIn("not allowed with", clash.stderr)
+        self.assertEqual(list(workspace.iterdir()), [])
+
+    def test_unpaired_gitlab_flags_exit_1_and_dry_run_writes_nothing(self):
+        workspace = self.cwd / "cedar"
+        workspace.mkdir()
+        unpaired = self.init("--root", str(workspace), "--user", "Casey", "--timezone", "America/Chicago",
+                             "--gitlab-host", "https://gitlab.example.test")
+        self.assertEqual(unpaired.returncode, 1, unpaired.stderr)
+        self.assertIn("refused:", unpaired.stderr)
+        self.assertIn("requires --gitlab-project", unpaired.stderr)
+        self.assertEqual(list(workspace.iterdir()), [])
+        preview = self.init("--dry-run", "--root", str(workspace), "--user", "Robin",
+                            "--timezone", "America/Chicago", "--github-repo", "example-team/alder")
+        self.assertEqual(preview.returncode, 0, preview.stderr)
+        self.assertIn("would create", preview.stdout)
+        self.assertEqual(list(workspace.iterdir()), [])
+
+
 if __name__ == "__main__":
     unittest.main()

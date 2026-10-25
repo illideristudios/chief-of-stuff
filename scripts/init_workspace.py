@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Configure a workspace's forge, Coordinator block and engine settings."""
+"""Bootstrap configuration inside an existing workspace that has no Coordinator block.
+
+Run it once on a directory that already exists and has no ## Coordinator block.
+"""
 
 from __future__ import annotations
 
@@ -182,25 +185,117 @@ def provision_kanban(forge, config: Kanban | None, dry: bool) -> tuple[str, str]
     return "\n".join(x for x in (hold_out, stage_out) if x), "\n".join(x for x in (hold_err, stage_err) if x)
 
 
+EPILOG = """\
+When not to use
+  A workspace that already has a ## Coordinator block is refused. To install or
+  keep model guidance on a workspace that is already configured, use
+  chief-of-stuff models --root PATH. Init is not an update and not a reset.
+  Parent [workspaces] setup (architecture section 12, issue #825) is not
+  implemented: init does not read or write that table, register child
+  workspaces, or start an engine.
+
+Output
+  Human-readable text. Not TOON and not JSON, and there are no structured
+  fields. --help writes this text on stdout and leaves stderr empty.
+  A successful write prints, on stdout, an optional "ignored in EXCLUDE" line,
+  then optional "hold label" and "stage label" lines for labels the forge
+  created, then "configured ROOT; settings in SETTINGS; model guidance in
+  GUIDANCE". ROOT, SETTINGS and GUIDANCE are the workspace path and the two
+  destination paths.
+  --dry-run prints "would append to" or "would create" for the Coordinator
+  file and prints the proposed block; "would keep existing" or "would create"
+  for settings, and prints new settings only when the file is absent; the same
+  keep-or-create line for model guidance, without its contents; and optional
+  "would create the hold label" or "would create the stage label" lines, or a
+  "would check GitHub Project" line when existing settings name a project.
+  A forge that refuses a label prints "hold label not created" or "stage label
+  not created" on stderr, and initialization still continues. Configuration and I/O refusals print
+  "refused:" on stderr. Usage faults print usage and an error on stderr.
+
+Exit codes
+  0  initialization, --dry-run, or --help succeeded. A label warning on stderr
+     is still exit 0.
+  1  refused configuration or I/O, including a missing GitLab partner flag, a
+     --board-port outside 1-65535, a bad user, timezone, directory, or token
+     variable, an existing Coordinator block, and invalid existing settings.
+  2  usage fault: a missing required argument, an unknown option, an invalid
+     choice, a non-integer --board-port, or both --github-repo and --gitlab-host.
+
+Side effects
+  Reads the workspace directory, an existing Coordinator file, existing
+  settings (validated, not rewritten), the shipped model-guidance template
+  when guidance is created, and timezone data. Inside a git work tree it also
+  reads the exclude file. A real run with a forge reads that forge and may
+  create missing labels. --dry-run reads the same local files and does not
+  contact the forge.
+  Appends one ## Coordinator block to an existing file, keeping the text above
+  it and trimming trailing whitespace. Creates the file under a "# Workspace"
+  heading when it is absent. An existing Coordinator block is never replaced.
+  Creates the settings file only when absent: notifications off, the chosen
+  launcher and worker mode, a [kanban] map for the shipped workflow, hold label
+  "needs human", and commented examples. Existing valid settings are kept.
+  --launcher and --worker-mode change only settings this run creates.
+  Creates model guidance only when absent and keeps an existing file.
+  Inside a git work tree, appends ignore rules for the new files, the daily and
+  worktree directories, and engine state names (store.db and .chief-of-stuff/).
+  A Coordinator file is listed only when this run creates it. Other exclude
+  lines stay.
+  It does not create a store, issues, a repository, daily files, worktrees,
+  board files, or a running service, and it does not install or start an
+  engine or supervisor, launch a worker, or open a browser. --board-port only
+  records the board URL and pages/ directory.
+  A forge choice is required. GitHub calls use gh authentication. GitLab
+  records the token variable name and uses it for API calls; the token value
+  is never written. New settings cause the hold label and one stage label per
+  shipped workflow stage to be created when the forge lacks them. Existing
+  settings that name a GitHub Project are checked for those options instead of
+  creating stage labels; a missing hold label is still created. Those forge
+  writes happen immediately. There is no --commit flag. --dry-run only reports
+  them. There is no rollback: label provisioning runs before the local writes,
+  and a later I/O failure can leave a partial workspace.
+
+Examples
+  mkdir -p /tmp/alder && chief-of-stuff init --dry-run --root /tmp/alder --user Robin --timezone America/Chicago --github-repo example-team/alder
+  mkdir -p /tmp/birch && chief-of-stuff init --root /tmp/birch --user Morgan --timezone America/Chicago --github-repo example-team/birch --agent implementer:task --launcher tmux
+  mkdir -p /tmp/cedar && chief-of-stuff init --root /tmp/cedar --user Casey --timezone America/Chicago --gitlab-host https://gitlab.example.test --gitlab-project example-team/cedar --gitlab-token-env CEDAR_GITLAB_TOKEN
+"""
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--root", type=Path, required=True, help="existing workspace directory")
-    ap.add_argument("--user", required=True, help="name to show as the workspace user")
-    ap.add_argument("--timezone", required=True, help="IANA timezone, e.g. America/Chicago")
-    ap.add_argument("--daily-dir", default="daily/")
-    ap.add_argument("--worktrees", default="worktrees/")
+    ap = argparse.ArgumentParser(
+        prog="chief-of-stuff init", description=__doc__, epilog=EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter, add_help=False)
+    ap.add_argument("-h", "--help", action="help",
+                    help="Boolean, default false. Print this text on stdout and exit 0. Other arguments are not required.")
+    ap.add_argument("--root", type=Path, required=True, metavar="PATH",
+                    help="Path, required, no default. An existing workspace directory. init does not create it.")
+    ap.add_argument("--user", required=True, metavar="NAME",
+                    help="String, required, no default. Coordinator user: one trimmed, nonempty printable line without backticks or pipes.")
+    ap.add_argument("--timezone", required=True, metavar="ZONE",
+                    help="IANA timezone string, required, no default. Must be a zone ZoneInfo recognizes, for example America/Chicago.")
+    ap.add_argument("--daily-dir", default="daily/", metavar="DIR",
+                    help="Relative directory string, default daily/. Daily log and tracker paths, kept inside the workspace with a trailing slash. The directory is not created.")
+    ap.add_argument("--worktrees", default="worktrees/", metavar="DIR",
+                    help="Relative directory string, default worktrees/. Coordinator worktree location, with the same path rules. Worktrees are not created.")
     ap.add_argument("--agent", action="append", default=[], metavar="NAME:task|standing",
-                    help="worker type and lifetime; repeat for multiple types")
-    ap.add_argument("--launcher", choices=("ghostty", "tmux"), default="ghostty")
+                    help="Repeatable string, default none. Append one Agent line. The form is NAME:task or NAME:standing; NAME matches [A-Za-z0-9][A-Za-z0-9._-]{0,63}.")
+    ap.add_argument("--launcher", choices=("ghostty", "tmux"), default="ghostty",
+                    help="Choice ghostty or tmux, default ghostty. Sets [workers].launcher only in settings this run creates. Starts no terminal.")
     ap.add_argument("--worker-mode", choices=("interactive", "one-shot"), default="interactive",
-                    help="default dispatch mode written to [workers] in the workspace TOML")
-    ap.add_argument("--board-port", type=int, help="configure local board serving on this fixed port")
+                    help="Choice interactive or one-shot, default interactive. Sets [workers].mode only in settings this run creates. Dispatches no worker.")
+    ap.add_argument("--board-port", type=int, metavar="PORT",
+                    help="Integer, default unset. Record a Pages board at http://127.0.0.1:PORT/ with directory pages/. Valid range 1-65535. Nothing is served or opened.")
     backlog_group = ap.add_mutually_exclusive_group()
-    backlog_group.add_argument("--github-repo", help="GitHub owner/repository")
-    backlog_group.add_argument("--gitlab-host", help="GitLab https URL; also pass --gitlab-project")
-    ap.add_argument("--gitlab-project", help="GitLab group/repository")
-    ap.add_argument("--gitlab-token-env", default="CHIEF_OF_STUFF_GITLAB_TOKEN")
-    ap.add_argument("--dry-run", action="store_true", help="print the new block and settings without writing")
+    backlog_group.add_argument("--github-repo", metavar="OWNER/NAME",
+                               help="owner/repository string, default unset. Select a GitHub backlog, mutually exclusive with --gitlab-host. GitHub calls use gh. Required unless --gitlab-host is set.")
+    backlog_group.add_argument("--gitlab-host", metavar="URL",
+                               help="HTTP or HTTPS URL string, default unset. Select a GitLab backlog, mutually exclusive with --github-repo. Requires --gitlab-project. Required unless --github-repo is set.")
+    ap.add_argument("--gitlab-project", metavar="GROUP/NAME",
+                    help="Group/project string, default unset. GitLab project path. Requires --gitlab-host, and is refused without it even when --github-repo is set.")
+    ap.add_argument("--gitlab-token-env", default="CHIEF_OF_STUFF_GITLAB_TOKEN", metavar="NAME",
+                    help="Environment-variable name, default CHIEF_OF_STUFF_GITLAB_TOKEN. Recorded on a GitLab Backlog line and used for GitLab calls. The token value is never written. Checked even for a GitHub backlog.")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Boolean, default false. Validate and print the intended file changes and label intent. No file writes and no forge calls.")
     args = ap.parse_args(argv)
     root = args.root.resolve()
     try:
