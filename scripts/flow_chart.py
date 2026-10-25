@@ -12,13 +12,15 @@ A done task's last segment ends at its done time, not now.
 
 from __future__ import annotations
 
+
 import heapq
 from dataclasses import replace
 from datetime import datetime, timedelta
 
+from decision_actions import current_rows, state_of
 import gantt
-from clock import done_clock
-from fragment import esc
+from clock import done_clock, parse_stamp as _parse_store_dt
+from fragment import esc, issue_href
 from tracker import WORKFLOW, change_keys, issue_key, launch_row, launcher
 # The Log line grammar and the moves read with it live in tracker_log.py, which draws nothing. `moves` is imported
 # here as well, so `flow_chart.moves` still names it.
@@ -76,33 +78,9 @@ def _refs(tasks, log: list[Move], home):
     return ref_of
 
 
-def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[str, datetime], now: datetime,
-          durations: dict[str, timedelta] | None = None, slots: int = 1,
-          approved: frozenset[str] = frozenset(), ended: dict[str, tuple[datetime, str]] | None = None,
-          home=None) -> list[tuple[str, gantt.Row]]:
-    """(status, row) per task with a move, first moved first, then the queued tasks in tracker order. `tasks` are
-    tracker rows, later ones winning; `held` maps each held task's name to what holds it (task_forge.hold_causes); `ends` maps a task's item to its estimated end;
-    `durations` maps a queued task's item to how long it will take, and `slots` is how many run at once;
-    `approved` names the tasks whose open change is approved, labelled `approved · merge ~HH:MM` by their end;
-    `ended` maps a task's name to (time, word) — its change's forge merge or its closed issue's close time — which
-    ends its row (#220). Status is that word, `held` or the task's state word. Every bar's title names the worker
-    whose launch was running when it began (now, for a forecast or hold bar), else the task's owner cell, shown as
-    the board shows it (#192, #193). `home` resolves issue keys as in the board's source cache."""
-    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
-    # A move names a task by its name or its item; the name wins.
-    find = {**{t.item.strip().casefold(): t for t in tasks if t.item.strip()}, **by_name}
-    row_of = launcher(tasks)
-    ref_of = _refs(tasks, log, home)
-
-    def key_of(m: Move) -> str:
-        t = find.get(m.name.strip().casefold()) or (row_of(m.name)[0] if m.launch else None)
-        return t.name.strip().casefold() if t and t.name.strip() else m.name.casefold()
-
-    terminal = {lane.stages[-1] for lane in lanes.values()}
-    horizon = now + WINDOWS[-1][2]
-    busy: list[datetime] = []
-    log = sorted(log, key=lambda m: m.at)
-    first, runs = {}, {}  # runs: key → [worker, start, end or None] per launch
+def _launch_runs(log: list[Move], key_of) -> tuple[dict, dict]:
+    """(first, runs) of the time-sorted log: each task's first stage move, and its launched workers' [worker, start, end or None]."""
+    first, runs = {}, {}
     for m in log:
         key = key_of(m)
         if not m.launch:
@@ -118,81 +96,79 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
         for run, successor in zip(task_runs, task_runs[1:]):
             if run[2] is None:
                 run[2] = successor[1]
+    return first, runs
 
-    def owner(key: str, at: datetime, task) -> str:
-        running = [w for w, start, end in runs.get(key, ()) if start <= at and (end is None or at < end)]
-        return running[-1] if running else task.shown_owner if task else ""
 
-    log = [m for m in log if not (m.launch and (f := first.get(key_of(m))) and m.at >= f)]
-    out, groups = [], {}
-    for m in log:
-        groups.setdefault(key_of(m), []).append(m)
-    for key, mine in groups.items():
-        task, last = find.get(key) or find.get(mine[-1].name.strip().casefold()), mine[-1]
-        stop = now
-        if task and task.kind == "done":
-            # (#196) no clock: stop at its own last move, so it draws no bar past that move.
-            # (#213) a clock: its latest occurrence at or before now, not a same-date occurrence that
-            # may not have happened yet.
-            if t := task.state_time:
-                stop = done_clock(t, now, now.tzinfo)
-            else:
-                stop = last.at
-        finish = task and (ended or {}).get(task.name.strip())
-        is_held = bool(task and task.name.strip() in held)
-        boundary = last.at
-        # A launcher stop ends its run but leaves the row at its prior working stage.
-        mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
-        last = mine[-1]
-        # #227: a held row's last stage bar ends at its own last move — no dangling bar reading as work
-        # in progress — and the hold bar alone carries it from now through the window.
-        segs = []
-        for m, nxt in zip(mine, mine[1:] + [None]):
-            if m.stage in terminal:
-                continue
-            e = nxt.at if nxt else stop
-            if m.launch and m.stage == "implement":
-                # Concurrent launches have separate boundaries and retain their own worker titles.
-                run = next(r for r in runs[key] if r[0] == m.worker and r[1] == m.at)
-                e = min(run[2] or stop, first.get(key, stop))
-                if is_held:
-                    e = min(e, boundary)
-            elif nxt is None and is_held:
-                continue
-            if e > m.at:
-                segs.append(gantt.Segment(m.at, e, m.stage, "done",
-                                          m.worker if m.launch and m.stage == "implement" else owner(key, m.at, task)))
-        if finish:
-            at, word = finish
-            segs = [replace(g, end=min(g.end, at)) for g in segs if g.start < at]
-        lane = lanes.get(task.lane.strip()) if task else None
-        is_approved = bool(task and task.name.strip() in approved)
-        if finish:
-            status, note = word, f"{word} {at:%H:%M}"
-        elif last.stage in terminal:
-            status, note = "merged", f"merged {last.at:%H:%M}"
-        elif is_held:
-            segs.append(gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner(key, now, task)))
-            status, note = "needs input", f"needs input · {held[task.name.strip()]}"
-        elif task and lane and last.stage in lane.stages and (end := ends.get(task.item)) and end > now:
-            ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
-            segs += _ahead(ahead, now, end, owner(key, now, task))
-            busy.append(end)
-            # #217: a task not yet marked `running` but already moving through the lane still counts as
-            # running, never as queued (which is `open` with no move at all — the loop below).
-            status = "running" if task.kind == "open" else task.kind
-            note = f"approved · merge {_clock(end, now)}" if is_approved else f"{last.stage} · {_clock(end, now)}"
-        else:
-            kind = task.kind if task else ""
-            status = "approved" if is_approved else ("running" if kind == "open" else kind)
-            note = "approved" if is_approved else last.stage
-        out.append((status, gantt.Row(ref_of(task, last.name), task.name.strip() if task else launch_row(last.name, ())[1],
-                                      note, tuple(segs))))
+def _owner(runs: dict, key: str, at: datetime, task) -> str:
+    running = [w for w, start, end in runs.get(key, ()) if start <= at and (end is None or at < end)]
+    return running[-1] if running else task.shown_owner if task else ""
+
+
+def _stop(task, last: Move, now: datetime) -> datetime:
+    """Where a task's last bar stops: now, or for a done task its own clock or last move."""
+    if task and task.kind == "done":
+        # (#196) no clock: stop at its own last move, so it draws no bar past that move.
+        # (#213) a clock: its latest occurrence at or before now, not a same-date occurrence that
+        # may not have happened yet.
+        if t := task.state_time:
+            return done_clock(t, now, now.tzinfo)
+        return last.at
+    return now
+
+
+def _stage_bars(mine: list[Move], key: str, task, runs: dict, first: dict, terminal: set, stop: datetime,
+                boundary: datetime, is_held: bool) -> list[gantt.Segment]:
+    """The done bars of one task's moves, each ending at the next move, its worker's run, or `stop`."""
+    segs = []
+    for m, nxt in zip(mine, mine[1:] + [None]):
+        if m.stage in terminal:
+            continue
+        e = nxt.at if nxt else stop
+        if m.launch and m.stage == "implement":
+            # Concurrent launches have separate boundaries and retain their own worker titles.
+            run = next(r for r in runs[key] if r[0] == m.worker and r[1] == m.at)
+            e = min(run[2] or stop, first.get(key, stop))
+            if is_held:
+                e = min(e, boundary)
+        elif nxt is None and is_held:
+            continue
+        if e > m.at:
+            segs.append(gantt.Segment(m.at, e, m.stage, "done",
+                                      m.worker if m.launch and m.stage == "implement" else _owner(runs, key, m.at, task)))
+    return segs
+
+
+def _standing(task, lane, last: Move, now: datetime, terminal: set, owner_now: str, *, finish, held_cause: str | None,
+              end: datetime | None, is_approved: bool) -> tuple[str, str, list[gantt.Segment], datetime | None]:
+    """(status, note, bars ahead of now, end of the forecast that holds a worker slot or None) of one moved task."""
+    if finish:
+        at, word = finish
+        return word, f"{word} {at:%H:%M}", [], None
+    if last.stage in terminal:
+        return "merged", f"merged {last.at:%H:%M}", [], None
+    if held_cause is not None:
+        return "needs input", f"needs input · {held_cause}", [gantt.Segment(now, now + WINDOWS[-1][2], last.stage, "hold", owner_now)], None
+    if task and lane and last.stage in lane.stages and end and end > now:
+        ahead = [last.stage] + [s for s in lane.stages[lane.stages.index(last.stage) + 1:] if s not in terminal]
+        # #217: a task not yet marked `running` but already moving through the lane still counts as
+        # running, never as queued (which is `open` with no move at all).
+        status = "running" if task.kind == "open" else task.kind
+        note = f"approved · merge {_clock(end, now)}" if is_approved else f"{last.stage} · {_clock(end, now)}"
+        return status, note, _ahead(ahead, now, end, owner_now), end
+    kind = task.kind if task else ""
+    status = "approved" if is_approved else ("running" if kind == "open" else kind)
+    return status, "approved" if is_approved else last.stage, [], None
+
+
+def _queued_rows(tasks, by_name: dict, moved: set, lanes: dict, held: dict, durations, busy: list[datetime], slots: int,
+                 terminal: set, now: datetime, ref_of, runs: dict) -> list[tuple[str, gantt.Row]]:
+    """Forecast-only rows for the open tasks at their lane's first stage with no move, in the free worker slots."""
+    horizon = now + WINDOWS[-1][2]
     # Each slot is free once the forecast holding it ends; more forecasts than slots wait for the (n-k+1)th end.
     slots = max(1, slots)
     busy += [now] * (slots - len(busy))
     heapq.heapify(busy)
-    moved = set(groups)
+    out = []
     for t in tasks:
         key, lane = t.name.strip().casefold(), lanes.get(t.lane.strip())
         if (not key or by_name[key] is not t or key in moved or t.kind != "open" or t.name.strip() in held
@@ -206,11 +182,158 @@ def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[
         heapq.heappush(busy, start + took)
         stages = [s for s in lane.stages if s not in terminal]
         out.append((t.kind, gantt.Row(ref_of(t, t.item), t.name.strip(), f"queued · {_clock(start + took, now)}",
-                                      tuple(_ahead(stages, start, start + took, owner(key, now, t))))))
+                                      tuple(_ahead(stages, start, start + took, _owner(runs, key, now, t))))))
+    return out
+
+
+def _task_segments(task, mine: list[Move], key: str, runs: dict, first: dict, terminal: set, now: datetime,
+                   finish, is_held: bool) -> tuple[list[gantt.Segment], Move]:
+    """(done bars, last move) of one moved task, the bars clipped at its forge end when `finish` is set."""
+    stop = _stop(task, mine[-1], now)
+    boundary = mine[-1].at
+    # A launcher stop ends its run but leaves the row at its prior working stage.
+    mine = [m for m in mine if not (m.launch and m.stage == RELAUNCH_STAGE)]
+    # #227: a held row's last stage bar ends at its own last move — no dangling bar reading as work
+    # in progress — and the hold bar alone carries it from now through the window.
+    segs = _stage_bars(mine, key, task, runs, first, terminal, stop, boundary, is_held)
+    if finish:
+        at = finish[0]
+        segs = [replace(g, end=min(g.end, at)) for g in segs if g.start < at]
+    return segs, mine[-1]
+
+
+def _ordered(rows: list[tuple[str, gantt.Row]], now: datetime) -> list[tuple[str, gantt.Row]]:
     # #226: rows group merged, approved, running, needs input, queued, earliest move first within a group.
     far_future = now + WINDOWS[-1][2] * 1000  # a row with no segments at all sorts last in its bucket
-    return sorted(_merge_issues(out),
-                 key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
+    return sorted(rows, key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)))
+
+
+def build(log: list[Move], tasks, lanes: dict, held: dict[str, str], ends: dict[str, datetime], now: datetime,
+          durations: dict[str, timedelta] | None = None, slots: int = 1,
+          approved: frozenset[str] = frozenset(), ended: dict[str, tuple[datetime, str]] | None = None,
+          home=None) -> list[tuple[str, gantt.Row]]:
+    """(status, row) per task with a move, first moved first, then the queued tasks in tracker order. `tasks` are
+    tracker rows, later ones winning; `held` maps each held task's name (or item when nameless) to what holds it (task_forge.hold_causes); `ends` maps a task's item to its estimated end;
+    `durations` maps a queued task's item to how long it will take, and `slots` is how many run at once;
+    `approved` names the tasks whose open change is approved, labelled `approved · merge ~HH:MM` by their end;
+    `ended` maps a task's name to (time, word) — its change's forge merge or its closed issue's close time — which
+    ends its row (#220). Status is that word, `needs input`, `approved`, or the task's state word (`running` when `open`). Every bar's title names the worker
+    whose launch was running when it began (now, for a forecast or hold bar), else the task's owner cell, shown as
+    the board shows it (#192, #193). `home` resolves issue keys as in the board's source cache."""
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    # A move names a task by its name or its item; the name wins.
+    find = {**{t.item.strip().casefold(): t for t in tasks if t.item.strip()}, **by_name}
+    row_of = launcher(tasks)
+    ref_of = _refs(tasks, log, home)
+
+    def key_of(m: Move) -> str:
+        t = find.get(m.name.strip().casefold()) or (row_of(m.name)[0] if m.launch else None)
+        return (t.name.strip() or t.item.strip()).casefold() if t else m.name.casefold()
+
+    terminal = {lane.stages[-1] for lane in lanes.values()}
+    busy: list[datetime] = []
+    log = sorted(log, key=lambda m: m.at)
+    first, runs = _launch_runs(log, key_of)
+    log = [m for m in log if not (m.launch and (f := first.get(key_of(m))) and m.at >= f)]
+    out, groups = [], {}
+    for m in log:
+        groups.setdefault(key_of(m), []).append(m)
+    for key, mine in groups.items():
+        task = find.get(key) or find.get(mine[-1].name.strip().casefold())
+        hold_key = (task.name.strip() or task.item.strip()) if task else ""
+        is_held = bool(task and hold_key in held)
+        finish = task and (ended or {}).get(task.name.strip())
+        segs, last = _task_segments(task, mine, key, runs, first, terminal, now, finish, is_held)
+        status, note, ahead, slot_end = _standing(
+            task, lanes.get(task.lane.strip()) if task else None, last, now, terminal, _owner(runs, key, now, task),
+            finish=finish, held_cause=held[hold_key] if is_held else None, end=ends.get(task.item) if task else None,
+            is_approved=bool(task and task.name.strip() in approved))
+        if slot_end:
+            busy.append(slot_end)
+        out.append((status, gantt.Row(ref_of(task, last.name), task.label if task else launch_row(last.name, ())[1],
+                                      note, tuple(segs + ahead))))
+    out += _queued_rows(tasks, by_name, set(groups), lanes, held, durations, busy, slots, terminal, now, ref_of, runs)
+    return _ordered(_merge_issues(out), now)
+
+
+def build_from_store(db, now: datetime, *, include_hold_bars: bool = False) -> list[tuple[str, gantt.Row]]:
+    """Build one Gantt row per store issue with all its `(issue, stage, attempt)` segments (M6 item 1, Exit S2)."""
+    items = db.items()
+    all_segments = db.segments()
+    all_decisions = current_rows(db.decisions())  # rows are append-only: each decision's latest
+    segs_by_key: dict[str, list] = {}
+    for seg in all_segments:
+        segs_by_key.setdefault(seg.issue_key, []).append(seg)
+    open_decs_by_key: dict[str, list] = {}
+    for dec in all_decisions:
+        if state_of(dec).status in ("open", "blocked"):
+            open_decs_by_key.setdefault(dec.issue_key, []).append(dec)
+
+    out: list[tuple[str, gantt.Row]] = []
+    for item in items:
+        key = item.issue_key
+        raw_segs = segs_by_key.get(key, [])
+        if not raw_segs and item.forge_state == "closed":
+            continue
+        resume = db.resume(key)
+        runs = (resume.get("runs") or {}) if isinstance(resume, dict) else {}
+        g_segs: list[gantt.Segment] = []
+        for s in raw_segs:
+            start = _parse_store_dt(s.started_at, now)
+            if s.ended_at:
+                end = _parse_store_dt(s.ended_at, now)
+                kind = "done"
+            else:
+                end = now
+                kind = "running"
+            if end < start:
+                end = start
+            run_info = runs.get(f"{s.stage}-{s.attempt}") or {}
+            worker_title = str(run_info.get("runner") or s.agent_type or s.runtime or "")
+            g_segs.append(gantt.Segment(start, end, s.stage, kind, worker_title))
+
+        short_ref = f"#{key.rpartition('#')[2]}" if "#" in key else key
+        stage = item.stage or (raw_segs[-1].stage if raw_segs else "implement")
+        has_open_dec = bool(open_decs_by_key.get(key))
+        is_held = bool(item.human_review or has_open_dec)
+        if item.forge_state == "closed":
+            status, note = "merged", "closed"
+        elif is_held:
+            cause = "decision" if has_open_dec else stage
+            status, note = "needs input", f"needs input · {cause}"
+            if include_hold_bars:
+                g_segs.append(gantt.Segment(now, now + WINDOWS[-1][2], stage, "hold", ""))
+        elif item.review_state == "approved":
+            status, note = "approved", "approved"
+        elif any(s.ended_at is None for s in raw_segs):
+            status, note = "running", stage
+        elif raw_segs:
+            status, note = "running", stage
+        else:
+            status, note = "open", f"queued · {stage}"
+        row = gantt.Row(
+            ref=short_ref,
+            name=item.title or key,
+            note=note,
+            segments=tuple(g_segs),
+            href=issue_href(key),
+            ref_title=item.title or key,
+        )
+        out.append((status, row))
+    far_future = now + WINDOWS[-1][2] * 1000
+    return sorted(
+        out,
+        key=lambda sr: (BUCKETS.index(_bucket(sr[0])), min((g.start for g in sr[1].segments), default=far_future)),
+    )
+
+
+def from_store(db, start: datetime, end: datetime) -> list[gantt.Row]:
+    """Return Gantt rows from the store overlapping `[start, end]`, one row per issue with `(issue, stage, attempt)` segments."""
+    rows = [row for _, row in build_from_store(db, end, include_hold_bars=False)]
+    return [
+        r for r in rows
+        if not r.segments or any(g.end >= start and g.start <= end for g in r.segments)
+    ]
 
 
 def _merge_issues(rows: list[tuple[str, gantt.Row]]) -> list[tuple[str, gantt.Row]]:

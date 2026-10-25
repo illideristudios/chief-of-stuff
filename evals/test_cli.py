@@ -1,15 +1,64 @@
 """The one installed command routes fixed operations and preserves release pinning."""
 
+import io
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "scripts"))
+import backlog  # noqa: E402
 import chief_of_stuff as cli  # noqa: E402
+import shell_setup  # noqa: E402
+import supervisor  # noqa: E402
+
+HELP_SECTIONS = ("Purpose", "When not to use", "Options", "Output", "Exit codes", "Side effects", "Examples")
+# A per-command help issue opts in here after bringing its parser up to the standard.
+ENFORCED = frozenset({"backlog"})
+
+
+def missing_sections(help_text: str, name: str) -> list[str]:
+    """Check the shared help contract; Purpose is argparse's description."""
+    problems = []
+    if not re.match(rf"usage: chief-of-stuff {re.escape(name)}(?:\s|$)", help_text):
+        problems.append("usage must name the installed command")
+    # Usage may wrap across several indented lines. Description follows a blank line.
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    purpose = body[:headings[0].start()].strip() if headings else body.strip()
+    if not purpose:
+        problems.append("Purpose")
+    sections = {}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    for section in getattr(cli, "HELP_SECTIONS", HELP_SECTIONS)[1:]:
+        if not sections.get(section.casefold()):
+            problems.append(section)
+    if not re.search(rf"^\s*chief-of-stuff {re.escape(name)}(?:\s|$)",
+                     sections.get("examples", ""), re.MULTILINE):
+        problems.append("Examples must invoke the installed command")
+    return problems
+
+
+def _help_sections(help_text: str) -> dict[str, str]:
+    blocks = help_text.split("\n\n", 1)
+    body = blocks[1] if len(blocks) > 1 else ""
+    headings = list(re.finditer(r"^([\w ][\w -]*):\s*$", body, re.MULTILINE))
+    sections = {"purpose": body[:headings[0].start()].strip() if headings else body.strip()}
+    for index, heading in enumerate(headings):
+        end = headings[index + 1].start() if index + 1 < len(headings) else len(body)
+        sections[heading.group(1).casefold()] = body[heading.end():end].strip()
+    return sections
 
 
 class InstallTest(unittest.TestCase):
@@ -31,6 +80,11 @@ class InstallTest(unittest.TestCase):
         self.assertFalse(self.share.exists())
         self.assertFalse((self.bin / "chief-of-stuff").exists())
 
+    def test_installed_release_includes_requirements(self):
+        release = Path(self.install()["release"])
+        self.assertTrue((release / "requirements.txt").is_file())
+        self.assertEqual((release / "requirements.txt").read_bytes(), (ROOT / "requirements.txt").read_bytes())
+
     def test_one_wrapper_routes_init_and_models_from_versioned_release(self):
         first = self.install()
         command = self.bin / "chief-of-stuff"
@@ -43,9 +97,13 @@ class InstallTest(unittest.TestCase):
         self.assertIn("start", help_text)
         workspace = self.root / "workspace"
         workspace.mkdir()
+        gh = self.bin / "gh"
+        gh.write_text(f"#!{sys.executable}\nimport json\nprint(json.dumps([]))\n")
+        gh.chmod(0o755)
+        env = dict(os.environ, CHIEF_OF_STUFF_GH=str(gh))
         done = subprocess.run([str(command), "init", "--root", str(workspace), "--user", "Robin",
-                               "--timezone", "America/Chicago", "--worker-mode", "one-shot"],
-                              capture_output=True, text=True)
+                               "--timezone", "America/Chicago", "--worker-mode", "one-shot",
+                               "--github-repo", "owner/repo"], env=env, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertIn('mode = "one-shot"', (workspace / "chief-of-stuff.toml").read_text())
         guidance = workspace / "chief-of-stuff-models.md"
@@ -140,6 +198,292 @@ class TrackerCommandTest(unittest.TestCase):
                                    "--date", "2026-09-25", "section", "Resume"], capture_output=True, text=True)
             self.assertEqual(done.returncode, 0, done.stderr)
             self.assertIn("- Next: read the reply", done.stdout)
+
+
+class StoreBackedVenvRoutingTest(unittest.TestCase):
+    """#622: store-backed commands exec the pinned venv; plain commands keep sys.executable."""
+
+    @staticmethod
+    @contextmanager
+    def _passthrough_lock(path, wait=False):
+        yield
+
+    def test_store_backed_command_execs_venv_python(self):
+        venv_python = Path("/pin/venv/bin/python")
+        data = Path("/pin/data")
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["performance", "--help"])
+        ensure.assert_called_once_with(data)
+        execv.assert_called_once_with(
+            str(venv_python),
+            [str(venv_python), str(ROOT / "scripts/performance_report.py"), "--help"],
+        )
+
+    def test_plain_command_keeps_sys_executable(self):
+        with mock.patch.object(supervisor, "ensure_venv") as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["models", "--help"])
+        ensure.assert_not_called()
+        execv.assert_called_once_with(
+            sys.executable,
+            [sys.executable, str(ROOT / "scripts/install_model_guidance.py"), "--help"],
+        )
+
+    def test_work_routes_to_the_store_backed_driver_and_forwards_intake_options(self):
+        venv_python = Path("/pin/venv/bin/python")
+        args = ["--root", "/workspace", "Add a flag", "--body", "why", "--issue", "3", "--commit"]
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=venv_python), \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["work", *args])
+        execv.assert_called_once_with(str(venv_python),
+            [str(venv_python), str(ROOT / "scripts/work.py"), *args])
+
+    def test_engine_and_supervisor_route_through_the_cli(self):
+        venv_python = Path("/pin/venv/bin/python")
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=venv_python) as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["engine", "--root", "/workspace", "--once"])
+        ensure.assert_called_once()
+        execv.assert_called_once_with(
+            str(venv_python),
+            [str(venv_python), str(ROOT / "scripts/engine.py"), "--root", "/workspace", "--once"],
+        )
+        with mock.patch.object(supervisor, "ensure_venv") as ensure, \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)) as execv:
+            with self.assertRaises(SystemExit):
+                cli.main(["supervisor", "--root", "/workspace", "status"])
+        ensure.assert_not_called()
+        execv.assert_called_once_with(
+            sys.executable,
+            [sys.executable, str(ROOT / "scripts/supervisor.py"), "--root", "/workspace", "status"],
+        )
+
+    def test_work_cli_files_an_issue_and_writes_the_engine_store(self):
+        import forge
+        import store
+        import work
+        from evals import test_forge as tf
+
+        gh = tf.FakeGh()
+        factory = forge.for_workspace
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "CLAUDE.md").write_text("## Coordinator\n\n- Backlog: GitHub issues; repo example/app\n")
+
+            def exec_driver(python, argv):
+                self.assertEqual(argv[1], str(ROOT / "scripts/work.py"))
+                raise SystemExit(work.main(argv[2:]))
+
+            with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+                 mock.patch.object(supervisor, "ensure_venv", return_value=Path(sys.executable)), \
+                 mock.patch.object(cli.os, "execv", side_effect=exec_driver), \
+                 mock.patch.object(forge, "for_workspace", side_effect=lambda root, **opts: factory(root, gh=gh, **opts)), \
+                 mock.patch.object(sys, "stdout", io.StringIO()) as out:
+                with self.assertRaises(SystemExit) as done:
+                    cli.main(["work", "--root", str(root), "Add a flag",
+                              "--body", "## File ownership\n- write: `src/`", "--commit"])
+            self.assertEqual(done.exception.code, 0)
+            self.assertIn("github:example/app#101", out.getvalue())
+            db = store.Store(root / "store.db")
+            try:
+                self.assertEqual([(i.issue_key, i.title) for i in db.items()],
+                                 [("github:example/app#101", "Add a flag")])
+            finally:
+                db.engine.dispose()
+        self.assertEqual([c[:2] for c in gh.all_calls], [["issue", "create"]])
+
+    def test_venv_failure_refuses_without_falling_back(self):
+        buf = io.StringIO()
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv",
+                               side_effect=supervisor.ServiceError("no python3 on the login shell's PATH")), \
+             mock.patch.object(cli.os, "execv") as execv, \
+             mock.patch.object(sys, "stderr", buf):
+            code = cli.main(["performance"])
+        self.assertEqual(code, 1)
+        self.assertIn("refused:", buf.getvalue())
+        self.assertIn("no python3", buf.getvalue())
+        execv.assert_not_called()
+
+    def test_shell_error_from_setup_refuses(self):
+        buf = io.StringIO()
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv",
+                               side_effect=shell_setup.ShellError("configured login shell '/missing' is not executable")), \
+             mock.patch.object(cli.os, "execv") as execv, \
+             mock.patch.object(sys, "stderr", buf):
+            code = cli.main(["performance"])
+        self.assertEqual(code, 1)
+        self.assertIn("refused:", buf.getvalue())
+        self.assertIn("not executable", buf.getvalue())
+        execv.assert_not_called()
+
+    def test_os_error_from_setup_refuses(self):
+        buf = io.StringIO()
+        with mock.patch.object(supervisor, "lock", self._passthrough_lock), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=OSError("permission denied")), \
+             mock.patch.object(cli.os, "execv") as execv, \
+             mock.patch.object(sys, "stderr", buf):
+            code = cli.main(["performance"])
+        self.assertEqual(code, 1)
+        self.assertIn("refused:", buf.getvalue())
+        self.assertIn("permission denied", buf.getvalue())
+        execv.assert_not_called()
+
+    def test_venv_setup_runs_under_supervisor_lock(self):
+        data = Path("/pin/data")
+        order = []
+
+        @contextmanager
+        def fake_lock(path, wait=False):
+            order.append(("lock", path, wait))
+            yield
+            order.append(("unlock", path))
+
+        def fake_ensure(d):
+            order.append(("ensure", d))
+            return Path("/pin/venv/bin/python")
+
+        with mock.patch.object(supervisor, "lock", fake_lock), \
+             mock.patch.object(supervisor, "ensure_venv", side_effect=fake_ensure), \
+             mock.patch.object(supervisor, "data_dir", return_value=data), \
+             mock.patch.object(cli.os, "execv", side_effect=SystemExit(0)):
+            with self.assertRaises(SystemExit):
+                cli.main(["performance"])
+        self.assertEqual(order, [
+            ("lock", data / "supervisor.lock", True),
+            ("ensure", data),
+            ("unlock", data / "supervisor.lock"),
+        ])
+
+    def test_every_command_reaching_sqlalchemy_is_store_backed(self):
+        from evals.test_architecture import forbidden_reach
+        scripts = ROOT / "scripts"
+        reaching = {name for name, target in cli.COMMANDS.items()
+                    if target.startswith("scripts/") and target.count("/") == 1
+                    and forbidden_reach(scripts, Path(target).stem, set(), frozenset({"sqlalchemy", "alembic"}))}
+        self.assertEqual(reaching, set(cli.STORE_BACKED))
+
+
+class BacklogHelpTest(unittest.TestCase):
+    """#844: `chief-of-stuff backlog --help` is the reference an agent discovers and trusts."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cwd = Path(self.tmp.name)
+
+    def run_backlog(self, *args, env=None):
+        return subprocess.run(
+            [sys.executable, str(ROOT / "chief_of_stuff.py"), "backlog", *args],
+            cwd=self.cwd, env=env, capture_output=True, text=True,
+        )
+
+    def test_missing_sections_checks_shared_standard(self):
+        complete = (
+            "usage: chief-of-stuff sample [-h]\n\nDo the sample operation.\n\n"
+            "options:\n  -h, --help  show this help message and exit\n\n"
+            "When not to use:\n  Use another operation for other work.\n\n"
+            "Output:\n  A sample on stdout.\n\nExit codes:\n  0: success; 2: usage error.\n\n"
+            "Side effects:\n  None.\n\nExamples:\n  chief-of-stuff sample --help\n"
+        )
+        self.assertEqual(missing_sections(complete, "sample"), [])
+        for section in HELP_SECTIONS[1:]:
+            with self.subTest(section=section):
+                heading = section.lower() if section == "Options" else section
+                deficient = re.sub(rf"(?m)^{heading}:\n(?:  .+\n)+", "", complete)
+                self.assertIn(section, missing_sections(deficient, "sample"))
+                empty = re.sub(rf"(?m)(^{heading}:\n)(?:  .+\n)+", r"\1", complete)
+                self.assertIn(section, missing_sections(empty, "sample"))
+        self.assertIn("Purpose", missing_sections(complete.replace("Do the sample operation.", ""), "sample"))
+        self.assertIn(
+            "usage must name the installed command",
+            missing_sections(complete.replace("usage: chief-of-stuff sample", "usage: sample.py"), "sample"),
+        )
+        self.assertIn(
+            "Examples must invoke the installed command",
+            missing_sections(complete.replace("  chief-of-stuff sample --help", "  sample.py --help"), "sample"),
+        )
+
+    def test_backlog_help_meets_shared_standard_and_covers_backlog_contract(self):
+        self.assertIn("backlog", ENFORCED)
+        done = self.run_backlog("--help")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(done.stderr, "")
+        self.assertEqual(list(self.cwd.iterdir()), [])
+        self.assertEqual(missing_sections(done.stdout, "backlog"), [], done.stdout)
+
+        sections = _help_sections(done.stdout)
+        purpose_first_line = sections["purpose"].splitlines()[0]
+        expected_purpose = backlog.__doc__.strip().splitlines()[0]
+        self.assertEqual(purpose_first_line, expected_purpose)
+        self.assertLessEqual(len(purpose_first_line), 100)
+
+        parser = backlog.build_parser()
+        options_text = " ".join(sections["options"].split())
+        for action in parser._actions:
+            for flag in action.option_strings:
+                self.assertIn(flag, options_text, flag)
+            self.assertIn("default:", action.help, f"{action.option_strings} help must state its default")
+
+        not_for = " ".join(sections["when not to use"].split())
+        for alt in ("work", "kanban", "pipeline", "tracker", "log", "board", "pages"):
+            self.assertIn(alt, cli.COMMANDS)
+            self.assertIn(f"chief-of-stuff {alt}", not_for)
+
+        output = " ".join(sections["output"].split())
+        for fact in ("Plain text", "not TOON", "not JSON", "stdout", "stderr", "backlog:", "unknown",
+                     "never", "0 open", "empty backlog", "nothing was written: add --commit to make these real"):
+            self.assertIn(fact, output, fact)
+
+        codes = " ".join(sections["exit codes"].split())
+        for fact in ("0", "1", "2", "usage"):
+            self.assertIn(fact, codes, fact)
+
+        effects = " ".join(sections["side effects"].split())
+        for fact in ("--commit", "--parent", "--blocked-by", "GitHub", "GitLab",
+                     "CHIEF_OF_STUFF_GITLAB_TOKEN", "Keychain", "glab", "preview",
+                     "store.db", "acme-co/ledger-demo", "https://gitlab.example.test"):
+            self.assertIn(fact, effects, fact)
+
+        examples = [line.strip() for line in sections["examples"].splitlines()
+                    if line.strip().startswith("chief-of-stuff backlog")]
+        self.assertEqual(len(examples), 3, examples)
+        for example in examples:
+            tokens = shlex.split(example)
+            self.assertEqual(tokens[:2], ["chief-of-stuff", "backlog"])
+            parser.parse_args(tokens[2:])
+        examples_text = "\n".join(examples)
+        for fact in ("--list", "--state all", "--create", "Add retry to the invoice export",
+                     "--parent 12", "--blocked-by 7", "--commit"):
+            self.assertIn(fact, examples_text, fact)
+
+    def test_documented_exit_codes_for_missing_config_and_unknown_read(self):
+        missing = self.run_backlog("--config", str(self.cwd / "missing.md"))
+        self.assertEqual(missing.returncode, 2)
+        self.assertEqual(missing.stdout, "")
+        self.assertIn("no config at", missing.stderr)
+
+        cfg = self.cwd / "CLAUDE.md"
+        cfg.write_text("# Workspace\n\n## Coordinator\n\n- Backlog: GitHub issues; repo acme-co/ledger-demo\n")
+        stub = self.cwd / "fake-gh"
+        stub.write_text(f"#!{sys.executable}\nimport sys\nsys.stderr.write('HTTP 503: service unavailable\\n')\nsys.exit(1)\n")
+        stub.chmod(0o755)
+        env = dict(os.environ, CHIEF_OF_STUFF_GH=str(stub))
+        failed = self.run_backlog("--config", str(cfg), "--list", env=env)
+        self.assertEqual(failed.returncode, 1)
+        self.assertEqual(failed.stdout, "")
+        self.assertIn("backlog: unknown", failed.stderr)
+        self.assertNotIn("0 open", failed.stderr)
 
 
 if __name__ == "__main__":

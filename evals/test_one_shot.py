@@ -406,16 +406,17 @@ class CommandTest(unittest.TestCase):
 
     def test_exit_zero_without_structured_result_requires_review(self):
         with tempfile.TemporaryDirectory() as tmp:
-            status, reason, changes = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
+            status, reason, changes, counts = one_shot.worker_result(Path(tmp) / "missing.toon", 0)
         self.assertEqual(status, "human_review")
         self.assertIn("did not write", reason)
         self.assertEqual(changes, "")
+        self.assertEqual(counts, dict.fromkeys(("passed", "failed", "skipped", "xfailed")))
 
     def test_an_undecodable_result_requires_review_with_its_text(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('status: done\nreason: "costs \\$5"\nchanges: "a.py"\n')
-            status, reason, _ = one_shot.worker_result(path, 0)
+            status, reason, _, _ = one_shot.worker_result(path, 0)
         self.assertEqual(status, "human_review")
         self.assertIn("costs", reason)
 
@@ -424,7 +425,15 @@ class CommandTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "worker-result.toon"
             path.write_text('{"status": "done", "reason": "fixed: the \\"cap\\"", "changes": "a.py, b.py"}\n')
-            self.assertEqual(one_shot.worker_result(path, 0), ("done", 'fixed: the "cap"', "a.py, b.py"))
+            self.assertEqual(one_shot.worker_result(path, 0), (
+                "done", 'fixed: the "cap"', "a.py, b.py", dict.fromkeys(("passed", "failed", "skipped", "xfailed"))))
+
+    def test_toon_result_carries_observed_suite_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "worker-result.toon"
+            counts = {"passed": 23, "failed": 0, "skipped": 2, "xfailed": 11}
+            path.write_text(toon_encode({"status": "done", "reason": "finished", "changes": "tested", **counts}))
+            self.assertEqual(one_shot.worker_result(path, 0), ("done", "finished", "tested", counts))
 
 
 class CodexAddDirArgsTest(unittest.TestCase):
@@ -524,20 +533,7 @@ class CodexAddDirArgsTest(unittest.TestCase):
             (base / ".git/worktrees/tree/gitdir").write_text(f"{sub / '.git'}\n")
             self.assertEqual(git_trees.codex_add_dir_args(sub), [])
 
-    def test_a_relative_paths_worktree_still_gets_its_two_dirs(self):
-        # `git worktree add --relative-paths` writes the back-pointer relative to the gitdir; it is resolved before comparing.
-        with tempfile.TemporaryDirectory() as tmp:
-            base, tree = Path(tmp) / "base", Path(tmp) / "tree"
-            subprocess.run(["git", "init", "-q", str(base)], check=True)
-            self._git("-C", str(base), "commit", "-q", "--allow-empty", "-m", "init")
-            made = subprocess.run(["git", "-C", str(base), "worktree", "add", "-q", "--relative-paths", str(tree)],
-                                  capture_output=True, text=True)
-            if made.returncode:
-                self.skipTest(f"this git has no `worktree add --relative-paths`: {made.stderr.strip()}")
-            pointer = (base / ".git/worktrees/tree/gitdir").read_text().strip()
-            self.assertFalse(Path(pointer).is_absolute(), pointer)  # the fixture is the relative form
-            self.assertEqual(git_trees.codex_add_dir_args(tree),
-                             self.pairs((base / ".git").resolve(), (base / ".git/worktrees/tree").resolve()))
+    # The `worktree add --relative-paths` case is removed until the CI image's git supports it (#855).
 
     def test_no_git_process_is_spawned_for_any_grant_or_refusal(self):
         # #443: the tree is what a previous codex run could write to, so its git control files are read as files
@@ -647,6 +643,23 @@ class RunTest(unittest.TestCase):
             return one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=tree or self.tree, name="worker01", runtime=runtime, agent_type=None,
                                 model=model, effort=effort, dry_run=False)
+
+    def test_run_composes_with_already_loaded_workspace_policy(self):
+        (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `cos.toml`\n")
+        (self.root / "cos.toml").write_text(
+            '[workers]\nrules = ["Keep tests."]\nrequire_green_tests = true\n[lanes.code]\nstages = ["review"]\n'
+            '[stages.review]\nskills = ["security-review"]\n')
+        settings = one_shot.load_settings(self.root, "cos.toml")
+        with mock.patch.object(one_shot, "load_settings", return_value=settings) as load, \
+             mock.patch.object(dispatch_prompt, "load_settings", side_effect=AssertionError("duplicate read")), \
+             mock.patch.object(dispatch_prompt, "compose", wraps=dispatch_prompt.compose) as compose, \
+             mock.patch.object(one_shot, "resolve", return_value="/fake/agent"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree,
+                                name="worker01", runtime="claude", agent_type=None, model="example", effort="", dry_run=True)
+        self.assertEqual(code, 0)
+        load.assert_called_once_with(self.root, "cos.toml")
+        self.assertIs(compose.call_args.kwargs["settings"], settings)
 
     def test_done_exits_once_and_leaves_waiting_for_integration(self):
         fake = self._fake('status: done\nreason: completed audit\nchanges: committed handler and ran tests\n',
@@ -1074,7 +1087,7 @@ class RunTest(unittest.TestCase):
         # A stop a fresh run fixes is the coordinator's to relaunch, not the user's to review (#68).
         fake = self._fake('status: relaunch\nreason: target PR merged before work began\nchanges: none\n',
                           write_partial=False)
-        with mock.patch.object(one_shot.kanban, "add_human_hold") as hold, \
+        with mock.patch.object(one_shot.forge, "add_human_hold") as hold, \
              mock.patch.object(one_shot.backlog, "comment") as comment:
             self.assertEqual(self._run(fake), 1)
         hold.assert_not_called()
@@ -1120,7 +1133,7 @@ class RunTest(unittest.TestCase):
         """One launch of a worker that wrote `stderr`; returns the exit code and the hold and comment mocks."""
         fake = self._fake(result, exit_code=exit_code, write_partial=write_partial, commit_partial=commit_partial,
                           stderr=stderr, during=during)
-        with mock.patch.object(one_shot.kanban, "add_human_hold", return_value="") as hold, \
+        with mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             return self._run(fake, tree, model=model, runtime=runtime), hold, comment
 
@@ -1173,17 +1186,11 @@ class RunTest(unittest.TestCase):
         comment.assert_not_called()
         self.assertEqual(self._report()["status"], "relaunch")
 
-    def test_the_hold_label_guard_sees_a_review_outcome_in_the_same_workspace(self):
-        # The control for the test above: this workspace does label a human_review.
-        self._with_an_issue_and_kanban()
-        _, hold, _ = self._stopped(result="status: human_review\nreason: unclear policy\nchanges: none\n")
-        hold.assert_called_once()
-
     def test_a_failed_hold_is_recorded_in_the_log(self):
         # #566: the report alone loses a hold failure between runs; the Log keeps it where the audit reads it.
         self._with_an_issue_and_kanban()
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: none\n', write_partial=False)
-        with mock.patch.object(one_shot.kanban, "add_human_hold",
+        with mock.patch.object(one_shot.forge, "add_human_hold",
                                return_value="missing label in GitHub: !! - HUMAN REVIEW REQUIRED") as hold, \
              mock.patch.object(one_shot.backlog, "comment",
                                return_value=SimpleNamespace(done=True, error="")) as comment:
@@ -1886,11 +1893,13 @@ class RunTest(unittest.TestCase):
             "(root / 'worker-result.toon').write_text",
             f"for _ in range(600):\n    if Path({str(release)!r}).exists(): break\n"
             "    __import__('time').sleep(0.05)\n(root / 'worker-result.toon').write_text", 1))
-        driver = ("import sys; from pathlib import Path; sys.path.insert(0, %r); import one_shot; "
+        driver = ("import sys; from functools import partial; from pathlib import Path; sys.path.insert(0, %r); import one_shot; "
+                  "one_shot.git_view.run = partial(one_shot.git_view.run, base=Path(%r)); "
                   "one_shot.resolve = lambda name: %r; one_shot.login_argv = lambda argv: argv; "
                   "one_shot.run(root=Path(%r), day='2026-09-18', task='Security audit', cwd=Path(%r), "
                   "name='worker01', runtime='codex', agent_type=None, model='', effort='', dry_run=False)"
-                  % (str(Path(one_shot.__file__).resolve().parent), str(fake), str(self.root), str(self.tree)))
+                  % (str(Path(one_shot.__file__).resolve().parent), str(self.root / "private-views"),
+                     str(fake), str(self.root), str(self.tree)))
         launcher = subprocess.Popen([sys.executable, "-c", driver], start_new_session=True)
         try:
             deadline = time.monotonic() + 30
@@ -1969,10 +1978,10 @@ class RunTest(unittest.TestCase):
         self.assertFalse((self.tree / ".chief-of-stuff").exists())
         self.assertEqual(self.tracker.read_text(), TRACKER)
 
-    def test_claude_profile_runs_the_one_shot_through_claude_as(self):
+    def test_claude_as_profile_runs_the_one_shot_through_claude_as(self):
         # Zach, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
         (self.root / "CLAUDE.md").write_text(CLAUDE + "- Settings: `chief-of-stuff.toml`\n")
-        (self.root / "chief-of-stuff.toml").write_text('[workers]\nclaude_profile = "secondary"\n')
+        (self.root / "chief-of-stuff.toml").write_text('[workers]\nclaude_as_profile = "secondary"\n')
         for runtime, program in (("claude", "claude-as"), ("codex", "codex")):
             with self.subTest(runtime=runtime):
                 out = io.StringIO()
@@ -2018,7 +2027,7 @@ class RunTest(unittest.TestCase):
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: changed parser\n')
         with mock.patch.object(one_shot, "resolve", return_value=str(fake)), \
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
-             mock.patch.object(one_shot.kanban, "add_human_hold", return_value="") as hold, \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value="") as hold, \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             code = one_shot.run(root=self.root, day="2026-09-18", task="Security audit",
                                 cwd=self.tree, name="worker01", runtime="codex", agent_type=None,
@@ -2048,7 +2057,7 @@ class RunTest(unittest.TestCase):
         fake = self._fake('status: human_review\nreason: unclear policy\nchanges: changed parser\n')
         with mock.patch.object(one_shot, "resolve", return_value=str(fake)), \
              mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
-             mock.patch.object(one_shot.kanban, "add_human_hold", return_value=""), \
+             mock.patch.object(one_shot.forge, "add_human_hold", return_value=""), \
              mock.patch.object(one_shot.backlog, "comment", return_value=SimpleNamespace(done=True, error="")) as comment:
             one_shot.run(root=self.root, day="2026-09-18", task="Security audit", cwd=self.tree, name="worker01",
                          runtime="codex", agent_type=None, model="", effort="", dry_run=False)
@@ -2140,6 +2149,20 @@ class SanitisedTreeReadTest(unittest.TestCase):
         (fx.root / "CLAUDE.md").write_text(CLAUDE.replace("`trees/`", "`.`"))
         return fx
 
+    def test_tree_note_refuses_a_configured_clones_redirected_tree(self):
+        fx = self.fixture()
+        claude = fx.root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("## Coordinator\n", "## Coordinator\n- Settings: `settings.toml`\n"))
+        (fx.root / "settings.toml").write_text(f'[repos]\nproject = "{fx.clone}"\n')
+        other, decoy = fx.root / "other", fx.root / "decoy"
+        taint.git(["clone", str(fx.clone), str(other)], fx.root)
+        taint.git(["worktree", "add", "-b", "decoy", str(decoy)], other)
+        admin = git_view.locate(decoy).gitdir
+        (admin / "gitdir").write_text(str(fx.tree / ".git") + "\n")
+        (fx.tree / ".git").write_text(f"gitdir: {admin}\n")
+        with self.assertRaisesRegex(ValueError, "tree is unreadable"):
+            one_shot._tree_note(fx.root, fx.tree)
+
     def old_env(self):
         # Spell out the former implementation; tests survive its deletion.
         return {**git_trees.user_env(), "GIT_NO_REPLACE_OBJECTS": "1"}
@@ -2222,6 +2245,72 @@ class SanitisedTreeReadTest(unittest.TestCase):
 
     def test_git_read_env_is_deleted(self):
         self.assertFalse(hasattr(one_shot, "git_read_env"))
+
+    def test_cache_error_is_returned_separately_from_git_exit_status(self):
+        fx = self.fixture()
+        error = git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+        with mock.patch.object(git_view, "run", side_effect=error), \
+                mock.patch.object(one_shot, "_enclosing_repository") as enclosing:
+            out, failure = one_shot._git(["status", "--short"], fx.tree)
+        self.assertIsNone(out)
+        self.assertIs(failure, error)
+        enclosing.assert_not_called()
+        self.assertNotIsInstance(failure, git_view.Unviewable)
+
+    def test_relative_default_cache_is_reported_for_tree_and_enclosing_repository(self):
+        fx = self.fixture()
+        sub = fx.tree / "subfolder"
+        sub.mkdir()
+        real_base = git_view._base
+        for tree in (fx.tree, sub):
+            with self.subTest(tree=tree), mock.patch.dict(os.environ, {"XDG_CACHE_HOME": "relative-cache"}), \
+                    mock.patch.object(git_view, "_base", side_effect=lambda layout, base: real_base(layout, None)):
+                out, error = one_shot._git(["status", "--short"], tree)
+                self.assertIsNone(out)
+                self.assertIsInstance(error, git_view.CacheError)
+                self.assertEqual(str(error), "view cache base 'relative-cache' is relative")
+                self.assertEqual(one_shot.changed_files(tree), "git status failed: view cache base 'relative-cache' is relative")
+                self.assertIsNone(one_shot.git_head(tree))
+                with self.assertRaisesRegex(ValueError, "view cache base 'relative-cache' is relative"):
+                    one_shot.git_head(tree, strict=True)
+                with self.assertRaisesRegex(ValueError, "view cache base 'relative-cache' is relative"):
+                    one_shot._tree_note(fx.root, tree)
+
+    def test_cache_failure_refuses_launch_before_writing_or_starting_a_worker(self):
+        fx = self.fixture()
+        day, tracker, copy, cfg = self.launch_fixture(fx)
+        before, previous = tracker.read_bytes(), copy.read_bytes()
+        real_view_run = git_view.run
+        for command in ("branch", "rev-parse"):
+            def view_read(args, tree, **kwargs):
+                if args[0] == command:
+                    raise git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+                return real_view_run(args, tree, **kwargs)
+
+            with self.subTest(command=command), \
+                    mock.patch.object(one_shot, "login_argv", side_effect=lambda argv: argv), \
+                    mock.patch.object(git_view, "run", side_effect=view_read), \
+                    mock.patch.object(subprocess, "Popen", wraps=subprocess.Popen) as process, \
+                    mock.patch.object(one_shot, "record_launch") as row, \
+                    mock.patch.object(dispatch_prompt, "write_dispatch") as dispatch:
+                with self.assertRaisesRegex(ValueError, "cannot prepare view cache base '/unusable-cache'"):
+                    self.launch(fx, cfg, day)
+                row.assert_not_called()
+                dispatch.assert_not_called()
+                self.assertTrue(all(call.args[0][0] == "git" for call in process.call_args_list))
+                self.assertEqual(tracker.read_bytes(), before)
+                self.assertEqual(copy.read_bytes(), previous)
+                self.assertFalse((fx.tree / dispatch_prompt.DISPATCH_FILE).exists())
+
+    def test_cache_failure_during_unborn_head_checks_names_the_configuration_problem(self):
+        fx = self.fixture()
+        missing = subprocess.CompletedProcess([], 128, "", "HEAD is missing")
+        symbolic = subprocess.CompletedProcess([], 0, "refs/heads/unborn\n", "")
+        error = git_view.CacheError("cannot prepare view cache base '/unusable-cache'")
+        for replies in ([missing, error], [missing, symbolic, error]):
+            with self.subTest(reads=len(replies)), mock.patch.object(git_view, "run", side_effect=replies):
+                with self.assertRaisesRegex(ValueError, "cannot prepare view cache base '/unusable-cache'"):
+                    one_shot.git_head(fx.tree, strict=True)
 
     def test_r6_four_public_reads_reach_git_view_only_through_git_helper(self):
         helper = getattr(one_shot, "_git", None)
@@ -2328,7 +2417,7 @@ class SanitisedTreeReadTest(unittest.TestCase):
         with mock.patch.object(one_shot, "git_head", return_value=None) as head:
             self.assertEqual(one_shot.committed_changes(fx.tree, fx.sha["B"]),
                              "Could not read commits: tree unreadable")
-        head.assert_called_once_with(fx.tree)
+        head.assert_called_once_with(fx.tree, expected_common=None)
 
     def test_unchanged_head_and_unknown_before_keep_no_commits(self):
         fx = self.fixture()

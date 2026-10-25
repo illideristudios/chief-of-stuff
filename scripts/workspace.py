@@ -27,6 +27,22 @@ class ConfigError(Exception):
 
 
 @dataclass(frozen=True)
+class WorkspaceFile:
+    """A file init leaves in a workspace and the command that adds it to one that lacks it; `command` takes `{root}`."""
+    name: str
+    command: str
+
+
+# Init's config and settings, also read by health for older workspaces. Init needs user/forge inputs;
+# --help explains those rather than suggesting an incomplete command that would fail.
+# Health only exercises `settings`: a missing config is a usage fault there. Model guidance stays out: the engine rotates models (ledger D10), so preflight does not advise installing it.
+WORKSPACE_FILES: dict[str, WorkspaceFile] = {
+    "config": WorkspaceFile("CLAUDE.md", "chief-of-stuff init --help"),
+    "settings": WorkspaceFile("chief-of-stuff.toml", "chief-of-stuff init --help"),
+}
+
+
+@dataclass(frozen=True)
 class Deadline:
     name: str
     at: datetime
@@ -95,6 +111,17 @@ def _bullets(body: list[str]) -> tuple[dict[str, str], dict[str, list[tuple[str,
 def settings_path(text: str) -> str | None:
     """The path the block's `Settings:` line names, or None. Asks the block for no other line, so `health` can run on a block `parse_coordinator` refuses."""
     return _first_path(_bullets(_section(text, "## Coordinator"))[0].get("Settings", ""))
+
+
+def architecture_document(root: Path) -> Path | None:
+    """The canonical document's first backticked path, resolved against the workspace root."""
+    try:
+        text = (root / "CLAUDE.md").read_text()
+    except FileNotFoundError:
+        return None
+    value = _bullets(_section(text, "## Architecture"))[0].get("Canonical document", "")
+    match = re.search(r"`([^`]+)`", value)
+    return (root / match[1].strip()).resolve() if match else None
 
 
 def parse_coordinator(text: str, today: date) -> Config:
@@ -218,6 +245,50 @@ def worktrees_dir(claude_md: str) -> str:
 
 
 
+def _decision_deadline(cells: list[str], item_col: int, tracker_day: date,
+                       zone: ZoneInfo) -> tuple[str, datetime, list[str]] | None:
+    """A Decisions row's `deadline:` item as (name, instant, option parts), or None when the row is not a valid one."""
+    if _is_separator(cells) or item_col >= len(cells):
+        return None
+    item, *options = [part.strip() for part in _unmark(cells[item_col]).split(";")]
+    match = DECISION_DEADLINE.fullmatch(item)
+    if not match:
+        return None
+    name, day_text, hour_text, minute_text = match.groups()
+    name = name.strip(" ,—–-")
+    if not name:
+        return None
+    try:
+        day = date.fromisoformat(day_text) if day_text else tracker_day
+        at = datetime.combine(day, time(int(hour_text), int(minute_text)), tzinfo=zone)
+    except ValueError:
+        return None
+    return name, at, options
+
+
+def _recorded_time(cells: list[str], time_col: int | None) -> time | None:
+    """The time a Decisions row was recorded, or None when it has no readable one."""
+    if time_col is None or time_col >= len(cells):
+        return None
+    stamp = HHMM.fullmatch(cells[time_col])
+    if not stamp:
+        return None
+    try:
+        return time(int(stamp[1]), int(stamp[2]))
+    except ValueError:
+        return None
+
+
+def _decision_terms(options: list[str], old: Deadline | None) -> tuple[str | None, str]:
+    """The requirements path and task scope a decision names, each defaulting to the configured deadline's."""
+    requirements = next((r.group(1) for option in options
+                         if (r := re.fullmatch(r"(?i)requirements\s+`?([^`]+?)`?", option))),
+                        old.requirements if old else None)
+    scope = ("named" if any(re.fullmatch(r"(?i)named tasks only", option) for option in options)
+             else old.scope if old else "all")
+    return requirements, scope
+
+
 def with_decision_deadlines(cfg: Config, tracker_text: str, tracker_day: date,
                             *, min_day: date | None = None) -> Config:
     """Project precise Decisions-row deadlines into the board's configured deadline list.
@@ -238,38 +309,16 @@ def with_decision_deadlines(cfg: Config, tracker_text: str, tracker_day: date,
     decided: dict[str, tuple[time | None, Deadline]] = {}
     for row in rows[1:]:
         cells = _cells(row)
-        if _is_separator(cells) or item_col >= len(cells):
+        parsed = _decision_deadline(cells, item_col, tracker_day, cfg.zone)
+        if parsed is None:
             continue
-        item, *options = [part.strip() for part in _unmark(cells[item_col]).split(";")]
-        match = DECISION_DEADLINE.fullmatch(item)
-        if not match:
-            continue
-        name, day_text, hour_text, minute_text = match.groups()
-        name = name.strip(" ,—–-")
-        if not name:
-            continue
-        try:
-            day = date.fromisoformat(day_text) if day_text else tracker_day
-            at = datetime.combine(day, time(int(hour_text), int(minute_text)), tzinfo=cfg.zone)
-        except ValueError:
-            continue
+        name, at, options = parsed
         if min_day is not None and at.date() < min_day:
             continue
         key = name.casefold()
         old = base.get(key)
-        requirements = next((r.group(1) for option in options
-                             if (r := re.fullmatch(r"(?i)requirements\s+`?([^`]+?)`?", option))),
-                            old.requirements if old else None)
-        scope = ("named" if any(re.fullmatch(r"(?i)named tasks only", option) for option in options)
-                 else old.scope if old else "all")
-        recorded = None
-        if time_col is not None and time_col < len(cells):
-            stamp = HHMM.fullmatch(cells[time_col])
-            if stamp:
-                try:
-                    recorded = time(int(stamp[1]), int(stamp[2]))
-                except ValueError:
-                    pass
+        requirements, scope = _decision_terms(options, old)
+        recorded = _recorded_time(cells, time_col)
         previous = decided.get(key)
         if previous is None or (recorded is not None and (previous[0] is None or recorded > previous[0])):
             decided[key] = (recorded, Deadline(old.name if old else name, at, requirements, scope))

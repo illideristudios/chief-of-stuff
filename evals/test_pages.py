@@ -20,6 +20,7 @@ import urllib.error
 from unittest import mock
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -109,10 +110,10 @@ class ServeTest(unittest.TestCase):
         self.assertEqual(get(self.port, "/.pid").status, 404)
 
 
-def snippet() -> str:
+def snippet(last_modified: str = "Thu, 01 Jan 1970 00:00:00 GMT") -> str:
     """The shared reload check. Imported here, not at the top, so only the tests of it are red while it is missing."""
     import page_reload
-    return page_reload.SNIPPET
+    return page_reload.inject(b"", last_modified).decode()
 
 
 class ReloadSnippetTest(unittest.TestCase):
@@ -140,10 +141,11 @@ class ReloadSnippetTest(unittest.TestCase):
         self.addCleanup(self.server.shutdown)
 
     def test_every_page_kind_carries_the_snippet_once_before_the_last_body_end(self):
-        snip = snippet().encode()
         for path in self.ROUTES:
             with self.subTest(path=path):
-                body = get(self.port, path).body
+                got = get(self.port, path)
+                body = got.body
+                snip = snippet(got.getheader("Last-Modified")).encode()
                 self.assertEqual(body.count(snip), 1)
                 self.assertLess(body.index(snip), body.rindex(b"</body>"))
                 self.assertIn(f"<p>{self.ROUTES[path]}</p>".encode(), body)
@@ -157,14 +159,16 @@ class ReloadSnippetTest(unittest.TestCase):
                 self.assertEqual(head.body, b"")
                 self.assertEqual(head.getheader("Last-Modified"), got.getheader("Last-Modified"))
                 self.assertEqual(got.getheader("Last-Modified"), email.utils.formatdate(self.MTIME, usegmt=True))
+                self.assertIn(f"var seen={json.dumps(got.getheader('Last-Modified'))};".encode(), got.body)
 
     def test_a_page_without_a_body_end_gets_it_appended_and_the_last_one_is_where_it_goes(self):
-        snip = snippet().encode()
         (self.dir / "arch-review.html").write_text("<p>no body</p>")
-        body = get(self.port, "/arch-review.html").body
+        got = get(self.port, "/arch-review.html")
+        body, snip = got.body, snippet(got.getheader("Last-Modified")).encode()
         self.assertEqual((body.count(snip), body.startswith(b"<p>no body</p>"), body.endswith(snip)), (1, True, True))
         (self.dir / "arch-review.html").write_text('<body><script>var s="</body>"</script></body>')
-        body = get(self.port, "/arch-review.html").body
+        got = get(self.port, "/arch-review.html")
+        body, snip = got.body, snippet(got.getheader("Last-Modified")).encode()
         self.assertEqual((body.count(snip), body.index(snip) > body.index(b'"</body>"'), body.endswith(b"</body>")), (1, True, True))
 
     def test_a_file_that_is_not_html_is_served_unchanged(self):
@@ -178,9 +182,10 @@ class ReloadSnippetTest(unittest.TestCase):
         snip = snippet()
         self.assertTrue(snip.lstrip().startswith("<script") and snip.rstrip().endswith("</script>"))
         for needle in ("HEAD", "no-store", "location.pathname", "visibilitychange",
-                       "document.lastModified", "Last-Modified", "defaultValue", "activeElement", "page-changed", "location.reload"):
+                       "Last-Modified", "defaultValue", "activeElement", "page-changed", "location.reload"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, "".join(snip.replace('"', "'").split()))  # quotes and spacing are the author's
+        self.assertNotIn("document.lastModified", snip)  # #332: compare Last-Modified header to header
         for blocking in ("alert(", "confirm(", "prompt("):
             self.assertNotIn(blocking, snip)
 
@@ -192,22 +197,25 @@ class ReloadSnippetTest(unittest.TestCase):
 
     def test_the_snippet_guards_every_kind_of_user_state_a_reload_would_lose(self):
         # A reload drops a picked radio or checkbox, a chosen option and edited rich text, as it drops typed text.
-        _, flat = self.code()
+        code, flat = self.code()
         self.assertRegex(flat, r"\.checked!==?\w+\.defaultChecked")
-        self.assertRegex(flat, r"\.selected!==?\w+\.defaultSelected")
         for word in ("defaultChecked", "defaultSelected", "defaultValue", "tagName", "INPUT", "TEXTAREA", "SELECT"):
             with self.subTest(word=word):
                 self.assertRegex(flat, rf"\b{word}\b")  # `SELECTX` is not SELECT
+        self.assertIn("selectDirty", code)  # #339: select default is first non-disabled / none if multiple
+        self.assertIn(".elements", flat)  # #388: form.elements includes form-attribute controls
         self.assertIn("isContentEditable", flat)  # in code, not only in a comment
         self.assertNotRegex(flat, r"false&&|&&false|\b0&&|&&0\b")  # a guard that can never be true guards nothing
 
     def test_the_snippet_counts_only_form_controls_as_unsaved_input(self):
         # R13: the source page's Unified/Split radios sit outside any form; picking Split is not input a reload loses.
+        # #388: form.elements (not a descendant query) so a control tied by the form attribute still counts.
         _, flat = self.code()
         selectors = re.findall(r"some\('([^']*)'", flat)
         self.assertTrue(selectors, "found no `some('selector', ...)` dirty check")
         scoped = all("form" in part for sel in selectors for part in sel.split(","))
         self.assertTrue(scoped or "closest('form')" in flat, f"dirty checks reach controls outside a form: {selectors}")
+        self.assertIn(".elements", flat)
 
     def test_the_source_pages_layout_radios_are_outside_any_form(self):
         # The premise of the test above: no form wraps them, so a form-scoped check never counts them.
@@ -216,11 +224,13 @@ class ReloadSnippetTest(unittest.TestCase):
         self.assertNotIn("<form", source_page.LAYOUT)
         self.assertNotIn("<form", Path(source_page.__file__).read_text())
 
-    def test_the_snippet_does_not_take_an_epoch_last_modified_for_an_absent_one(self):
-        # R16: Date.parse of a missing header is NaN; 0 is a real time, and a page stamped 0 must still reload.
-        _, flat = self.code()
-        self.assertIn("isNaN(", flat)
-        self.assertNotRegex(flat, r"\bt&&")
+    def test_the_snippet_compares_last_modified_headers_as_strings(self):
+        # #332: Date.parse(document.lastModified) vs the header disagrees in a DST fall-back's repeated hour.
+        code, flat = self.code()
+        self.assertNotIn("document.lastModified", code)
+        self.assertNotIn("Date.parse", code)
+        self.assertIn("Last-Modified", flat)
+        self.assertIn("t!=null&&t!==seen", flat)
 
     def test_the_snippet_listens_for_visibilitychange_without_replacing_the_pages_own_handler(self):
         flat = "".join(snippet().replace('"', "'").split())
@@ -229,16 +239,24 @@ class ReloadSnippetTest(unittest.TestCase):
     def test_inject_matches_the_body_end_in_any_case(self):
         import page_reload
         snip = page_reload.ENCODED  # the bytes inject() writes
-        self.assertEqual(snip, page_reload.SNIPPET.encode())
+        self.assertEqual(snip, snippet().encode())
         for end in (b"</BODY>", b"</Body>"):
             with self.subTest(end=end):
-                out = page_reload.inject(b"<BODY><p>x</p>" + end + b"</HTML>")
+                out = page_reload.inject(b"<BODY><p>x</p>" + end + b"</HTML>", "Thu, 01 Jan 1970 00:00:00 GMT")
                 self.assertEqual((out.count(snip), out.index(snip) < out.rindex(end), out.endswith(end + b"</HTML>")), (1, True, True))
 
+    def test_inject_escapes_the_baseline_as_a_script_safe_json_string(self):
+        stamp = '"\\\n</script>\u2028'
+        snip = snippet(stamp)
+        value = re.search(r"var seen=(.*);", snip)[1]
+        self.assertEqual(json.loads(value), stamp)
+        self.assertNotIn("<", value)
+        self.assertEqual(snip.count("</script>"), 1)
+
     def test_an_upper_case_html_suffix_is_injected_like_html(self):
-        snip = snippet().encode()
         (self.dir / "LOUD.HTML").write_text("<body><p>loud</p></body>")
-        body = get(self.port, "/LOUD.HTML").body
+        got = get(self.port, "/LOUD.HTML")
+        body, snip = got.body, snippet(got.getheader("Last-Modified")).encode()
         self.assertEqual((body.count(snip), b"<p>loud</p>" in body), (1, True))
 
     def test_an_html_that_does_not_exist_or_is_not_a_file_is_404_for_get_and_head(self):
@@ -281,6 +299,67 @@ class ReloadSnippetTest(unittest.TestCase):
         self.assertEqual(resp.status, 404)
         self.assertNotIn("1970", resp.getheader("Last-Modified") or "")
 
+    def test_odd_page_urls_are_404(self):
+        # #340: %00 closed with no response; /sub/ listed without the snippet; /dir.html/ was an empty 200.
+        (self.dir / "sub").mkdir()
+        (self.dir / "dir.html").mkdir()
+        for path in ("/%00", "/sub/", "/dir.html/", "/sub/%2F", "/dir.html%2F", "/%2F", "/sub/#x", "/dir.html/#x"):
+            for method in ("GET", "HEAD"):
+                with self.subTest(path=path, method=method):
+                    self.assertEqual(get(self.port, path, method=method).status, 404)
+
+    def test_a_case_folded_rendered_name_is_not_served_by_file_name(self):
+        # #335: workerſ.html (U+017F) case-folds to workers.html; the route-only rule must use casefold, not lower.
+        (self.dir / "workers.html").write_text("<!doctype html><body><p>workers</p></body>")
+        self.assertEqual(get(self.port, "/worker%C5%BF.html").status, 404)
+        self.assertEqual(get(self.port, "/workers").status, 200)
+
+    def test_head_of_html_does_not_read_the_file_and_a_huge_page_is_refused(self):
+        # #333: HEAD matched GET's length without reading; a page over the cap is 413 and never read.
+        reads = []
+        real = Path.read_bytes
+
+        def spy(path):
+            reads.append(path.name)
+            return real(path)
+
+        with mock.patch.object(Path, "read_bytes", spy):
+            head = get(self.port, "/arch-review.html", method="HEAD")
+        self.assertEqual(head.status, 200)
+        self.assertNotIn("arch-review.html", reads)
+        self.assertEqual(head.getheader("Content-Length"), str(len(get(self.port, "/arch-review.html").body)))
+        with mock.patch.object(pg, "MAX_PAGE", 64):
+            (self.dir / "big.html").write_bytes(b"x" * 128)
+            reads.clear()
+            with mock.patch.object(Path, "read_bytes", spy):
+                for method in ("GET", "HEAD"):
+                    with self.subTest(method=method):
+                        self.assertEqual(get(self.port, "/big.html", method=method).status, 413)
+            self.assertEqual(reads, [])
+        if os.geteuid() == 0:
+            return  # root reads a mode-0 file
+        locked = self.dir / "locked.html"
+        locked.write_text("<!doctype html><body>x</body>")
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o600)
+        for method in ("GET", "HEAD"):
+            with self.subTest(unreadable=method):
+                self.assertEqual(get(self.port, "/locked.html", method=method).status, 404)
+
+
+class BannerPerRequestTest(unittest.TestCase):
+    """#334: banner is per request, not a side effect left on a reused handler."""
+
+    def test_allowed_clears_banner_before_each_request(self):
+        h = pg.Handler.__new__(pg.Handler)
+        h.banner = "stale from the request before"
+        h.server = mock.Mock(server_address=("127.0.0.1", 9), root=None, refresher=None)
+        h.headers = {"Host": "evil.test"}
+        h.path, h.command, h.directory = "/", "GET", str(Path(tempfile.mkdtemp()))
+        h.send_error = mock.Mock()
+        self.assertFalse(h._allowed())
+        self.assertEqual(h.banner, "")
+
 
 class EnsureTest(unittest.TestCase):
     def setUp(self):
@@ -320,6 +399,26 @@ class EnsureTest(unittest.TestCase):
                 pg.ensure(self.dir, self.port, self.log)
         self.assertFalse((self.dir / ".pid").exists())
 
+    def test_a_server_that_never_came_up_is_terminated(self):
+        """#493: ensure must kill the detached child before raising, or nothing can stop it."""
+        started: list[subprocess.Popen] = []
+        real_popen = subprocess.Popen
+
+        def popen(*_a, **_k):
+            proc = real_popen([sys.executable, "-c", "import time; time.sleep(60)"],
+                              start_new_session=True)
+            started.append(proc)
+            return proc
+
+        with mock.patch.object(pg.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(pg, "_who", return_value=None), \
+                mock.patch.object(pg.time, "sleep"):
+            with self.assertRaisesRegex(pg.PagesError, "did not come up"):
+                pg.ensure(self.dir, self.port, self.log)
+        self.assertEqual(len(started), 1)
+        self.assertIsNotNone(started[0].poll(), "failed ensure left its detached server running")
+        self.assertFalse((self.dir / ".pid").exists())
+
     def test_a_foreign_server_on_the_port_is_an_error(self):
         other = http.server.ThreadingHTTPServer(("127.0.0.1", self.port), http.server.SimpleHTTPRequestHandler)
         threading.Thread(target=other.serve_forever, daemon=True).start()
@@ -327,6 +426,56 @@ class EnsureTest(unittest.TestCase):
         self.addCleanup(other.shutdown)
         with self.assertRaisesRegex(pg.PagesError, f"{self.port}.*not the pages server"):
             pg.ensure(self.dir, self.port, self.log)
+
+    def test_cancelled_start_reaps_its_detached_child_before_returning(self):
+        stop = threading.Event()
+        real_popen = subprocess.Popen
+        children = []
+
+        def start(*_a, **_k):
+            proc = real_popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+            children.append(proc)
+            self.addCleanup(lambda: proc.poll() is None and proc.kill())
+            stop.set()  # shutdown arrived while Popen was starting the child
+            return proc
+
+        with mock.patch.object(pg.subprocess, "Popen", side_effect=start), \
+             mock.patch.object(pg, "_who", return_value=None):
+            self.assertEqual(pg.ensure(self.dir, self.port, self.log, stop=stop), "pages: stopped")
+        self.assertEqual(len(children), 1)
+        self.assertIsNotNone(children[0].returncode, "cancelled startup must reap its child before returning")
+        self.assertFalse((self.dir / ".pid").exists())
+
+    def test_cancellation_interrupts_waiting_for_the_ensure_lock(self):
+        stop = threading.Event()
+        finished = threading.Event()
+        attempted = threading.Event()
+        errors = []
+        real_lock = pg.supervisor.lock
+
+        def lock(*args, **kwargs):
+            attempted.set()
+            return real_lock(*args, **kwargs)
+
+        def ensure():
+            try:
+                pg.ensure(self.dir, self.port, self.log, stop=stop)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                finished.set()
+
+        with real_lock(self.dir / ".ensure.lock"), \
+             mock.patch.object(pg.supervisor, "lock", side_effect=lock), \
+             mock.patch.object(pg.subprocess, "Popen") as popen:
+            thread = threading.Thread(target=ensure, daemon=True)
+            thread.start()
+            self.assertTrue(attempted.wait(2), "ensure never tried to acquire the held lock")
+            stop.set()
+            self.assertTrue(finished.wait(2), "shutdown stayed blocked on the ensure lock")
+            thread.join(timeout=2)
+        self.assertEqual(errors, [])
+        popen.assert_not_called()
 
     def test_an_older_server_is_restarted(self):
         # A server started before `--root` existed never renders; `--ensure` replaces it, by its pid file.
@@ -348,6 +497,30 @@ class EnsureTest(unittest.TestCase):
             pg.ensure(self.dir, self.port, self.log)
         self.assertIsNone(other.poll())
         self.assertIsNone(old.poll())
+
+    def test_concurrent_ensures_start_one_server(self):
+        self.addCleanup(self.stop)
+        barrier = threading.Barrier(4)
+        results: list[str] = []
+        errors: list[Exception] = []
+
+        def run():
+            barrier.wait(timeout=5)
+            try:
+                results.append(pg.ensure(self.dir, self.port, self.log))
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=run) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+        self.assertEqual(errors, [])
+        self.assertEqual(sorted(results), ["pages: serving", "pages: serving", "pages: serving", "pages: started"])
+        pid = int((self.dir / ".pid").read_text())
+        self.assertTrue(pg.is_pages_serve(pid, self.port))
+        self.assertEqual(get(self.port, "/").status, 200)
 
 
 OLD_SERVER = """import functools, http.server, sys
@@ -396,7 +569,12 @@ class RenderOnRequestTest(unittest.TestCase):
     make the page render automatically using scripts and stuff instead of the agent pulling in data each time")."""
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
+        # A private parent, removed after the test: FreshRefusesAForeignNameTest snapshots root.parent, which must
+        # never be the shared temp dir (#357: reading every file there hung the suite locally).
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
         self.day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
@@ -454,11 +632,11 @@ class RenderOnRequestTest(unittest.TestCase):
         (self.pages / "decision-cache-ttl.json").write_text(
             '{"headline": "Cache TTL", "ask": "Keep 5 minutes?", "options": [{"key": "A", "title": "Keep", '
             '"text": "no change"}, {"key": "B", "title": "Drop", "text": "slower"}], "recommended": "A", "why": "fine", "default": "A at 17:00"}')
-        snip = snippet()
         for path, name in (("/", f"{self.day}-board.html"), ("/decisions", "decisions.html"),
                            ("/decisions/cache-ttl", "decision-cache-ttl.html")):
             with self.subTest(path=path):
-                page = get(self.port, path).body.decode()
+                got = get(self.port, path)
+                page, snip = got.body.decode(), snippet(got.getheader("Last-Modified"))
                 self.assertEqual(page.count(snip), 1)
                 self.assertEqual(page.count("fetch(location.pathname"), 1)
                 on_disk = (self.pages / name).read_text()
@@ -468,23 +646,14 @@ class RenderOnRequestTest(unittest.TestCase):
     def test_the_banner_variant_carries_the_snippet_once(self):
         get(self.port, "/")
         (self.root / "cos.toml").write_text("[lanes\n")
-        snip = snippet()
         got, head = get(self.port, "/"), get(self.port, "/", method="HEAD")
+        snip = snippet(got.getheader("Last-Modified"))
         self.assertIn(b"not re-rendered", got.body)
         body = got.body.decode()
         self.assertEqual(body.count(snip), 1)
         self.assertLess(body.index(snip), body.rindex("</body>"))
         self.assertEqual(head.getheader("Content-Length"), str(len(got.body)))
         self.assertEqual(head.getheader("Last-Modified"), got.getheader("Last-Modified"))
-
-    def test_a_decision_page_renders_from_its_json(self):
-        (self.pages / "decision-cache-ttl.json").write_text(
-            '{"headline": "Cache TTL", "ask": "Keep 5 minutes?", "options": [{"key": "A", "title": "Keep", '
-            '"text": "no change"}, {"key": "B", "title": "Drop", "text": "slower"}], "recommended": "A", "why": "fine", "default": "A at 17:00"}')
-        resp = get(self.port, "/decisions/cache-ttl")
-        self.assertEqual(resp.status, 200)
-        self.assertIn(b"Cache TTL", resp.body)
-        self.assertIn(b"Cache TTL", get(self.port, "/decisions").body)
 
     def test_pages_are_routes_and_their_files_are_not_served(self):
         # The user, 2026-09-26: "pages should be: / /decisions /decisions/id actually an app".
@@ -719,7 +888,12 @@ class _PagesFixture:
              "/issues/7/source": "issue-7-source.html"}
 
     def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
+        # A private parent, removed after the test: FreshRefusesAForeignNameTest snapshots root.parent, which must
+        # never be the shared temp dir (#357: reading every file there hung the suite locally).
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
         self.day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
@@ -897,7 +1071,7 @@ class RenderStampTest(_PagesFixture, unittest.TestCase):
             got, head = get(self.port, "/issues/7"), get(self.port, "/issues/7", method="HEAD")
         self.assertEqual((got.status, head.status), (200, 200))
         self.assertIn(b"not re-rendered: RuntimeError: boom", got.body)
-        self.assertEqual(got.body.count(page_reload_bytes()), 1)
+        self.assertEqual(got.body.count(snippet(got.getheader("Last-Modified")).encode()), 1)
         self.assertEqual(head.getheader("Content-Length"), str(len(got.body)))
 
     def test_a_page_file_that_is_not_utf8_is_rewritten_not_wedged(self):
@@ -929,11 +1103,6 @@ class RenderStampTest(_PagesFixture, unittest.TestCase):
         self.assertTrue([r for r in replaced if r[1].name == target.name and r[0] != r[1] and r[0].parent == r[1].parent],
                         f"workers.html was not replaced from a temp file beside it: {replaced}")
         self.assertEqual(set(os.listdir(self.pages)), before, "a temp file was left behind")
-
-
-def page_reload_bytes() -> bytes:
-    import page_reload
-    return page_reload.ENCODED
 
 
 class UnfrozenBoardTest(_PagesFixture, unittest.TestCase):
@@ -1044,6 +1213,18 @@ class AnswerTest(unittest.TestCase):
                 self.assertEqual(post(self.port, path, body, host=host, origin=origin).status, status)
         self.assertIsNone(self.answer())
 
+    def test_a_decision_linked_out_of_the_pages_dir_is_refused(self):
+        """#1009: a path built from the request resolves inside the pages dir or is refused, so a symlink out of it is
+        no decision: not served, not read, not answered."""
+        outside = self.root / "outside.json"
+        outside.write_text(self.json.read_text())
+        before = outside.read_bytes()
+        link = self.pages / "decision-linked.json"
+        link.symlink_to(outside)
+        self.assertEqual(get(self.port, "/decisions/linked").status, 404)
+        self.assertEqual(post(self.port, "/decisions/linked", b"key=B", origin=self.origin).status, 404)
+        self.assertEqual((outside.read_bytes(), link.is_symlink()), (before, True))
+
     def test_an_unreadable_decision_takes_no_answer(self):
         self.json.write_text("{")
         self.assertEqual(post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin).status, 409)
@@ -1074,9 +1255,9 @@ class _Renders:
         import render_board
         self.cond, self.gate = threading.Condition(), threading.Semaphore(0)
         self.inside, self.entered, self.most = [], [], {}
-        for target, fake in ((render_board, lambda root, day=None: self.render(f"{day}-board.html")),
+        for target, fake in ((render_board, lambda root, day=None, **inputs: self.render(f"{day}-board.html")),
                              (decision_page, lambda root, pages_dir, slug, day, source=None: self.render(f"decision-{slug}.html")),
-                             (issue_page, lambda root, pages_dir, n: self.render(f"issue-{n}.html"))):
+                             (issue_page, lambda root, pages_dir, n, **inputs: self.render(f"issue-{n}.html"))):
             patcher = mock.patch.object(target, "write", fake)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -1223,6 +1404,135 @@ class ConfiguredWorkersTest(_Renders, unittest.TestCase):
     def test_pages_workers_sets_how_many_render_at_once(self):
         # Rule: "N comes from the workspace settings TOML `[pages] workers`, a positive whole number".
         self.assert_up_to(2)
+
+
+class SuperviseTest(unittest.TestCase):
+    """#735 (folded into #634): the engine's supervisor keeps the board's page server alive (H4), with backoff on
+    failed starts, and there is no second LaunchAgent."""
+
+    def setUp(self):
+        parent = tempfile.TemporaryDirectory()
+        self.addCleanup(parent.cleanup)
+        self.root = Path(parent.name) / "ws"
+        self.root.mkdir()
+        self.port = free_port()
+        self.pages = self.root / "pages"
+        self.pages.mkdir()
+        (self.pages / f"{datetime.now().date().isoformat()}-board.html").write_text("<p>board</p>")
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:{self.port}/; dir `pages/`\n")
+
+    def stop_server(self):
+        pid_file = self.pages / ".pid"
+        if pid_file.is_file():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGTERM)
+            except (OSError, ValueError):
+                pass
+
+    def test_restarts_a_killed_page_server_without_an_agent_or_second_launch_agent(self):
+        self.addCleanup(self.stop_server)
+        stop = threading.Event()
+        with mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg, "RETRY_MIN", 0.05):
+            thread = threading.Thread(target=pg.supervise, args=(self.root, stop), daemon=True)
+            thread.start()
+            self.addCleanup(lambda: thread.join(timeout=5))
+            self.addCleanup(stop.set)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline and pg._who(self.port) is None:
+                time.sleep(0.05)
+            self.assertEqual(get(self.port, "/").status, 200)
+            first_pid = int((self.pages / ".pid").read_text())
+            os.kill(first_pid, signal.SIGTERM)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline and pg.is_pages_serve(first_pid, self.port):
+                time.sleep(0.05)
+            deadline = time.monotonic() + WAIT
+            while time.monotonic() < deadline:
+                if (self.pages / ".pid").is_file() and int((self.pages / ".pid").read_text()) != first_pid:
+                    if pg._who(self.port) is not None:
+                        break
+                time.sleep(0.05)
+            second_pid = int((self.pages / ".pid").read_text())
+            self.assertNotEqual(second_pid, first_pid)
+            self.assertEqual(get(self.port, "/").status, 200)
+            stop.set()
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+
+    def test_backs_off_failed_and_flapping_starts_up_to_sixty_seconds_then_resets_when_serving(self):
+        waits: list[float] = []
+        stop = threading.Event()
+        outcomes = iter([
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            "pages: started",
+            "pages: restarted",
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            pg.PagesError("port busy"),
+            "pages: serving",
+            pg.PagesError("port busy"),
+        ])
+
+        def fake_ensure(*_a, **_k):
+            item = next(outcomes)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def fake_wait(seconds: float) -> bool:
+            waits.append(seconds)
+            if len(waits) >= 9:
+                stop.set()
+                return True
+            return False
+
+        with mock.patch.object(pg, "ensure", side_effect=fake_ensure), \
+             mock.patch.object(stop, "wait", side_effect=fake_wait):
+            pg.supervise(self.root, stop)
+        self.assertEqual(waits, [1, 2, 4, 8, 16, 32, 60, pg.POLL, 1])
+
+    def test_does_nothing_when_board_is_disabled_or_supervisor_lock_is_held(self):
+        import supervisor
+        stop = threading.Event()
+        with supervisor.lock(supervisor.state_dir(self.root) / "pages-supervisor.lock"), \
+             mock.patch.object(pg, "ensure") as ensured:
+            pg.supervise(self.root, stop)
+        ensured.assert_not_called()
+
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: none\n")
+        stop2 = threading.Event()
+        with mock.patch.object(pg, "ensure") as ensured, \
+             mock.patch.object(stop2, "wait", side_effect=lambda _s: (stop2.set(), True)[1]):
+            pg.supervise(self.root, stop2)
+        ensured.assert_not_called()
+
+    def test_keeps_supervising_through_an_unreadable_config_and_a_board_added_later(self):
+        stop, waits = threading.Event(), []
+        configs = iter([KeyError("America/Nowhere"), SimpleNamespace(pages_dir=None, board_url=None),
+                        SimpleNamespace(pages_dir="pages/", board_url="http://127.0.0.1:1/")])
+
+        def read(_root):
+            item = next(configs)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        def fake_wait(seconds):
+            waits.append(seconds)
+            return len(waits) == 3 and (stop.set() or True)
+
+        with mock.patch.object(pg, "read_config", side_effect=read), \
+             mock.patch.object(pg, "from_config", return_value=(self.pages, self.port)), \
+             mock.patch.object(pg, "ensure", return_value="pages: serving") as ensured, \
+             mock.patch.object(stop, "wait", side_effect=fake_wait):
+            pg.supervise(self.root, stop)
+        self.assertEqual(len(waits), 3)
+        ensured.assert_called_once()
 
 
 if __name__ == "__main__":

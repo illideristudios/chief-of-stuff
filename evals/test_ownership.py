@@ -1,11 +1,81 @@
 """#57: one rule for a read-only task, read the same way by the prompt and the launcher."""
 
+import re
 import sys
+import textwrap
 import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import ownership  # noqa: E402
+
+
+class IssueScopesTest(unittest.TestCase):
+    def test_issue_section_uses_the_shared_table_and_bullet_reader(self):
+        body = "## File ownership\n| Mode | Paths |\n| --- | --- |\n| write | `src/`, `tests/` |\n- read-only: `docs/`\n## Other\n- write: `secrets/`"
+        self.assertEqual(ownership.issue_scopes(body), [("src", "write"), ("tests", "write"), ("docs", "read")])
+
+    def test_absent_empty_or_invalid_scope_has_no_scope(self):
+        for body in ("", "## File ownership\n", "## File ownership\n- typo: `src/`",
+                     "## File ownership\n- write: `../outside`", "## File ownership\n- write: `/absolute`"):
+            with self.subTest(body=body):
+                self.assertIsNone(ownership.issue_scopes(body))
+
+    def test_a_malformed_line_invalidates_the_declaration(self):
+        for bad in ("write src/", "- write src/", "| write |", "some prose", "| write | src/ | extra |", "| Mode | src/ |", "- mode: src/"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(ownership.issue_scopes("## File ownership\n- read-only: docs/\n" + bad))
+
+    def test_noncanonical_path_segments_cannot_bypass_overlap(self):
+        for path in ("src//a.py", "src/./a.py", "src/../a.py", "./", ".//", "./."):
+            with self.subTest(path=path):
+                self.assertIsNone(ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + path))
+
+    def test_cells_that_cannot_round_trip_through_overlap_have_no_scope(self):
+        for paths in ("`none`", "`none, src`", "`src,a.py`", "`src/a; worktree hidden`",
+                      "`src/a` src/b", "src/a, `src/b`", "`src/a` and `src/b`", "`src/a` `src/b`",
+                      "`src/a", "`src/a` trailing", "` src/a `"):
+            with self.subTest(paths=paths):
+                scopes = ownership.issue_scopes("## File ownership\n- read-only: docs/\n- write: " + paths)
+                self.assertIsNone(scopes)
+
+    def test_whole_repository_scope_is_explicit_and_read_only_stays_distinct(self):
+        for mode, expected in (("write", "write"), ("read-only", "read")):
+            with self.subTest(mode=mode):
+                self.assertEqual(ownership.issue_scopes(f"## File ownership\n- {mode}: `.`"), [(".", expected)])
+
+    def test_empty_path_rows_are_ignored_only_when_a_valid_path_remains(self):
+        for empty in ("- write:", "- read-only:", "| write | |"):
+            with self.subTest(empty=empty):
+                self.assertIsNone(ownership.issue_scopes("## File ownership\n" + empty))
+                for paths, expected in (("- write: `src/`", [("src", "write")]),
+                                        ("- read-only: `docs/`", [("docs", "read")])):
+                    self.assertEqual(ownership.issue_scopes("## File ownership\n" + empty + "\n" + paths), expected)
+        self.assertIsNone(ownership.issue_scopes("## File ownership\n- typo:\n- write: `src/`"))
+        self.assertIsNone(ownership.issue_scopes("## File ownership\n- write: none\n- read-only: docs/"))
+
+    def test_issue_forms_require_input_and_submit_a_parseable_section(self):
+        templates = Path(__file__).resolve().parents[1] / ".github" / "ISSUE_TEMPLATE"
+        for name in ("bug.yml", "task.yml"):
+            with self.subTest(template=name):
+                # Read the actual ownership field and its literal YAML block without a YAML dependency.
+                fields = (templates / name).read_text().split("  - type: ")[1:]
+                ownership_fields = [field for field in fields if "    id: file_ownership\n" in field]
+                self.assertEqual(len(ownership_fields), 1, "the form must include the ownership field")
+                field = ownership_fields[0]
+                self.assertRegex(field, r"validations:\n      required: true")
+                default = re.search(r"(?m)^      value:", field)
+                self.assertIsNone(default, "a prefilled skeleton satisfies required without declaring a path")
+                placeholder = re.search(r"(?m)^      placeholder: \|\n((?:        .*\n)+)", field)
+                self.assertIsNotNone(placeholder)
+                skeleton = textwrap.dedent(placeholder[1]).rstrip()
+                for submitted in (skeleton.replace("- write:", "- write: `src/`"),
+                                  skeleton + "\n- write: `src/`"):
+                    # GitHub renders each form field's label and response in template order.
+                    body = "\n\n".join(
+                        f"### {re.search(r'(?m)^      label: (.+)$', entry)[1]}\n\n"
+                        + (submitted if entry == field else "Example response") for entry in fields)
+                    self.assertEqual(ownership.issue_scopes(body), [("src", "write")])
 
 
 class ReadOnlyTest(unittest.TestCase):

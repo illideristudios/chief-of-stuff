@@ -101,7 +101,8 @@ def ready_one_shot_tasks(root: Path, tracker_text: str, settings: Settings) -> l
     for t in tasks:
         if t.kind != "open" or t.owner.strip() != "unassigned":
             continue
-        if t.workflow or t.standing:
+        # standing_for unmarks the item; a bold name (`**impl03**: standing`) is still a placeholder when unassigned.
+        if t.workflow or t.standing or tracker.STANDING_ITEM.match(tracker._unmark(t.item).strip()) or tracker.STANDING_NAME.match(t.name.strip()):
             continue
         if t.stage.strip().startswith("hold"):
             continue
@@ -154,7 +155,7 @@ def reconcile_dead_workers(root: Path, tracker_path: Path, day: str) -> list[str
             matching_reports: list[tuple[float, dict]] = []
             for p in reports_dir.glob("*.toon"):
                 try:
-                    data = read_report(p)
+                    data = read_report(p, git_trees.read_regular)
                     if data.get("task") in (t.label, t.name, t.item):
                         matching_reports.append((p.stat().st_mtime, data))
                 except UNREADABLE:
@@ -257,7 +258,14 @@ def dispatch_ready_tasks(root: Path, day: str, tracker_path: Path, settings: Set
             clone_repo = root / first_repo
 
         try:
-            make_worktree.build(root, clone_repo, trees_base, tree_name, branch_name, agent_type="implementer")
+            declared = make_worktree.agent_types((root / "CLAUDE.md").read_text())
+            # A configured profile wins; the legacy implementer fallback must be a task type.
+            defaults = settings.stages.get(t.stage.strip())
+            if defaults and defaults.agent:
+                cut_type = defaults.agent if defaults.agent in declared else ""
+            else:
+                cut_type = "implementer" if declared.get("implementer") == "task" else ""
+            make_worktree.build(root, clone_repo, trees_base, tree_name, branch_name, agent_type=cut_type)
         except make_worktree.RefusedError as exc:
             dispatched.append(f"refused worktree for {t.label}: {exc}")
             continue
@@ -266,7 +274,9 @@ def dispatch_ready_tasks(root: Path, day: str, tracker_path: Path, settings: Set
         chief_bin = resolve_chief_bin(root)
 
         cmd = [sys.executable, str(chief_bin), "worker", "--one-shot", "--root", str(root),
-               "--task", t.label, "--cwd", str(tree_path), "--date", day]
+               "--task", t.label, "--cwd", str(tree_path), "--date", day, "--name", tree_name]
+        if cut_type in declared:
+            cmd += ["--type", cut_type]
 
         try:
             subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
