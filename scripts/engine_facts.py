@@ -180,6 +180,11 @@ def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | 
         if (latest is None or latest.stage != "implement" or latest.outcome != "human_review"
                 or any(s.stage != latest.stage and s.started_at == latest.started_at for s in completed)):
             continue
+        runs = data.get("runs", {})
+        run_name = f"implement-{latest.attempt}"
+        if not isinstance(runs, dict) or (run_name in runs and not isinstance(runs[run_name], dict)):
+            candidates.append(((key, latest.stage, latest.attempt), None))
+            continue
         record = _record(store, key, latest.stage, latest.attempt)
         branch = record.get("branch") if record else None
         if branch is None or (isinstance(branch, str) and not branch.strip()):

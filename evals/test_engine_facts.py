@@ -109,7 +109,9 @@ class GatherTest(unittest.TestCase):
         for data, expected in (({}, None), ({"work_branch": "  "}, None),
                                ({"work_branch": "work/issue-1"}, True),
                                ({"work_branch": "other", "runs": {"implement-2": {"branch": "work/issue-1"}}}, True),
-                               ({"work_branch": "work/issue-1", "runs": {"implement-2": {"branch": 42}}}, None)):
+                               ({"work_branch": "work/issue-1", "runs": {"implement-2": {"branch": 42}}}, None),
+                               ({"work_branch": "work/issue-1", "runs": "malformed"}, None),
+                               ({"work_branch": "work/issue-1", "runs": {"implement-2": "malformed"}}, None)):
             with self.subTest(data=data):
                 self.db.set_resume(KEY, data)
                 self.assertIs(dict(self.release_gather(f).implementation_requests).get((KEY, "implement", 2)), expected)
