@@ -1,104 +1,104 @@
-# Plan: #928, trio votes from Cursor and agy fail, so almost no decision is unanimous
+# Implementation plan for #928: retry unstructured trio answers as outages
 
-## Finding: where the code is, and what already landed
+## Scope and verified baseline
 
-`scripts/trio_gate.py` and `scripts/host_adapter.py` do not exist on this branch's base (`main`, 0.128.x, `50091f80`). They live on `origin/develop` (`4417a8fe`, same as the #927 plan found). The implement stage must start from `origin/develop`, or every path below is missing. Line numbers below are `origin/develop`.
+This stage changes only this plan. Implement the remaining #928 gap; do not change repeated-consult identity (#927), rotation selection (#879), worker retries, or live decision stores.
 
-The issue's numbers are from 0.129.98. PRs #947 and #948 (0.129.99 and later) already shipped most of what §6 of the architecture asks for, so do not rebuild it:
+The assigned worktree starts at `50091f80` plus the earlier plan commit `59f7c030`; it has no engine modules or engine evals. The earlier plan's instruction to use `origin/develop` is stale: that ref no longer exists locally. The engine code is present in the inspected `origin/main` snapshot, `17552bbd` (plugin version `0.129.114`). Implementation must use an engine-bearing base selected by the engine and recheck the functions below before editing. This plan stage does not switch branches or merge anything.
 
-- `trio_gate.TIMEOUT_S = 300` (was 60) and the 480 s pass budget (`trio_gate.py:14`, `_ask`'s `remaining`).
-- `trio_gate._ask` replaces a member once on any non-quota failure by drawing another distinct entry (`trio_gate._ask`, `trio_gate.py:119`). A second failure is kept as the member's vote.
-- `retryable_failure` makes a row whose failed vote is `quota` or `unknown` a pending outage (`decided_by=""`, retried at `retry_at`, capped at `MAX_TRIO_RETRIES = 8`), not a split.
+Already present in that snapshot:
 
-## Why #928 still fails: one gap
+- `scripts/trio_gate.py:TIMEOUT_S` is 300 seconds (commit `6c9046f4`), addressing Cursor answers that took longer than the issue's original 60-second limit.
+- `trio_gate._ask` replaces a member once after a non-quota `Failure`, using another rotation entry when available. Quota stops advance through the available entries.
+- `scripts/engine.py:TRIO_PASS_BUDGET_S` is 480 seconds. Each call receives the lesser of 300 seconds and the remaining pass budget; no call starts after the budget expires.
+- `decision_escalation.retryable_failure`, `exhaust_retry`, and `engine._choice` keep retryable outages pending, apply exponential backoff, and escalate after `MAX_TRIO_RETRIES = 8`. A settled owner decision is reused rather than consulted again.
 
-`decision_escalation.retryable_failure` (`decision_escalation.py:16-24`) treats a failed vote as an outage only for `model_port.RETRYABLE = ("quota", "unknown")`. `host_adapter.judge` returns `Failure("error", ...)` for the two cases §6 names as an outage, "an answer with no structure":
+Do not recreate these mechanisms or raise their limits. The architecture already specifies the intended behavior in `architecture/ARCHITECTURE.md` §6: a timeout or answer without structure gets one replacement, and a second failure is retried as an outage rather than treated as disagreement.
 
-- `host_adapter.py:244` `"{runtime} gave no readable answer: {exc}"` (the host's output did not parse).
-- `host_adapter.py:246` `"{runtime} gave no structured answer"` (agy: `status != SUCCESS` or no `structured_output`; Cursor: `is_error` or no JSON object in `result`).
+## Remaining defect and intended result
 
-So when the replacement also fails with one of these, `consult` records `decided_by="zach"`, the pass never retries, and the decision waits on the owner. That is the issue's evidence: drago decision 82, agy `model failure (error): agy gave no structured answer`, `decided_by zach`, `unanimous false`. Timeouts (`host_adapter.py:235`) are `unknown`, so they already retry; `test_a_replacement_that_also_fails_keeps_the_failed_vote` covers only that kind.
+`host_adapter.judge` is the trio's read-only adapter for Codex, Cursor, and agy. It currently returns:
 
-`judge` is the trio's port for Codex, Cursor and agy only (`engine._judge`), so its failure kinds can change without touching workers. `RETRYABLE` itself must not widen: `worker.py`, `reconcile.py` and `completion.py` use it to decide worker retries.
+| Host result | Current failure kind | Decision behavior after replacement also fails |
+| --- | --- | --- |
+| Subprocess timeout | `unknown` | Pending outage with backoff |
+| Quota stop | `quota` | Rotation/backoff or exhausted-quota escalation |
+| Unreadable answer (`_structured` raises a caught parsing/read exception) | `error` | Immediately waits on owner |
+| Missing structured answer (`_structured` returns `None`) | `error` | Immediately waits on owner |
 
-## Change
+The latter path includes agy `status != SUCCESS`, absent/null `structured_output`, Cursor `is_error`, Cursor result text without a JSON object, and a missing Codex answer file. It matches the issue's `agy gave no structured answer` evidence.
 
-`scripts/host_adapter.py`, `judge`
+`model_port.RETRYABLE` contains only `quota` and `unknown`. `_ask` replaces an `error` once, but `retryable_failure` does not recognize a second `error` as an outage. `consult` therefore stores `decided_by="zach"`; `decide` reuses that row as settled. The problem is the host classification, not the existing replacement or backoff logic.
 
-- The two `Failure("error", ...)` returns become `Failure("unknown", ...)`. A host that exits cleanly with output we cannot read is an outage the trio retries, not a model verdict. `missing_program` (no CLI, no read-only mode) stays `missing_program`; `classify` is unchanged (quota stays `quota`, a nonzero exit stays `unknown`).
-- The no-structure message gains the last 300 characters of stdout, as `classify` already does for an unexplained exit: `f"{runtime} gave no structured answer: {stdout tail}"`. The failure text is stored in the verdict, so the next occurrence shows what agy actually returned. Nothing says today why agy returns no `structured_output` in 9 of 19 calls; the diagnosis comes from that tail.
+After the change, an unreadable or absent structured answer follows the timeout path. One failed host can be replaced and still yield three valid, matching adopt votes. If its replacement also fails, the decision stays unanswered and pending until its retry deadline. Recovery can then adopt normally; persistent failure becomes an explicitly exhausted outage at the existing cap.
 
-`.claude-plugin/plugin.json`, `.claude-plugin/marketplace.json`: patch version bump, as `5b596d3e` did for the first #928 release. The release install is what puts the fix in front of the live engine.
+## Implementation sequence
 
-No change to `trio_gate.py`, `decision_escalation.py` or `model_port.py`. Nothing here conflicts with the #927 plan, which edits `trio_gate.py`, `engine.py` and their tests.
+1. **Write failing adapter evals.** In `evals/test_host_adapter.py:JudgeTest`, split the existing quota/no-answer test and add parameterized failure cases. Assert the results are `Failure(kind="unknown")`, `.retryable` is true, and the message still names the runtime and whether the answer was unreadable or unstructured. These assertions must fail against the inspected implementation.
+2. **Make the narrow production change.** In `scripts/host_adapter.py:judge`, change the two `Failure("error", ...)` returns for unreadable and missing structured answers to `Failure("unknown", ...)`. Retain the existing diagnostic messages. Do not add raw stdout tails to persisted verdicts: they are unnecessary for the classification fix and may contain arbitrary model output. Keep `classify`, `_structured` extraction rules, and `model_port.RETRYABLE` unchanged. This keeps worker failure classification unchanged.
+3. **Pin the decision behavior through the adapter.** Extend `evals/test_trio_gate.py:TrioModelsTest` with a model port that calls the real `host_adapter.judge` for failing host entries, mocking CLI resolution, login argv, and subprocess responses. Successful entries can return the existing valid reply fixture. A test that merely constructs `Failure("unknown", ...)` would pass before this fix and cannot catch the classification regression.
+4. **Pin retry scheduling and recovery.** Extend `evals/test_engine.py` using its existing fake clock/store fixtures and the same adapter-produced failure path. Verify no repeated call before the retry deadline, successful adoption after recovery, and owner escalation only at the existing cap. Reuse current retry/crash coverage rather than introducing a new scheduler or retry counter.
+5. **Release metadata.** Increment the patch version consistently in `.claude-plugin/plugin.json` and `.claude-plugin/marketplace.json`, choosing the next version from the implementation base rather than pinning a number here. Commit the tests/fix and metadata in small meaningful commits; never merge. Installation and live-engine operation remain outside this implementation change.
 
-## Tests (write first, see them fail)
+## Test matrix and acceptance
 
-`evals/test_host_adapter.py`, `JudgeTest`:
+Adapter tests use local fakes only; no real model calls, credentials, or timed sleeps:
 
-- Rewrite `test_a_quota_line_is_a_quota_stop_and_no_answer_is_an_error`: a Cursor `is_error` envelope, an agy `{"status": "FAILED"}`, an agy `SUCCESS` with no `structured_output`, and unparseable stdout are all `kind == "unknown"` and `.retryable`; the message names the runtime and carries the stdout tail. Quota stays `quota`.
+- Cursor error envelope; successful envelope whose result has no JSON object; malformed/empty JSON stdout.
+- agy failed status; SUCCESS with absent or null `structured_output`; malformed JSON stdout.
+- Codex absent answer file and invalid JSON in that file. Extend the test helper to write invalid answer text when necessary.
+- Existing valid host outputs still produce `Reply.data`; quota stays `quota`; missing CLI/read-only mode stays `missing_program`; a simulated `TimeoutExpired` stays retryable and receives `request.timeout_s`.
 
-`evals/test_trio_gate.py`, `TrioModelsTest`, next to `test_a_replacement_that_also_fails_keeps_the_failed_vote`:
+Decision tests exercise these observable outcomes:
 
-- The same replacement test run with the host's no-structure failure (`Failure("unknown", "agy gave no structured answer: ...")` on `cursor` and `agy`): `escalated`, four requests, `decided_by == ""`, `decision_escalation.retryable_failure(row.record)`. This pins the end state the issue wants, a retry and not an owner row, against the exact text.
+1. Cursor produces no structured answer; a distinct replacement returns a valid adopt vote. All three final votes adopt the same option, so the decision is unanimous with the expected recommendation and final runtime/model identities.
+2. Cursor and its agy replacement both return actual unstructured host envelopes. With the existing deterministic rotation, requests are Claude, Cursor, agy, Codex. Assert `answer is None`, `decided_by == ""`, `failures == 1`, no recommendation/unanimity, and `retryable_failure(row.record)` is true. Cover unreadable output as well as missing structure. Also cover a rotation with no spare replacement: it must remain a retryable outage, without extra calls.
+3. Through the engine, that outage records a future retry deadline and no owner ambiguity interrupt. Reopening the store and running before the deadline makes no model calls. At the deadline, healthy replies settle the decision and clear its retry state.
+4. Persistent adapter-produced outages reach the existing eight-consultation cap, produce one owner escalation identifying unavailability, and make no further calls on later passes. A genuine well-formed concern vote still settles as disagreement and waits on the owner immediately. A human answer that arrives during consultation remains authoritative (existing regression coverage).
 
-Run `python3 -m unittest discover -s evals -p 'test_*.py'`.
+A failure placeholder is still persisted with `vote="concern"`, `choice=null`, and `model failure (unknown): ...` for record compatibility. Acceptance is that this placeholder routes through outage handling and cannot settle the decision as a substantive concern before exhaustion. Do not falsely infer unanimous adoption from the two successful votes, change the stored verdict schema, or alter board rendering in this issue.
 
-## Verify after the release
+Run the focused evals first on the implementation base:
 
-Re-run the issue's repro query with `created_at` after the 0.129.99 install and the one for this release, on both stores, and also count `reasoning like 'malformed verdict%'`. Expected: Cursor timeouts far below 21 of 27, no `model failure (error)` rows from cursor or agy, and no `decided_by zach` rows whose newest verdict is a host failure. Anything left in the stdout tails is the agy diagnosis.
-
-## Decision record
-
-```
-Glossary
-F := a trio member's call failed and its replacement also failed
-E := that failure is Failure kind "error"       U := that failure is Failure kind "unknown"
-R := retryable_failure(row.record)               Z := the row is decided_by zach (waits on the owner)
-O := the failure is "an answer with no structure", per §6 an outage
-H := the failure comes from host_adapter.judge
-
-Premises
-1. R ↔ the failed vote's kind is in RETRYABLE = (quota, unknown)   [decision_escalation.py:16-24, model_port.py:46]
-2. ¬R → Z; R → the row is retried at retry_at, up to 8 times       [trio_gate.consult, engine._choice]
-3. host_adapter.judge returns kind "error" for no readable / no structured answer   [host_adapter.py:244,246]
-4. F ∧ E → ¬R → Z                                                  [1, 2, 3]
-5. O → the owner should not be asked                                [ARCHITECTURE.md §6, Outage]
-6. RETRYABLE is also read by worker, reconcile and completion; widening it changes worker retries   [worker.py:527, reconcile.py:257, completion.py:73]
-7. judge serves only the trio's Codex, Cursor and agy members       [engine._judge]
-
-Derivation
-8.  3 ∧ 4 → every no-structure failure on a host reaches the owner      [observed: drago decision 82]
-9.  5 ∧ 8 → the current behaviour breaks §6
-10. H ∧ O → reclassify to U inside host_adapter.judge                  [6, 7: widening RETRYABLE would leak to workers]
-11. U → R                                                              [1]
-12. F ∧ U → R → retried, not Z                                         [2, 11]
-∴ judge returns "unknown" for an answer with no structure, so an outage is retried and the owner is asked only after 8 failed retries
+```text
+python3 -m unittest discover -s evals -p 'test_host_adapter.py'
+python3 -m unittest discover -s evals -p 'test_trio_gate.py'
+python3 -m unittest discover -s evals -p 'test_engine.py'
 ```
 
-## Risks
+Then run the repository suite:
 
-- **Base branch.** Implement from `origin/develop`, not this worktree's `main`.
-- **Cursor `is_error` is now an outage.** A Cursor reply with `is_error: true` shares the no-structure path. A permanent one (a model name that does not exist) is retried until the cap of 8 (about 3 hours of backoff) before the owner sees it, instead of at once. The replace-once step moves the member to a different entry first, so a bad entry rarely reaches the cap.
-- **Root cause of agy's missing `structured_output` is not established.** This plan stops it reaching the owner and records the evidence; it does not make agy answer. If the tails show the JSON sitting in a text field, the fix is to reuse `_structured`'s Cursor text scan for agy. That is a follow-up on evidence, not built on a guess.
-- **Cost per retry.** Each retry re-asks all three members, including those that already voted. Carrying good votes across retries would cut calls, but §6 does not ask for it and it changes the record shape. Not planned.
-- **A failed vote is still stored as `vote: "concern", choice: null`.** Unanimity is computed from adopt votes, so it is never counted as a real concern, and `retryable_failure` reads the `model failure (...)` prefix. Boards and the crawl that read the stored vote still see "concern". Not changed here.
-- **`malformed verdict` is not an outage.** A reply whose data fails the schema (a choice outside the options) is still a settled concern. The issue's counts only matched `model failure%`, so the re-run above also counts malformed verdicts to show whether they matter.
-- **Worst-case latency.** A 300 s timeout twice per member, three members, is up to 30 minutes of serial calls per consult, which the 480 s pass budget (#927) bounds per pass. Cursor is the slow one; the pass budget, not this change, is the limit.
-- **Architecture documents.** §6 already describes this behaviour (commits `282b805a`, `c708fcbb`). The architecture agent owns `ARCHITECTURE.md` and `compliance.md`; nothing here edits them.
-
-## Proposed file ownership
-
+```text
+python3 -m unittest discover -s evals -p 'test_*.py'
 ```
-file_ownership:
-- write scripts/host_adapter.py
-- write evals/test_host_adapter.py
-- write evals/test_trio_gate.py
-- write .claude-plugin/plugin.json
-- write .claude-plugin/marketplace.json
-- read  scripts/trio_gate.py
-- read  scripts/decision_escalation.py
-- read  scripts/model_port.py
-- read  scripts/engine.py
-- read  architecture/ARCHITECTURE.md
-```
+
+Record actual passed, failed, skipped, and xfailed counts. The plan-stage suite runs against this assigned older worktree; it validates the plan branch baseline, not the proposed engine change. The implementation must run its own focused and full suites on the engine-bearing base. Inspect the diff to confirm production edits are limited to the two failure classifications and synchronized version metadata.
+
+## Risks and verification after release
+
+- **Base mismatch:** implementation cannot apply this plan to the assigned older base without the engine modules. Revalidate the current engine base and ownership before starting; do not copy modules from another branch into this plan worktree.
+- **Persistent host misconfiguration:** Cursor error envelopes and agy failed status can represent permanent problems. They will now use the existing bounded replacement/backoff path before owner escalation. Missing executables remain immediately identifiable. This change does not establish why agy omits its structured output or make a slow host faster.
+- **Existing owner rows:** historical `model failure (error)` rows remain settled under current logic. This code change prevents new misclassification; it does not silently rewrite/reopen old decisions, rerun their possible side effects, or clear the issue's existing backlog. Any historical repair requires separate, explicit lifecycle handling.
+- **Malformed verdicts:** validly decoded data that fails the vote schema still follows `malformed verdict` handling. This change covers missing/unreadable answers reported as `model failure`, matching the issue's evidence. Count malformed verdicts separately during rollout rather than assuming this fix covers them.
+- **Cost and latency:** retries reconsult all members; successful votes are not carried between consultations. Existing 300-second call limits, the shared 480-second pass budget, and capped backoff bound the extra work. Exhausted outage escalation remains intentional.
+- **Record consumers:** stored failure placeholders still say `concern`. Outage status depends on `choice=null` and the existing failure prefix/kind. Preserve those formats and verify actual owner routing, rather than relying only on a count of concern labels.
+
+After installation by the release process, rerun the issue's read-only aggregation on both stores with `created_at` filtered to the installation timestamp. Count failures by runtime/kind, pending retryable outages, exhausted retries, malformed verdicts, and owner escalations. New host no-readable/no-structured failures must use `model failure (unknown)`, never `model failure (error)`. They must remain pending until recovery or explicit retry exhaustion; complete valid matching votes must adopt. Compare timeout rates separately: this patch changes outage routing, and does not promise a lower underlying host failure rate or unanimity for genuine disagreements. No live-store reads or writes are needed for deterministic implementation tests.
+
+## Proposed implementation file ownership
+
+| Path | Mode | Purpose |
+| --- | --- | --- |
+| `scripts/host_adapter.py` | write | Classify absent/unreadable judgement answers as retryable outages |
+| `evals/test_host_adapter.py` | write | Host-envelope and timeout regression cases |
+| `evals/test_trio_gate.py` | write | Adapter-to-decision replacement and pending-outage coverage |
+| `evals/test_engine.py` | write | Deadline, recovery, and capped outage integration coverage |
+| `.claude-plugin/plugin.json` | write | Release patch version |
+| `.claude-plugin/marketplace.json` | write | Matching release patch version |
+| `scripts/trio_gate.py` | read | Existing selection, replacement, recording, and reuse |
+| `scripts/decision_escalation.py` | read | Existing outage detection, owner routing, retry cap |
+| `scripts/model_port.py` | read | Failure kinds and shared retry semantics |
+| `scripts/engine.py` | read | Judge dispatch, pass budget, persisted retry scheduling |
+| `scripts/runtimes.py` | read | Host read-only judgement argv |
+| `architecture/ARCHITECTURE.md` | read | Canonical §6 outage requirements |
+| `CLAUDE.md` | read | Implementation and test conventions |
