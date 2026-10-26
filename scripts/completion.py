@@ -26,6 +26,34 @@ class Verdict:
     suite_hold: bool = False
 
 
+@dataclass(frozen=True)
+class Candidate:
+    path: str
+    branch: str
+    head: str
+    readable: bool
+    quarantined: bool
+    merge_in_progress: bool
+
+
+@dataclass(frozen=True)
+class Recovery:
+    candidate: Candidate
+
+
+@dataclass(frozen=True)
+class Conflict:
+    candidates: tuple[Candidate, ...]
+
+
+def recovery(candidates: Sequence[Candidate]) -> Recovery | Conflict | None:
+    """Reuse one safe survivor; only multiple safe survivors need a decision."""
+    safe = tuple(c for c in candidates if c.readable and not c.quarantined and not c.merge_in_progress)
+    if len(safe) > 1:
+        return Conflict(safe)
+    return Recovery(safe[0]) if safe else None
+
+
 def done_on_main(on_main: bool | None, suite_on_main: bool | None) -> str | None:
     """None only when both facts are true. Unknown is not landed."""
     if on_main is not True:
@@ -72,6 +100,8 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
         return Verdict(outcome, why, True)
     if report in (*RETRYABLE, "blocked"):
         return Verdict(report, "")
+    if report != "done":
+        return Verdict(outcome, "worker gone")
     if not landing_required:
         left = []
         if tree is not None:
@@ -89,9 +119,6 @@ def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only
     # Preserve explicit completion behind a hold; retrying could overwrite the delivered work.
     if report == "done" and not landed and (left or tree_landed is False):
         return Verdict("done", left or "tree HEAD is outside the verified landing", True)
-    orphaned = None if landed and report == "done" else orphan_reason(tree_name, tree, tree_claims)
-    if orphaned:
-        return Verdict("failed", orphaned, True)
     if report == "done":
         gate = done_on_main(on_main, suite_on_main)
         if gate:

@@ -24,6 +24,7 @@ import decision_actions
 import decision_escalation
 import dispatch_prompt
 import engine_facts
+import completion
 import engine_merge
 import forge
 import guard_commands
@@ -630,6 +631,9 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
                    facts: reconcile.Facts) -> None:
     """Close the exited run; the planner and cleanup gate merged-item completion on main CI."""
     key = segment.issue_key
+    if "recovery" in _resume(store, key):
+        # Unreadable orphans are set aside at launch; they do not require a human hold.
+        facts = replace(facts, unreadable=tuple(k for k in facts.unreadable if k != key))
     item = next((item for item in store.items() if item.issue_key == key), None)
     workflow = policies.workflow_for(_resume(store, key).get("issue_type") or getattr(item, "issue_type", None))
     verdict = reconcile.completion_verdict(key, segment, facts, workflow, report=outcome, worker_alive=False)
@@ -645,7 +649,7 @@ def _finish_worker(forge: Any, store: Any, segment: Any,
 def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, trees: Path,
              launch: Launch, workers: settings.Workers, clock: engine_clock.Clock = engine_clock.system,
              max_concurrency: int | None = None, require_green: bool = False, teardown_command: str = "",
-             model: model_port.Model | None = None) -> list[reconcile.Action]:
+             model: model_port.Model | None = None, clone: Path | None = None) -> list[reconcile.Action]:
     """Sync, plan, execute independently, write stages, then clean engine-owned trees.
 
     snapshots() must return the complete successful issue read or raise (including on partial reads),
@@ -688,6 +692,21 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
+
+    recovery_errors = set()
+    for item in store.items():
+        key = item.issue_key
+        try:
+            candidates = engine_facts.recovery_candidates(store, key, trees=trees, clone=clone)
+            if candidates is not None:
+                from dataclasses import asdict
+                store.update_resume(key, lambda d: d.__setitem__("recovery", {
+                    "stage": item.stage, "candidates": [asdict(c) for c in candidates]}))
+        except Exception as exc:
+            recovery_errors.add(key)
+            message = f"recovery read failed: {exc}"
+            if not any(row.message == message for row in store.log(key)):
+                store.add_log(key, message, clock().isoformat())
 
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
@@ -797,10 +816,35 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                      for item in store.items() for row in store.asks(item.issue_key))
         if asks != facts.asks:
             facts = replace(facts, asks=asks)
-    items = [item for item in store.items()
-             if not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold")]
+    recovery_pending = set()
+    for item in store.items():
+        key = item.issue_key
+        if key in recovery_errors:
+            continue
+        try:
+            data = _resume(store, key)
+            if "recovery" not in data:
+                continue
+            verdict = completion.recovery(tuple(completion.Candidate(**row) for row in data["recovery"]["candidates"]))
+            if not worker.recovery_stopped(store, key):
+                recovery_pending.add(key)
+            elif isinstance(verdict, completion.Conflict):
+                stage = data["recovery"]["stage"]
+                choice = _choice(store, key, "recovery", "multiple safe worker trees survive", ("abort", "hold"),
+                                 _resolved(policies, store, key, stage), policies.personas, model,
+                                 stage=stage, clock=clock, until=until)
+                if choice != "abort":
+                    recovery_pending.add(key)
+                else:
+                    store.update_resume(key, lambda d: d.__setitem__("recovery_choice", choice))
+        except Exception as exc:
+            recovery_errors.add(key)
+            store.add_log(key, f"recovery read failed: {exc}", at)
+    items = [item for item in store.items() if item.issue_key not in recovery_errors
+             and (not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold"))]
     _remember_verified(store, facts)
     inputs = _planning_inputs(store, items)
+    inputs["pending_asks"].update((key, True) for key in recovery_pending)
     actions = reconcile.plan(items, policies=policies,
                              free_slots=slots.free_slots(max_concurrency, slots.running(store)), now=now,
                              hold_stages=board.hold_stages if board is not None else (),
@@ -1117,6 +1161,7 @@ def main(argv: list[str] | None = None) -> int:
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
+                                 clone=root / selected if selected else root,
                                  launch=launch, workers=config.workers, max_concurrency=config.workers.max_concurrency, model=model,
                                  require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
                     except Exception as exc:

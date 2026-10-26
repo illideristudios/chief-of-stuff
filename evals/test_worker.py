@@ -25,6 +25,9 @@ import slots
 import store
 import supervisor
 import worker
+import completion
+import engine_facts
+from evals import make_repo, git_taint
 from evals.test_engine import KEY, NOW, FakeForge, policies
 
 
@@ -220,6 +223,7 @@ class WorkerTest(unittest.TestCase):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
              mock.patch.object(worker.claude_adapter, "start", side_effect=self.start), \
              mock.patch.object(worker.claude_adapter, "cancel"), \
+             mock.patch.object(worker.process_status, "carriers", return_value=[]), \
              mock.patch.object(worker.time, "monotonic", side_effect=[0, 10]), \
              mock.patch.object(worker.process_status, "identity", return_value=None):
             with self.assertRaisesRegex(RuntimeError, "verify"):
@@ -899,7 +903,7 @@ class WorkerTest(unittest.TestCase):
         forge = self.suite_run()
         run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
         (run_dir / "exit.json").unlink()
-        forge.add_human_hold = mock.Mock(return_value="")
+        forge.add_human_hold = mock.Mock(wraps=forge.add_human_hold)
         with mock.patch.object(worker.process_status, "identity", return_value=None), \
              mock.patch.object(engine.engine_facts.process_status, "identity", return_value=None):
             self.suite_pass(forge, mock.Mock(return_value=("example", "")))
@@ -1555,6 +1559,182 @@ class WorkerTest(unittest.TestCase):
         self.finish("quota")
         worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         self.assertEqual(self.db.resume(KEY)["quota_percent"], 100)
+
+
+class RecoveryTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name).resolve()
+        self.addCleanup(mock.patch.stopall)
+        self.views = git_taint.private_git_views(self.root / "views")
+        self.views.__enter__()
+        self.addCleanup(self.views.__exit__, None, None, None)
+        self.clone = make_repo.build(self.root, {"worktrees": [
+            {"name": "issue-1-implement-1", "branch": "work/issue-1-implement-1", "merged": False, "dirty": True}]})
+        self.trees = self.root / "trees"
+        self.tree = self.trees / "issue-1-implement-1"
+        path = self.root / "store.db"
+        store.migrate(path)
+        self.db = store.Store(path, clock=lambda: NOW)
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, stage="implement")
+        self.p, self.forge = policies(), FakeForge()
+        self.forge.issue = lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(title="Build", body="Issue body"))
+        self.forge.protected_branches = lambda: ("main",)
+        self.now = NOW
+        self.head = make_repo.git(["rev-parse", "HEAD"], self.tree)
+        self.db.set_resume(KEY, {"worktree": str(self.tree), "work_branch": "work/issue-1-implement-1"})
+        mock.patch.object(engine, "_record_limits").start()
+        mock.patch.object(engine.cleanup, "execute", return_value=0).start()
+        mock.patch.object(engine.notify, "sync_workspace").start()
+        self.identity = mock.patch.object(worker.process_status, "identity", return_value="birth").start()
+        mock.patch.object(worker.process_status, "carriers", return_value=[]).start()
+        self.started = []
+        self.start = mock.patch.object(worker.claude_adapter, "start", side_effect=self.fake_start).start()
+
+    def fake_start(self, request, run_dir, **kwargs):
+        self.identity.return_value = "birth"
+        self.started.append(request.cwd)
+        (run_dir / "started.json").write_text(json.dumps({"pid": 77, "runner_pid": 78, "session_id": request.session_id}))
+        return SimpleNamespace(pid=78, poll=lambda: None)
+
+    def launch(self, key, stage, attempt, persona):
+        return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root, trees=self.trees,
+                             clone=self.clone, policies=self.p, forge=self.forge, clock=lambda: self.now)
+
+    def run_pass(self):
+        return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
+            clone=self.clone, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: self.now)
+
+    def dead_run(self):
+        self.run_pass()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        run = Path(record["run_dir"])
+        (run / "stdout").write_text('{"is_error": true, "result": "failed"}')
+        (run / "stderr").write_text("")
+        self.identity.return_value = None
+        return run
+
+    def test_s1_kill_then_s4_quota_resumes_without_prompt_or_state_loss(self):
+        self.run_pass()
+        segment = self.db.segments(KEY)[0]
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        worker._runners.clear()  # the engine is gone; the host remains alive
+        self.run_pass()
+        self.assertEqual(len(self.started), 1)
+        self.assertEqual(self.db.segments(KEY)[0].id, segment.id)
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"], record)
+        run = Path(record["run_dir"])
+        (run / "stdout").write_text("")
+        (run / "stderr").write_text("429 RESOURCE_EXHAUSTED quota; resets in 2 hours")
+        (run / "exit.json").write_text('{"exit_code": 1}')
+        self.identity.return_value = None
+        actions = self.run_pass()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "quota")
+        self.assertIn(reconcile.Wait(KEY, "quota reset pending"), actions)
+        self.now += timedelta(hours=2)
+        self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertEqual(self.db.segments(KEY)[-1].attempt, 2)
+        self.assertEqual(self.db.resume(KEY)["worktree"], str(self.tree))
+        self.assertEqual(make_repo.git(["symbolic-ref", "--short", "HEAD"], self.tree), "work/issue-1-implement-1")
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertEqual((self.tree / "scratch.txt").read_text(), "unsaved\n")
+        self.assertEqual(len(self.db.items()), 1)
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertEqual(self.db.decisions(KEY), [])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
+
+    def test_one_dirty_orphan_is_reused_without_asking(self):
+        self.dead_run()
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(self.started, [str(self.tree), str(self.tree)])
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+        self.assertEqual(self.db.decisions(KEY), [])
+
+    def test_two_survivors_ask_once_hold_then_reuse_the_single_survivor(self):
+        self.dead_run()
+        other = self.trees / "issue-1-plan-1"
+        make_repo.git(["worktree", "add", "-b", "work/issue-1-plan-1", str(other), "main"], self.clone)
+        self.run_pass()
+        self.run_pass()
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
+        decision = self.db.decisions(KEY)[0]
+        self.assertEqual(decision.record["decision"]["options"], ["abort", "hold"])
+        self.assertEqual(len(self.started), 1)
+        self.db.add_decision(KEY, decision.topic, decision.question, "hold", "user", decision.record)
+        self.assertIn(reconcile.Wait(KEY, "decision pending"), self.run_pass())
+        self.assertTrue(other.exists())
+        make_repo.git(["worktree", "move", str(other), str(self.trees / "elsewhere")], self.clone)
+        make_repo.git(["branch", "-m", "work/issue-1-plan-1", "another-issue"], self.clone)
+        self.run_pass()
+        self.assertEqual(self.started[-1], str(self.tree))
+
+    def test_failed_fast_forward_quarantines_and_starts_fresh_without_a_hold(self):
+        self.dead_run()
+        trusted = worker.make_worktree.git_trusted
+        def fail_merge(args, cwd):
+            return (1, "cannot fast-forward") if args[0] == "merge" else trusted(args, cwd)
+        with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=fail_merge):
+            self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertNotEqual(self.started[-1], str(self.tree))
+        self.assertFalse(self.db.item(KEY).human_review)
+        self.assertEqual(self.db.decisions(KEY), [])
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(self.head, refs.splitlines())
+        self.assertEqual(len(list((self.trees / "quarantine").glob("*/scratch.txt"))), 1)
+
+    def test_unreadable_checkout_is_quarantined_and_a_fresh_tree_starts(self):
+        self.dead_run()
+        (self.tree / ".git").write_text("damaged metadata\n")
+        self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertNotEqual(self.started[-1], str(self.tree))
+        self.assertFalse(self.db.item(KEY).human_review)
+        self.assertEqual(self.db.decisions(KEY), [])
+        self.assertEqual(len(list((self.trees / "quarantine").glob("*/scratch.txt"))), 1)
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(self.head, refs.splitlines())
+
+    def test_branch_without_a_checkout_is_a_single_candidate(self):
+        self.dead_run()
+        # Moving outside the configured discovery directory leaves the registered checkout in git.
+        # A detached checkout leaves just the original branch as a recovery candidate.
+        make_repo.git(["checkout", "--detach"], self.tree)
+        self.db.update_resume(KEY, lambda d: (d.pop("worktree"), d.pop("work_branch")))
+        found = engine_facts.recovery_candidates(self.db, KEY, trees=self.trees, clone=self.clone)
+        self.assertTrue(any(c.branch == "work/issue-1-implement-1" and not c.path for c in found))
+
+    def test_abort_quarantines_every_tree_and_ref_and_starts_fresh(self):
+        self.dead_run()
+        other = self.trees / "issue-1-plan-1"
+        make_repo.git(["worktree", "add", "-b", "work/issue-1-plan-1", str(other), "main"], self.clone)
+        self.run_pass()
+        decision = self.db.decisions(KEY)[0]
+        self.db.add_decision(KEY, decision.topic, decision.question, "abort", "user", decision.record)
+        # A revived matching host must prevent quarantine, including after an abort answer.
+        self.identity.return_value = "birth"
+        self.run_pass()
+        self.assertTrue((self.tree / "scratch.txt").exists())
+        self.identity.return_value = None
+        # Start verification must see the new host after the old one is confirmed stopped.
+        def start(request, run_dir, **kwargs):
+            self.identity.return_value = "birth"
+            return self.fake_start(request, run_dir, **kwargs)
+        self.start.side_effect = start
+        self.run_pass()
+        quarantine = self.trees / "quarantine"
+        self.assertEqual(len(list(quarantine.glob("*/scratch.txt"))), 1)
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(self.head, refs.splitlines())
+        self.assertNotEqual(self.db.resume(KEY)["worktree"], str(self.tree))
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], Path(self.started[-1])),
+                         make_repo.git(["rev-parse", "main"], self.clone))
+        self.assertEqual(engine_facts.recovery_candidates(self.db, KEY, trees=self.trees, clone=None), None)
 
 
 class IdentityTest(unittest.TestCase):

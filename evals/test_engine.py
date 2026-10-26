@@ -119,6 +119,17 @@ class FakeForge:
 
 
 class EngineTest(unittest.TestCase):
+    def test_recovery_read_failure_is_isolated_to_its_issue(self):
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
+        def gather(db, key, **kwargs):
+            if key == KEY:
+                raise OSError("unreadable recovery")
+            return None
+        with mock.patch.object(engine.engine_facts, "recovery_candidates", side_effect=gather):
+            actions = self.run_pass(clone=self.root)
+        self.assertEqual([row[0] for row in self.launched], [OTHER])
+        self.assertIn("recovery read failed: unreadable recovery", " ".join(row.message for row in self.db.log(KEY)))
+
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)

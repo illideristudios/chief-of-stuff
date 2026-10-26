@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import dispatch_prompt
+import completion
 import git_trees
 import git_view
 import process_status
@@ -20,6 +21,69 @@ import readiness
 from forge_port import ForgeError
 from orphans import Claim
 from reconcile import Facts, latest_segment
+
+
+def recovery_candidates(store: Any, key: str, *, trees: Path, clone: Path | None) -> tuple[completion.Candidate, ...] | None:
+    """Read one stopped issue's survivors. None means no recovery is due (or no clone)."""
+    if clone is None:
+        return None
+    data = store.resume(key) or {}
+    history = store.segments(key)
+    latest = history[-1] if history else None
+    record = _record(store, key, latest.stage, latest.attempt) if latest else None
+    if "recovery" not in data:
+        if latest is None or latest.ended_at is not None or record is None:
+            return None
+        if record.get("run_dir") and (Path(record["run_dir"]) / "exit.json").exists():
+            return None  # ordinary, fully recorded exits already have a checkout for retry
+        # Even an exit file is not permission to move a tree while its host still runs.
+        for field, host in (("pid", True), ("runner_pid", False)):
+            pid, session = record.get(field), record.get("session_id")
+            if type(pid) is not int or pid <= 0 or not session:
+                return None
+            if process_status.identity(pid, session, host=host) is not None:
+                return None
+    common = git_view.locate(clone).common
+    number = key.rpartition("#")[2]
+    prefix = f"work/issue-{number}-"
+    paths = {p for p in trees.glob(f"issue-{number}-*") if p.is_dir()}
+    if raw := data.get("worktree"):
+        path = Path(raw).resolve()
+        if path.is_relative_to(trees.resolve()) and "quarantine" not in path.relative_to(trees.resolve()).parts:
+            paths.add(path)
+    candidates, checked_out = [], set()
+    # A quarantined checkout can still name its old ref if the engine died during the rename.
+    for path in (trees / "quarantine").glob("**/.git"):
+        code, branch = git_trees.git(["symbolic-ref", "--short", "HEAD"], path.parent, expected_common=common)
+        if code == 0:
+            checked_out.add(branch)
+    for path in sorted(paths):
+        path = path.resolve()
+        if not path.is_relative_to(trees.resolve()) or "quarantine" in path.relative_to(trees.resolve()).parts:
+            continue
+        code, branch = git_trees.git(["symbolic-ref", "--short", "HEAD"], path, expected_common=common)
+        ok, head = git_trees.git(["rev-parse", "--verify", "HEAD"], path, expected_common=common)
+        readable = code == 0 and ok == 0 and branch.startswith(prefix)
+        # Preserve a known ref even when the checkout's metadata is damaged.
+        branch = branch if code == 0 else (data.get("work_branch", "") if str(path) == data.get("worktree") else "")
+        if not branch.startswith(prefix):
+            branch = ""
+        if branch:
+            checked_out.add(branch)
+        try:
+            layout = git_view.locate(path, expected_common=common)
+            merging = any((layout.gitdir / name).exists() for name in ("MERGE_HEAD", "rebase-merge", "rebase-apply"))
+        except git_view.Unviewable:
+            merging = False
+        candidates.append(completion.Candidate(str(path), branch, head if ok == 0 else "", readable, False, merging))
+    code, refs = git_trees.git(["for-each-ref", "--format=%(refname:short) %(objectname)", f"refs/heads/{prefix}*"], clone)
+    if code:
+        raise RuntimeError("cannot read orphan branches")
+    for line in refs.splitlines():
+        branch, _, head = line.partition(" ")
+        if branch not in checked_out:
+            candidates.append(completion.Candidate("", branch, head, True, False, False))
+    return tuple(candidates)
 
 
 def _blockers(forge: Any) -> tuple[dict[str, tuple[str, ...]] | None, str]:

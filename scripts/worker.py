@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import random
 import re
 import time
@@ -13,6 +14,7 @@ from typing import Any
 from collections.abc import Callable
 
 import claude_adapter
+import completion
 import clock as engine_clock
 import dispatch_prompt
 import guard_binding
@@ -107,6 +109,101 @@ def _exit_record(run_dir: Path) -> tuple[int, datetime | None]:
 
 def _exit_code(run_dir: Path) -> int:
     return _exit_record(run_dir)[0]
+
+
+def _quarantine_run(run_dir: Path) -> None:
+    destination = run_dir.parent / "quarantine" / f"{run_dir.name}-{uuid.uuid4()}"
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    run_dir.rename(destination)
+
+
+def recovery_stopped(store: Any, key: str) -> bool:
+    """Unknown process identity is a wait, never permission to move a checkout."""
+    for record in _resume(store, key).get("runs", {}).values():
+        for field, host in (("pid", True), ("runner_pid", False)):
+            pid, session = record.get(field), record.get("session_id")
+            if type(pid) is not int or pid <= 0 or not session:
+                return False
+            try:
+                if process_status.identity(pid, session, host=host) is not None:
+                    return False
+            except (OSError, RuntimeError):
+                return False
+    return True
+
+
+def _quarantine(candidate: completion.Candidate, *, trees: Path, clone: Path, key: str) -> None:
+    """Move a checkout and rename its ref; preserve commits and every uncommitted byte."""
+    stamp = str(uuid.uuid4())
+    target = f"refs/quarantine/{key.rpartition('#')[2]}/{stamp}/{candidate.branch or 'HEAD'}"
+    if candidate.path:
+        tree = Path(candidate.path)
+        if not tree.resolve().is_relative_to(trees.resolve()) or tree.resolve() == trees.resolve():
+            raise RuntimeError("recovery tree is outside the worktrees directory")
+        destination = trees / "quarantine" / f"{tree.name}-{stamp}"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if tree.exists():
+            code, _ = make_worktree.git_trusted(["worktree", "move", str(tree), str(destination)], clone)
+            if code:
+                shutil.move(str(tree), str(destination))  # unreadable metadata must not cost the files
+                make_worktree.git_trusted(["worktree", "repair", str(destination)], clone)
+        else:
+            destination = None
+    else:
+        destination = None
+    if candidate.branch:
+        source = f"refs/heads/{candidate.branch}"
+        code, head = make_worktree.git(["rev-parse", "--verify", source], clone)
+        if code == 0:
+            code, detail = make_worktree.git_trusted(["update-ref", target, head], clone)
+            if code:
+                raise RuntimeError(f"cannot preserve quarantined ref: {detail}")
+            if destination is not None:
+                # Point the retained checkout at the retained ref before retiring the original name.
+                code, detail = make_worktree.git_trusted(["symbolic-ref", "HEAD", target], destination)
+                if code and candidate.readable:
+                    # A damaged .git file still has its registered HEAD in the trusted common dir.
+                    raise RuntimeError(f"cannot rename quarantined checkout ref: {detail}")
+            code, detail = make_worktree.git_trusted(["update-ref", "-d", source, head], clone)
+            if code:
+                raise RuntimeError(f"cannot rename quarantined ref: {detail}")
+
+
+def _recover(store: Any, key: str, *, trees: Path, clone: Path) -> None:
+    data = _resume(store, key)
+    candidates = tuple(completion.Candidate(**row) for row in data["recovery"]["candidates"])
+    verdict = completion.recovery(candidates)
+    if isinstance(verdict, completion.Conflict) and data.get("recovery_choice") != "abort":
+        raise RuntimeError("recovery decision pending")
+    if not recovery_stopped(store, key):
+        raise RuntimeError("recovery host has not stopped")
+    survivor = verdict.candidate if isinstance(verdict, completion.Recovery) else None
+    for candidate in candidates:
+        if candidate != survivor and not candidate.quarantined:
+            _quarantine(candidate, trees=trees, clone=clone, key=key)
+    if survivor is not None:
+        error = make_worktree.git_trees.fetch_base(clone)
+        if error:
+            raise RuntimeError(f"cannot fetch recovery base: {error}")
+        tree = Path(survivor.path) if survivor.path else trees / survivor.branch.removeprefix("work/")
+        if not survivor.path:
+            code, detail = make_worktree.git_trusted(["worktree", "add", str(tree), survivor.branch], clone)
+            if code:
+                raise RuntimeError(f"cannot restore orphan branch: {detail}")
+        code, _ = make_worktree.git_trusted(["merge", "--ff-only", "refs/remotes/origin/main"], tree)
+        if code:
+            _quarantine(completion.Candidate(str(tree), survivor.branch, survivor.head, True, False, False),
+                        trees=trees, clone=clone, key=key)
+            survivor = None
+        else:
+            store.update_resume(key, lambda d: d.update(worktree=str(tree), work_branch=survivor.branch))
+            store.set_ownership(key, str(tree), "tree")
+    if survivor is None:
+        def fresh(d):
+            d.pop("worktree", None)
+            d.pop("work_branch", None)
+        store.update_resume(key, fresh)
+    store.update_resume(key, lambda d: (d.pop("recovery", None), d.pop("recovery_choice", None)))
 
 
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
@@ -209,6 +306,7 @@ def _save_run(store: Any, key: str, stage: str, attempt: int, record: dict, mode
         if model:
             data["model"] = {**data.get("model", {}), stage: model}
         data.pop("quota", None)
+        data.pop("recovery_fresh", None)
 
     store.update_resume(key, save)
 
@@ -303,6 +401,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
+    recovered = ("recovery" in data or data.get("recovery_fresh")) and stage != "review"
+    if "recovery" in data and recovered:
+        _recover(store, issue_key, trees=trees, clone=clone or root)
+        data = _resume(store, issue_key)
     # build's from_branch is detached. Reviews use it; fixes need the original writable checkout.
     prepared_review = data.get("review_trees", {}).get(str(attempt)) if stage == "review" else None
     request_head = forge.closing_request(issue_key) if stage == "review" else None
@@ -329,7 +431,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     elif not prepared_review:
         started = any(name.startswith(f"{stage}-") for name in data.get("runs", {}))
         # A failed start before any worker (such as an unreadable issue) left no tree to lose.
-        if stage == "fix" or (stage != "review" and attempt > 1 and started):
+        if not recovered and (stage == "fix" or (stage != "review" and attempt > 1 and started)):
             raise RuntimeError("fix/retry has no existing worktree; refusing a fresh branch")
         from_branch = request_head.branch if request_head is not None else ""
         branch = from_branch or branch
@@ -476,6 +578,10 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             if record is None and trees is not None:
                 # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.
                 run_dir = _run_dir(root, key, segment.stage, segment.attempt)
+                if run_dir.exists() and not (run_dir / "started.json").exists():
+                    _quarantine_run(run_dir)
+                    store.drop_segment(key, segment.stage, segment.attempt)
+                    continue
                 try:
                     record = _existing_run(data, run_dir, segment.stage, segment.attempt, trees, clock)
                 except RuntimeError:
@@ -515,18 +621,20 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
-            if not (run_dir / "exit.json").exists():
-                # The planner closes it from tree, report and orphan evidence.
-                continue
+            missing_exit = not (run_dir / "exit.json").exists()
             teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
-            code, exited_at = _exit_record(run_dir)
+            code, exited_at = (1, None) if missing_exit else _exit_record(run_dir)
             runtime = record.get("runtime", "claude")
-            stdout, stderr = (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text()
+            stdout, stderr = (p.read_text() if p.exists() else "" for p in (run_dir / "stdout", run_dir / "stderr"))
             if runtime == "claude":
                 reply = claude_adapter.classify(code, stdout, stderr)
             else:
                 reply = host_adapter.classify(runtime, code, stdout, stderr)
                 host_adapter.cleanup(record)
+            # A missing exit code cannot disprove a durable report. Quota evidence still wins.
+            if missing_exit and store.segment_reports(key, segment.stage, segment.attempt) and not (
+                    isinstance(reply, Failure) and reply.kind == "quota"):
+                reply = Reply("", None, record["session_id"], 0.0, 0)
             if isinstance(reply, Failure):
                 if reply.retryable:
                     outcome = reply.kind
