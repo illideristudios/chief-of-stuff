@@ -14,6 +14,24 @@ RISK = TreeState("feature", 1, 2, None)
 
 
 class CompletionTest(unittest.TestCase):
+    def test_recovery_reuses_exactly_one_safe_survivor(self):
+        safe = completion.Candidate("tree", "work/issue-1-implement-1", "head", True, False, False)
+        self.assertEqual(completion.recovery((safe,)), completion.Recovery(safe))
+        self.assertIsNone(completion.recovery(()))
+        other = completion.Candidate("other", "work/issue-1-plan-1", "other-head", True, False, False)
+        self.assertEqual(completion.recovery((safe, other)), completion.Conflict((safe, other)))
+
+    def test_unsafe_candidates_are_never_reused_or_held(self):
+        for readable, quarantined, merging in ((False, False, False), (True, True, False), (True, False, True)):
+            candidate = completion.Candidate("tree", "branch", "head", readable, quarantined, merging)
+            self.assertIsNone(completion.recovery((candidate,)))
+
+    def test_a_reusable_abandoned_tree_can_retry_without_a_human_hold(self):
+        for final in (True, False):
+            verdict = completion.abandoned(False, tree=RISK, tree_name="tree",
+                tree_claims=(orphans.Claim("worker", False),), landing_required=final)
+            self.assertEqual(verdict, completion.Verdict("failed", "worker gone"))
+
     def test_done_means_on_main_with_the_suite_run_there(self):
         self.assertIsNone(completion.done_on_main(True, True))
         self.assertEqual(completion.done_on_main(False, True), "not on main")

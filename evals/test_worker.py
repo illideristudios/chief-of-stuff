@@ -1107,11 +1107,41 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual([s.outcome for s in self.db.segments()], ["failed", "failed"])
         self.assertEqual(len(self.db.log(KEY)), 2)
 
-    def test_a_gone_worker_with_no_exit_record_stays_open_for_the_planner(self):
-        self.launched()
+    def test_a_gone_worker_with_no_exit_record_is_collected(self):
+        run = self.launched()
+        self.report(run)
         with mock.patch.object(worker.process_status, "identity", return_value=None):
             worker.collect(self.db, self.root, lambda: NOW)
-        self.assertIsNone(self.db.segments()[0].ended_at)
+        self.assertEqual(self.db.segments()[0].outcome, "done")
+        self.assertEqual(self.db.asks(KEY), [])
+
+    def test_dead_run_without_exit_recovers_quota_from_stderr(self):
+        run = self.launched()
+        (run / "stderr").write_text("429 RESOURCE_EXHAUSTED quota; resets in 2 hours")
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW)
+        self.assertEqual(self.db.segments()[0].outcome, "quota")
+        self.assertEqual(self.db.resume(KEY)["quota"]["retry_at"], (NOW + timedelta(hours=2)).isoformat())
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertTrue(self.tree.exists())
+
+    def test_killed_launch_keeps_the_slot_and_adopts_without_a_second_start(self):
+        def killed(request, run_dir, **kwargs):
+            self.start(request, run_dir, **kwargs)
+            raise KeyboardInterrupt
+        with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.claude_adapter, "start", side_effect=killed):
+            with self.assertRaises(KeyboardInterrupt):
+                slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                            max_concurrency=1, clock=lambda: NOW, launch=self.launch)
+        self.assertEqual(slots.running(self.db), 1)
+        worker._runners.clear()
+        with mock.patch.object(worker.process_status, "identity", return_value="start"), \
+             mock.patch.object(worker.claude_adapter, "start") as start:
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        start.assert_not_called()
+        self.assertEqual(slots.running(self.db), 1)
+        self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["pid"], 77)
 
     def test_malformed_run_records_and_result_end_failed(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
@@ -1305,16 +1335,15 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["session_id"], saved["session_id"])
                 self.assertEqual(list(run.parent.glob(f"{run.name}-refused-*")), [])
 
-    def test_collect_keeps_a_command_only_start_reserved(self):
-        # Engine restart between Popen and started.json must not fail the reservation.
+    def test_collect_quarantines_a_command_only_start_and_drops_the_empty_slot(self):
         run = worker._run_dir(self.root, KEY, "implement", 1)
         run.mkdir(parents=True)
         (run / "command.json").write_text("{}")
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
-        seg = self.db.segments(KEY)[0]
-        self.assertIsNone(seg.ended_at)
-        self.assertIsNone(seg.outcome)
+        self.assertEqual(self.db.segments(KEY), [])
+        self.assertFalse(run.exists())
+        self.assertTrue(list((run.parent / "quarantine").glob(f"{run.name}-*")))
 
     def test_collect_still_fails_a_reservation_with_no_start_evidence(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
