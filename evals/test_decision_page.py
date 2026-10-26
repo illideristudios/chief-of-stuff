@@ -830,6 +830,15 @@ class MainTest(unittest.TestCase):
                 self.assertIn("name", err)
         self.assertFalse((root / "pages").exists())
 
+    def test_a_name_of_digits_alone_is_refused_as_reserved_for_store_decision_ids(self):
+        """#945: /decisions/<digits> is a store decision's page, so an authored slug is never digits alone."""
+        root = self.workspace()
+        code, _, err = self.run_main("--root", str(root), "--from", str(root / "d.json"), "--name", "42")
+        self.assertEqual(code, 2)
+        self.assertIn("digit-only names are reserved for store decision ids", err)
+        self.assertNotIn("is not lowercase letters", err)
+        self.assertFalse((root / "pages").exists())
+
     def test_no_board_line_means_no_page(self):
         root = self.workspace(board="")
         code, _, err = self.run_main("--root", str(root), "--from", str(root / "d.json"), "--name", "x")
