@@ -475,8 +475,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--name", required=True, help="the page's slug: lowercase letters, digits and dashes")
     ap.add_argument("--date", default=date.today().isoformat(), help="the day shown on the page")
     args = ap.parse_args(argv)
-    if not NAME.fullmatch(args.name) or args.name.isdigit():  # a path of digits is a store decision's id (#945)
+    if not NAME.fullmatch(args.name):
         print(f"decision: name {args.name!r} is not lowercase letters, digits and dashes", file=sys.stderr)
+        return 2
+    if args.name.isdigit():  # /decisions/<digits> is a store decision's page (#945)
+        print(f"decision: name {args.name!r}: digit-only names are reserved for store decision ids", file=sys.stderr)
         return 2
     try:
         pages_dir, port = pages_address(Path(args.root))
