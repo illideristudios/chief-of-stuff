@@ -156,6 +156,19 @@ The optional [Kanban walk](docs/kanban.md) maps tracker stages to configurable b
 
 A decision's page is `<pages dir>/decision-<slug>.json`, served as `http://127.0.0.1:<port>/decisions/<slug>` and rendered on request; `chief-of-stuff decision --root /path/to/workspace --name <slug>` renders it by hand. The JSON fields are listed in `scripts/decision_page.py`.
 
+On an engine workspace every decision in `store.db` also has a page, `http://127.0.0.1:<port>/decisions/<id>`, rendered from the store on request with no authored file. `<id>` is the id of the decision's first row, and any later row's id shows the same page; a path of digits is always a store id, so an authored slug is never only digits. The page shows the question, the options, the recommendation and the trio's outcome, what happens if no one answers, who it waits on, its issue, and every row of the decision, newest first. An open or blocked decision carries the answer form. An answered one shows the answer and who gave it, and keeps only Reverse, which takes your reason and appends a reversal for the engine to apply. A form posted from the page returns to it. An unknown id is a 404. The `/decisions` list and each task page link every decision to its page.
+
+```
+o := the decision is open or blocked      a := the decision is answered
+F := its page carries the answer form     R := its page carries Reverse, which appends a reversal intent
+W := the recorded answer is overwritten   x := the id names a decision row
+1.  o → F                [#945; architecture §6]
+2.  a → ¬F ∧ R           [#945, #971; architecture §6]
+3.  R → ¬W               [§6: rows are append-only]
+4.  ¬x → 404             [#945]
+∴   an open decision is answered on its page, an answered one is only reversed there and never overwritten, and an unknown id has no page
+```
+
 The board and `notify.py sync` also read precise deadlines from tracker `## Decisions` rows: put `deadline: <name> YYYY-MM-DD HH:MM` in the `item` column, or `deadline: <name> HH:MM` for a time on that tracker's date. A later decision for the same name updates its marker, task horizon, and future notification warnings. A decision without an exact time supplies no instant. Run notification sync after a precise deadline decision changes.
 
 ## Workspace policy
