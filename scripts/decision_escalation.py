@@ -101,7 +101,7 @@ class NeedsOwner:
     reason: str
 
 
-def _is_gate(row: Any, decision: dict[str, Any]) -> bool:
+def is_gate(row: Any, decision: dict[str, Any]) -> bool:
     # Rows written before `gate` was explicit are recognised by their shape.
     return bool(decision.get("gate", row.topic != "ask" and not decision.get("instance")
                              and tuple(decision.get("options") or ()) == ("approve", "hold")))
@@ -114,7 +114,7 @@ def needs_owner(rows: Sequence[Any]) -> NeedsOwner | None:
     row = rows[-1]
     record = row.record if isinstance(row.record, dict) else {}
     decision = record.get("decision") if isinstance(record.get("decision"), dict) else {}
-    gate = _is_gate(row, decision)
+    gate = is_gate(row, decision)
     # Older gate holds committed an answer before their separate interrupt write.
     legacy_hold = row.answer == "hold" and row.decided_by == "trio" and gate
     if not legacy_hold and ((row.answer or "").strip() or row.decided_by != "zach"):

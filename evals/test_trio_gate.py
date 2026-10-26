@@ -1,5 +1,6 @@
 """The decision trio adopts only three matching option choices (design 5a, plan M5 items 1-2)."""
 
+import ast
 import json
 import sys
 import tempfile
@@ -570,6 +571,17 @@ class DrawTest(unittest.TestCase):
 
     def test_only_launchable_entries_are_drawn(self):
         self.assertEqual(model_port.draw(ROTATION, 3, launchable=lambda runtime: runtime == "codex"), (ROTATION[3],))
+
+
+class PublicImportTest(unittest.TestCase):
+    """trio_gate reaches decision_escalation through public names only (#1131)."""
+
+    def test_trio_gate_imports_no_private_name(self):
+        self.assertTrue(callable(getattr(decision_escalation, "is_gate", None)))
+        tree = ast.parse(Path(trio_gate.__file__).read_text(encoding="utf-8"))
+        private = [alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+                   for alias in node.names if alias.name.startswith("_")]
+        self.assertEqual(private, [])
 
 
 if __name__ == "__main__":

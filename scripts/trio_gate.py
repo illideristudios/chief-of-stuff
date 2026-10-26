@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass, replace
 from typing import Any, Callable, Mapping, Sequence
 
 from decision_actions import human_answer
-from decision_escalation import (DecisionUpdate, _is_gate, exhaust_retry, identity, preserve_ask_link,
+from decision_escalation import (DecisionUpdate, is_gate, exhaust_retry, identity, preserve_ask_link,
                                  retryable_failure)
 from model_port import Failure, Model, Reply, Request, draw
 from policy import Persona, Policy, PolicyError
@@ -98,7 +98,7 @@ def _default(update: DecisionUpdate) -> str:
         event = None
     if isinstance(event, dict) and "tool_name" in event and event.get("kind", "permission") == "permission":
         return "Denied: a permission the trio does not adopt is denied."  # engine._route_asks
-    if _is_gate(update, decision):
+    if is_gate(update, decision):
         return "Hold: the work waits at the gate until it is approved."  # reconcile._gate
     if update.topic == "scope":
         return "Not written: the file ownership stays unwritten until it is approved."  # engine._settle_scopes
