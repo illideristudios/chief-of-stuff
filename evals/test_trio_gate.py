@@ -499,6 +499,64 @@ class TrioModelsTest(unittest.TestCase):
         self.assertEqual(self.store.decisions(KEY)[-1].decided_by, "zach")
 
 
+class DefaultTest(unittest.TestCase):
+    """#1128: every recorded decision carries its default, what the engine does if nobody answers it (§6)."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = Path(tmp.name) / "store.db"
+        store.migrate(path)
+        self.store = store.Store(path)
+        self.addCleanup(self.store.engine.dispose)
+        self.store.upsert_item(KEY, title="Separate parsing")
+        self.policy = policy.Policy(trio=DEFAULT)
+
+    def split(self, decision):
+        trio_gate.consult(decision, self.policy, PERSONAS, FakeModel([reply(vote="concern")] * 3), self.store)
+        return self.store.decisions(KEY)[-1]
+
+    def test_each_kind_of_decision_records_the_engines_no_answer_outcome(self):
+        permission = json.dumps({"kind": "permission", "tool_name": "Bash", "tool_input": {"command": "make"}})
+        kinds = {
+            # engine._route_asks denies a permission the trio does not adopt
+            "Denied": trio_gate.Decision(KEY, "ask", "Permission requested for Bash", ("allow", "deny"),
+                                         context=permission, instance="ask-1"),
+            # reconcile._gate waits at a gate until its answer is approve
+            "Hold": trio_gate.Decision(KEY, "plan", "gate requires Zach's approval", ("approve", "hold"),
+                                       context="implement-1", gate=True),
+            # engine._settle_scopes writes nothing unapproved
+            "Not written": trio_gate.Decision(KEY, "scope", "Approve this file ownership?", ("approve", "reject"),
+                                              context="write: scripts/cache.py"),
+            # engine_mcp's ask: the worker reports blocked and waits for the engine
+            "The worker waits": trio_gate.Decision(KEY, "ask", "Which parser?", OPTIONS, instance="ask-2"),
+        }
+        for words, decision in kinds.items():
+            with self.subTest(topic=decision.topic, question=decision.question):
+                self.assertTrue(self.split(decision).record["default"].startswith(words))
+
+    def test_an_adopted_decision_and_an_unavailable_trio_carry_it_too(self):
+        decision = trio_gate.Decision(KEY, "ask", "Which parser?", OPTIONS, instance="ask-3")
+        trio_gate.consult(decision, self.policy, PERSONAS, FakeModel([reply()] * 3), self.store)
+        self.assertTrue(self.store.decisions(KEY)[-1].record["default"].startswith("The worker waits"))
+        gate = trio_gate.Decision(KEY, "plan", "gate requires Zach's approval", ("approve",), gate=True)
+        for _ in range(2):  # refused every pass, recorded once
+            trio_gate.decide(gate, self.store.decisions(KEY), self.policy, PERSONAS, None, self.store)
+        rows = [r for r in self.store.decisions(KEY) if r.topic == "plan"]
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].record["default"].startswith("Hold"))
+
+    def test_a_board_answer_or_reversal_keeps_the_decisions_default(self):
+        decision = trio_gate.Decision(KEY, "scope", "Approve this file ownership?", ("approve", "reject"))
+        asked = self.split(decision)
+        tr = decision_actions.answer(asked, "approve", decided_by="user")
+        trio_gate.record(self.store, KEY, tr.update)
+        answered = self.store.decisions(KEY)[-1]
+        self.assertEqual(answered.record["default"], asked.record["default"])
+        trio_gate.record(self.store, KEY, decision_escalation.reverse(self.store.decisions(KEY), "scope", decision.question))
+        self.assertEqual(self.store.decisions(KEY)[-1].record["default"], asked.record["default"])
+
+
 class DrawTest(unittest.TestCase):
     """The pure selection beside model_port's rotation (#879, DRY with #853)."""
 
