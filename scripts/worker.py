@@ -208,9 +208,14 @@ def _recover(store: Any, key: str, *, trees: Path, clone: Path) -> None:
     if not recovery_stopped(store, key):
         raise RuntimeError("recovery host has not stopped")
     survivor = verdict.candidate if isinstance(verdict, completion.Recovery) else None
+
+    def set_aside(candidate: completion.Candidate, why: str) -> None:
+        _quarantine(candidate, trees=trees, clone=clone, key=key)
+        store.log_event(key, f"recovery quarantined {candidate.path or candidate.branch or candidate.head}: {why}")
+
     for candidate in candidates:
         if candidate != survivor:
-            _quarantine(candidate, trees=trees, clone=clone, key=key)
+            set_aside(candidate, "recovery aborted" if isinstance(verdict, completion.Conflict) else "not a safe survivor")
     if survivor is not None:
         error = make_worktree.git_trees.fetch_base(clone)
         if error:
@@ -220,10 +225,15 @@ def _recover(store: Any, key: str, *, trees: Path, clone: Path) -> None:
             code, detail = make_worktree.git_trusted(["worktree", "add", str(tree), survivor.branch], clone)
             if code:
                 raise RuntimeError(f"cannot restore orphan branch: {detail}")
-        code, _ = make_worktree.git_trusted(["merge", "--ff-only", "refs/remotes/origin/main"], tree)
+        code, own = make_worktree.git(["rev-list", "--count", f"refs/remotes/origin/main..refs/heads/{survivor.branch}"], clone)
+        if code or not own.strip().isdigit():
+            raise RuntimeError(f"cannot compare recovery branch with main: {own}")
+        # A branch with commits of its own is reused as-is; the merge gate rebases it (§8).
+        code, detail = (0, "") if int(own) else make_worktree.git_trusted(
+            ["merge", "--ff-only", "refs/remotes/origin/main"], tree)
         if code:
-            _quarantine(completion.Candidate(str(tree), survivor.branch, survivor.head, True, False, False),
-                        trees=trees, clone=clone, key=key)
+            set_aside(completion.Candidate(str(tree), survivor.branch, survivor.head, True, False, False),
+                      f"cannot fast-forward to main: {detail}")
             survivor = None
         else:
             store.update_resume(key, lambda d: d.update(worktree=str(tree), work_branch=survivor.branch))

@@ -694,6 +694,13 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
             store.upsert_item(item.issue_key, forge_state="closed")
 
     recovery_errors = set()
+
+    def recovery_failed(key: str, exc: Exception) -> None:
+        recovery_errors.add(key)
+        message = f"recovery read failed: {exc}"
+        if not any(row.message == message for row in store.log(key)):
+            store.add_log(key, message, clock().isoformat())
+
     for item in store.items():
         key = item.issue_key
         try:
@@ -702,10 +709,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 store.update_resume(key, lambda d: d.__setitem__("recovery", {
                     "stage": item.stage, "candidates": [asdict(c) for c in candidates]}))
         except Exception as exc:
-            recovery_errors.add(key)
-            message = f"recovery read failed: {exc}"
-            if not any(row.message == message for row in store.log(key)):
-                store.add_log(key, message, clock().isoformat())
+            recovery_failed(key, exc)
 
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
@@ -845,8 +849,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                             row.topic, row.question, "hold", "engine", {
                                 **row.record, "status": "superseded", "note": "recovery conflict no longer exists"}))
         except Exception as exc:
-            recovery_errors.add(key)
-            store.add_log(key, f"recovery read failed: {exc}", at)
+            recovery_failed(key, exc)
     items = [item for item in store.items() if item.issue_key not in recovery_errors
              and (not (pending := _resume(store, item.issue_key).get("pending_stage")) or pending.get("release_hold"))]
     _remember_verified(store, facts)

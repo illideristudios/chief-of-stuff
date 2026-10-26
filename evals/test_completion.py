@@ -45,12 +45,9 @@ class CompletionTest(unittest.TestCase):
         self.assertIsNone(completion.read_only_left_changes(True, False))
         self.assertIsNone(completion.read_only_left_changes(False, True))
 
-    def test_unlanded_work_and_an_orphan_are_named(self):
+    def test_unlanded_work_is_named(self):
         self.assertIsNone(completion.unlanded(CLEAN))
         self.assertIn("uncommitted", completion.unlanded(RISK))
-        gone = orphans.Claim("worker", False, "has no process")
-        self.assertIsNone(completion.orphan_reason("tree", RISK, (orphans.Claim("worker", True),)))
-        self.assertIn("orphaned", completion.orphan_reason("tree", RISK, (gone,)).lower())
 
     def test_a_live_or_unknown_worker_is_not_abandoned(self):
         self.assertIsNone(completion.abandoned(True))

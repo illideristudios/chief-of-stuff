@@ -5,7 +5,7 @@ precede landing. Before landing, dirty files and commits absent from remote refs
 inherited, published PR commits do not. A verified landing of this tree's HEAD and a clean tree
 clear squash history even after branch deletion. Missing tree or read-only baseline evidence
 requires a human hold without changing the reported outcome. Retryable and blocked writable runs keep
-their outcome and tree unless the tree is unreadable. Final completion also judges orphans.
+their outcome and tree unless the tree is unreadable.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 from model_port import RETRYABLE
-from orphans import Claim, judge
+from orphans import Claim
 from tree_state import TreeState, at_risk
 
 
@@ -75,13 +75,6 @@ def unlanded(state: TreeState | None) -> str | None:
         return None
     reasons = at_risk(state)
     return ", ".join(reasons) if reasons else None
-
-
-def orphan_reason(name: str, state: TreeState | None, claims: Sequence[Claim]) -> str | None:
-    if state is None or not name:
-        return None
-    found = judge(name, state, list(claims))
-    return None if found is None else str(found)
 
 
 def abandoned(worker_alive: bool | None, *, report: str | None = None, read_only: bool = False,
