@@ -331,7 +331,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                           for entry in db.log(item.issue_key))
         steps = "\n".join(f'<div class="step"><span class="when">{_step_when(at, now)}</span>'
                           f'<span class="dot"></span><span>{text}</span></div>'
-                          for at, text in sorted(steps_list))
+                          for at, text in sorted(steps_list, key=lambda step: step[0]))
         end = max((e for _, e in spans), default=now)
     # Worked: the union of every launch's interval, so overlapping workers count once.
     first = min((s for s, _ in spans), default=now)
