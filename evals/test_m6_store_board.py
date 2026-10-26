@@ -545,8 +545,7 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         import trio_gate
         transition = decision_actions.answer(dec, "Split", answered_at=NOW.isoformat())
         trio_gate.record(self.db, KEY, transition.update)
-        import reconcile
-        transition = decision_actions.meet_action(self.db.decisions(KEY)[-1], reconcile.Wait(KEY, "conflict"))
+        transition = decision_actions.refuse(self.db.decisions(KEY)[-1], "conflict")
         trio_gate.record(self.db, KEY, transition.update)
         row = next((status, row) for status, row in fc.build_from_store(self.db, NOW, include_hold_bars=True)
                    if row.href.endswith(urllib.parse.quote(KEY, safe="")))

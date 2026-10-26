@@ -47,7 +47,7 @@ import supervisor
 import trio_gate
 import worker
 from forge_port import ForgeError
-from reconcile import HOLD_REROUTE, HOLD_STAGE_WRITE, OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
+from reconcile import OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
 from workspace import worktrees_dir
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
@@ -517,19 +517,14 @@ def _replaced(store: Any, key: str, planned: decision_actions.DecisionState | No
     return (planned.intent_id if planned else None) != (current.intent_id if current else None)
 
 
-def _sync_decisions_with_action(store: Any, key: str, action: reconcile.Action) -> None:
-    """An answered decision shows blocked while its issue's action waits, and answered again once it does not."""
-    if isinstance(action, reconcile.Wait) and action.reason in (HOLD_REROUTE, HOLD_STAGE_WRITE):
-        return  # a pending move holds its own issue only; no sibling decision shows blocked for it
-    with store.transaction():
-        decisions = store.decisions(key)
-        if isinstance(action, reconcile.Wait) and action.reason == "decision pending":
-            # With no open decision, a blocked answer is what holds merge: restore it.
-            for update in decision_actions.restore_held(decisions):
+def _settle_waits(store: Any) -> None:
+    """Settle every answer an earlier wait blocked back to answered, on open and closed issues alike: a closed
+    issue gets no planned action, so this reads every decision rather than following the plan (#1124)."""
+    for key in sorted({st.issue_key for st in decision_actions.states(store.decisions())
+                       if decision_actions.meet_action(st).update}):
+        with store.transaction():  # re-read under the lock so a concurrent board intent is never overwritten
+            for update in decision_actions.settle_waits(store.decisions(key)):
                 _apply(store, key, update)
-            return
-        for state in decision_actions.states(decisions):
-            _apply(store, key, decision_actions.meet_action(state, action).update)
 
 
 def _deliver_comments(forge: Any, store: Any, key: str, at: str) -> None:
@@ -857,6 +852,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     store.add_log(key, message, at, OP_STAGE_WRITE)
     for item in store.items():
         _deliver_comments(forge, store, item.issue_key, at)
+    _settle_waits(store)
 
     until = clock() + timedelta(seconds=TRIO_PASS_BUDGET_S)
     _route_asks(store, policies, model, at, clock, until)
@@ -887,7 +883,6 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         op = (OP_MERGE_REFUSED if isinstance(action, reconcile.Merge)
               else OP_WORKER_RUN if isinstance(action, (reconcile.Dispatch, reconcile.Review)) else "")
         try:
-            _sync_decisions_with_action(store, key, action)
             stage = None
             if isinstance(action, (reconcile.Dispatch, reconcile.Review)):
                 stage = action.stage if isinstance(action, reconcile.Dispatch) else "review"

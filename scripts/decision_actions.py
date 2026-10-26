@@ -203,20 +203,8 @@ def block(records: Sequence[Any], intent_id: int | None, reason: str) -> Decisio
     return refuse(found, reason).update
 
 
-def unblock(records: Sequence[Any], decision_id: int | None) -> DecisionUpdate | None:
-    """An answer a wait blocked is restored once the wait is gone; an intent is never restored this way."""
-    found = next((st for st in states(records) if decision_id and st.id == decision_id), None)
-    if found is None or found.status != "blocked" or found.intent:
-        return None
-    return _row(replace(found, status="answered", blocked_reason=""))
-
-
 def latest_questions(records: Sequence[Any]) -> list[DecisionState]:
     return states(records)
-
-
-def unanswered(records: Sequence[Any]) -> bool:
-    return any(st.status != "superseded" and (st.status == "open" or not st.answer.strip()) for st in states(records))
 
 
 def replaces_engine_move(intent: DecisionState, stage: str) -> bool:
@@ -235,13 +223,6 @@ def advance(records: Sequence[Any], intent_id: int, stage: str = "", attempt: in
         kept = {k: v for k, v in (found.record or {}).items() if k != "reversed"}
         nxt = replace(nxt, record={**kept, "restarted": stage or found.rerouted_to, "restart_attempt": attempt})
     return _row(nxt)
-
-
-def restore_held(records: Sequence[Any]) -> list[DecisionUpdate]:
-    """A decision-pending hold that no open decision explains is held by answers a wait blocked: restore them."""
-    if unanswered(records):
-        return []
-    return [u for u in (unblock(records, st.id) for st in states(records)) if u is not None]
 
 
 def _reverse_target(dec: DecisionState, current_stage: str, history: Sequence[Any], policies: Any,
@@ -279,17 +260,19 @@ def respond(record: Any, action: str, text: str, *, target_stage: str = "", curr
     return reroute(record, stage, answer_text=text, answered_at=answered_at)
 
 
-def meet_action(record: Any, action: Any) -> Transition:
-    """A person's answer shows blocked while the planner's action waits or escalates, and answered otherwise (#288).
-    A model's answer is not tracked this way, so trio rows do not grow with every wait."""
+def meet_action(record: Any, action: Any = None) -> Transition:
+    """An answer stays answered whatever the planner's action: a Wait or Escalate never blocks it (§6, #1124).
+    Only `block` blocks, on the decision's own intent, so a blocked row with no intent is one an earlier wait
+    blocked (#288): it settles back to answered."""
     prev = state_of(record)
-    if prev.status not in {"answered", "blocked"} or prev.intent or prev.decided_by != "user":
+    if prev.status != "blocked" or prev.intent:
         return Transition(prev, None)
-    kind = type(action).__name__ if action is not None else ""
-    reason = str(getattr(action, "reason", "") or kind.casefold()) if kind in {"Wait", "Escalate"} else ""
-    if reason:
-        return refuse(prev, reason)
     return _transition(prev, replace(prev, status="answered", blocked_reason=""))
+
+
+def settle_waits(records: Sequence[Any]) -> list[DecisionUpdate]:
+    """The rows that settle every answer a wait blocked, each appended as a new row (decisions are append-only)."""
+    return [u for u in (meet_action(st).update for st in states(records)) if u is not None]
 
 
 def pending_comments(records: Sequence[Any], sent: Collection[str]) -> list[str]:

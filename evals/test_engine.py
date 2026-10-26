@@ -1712,14 +1712,31 @@ class EngineTest(unittest.TestCase):
         """A decision's current state: its identity's latest row."""
         return decision_actions.state_of(decision_escalation.latest(self.db.decisions(KEY))[decision_escalation.identity(row)])
 
-    def test_answered_decision_meeting_a_blocked_action_records_blocked_status(self):
-        # M6 item 2 & #288: engine calls decision_actions when a planned action meets an answered decision.
-        dec = self.decide("design", "Approve schema?", "Yes")
-        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "merge conflicts")]):
-            self.run_pass()
-            self.run_pass()
-        self.assertEqual((self.state(dec).status, self.state(dec).blocked_reason), ("blocked", "merge conflicts"))
-        self.assertEqual(len(self.db.decisions(KEY)), 2)  # an unchanged state appends nothing
+    def test_a_wait_or_an_escalation_leaves_a_persons_answer_answered(self):
+        # §6, #1124: only the decision's own intent failing for good blocks it, never the planner waiting.
+        for question, action in (("Approve schema?", reconcile.Wait(KEY, "merge conflicts")),
+                                 ("Ship it?", reconcile.Escalate(KEY, "retry limit reached"))):
+            with self.subTest(action=action):
+                dec = self.decide("design", question, "Yes")
+                with mock.patch.object(engine.reconcile, "plan", return_value=[action]):
+                    self.run_pass()
+                    self.run_pass()
+                self.assertEqual((self.state(dec).status, self.state(dec).blocked_reason), ("answered", ""))
+                self.assertEqual(self.db.decisions(KEY)[-1].id, dec.id)  # nothing appended
+
+    def test_a_closed_issues_wait_blocked_answers_settle_to_answered_as_new_rows(self):
+        # #1124: closed issues get no planned action, so the settling pass reads every issue's decisions.
+        self.forge.rows[0].update(forge_state="closed", merge_state="merged")
+        blocked = [self.decide("design", q, "Yes", status="blocked", blocked_reason=reason)
+                   for q, reason in (("Approve schema?", "merged, awaiting main CI"), ("Ship it?", "human review"))]
+        self.run_pass()
+        rows = self.db.decisions(KEY)
+        self.assertTrue({b.id for b in blocked} <= {r.id for r in rows})  # the blocked rows are kept: append-only
+        for b in blocked:
+            self.assertEqual((self.state(b).status, self.state(b).blocked_reason), ("answered", ""))
+            self.assertGreater(self.state(b).id, b.id)
+        self.run_pass()
+        self.assertEqual(len(self.db.decisions(KEY)), len(rows))  # settled once
 
     def test_default_agent_has_no_declared_type(self):
         self.run_pass()
@@ -1828,12 +1845,13 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
         self.assertEqual(self.state(answered).status, "answered")
 
-    def test_a_pending_sibling_decision_does_not_clear_another_decisions_block(self):
+    def test_a_wait_blocked_answer_settles_even_beside_a_pending_sibling(self):
+        # #1124: a wait never blocked it for good, so an open sibling is no reason to keep it blocked.
         blocked = self.decide("design", "Approve schema?", "Yes", status="blocked", blocked_reason="merge conflicts")
         self.decide("scope", "Still open?", by="zach")
-        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
+        with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "merge conflicts")]):
             self.run_pass()
-        self.assertEqual((self.state(blocked).status, self.state(blocked).blocked_reason), ("blocked", "merge conflicts"))
+        self.assertEqual((self.state(blocked).status, self.state(blocked).blocked_reason), ("answered", ""))
 
     def spent_intent(self, status="reversed"):
         dec = self.add_intent("implement", "run", status=status)
