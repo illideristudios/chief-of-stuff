@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import runtimes
+import session_logs
 from model_port import Failure, Reply, Request, quota_reset
 from shell_setup import ShellError, clean_env, login_argv, resolve
 
@@ -48,10 +49,18 @@ def command(request: Request, claude_as_profile: str = "", *, extra_args: tuple[
     return login_argv([*built[:boundary], *extra_args, *built[boundary:]], path_prefix=path_prefix)
 
 
+def _pin_config_dir(environment: dict[str, str], claude_as_profile: str) -> None:
+    # A named profile wins over a default-login directory. An empty profile keeps one the caller set.
+    if claude_as_profile or "CLAUDE_CONFIG_DIR" not in environment:
+        environment["CLAUDE_CONFIG_DIR"] = str(session_logs.claude_home(claude_as_profile))
+
+
 def start(request: Request, run_dir: Path, *, claude_as_profile: str = "",
           env: dict[str, str] | None = None) -> subprocess.Popen:
     """Detached adapter runner: durable stdout, stderr and exit status survive an engine restart."""
-    return spawn(command(request, claude_as_profile), request, run_dir, env)
+    overlay = dict(env or {})
+    _pin_config_dir(overlay, claude_as_profile)
+    return spawn(command(request, claude_as_profile), request, run_dir, overlay)
 
 
 def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, str] | None = None) -> subprocess.Popen:
@@ -112,7 +121,7 @@ def _worker(run_dir: Path) -> None:
 # environment. An unrelated secret must not become visible to a model subprocess.
 MODEL_ENV = {
     "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
-    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
     "CLAUDE_CODE_SKIP_BEDROCK_AUTH", "CLAUDE_CODE_SKIP_VERTEX_AUTH", "CLAUDE_CODE_SKIP_FOUNDRY_AUTH",
     "AWS_BEARER_TOKEN_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL",
     "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_PROFILE", "AWS_DEFAULT_PROFILE",
@@ -182,6 +191,7 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
         return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
     source = os.environ if env is None else env
     environment = model_env(source)
+    _pin_config_dir(environment, claude_as_profile)
     try:
         prepared = command(request, claude_as_profile, extra_args=extra_args,
                            path_prefix=source.get("CHIEF_OF_STUFF_PATH_PREFIX", ""))
