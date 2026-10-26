@@ -204,7 +204,6 @@ class Facts:
     stall_after: timedelta = timedelta(minutes=45)
     suites: tuple[tuple[tuple[str, str, int], tuple], ...] = ()  # (issue, stage, attempt) → (counts, summary)
     require_green: bool = False
-    scope_pending: tuple[str, ...] = ()  # issues whose plan's file_ownership proposal awaits the trio or the owner
     hold_observations: tuple[tuple[str, bool | None], ...] = ()  # fresh forge flags; omitted is unknown
     implementation_requests: tuple[tuple[tuple[str, str, int], bool | None], ...] = ()
     suite_holds: tuple[str, ...] = ()  # suite acceptance belongs to its own publication/release lifecycle
@@ -540,52 +539,12 @@ def hold_recovery(item: WorkItem, history: Sequence[Segment], *, pending_hold: M
     return "none"
 
 
-def _running_keys(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], facts: Facts | None) -> list[str]:
-    alive = dict(facts.alive) if facts is not None else {}
-    found = []
-    for item in items:
-        segment = _running_segment(segments.get(item.issue_key, ()))
-        if segment is None:
-            continue
-        if alive.get((item.issue_key, segment.stage, segment.attempt)) is False:
-            continue
-        found.append(item.issue_key)
-    return found
-
-
-SCOPE_REPLANS = 2  # plan reruns an issue may take to propose the file ownership its plan never proposed
-
-
-def _scope_replans(history: Sequence[Segment]) -> int:
-    """Plan runs launched after the issue's first finished plan, or all of them when none finished; a start that failed
-    at launch spends none."""
-    done = [seg.attempt for seg in history if seg.stage == "plan" and seg.outcome == "done"]
-    start = min(done) if done else 0
-    return sum(1 for seg in history if seg.stage == "plan" and seg.attempt > start
-               and not (seg.outcome == "failed" and seg.ended_at == seg.started_at))
-
-
-def _replan_for_scope(action: Action | None, item: WorkItem, history: Sequence[Segment], facts: Facts,
-                      policies: Policies, running: Sequence[str]) -> Action | None:
-    """An issue held on "needs file ownership" with no proposal pending reruns its plan stage, whose report proposes the
-    scope the trio approves (#915, §8). Plans that ran before plans proposed scope otherwise wait forever."""
-    if not (isinstance(action, Wait) and action.reason == "needs file ownership" and "plan" in policies.stages
-            and item.issue_key not in facts.scope_pending and _scope_replans(history) < SCOPE_REPLANS):
-        return action
-    attempt = max((seg.attempt for seg in history if seg.stage == "plan"), default=0) + 1
-    return _with_facts(Dispatch(item.issue_key, "plan", policies.stages["plan"].persona, attempt), item, history,
-                       facts, running)
-
-
-def _with_facts(action: Action | None, item: WorkItem, history: Sequence[Segment], facts: Facts,
-                running: Sequence[str]) -> Action | None:
+def _with_facts(action: Action | None, item: WorkItem, facts: Facts) -> Action | None:
     # Completion writes a forge hold before closure. A human's release must survive retained tree evidence.
     if not isinstance(action, (Dispatch, Review)):
         return action
     blockers = None if facts.blockers is None else dict(facts.blockers).get(item.issue_key, ())
-    reason = readiness.why_not(item.issue_key, claims=facts.claims, running=running, blockers=blockers,
-                               asks=facts.asks, reports=facts.reports,
-                               stage=action.stage if isinstance(action, Dispatch) else "review")
+    reason = readiness.why_not(item.issue_key, blockers=blockers, asks=facts.asks, reports=facts.reports)
     if reason == "dependency blockers unknown" and facts.blockers_error:
         reason = f"{reason}: {facts.blockers_error}"
     return Wait(item.issue_key, reason) if reason else action
@@ -611,15 +570,13 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
     Merge requires answered decisions and, where policy requires it, a done architect segment for the current work.
     Without creation times, issue numbers order work within each forge namespace.
     Attempt-owned extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
-    `facts` are this pass's ownership, blockers, stops, tree and stall readings. Without them a running segment
+    `facts` are this pass's blockers, stops, tree and stall readings. Without them a running segment
     still suppresses actions.
     """
     _time(now)
     if type(free_slots) is not int or free_slots < 0:
         raise ValueError("free_slots must be a non-negative integer")
     actions = []
-    running = _running_keys(items, segments, facts)
-    accepted: list[str] = []
     for item in sorted(items, key=lambda item: _order(item, created_at or {})):
         history = segments.get(item.issue_key, ())
         room = (rooms or {}).get(item.issue_key)
@@ -650,8 +607,7 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                            (launcher_holds or {}).get(item.issue_key, {}), facts,
                            tuple((waived_gates or {}).get(item.issue_key) or ()))
         if facts is not None and action is not None:
-            action = _with_facts(action, item, history, facts, (*running, *accepted))
-            action = _replan_for_scope(action, item, history, facts, policies, (*running, *accepted))
+            action = _with_facts(action, item, facts)
         if isinstance(action, Merge) and (pending_asks or {}).get(item.issue_key):
             action = Wait(item.issue_key, "decision pending")
         if isinstance(action, (Dispatch, Review, Ask)):
@@ -668,7 +624,6 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
             elif not isinstance(action, Ask):
                 if free_slots:
                     free_slots -= 1
-                    accepted.append(item.issue_key)
                 else:
                     action = Wait(item.issue_key, "no free worker slots")
         if action is not None:

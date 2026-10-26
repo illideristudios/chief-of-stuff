@@ -100,8 +100,6 @@ def _default(update: DecisionUpdate) -> str:
         return "Denied: a permission the trio does not adopt is denied."  # engine._route_asks
     if is_gate(update, decision):
         return "Hold: the work waits at the gate until it is approved."  # reconcile._gate
-    if update.topic == "scope":
-        return "Not written: the file ownership stays unwritten until it is approved."  # engine._settle_scopes
     return "The worker waits: the issue holds until this is answered."  # engine_mcp ask, decision_escalation.owner_waits
 
 
