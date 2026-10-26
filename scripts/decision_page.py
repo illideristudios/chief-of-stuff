@@ -48,7 +48,7 @@ from pathlib import Path
 import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
-from decision_actions import DecisionState, OPEN_STATES, states, tab_counts as store_tab_counts
+from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, states, tab_counts as store_tab_counts
 from fragment import FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
@@ -478,6 +478,9 @@ def main(argv: list[str] | None = None) -> int:
     if not NAME.fullmatch(args.name):
         print(f"decision: name {args.name!r} is not lowercase letters, digits and dashes", file=sys.stderr)
         return 2
+    if args.name.isdigit():  # /decisions/<digits> is a store decision's page (#945)
+        print(f"decision: name {args.name!r}: digit-only names are reserved for store decision ids", file=sys.stderr)
+        return 2
     try:
         pages_dir, port = pages_address(Path(args.root))
     except (OSError, ConfigError) as e:
@@ -699,11 +702,17 @@ def store_decision_badge(d: DecisionState) -> str:
     return f'<span class="decision-badge {escape(d.status)}">{escape(d.status.upper())}</span>'
 
 
-def store_decision_form(d: DecisionState) -> str:
+def store_decision_form(d: DecisionState, back: str = "") -> str:
+    """The store's answer form; `back` is the page a POST returns to. An answered decision keeps only Reverse, which
+    takes the person's reason and appends a reversal intent (§6, #971)."""
+    head = (f'<form method="post" action="/" class="decision-form">'
+            f'<input type="hidden" name="decision_id" value="{d.id}">'
+            + (f'<input type="hidden" name="back" value="{escape(back)}">' if back else ""))
+    if d.status not in OPEN_STATES:
+        return (head + '<input type="text" name="answer" aria-label="why reverse it" placeholder="why reverse it">'
+                '<button type="submit" name="action" value="reverse">Reverse</button></form>')
     return (
-        f'<form method="post" action="/" class="decision-form">'
-        f'<input type="hidden" name="decision_id" value="{d.id}">'
-        f'<input type="text" name="answer" value="{escape(d.answer or "")}">'
+        head + f'<input type="text" name="answer" value="{escape(d.answer or "")}">'
         f'<input type="text" name="target_stage" value="{escape(d.rerouted_to or "")}">'
         f'<button type="submit" name="action" value="answer">Answer</button>'
         f'<button type="submit" name="action" value="reverse">Reverse</button>'
@@ -712,24 +721,29 @@ def store_decision_form(d: DecisionState) -> str:
     )
 
 
-def _store_pending_row(d: DecisionState, asked: datetime | None, ctx: Context) -> str:
+def _fallback(d: DecisionState) -> str:
+    """What happens while the decision waits."""
+    return escape(d.blocked_reason or "worker waits")
+
+
+def _store_pending_row(d: DecisionState, asked: datetime | None, ctx: Context, page: int) -> str:
     when = f'<span class="when">{ctx.when(asked)}</span>' if asked else ""
     age = f'<span class="age">{span(ctx.now - asked)}</span>' if asked else ""
     topic = f'<span class="topic">{escape(d.gate)}</span>' if d.gate else ""
     badge = store_decision_badge(d)
     ans = f' <span class="decision-answer">({escape(d.answer)})</span>' if d.answer else ""
     link = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
-    fallback = escape(d.blocked_reason or "worker waits")
+    fallback = _fallback(d)
     return (f'      <div class="row pend" data-status="{escape(d.status)}">\n        <span class="stack">{when}{age}</span>\n'
-            f'        <span class="stack"><span class="line"><strong class="headline">{escape(d.prompt)}</strong>{topic} {badge}{ans}</span></span>\n'
+            f'        <span class="stack"><span class="line"><a class="headline" href="/decisions/{page}">{escape(d.prompt)}</a>{topic} {badge}{ans}</span></span>\n'
             f'        {store_decision_form(d)}\n        <span class="stack holds"><span>{link}</span></span>\n'
             f'        <span class="fallback">{fallback}</span>\n      </div>')
 
 
-def _store_done_row(d: DecisionState, when: datetime, ctx: Context) -> str:
+def _store_done_row(d: DecisionState, when: datetime, ctx: Context, page: int) -> str:
     asked = _stamp(d.asked_at, ctx.now)
     took = f"in {span(when - asked)}" if asked and when >= asked and when != asked else ""
-    head = f'<span class="headline">{escape(d.prompt)}</span><span class="page">{escape(d.gate or d.status)}</span>'
+    head = f'<a class="headline" href="/decisions/{page}">{escape(d.prompt)}</a><span class="page">{escape(d.gate or d.status)}</span>'
     by = d.decided_by or d.status
     keyed = f'<span class="key">{escape(by)}</span>' if by else ""
     ans = d.answer or (f"→ {d.rerouted_to}" if d.rerouted_to else d.status)
@@ -741,6 +755,86 @@ def _store_done_row(d: DecisionState, when: datetime, ctx: Context) -> str:
             f'        <span class="words">{words}</span>\n        <span class="since">{since}</span>\n      </div>')
 
 
+def _trio(record: dict) -> str:
+    """The trio's outcome: what it adopted, or why it fell to a person, and each member's vote."""
+    verdicts = [v for v in record.get("verdicts") or [] if isinstance(v, dict)]
+    if not verdicts:
+        return "<p>No trio consult.</p>"
+    head = f"trio adopted {record.get('recommendation')}" if record.get("unanimous") else record.get("error") or "the trio did not agree"
+    votes = "".join(f'<li><b>{escape(str(v.get("persona", "")))}</b> {escape(str(v.get("vote", "")))}'
+                    + (f' · {escape(str(v["choice"]))}' if v.get("choice") else "")
+                    + f': {escape(str(v.get("reasoning", "")))}</li>' for v in verdicts)
+    return f"<p>{escape(str(head))}</p><ul>{votes}</ul>"
+
+
+def store_page(rows, row_id: int, ctx: Context, navigation: dict | None = None) -> str | None:
+    """`/decisions/<id>` from the store (§6, #945): the decision whose identity holds row `row_id`, or None when no row
+    has that id. Its newest row is its state; every row of the identity is its history, newest first."""
+    ids = addresses(rows)
+    if row_id not in ids:
+        return None
+    page = ids[row_id]
+    history = sorted((r for r in rows if ids[r.id] == page), key=lambda r: -r.id)
+    d = state_of(history[0])
+    evidence = next((r.record for r in history if isinstance(getattr(r, "record", None), dict)
+                     and ("decision" in r.record or "verdicts" in r.record)), {})
+    asked = evidence.get("decision") if isinstance(evidence.get("decision"), dict) else {}
+    rec = evidence.get("recommendation")
+
+    def when(raw: str | None) -> str:
+        at = _stamp(raw, ctx.now)
+        return ctx.when(at) if at else ""
+
+    tag = '<span class="tag">recommended</span>'
+    options = "".join(f'<span class="o"><span class="key">{escape(str(o))}</span>{tag if o == rec else ""}</span>'
+                      for o in asked.get("options") or []) or '<span class="none">a free answer</span>'
+    done = ""
+    if d.status not in OPEN_STATES:
+        done = (f'<div class="card answered"><span><span class="key">{escape(d.decided_by or "—")}</span>'
+                f'{escape(d.answer or d.note or d.status)}</span><span class="saved">{escape(d.status)} {when(d.answered_at or d.asked_at)}</span></div>')
+    form = store_decision_form(d, f"/decisions/{page}") if d.status in OPEN_STATES | {"answered"} else ""
+    waits = escape(ctx.user or "the owner") if d.status in OPEN_STATES else f"no one: answered by {escape(d.decided_by or 'the engine')}"
+    steps = []
+    for r in history:
+        st = state_of(r)
+        what = " · ".join(escape(x) for x in (st.status, st.answer or st.note, st.decided_by) if x)
+        steps.append(f'      <div class="step"><span class="when">{when(st.asked_at)}</span><span class="dot"></span>'
+                     f'<span>#{r.id} {what}</span></div>')
+    link = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
+    first = when(state_of(history[-1]).asked_at)
+    eyebrow = " · ".join(["Decision", *([escape(d.gate)] if d.gate else []), *([f"asked {first}"] if first else []), link,
+                          '<a href="/decisions">decisions</a>', '<a href="/">board</a>'])
+    context_text = f'\n    <div class="prose">{markdown_blocks(str(asked["context"]))}</div>' if asked.get("context") else ""
+    right = (_section("Options", f'    <div class="card">{done}<div class="stack">{options}</div>{form}</div>')
+             + _section("Recommendation", f'    <div class="card prose"><p>{escape(str(rec)) if rec else "none"}</p>{_trio(evidence)}</div>')
+             + _section("If you don't answer", f'    <div class="card default prose"><p>{_fallback(d)}</p></div>')
+             + _section("Waits on", f'    <div class="card"><p>{waits}</p></div>'))
+    return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+            f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+            f"<title>{escape(d.prompt)}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n"
+            f"{tab_bar('Decisions', 0, True, **(navigation or {}))}"
+            f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
+            f"      <h1>{escape(d.prompt)}</h1>\n    </div>\n    {store_decision_badge(d)}\n  </header>\n\n"
+            f'  <div class="card ask">\n    <span class="cap">ask</span>\n    <div class="prose"><p>{escape(d.prompt)}</p></div>{context_text}\n  </div>\n\n'
+            '  <div class="cols">\n  <div class="col">\n'
+            + _section("History", '    <div class="card timeline">\n' + "\n".join(steps) + "\n    </div>")
+            + '  </div>\n  <div class="col">\n' + right + "  </div>\n  </div>\n</main>\n</body>\n</html>\n")
+
+
+def write_store(root: Path, pages_dir: Path, row_id: int, day: str, *, db: PageData | None = None,
+                navigation: dict | None = None) -> Path | None:
+    """Render `decision-<row_id>.html` from the store; with no such row, remove the file and return None (a 404). The
+    page server calls this in process."""
+    out = pages_dir / f"decision-{row_id}.html"
+    ctx = context(root, day) or Context(datetime.now().astimezone())
+    page = store_page(db.decision_rows, row_id, ctx, navigation) if db is not None else None
+    if page is None:
+        out.unlink(missing_ok=True)
+        return None
+    write_if_changed(out, page)
+    return out
+
+
 def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, *,
           db: PageData | None = None, navigation: dict | None = None) -> tuple[str, list[tuple[str, dict | None, datetime | None, str]]]:
     """`decisions.html` (Decisions.dc.html) and its pending entries (`entries`, read here unless given), which the
@@ -749,6 +843,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
     rows, held = [], held_refs(pending, ctx)
     store_states: list[DecisionState] = []
     pending_store: list[tuple[DecisionState, datetime | None]] = []
+    ids = addresses(db.decision_rows) if db is not None else {}
     if db is not None:
         opened = {i.issue_key for i in db.items() if getattr(i, "forge_state", "open") != "closed"}
         store_states = states(db.decisions())
@@ -756,7 +851,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
             ((d, _stamp(d.asked_at, ctx.now)) for d in store_states if d.status in OPEN_STATES and d.issue_key in opened),
             key=lambda item: (-(item[1].timestamp() if item[1] else 0), -item[0].id),
         )
-        rows.extend(_store_pending_row(d, asked, ctx) for d, asked in pending_store)
+        rows.extend(_store_pending_row(d, asked, ctx, ids.get(d.id, d.id)) for d, asked in pending_store)
     linker = Linker(ctx.forge)
     for slug, d, asked, why in pending:
         when = f'<span class="when">{ctx.when(asked)}</span>' if asked else ""
@@ -791,7 +886,7 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
         if d.status not in OPEN_STATES and d.status != "superseded":
             when = _stamp(d.answered_at or d.asked_at, ctx.now)
             if when is not None and when.date() == today:
-                done_items.append((when, _store_done_row(d, when, ctx)))
+                done_items.append((when, _store_done_row(d, when, ctx, ids.get(d.id, d.id))))
     for row in (r for r in ctx.rows if r.day == today):
         page = next(iter(PAGE_REF.findall(row.item)), None)
         source = pages_dir / f"{page}.json" if page else None

@@ -91,6 +91,12 @@ def current_rows(records: Sequence[Any]) -> list[Any]:
     return list({(getattr(r, "issue_key", ""), identity(r)): r for r in records}.values())
 
 
+def addresses(records: Sequence[Any]) -> dict[int, int]:
+    """Every row's decision address: the id of its identity's first row, which never changes as rows append (§6, #945)."""
+    first: dict = {}
+    return {r.id: first.setdefault((r.issue_key, identity(r)), r.id) for r in sorted(records, key=lambda r: r.id)}
+
+
 def states(records: Sequence[Any]) -> list[DecisionState]:
     """Every decision's current state."""
     return [state_of(row) for row in current_rows(records)]

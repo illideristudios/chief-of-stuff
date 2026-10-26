@@ -2,7 +2,8 @@
 """Serve the workspace's pages locally: the board and any page a session writes beside it.
 
 The pages are routes: `/` the board, `/workers` the running workers and today's ends, `/decisions` the list,
-`/decisions/<slug>` a decision page, `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
+`/decisions/<slug>` an authored decision page, `/decisions/<id>` (digits only) a store decision's page rendered
+from the store (#945), `/issues/<n>` a tracker issue's page, `/issues/<n>/source` its change's source
 and diff. Each is rendered into its file (`<day>-board.html`, `workers.html`, `decisions.html`, `decision-<slug>.html`,
 `issue-<n>.html`, `issue-<n>-source.html`), which only the routes serve: a request for the file's own name is a 404.
 A GET re-renders a page when one of its sources (the trackers, CLAUDE.md, the settings TOML, the decision JSON,
@@ -195,11 +196,12 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
     try:
         cfg = read_config(root)
         today = datetime.now(cfg.zone).date().isoformat()
-        if name.startswith("decision-"):
+        store_decision = name.startswith("decision-") and name[len("decision-"):-5].isdigit()  # a store id (#945)
+        if name.startswith("decision-") and not store_decision:
             if not (pages_dir / f"{name[:-5]}.json").is_file():
                 return ""
             day = today
-        elif name.startswith("issue-") or name == "workers.html":
+        elif store_decision or name.startswith("issue-") or name == "workers.html":
             day = today
         elif name == "decisions.html":
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
@@ -227,13 +229,16 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                     return ""
             started = time.time_ns()
             with slots:
-                if name.startswith("decision-"):
+                if name.startswith("decision-") and not store_decision:
                     decision_page.write(root, pages_dir, name[len("decision-"):-5], day)
                 else:
                     data = _page_data(root)
-                    if name == "workers.html" or name.startswith("issue-"):
+                    if name == "workers.html" or name.startswith(("issue-", "decision-")):
                         navigation = _navigation(root, pages_dir, data)
-                        if name == "workers.html":
+                        if store_decision:
+                            decision_page.write_store(root, pages_dir, int(name[len("decision-"):-5]), day,
+                                                      db=data, navigation=navigation)
+                        elif name == "workers.html":
                             workers_page.write(root, pages_dir, db=data, navigation=navigation)
                         elif name.endswith("-source.html"):
                             source_page.write(root, pages_dir, _issue_identity(name, source=True),
@@ -311,8 +316,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.path = f"{path}.html"
         elif path.startswith("/decisions/"):
             m = ROUTE.fullmatch(path)
-            source = self._page(f"decision-{m[1]}.json") if m else None
-            if source is None or not source.is_file():
+            # A path of digits is a store decision, rendered below or a 404; any other is an authored page's JSON.
+            source = self._page(f"decision-{m[1]}.json") if m and not m[1].isdigit() else None
+            if not (m and m[1].isdigit()) and (source is None or not source.is_file()):
                 self.send_error(404, "no such decision")
                 return False
             self.path = f"/decision-{m[1]}.html"
@@ -342,6 +348,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         unrecord_look(pages, prior)
         if name.startswith("issue-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
             self.send_error(404, "no task names this issue")  # issue_page.write removes the page then
+            return False
+        if name.startswith("decision-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
+            self.send_error(404, "no such decision")  # decision_page.write_store removes the page then
             return False
         return True
 
@@ -479,8 +488,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         for page in Path(self.directory).iterdir():
             if RENDERED.fullmatch(page.name):
                 RENDERED_AT[str(page)] = 0, None, ""
+        # Back to the decision's own page when its form came from there (#945), else the list (#895). The header is
+        # built from the parsed digits, so no request text reaches it (CodeQL's py/http-response-splitting).
+        back = re.fullmatch(r"/decisions/(\d+)", form.get("back", [""])[0])
         self.send_response(303)
-        self.send_header("Location", "/decisions")  # the store's forms live on /decisions only (#895)
+        self.send_header("Location", f"/decisions/{int(back[1])}" if back else "/decisions")
         self.send_header("Content-Length", "0")
         self.end_headers()
 

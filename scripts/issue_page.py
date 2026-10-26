@@ -2,8 +2,8 @@
 """One tracker issue's page, `/issues/<n>` (Task.dc.html, "Task page — laptop"), from the trackers and the cached
 forge sources: the header; its merge request (merge order, overlap, pipeline jobs, conflicts, threads); the issue's
 one Flow row; What happens next; Files changed; Architecture (module_graph.py, as on the decision page); How it got here
-(its Log lines); Review; Acceptance (the bullets under the issue body's "Acceptance" heading); its workers; and
-References. pages.py renders it on request into `issue-<n>.html`.
+(its Log lines); Review; Acceptance (the bullets under the issue body's "Acceptance" heading); its decisions, each
+linked to its page; its workers; and References. pages.py renders it on request into `issue-<n>.html`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ import flow_chart
 from clock import parse_stamp
 from task_forge import PageData, source_key
 import tracker_log
-from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, write_if_changed
+from decision_actions import addresses, state_of
+from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
 from fragment import href, tab_bar, issue_href, issue_page_name
 from page_common import drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
@@ -180,6 +181,15 @@ def _acceptance(issue: board_sources.Issue | None, linker: Linker = Linker()) ->
     rows = "\n".join(f'      <div class="chk"><span class="mk{" passed" if ok else ""}">{"met" if ok else "not met"}</span>'
                      f"<span>{markdown_inline(what, linker.resolve)}</span></div>" for ok, what in met)
     return _section(f"Acceptance · {sum(ok for ok, _ in met)} of {len(met)} met", f'    <div class="card">\n{rows}\n    </div>')
+
+
+def _decisions(db: PageData, key: str) -> str:
+    """The issue's store decisions, newest first, each linked to its page, where it is answered (§6, #945)."""
+    ids = addresses(db.decision_rows)
+    found = [state_of(r) for r in reversed(db.decisions()) if r.issue_key == key]
+    lines = "\n".join(f'      <p><a href="/decisions/{ids.get(d.id, d.id)}">{escape(d.prompt)}</a> {store_decision_badge(d)}</p>'
+                      for d in found)
+    return _section("Decisions", f'    <div class="card">\n{lines}\n    </div>') if found else ""
 
 
 def _next(rows, change: board_sources.Change | None, changes, why_not: str, now: datetime) -> str:
@@ -358,6 +368,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             + _section("How it got here", f'    <div class="card timeline">\n{steps}\n    </div>' if steps else '    <div class="card"><p>No Log lines yet.</p></div>')
             + (_review(change, now, linker) if change else "")
             + '  </div>\n  <div class="col">\n' + _acceptance(issue, linker)
+            + (_decisions(db, item.issue_key) if item is not None and db is not None else "")
             + workers_html
             + _section("References", f'    <div class="card refs">\n{refs_html}\n    </div>')
             + "  </div>\n  </div>\n</main>\n</body>\n</html>\n")

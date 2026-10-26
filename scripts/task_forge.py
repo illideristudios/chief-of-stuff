@@ -310,6 +310,7 @@ class PageData:
     resumes: dict[str, Any]
     issue_logs: tuple = ()
     engine_logs: tuple = ()
+    decision_rows: tuple = ()  # every decision row, oldest first: a decision page's history and address (#945)
 
     def items(self):
         return self.work_items
@@ -336,6 +337,8 @@ class PageData:
 def page_data(store) -> PageData:
     """Read the store through the use case once, before handing rows to presenters."""
     items = tuple(store.items())
-    # Decision rows are append-only; presenters see each decision's latest row only.
-    return PageData(items, tuple(store.segments()), tuple(decision_actions.current_rows(store.decisions())), tuple(store.reports()),
-                    {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()), tuple(store.engine_log()))
+    rows = tuple(store.decisions())
+    # Decision rows are append-only; presenters see each decision's latest row only, a decision page all of them.
+    return PageData(items, tuple(store.segments()), tuple(decision_actions.current_rows(rows)), tuple(store.reports()),
+                    {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()), tuple(store.engine_log()),
+                    rows)

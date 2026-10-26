@@ -438,6 +438,125 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
             self.assertEqual(len(decision_actions.pending_comments(self.db.decisions(KEY), ())), 3)
 
 
+class DecisionPageByIdTest(unittest.TestCase):
+    """#945: every store decision has an engine-rendered page at /decisions/<id>, <id> its identity's first row
+    (§6). Open or blocked carries the answer form; answered shows the answer and who gave it and keeps only Reverse,
+    which appends a reversal intent (#971). Unknown ids are 404; authored /decisions/<slug> pages keep working."""
+
+    TRIO = {"decision": {"issue_key": KEY, "topic": "scope", "question": "Approve this file ownership?",
+                         "options": ["approve", "reject"], "context": "write: scripts/cache.py", "stage": "plan",
+                         "attempt": 1},
+            "verdicts": [{"persona": "architect", "vote": "concern", "choice": None,
+                          "reasoning": "model failure (timeout): timed out after 15 seconds"}],
+            "recommendation": None, "unanimous": False,
+            "error": "trio unavailable after 3 attempts: Approve this file ownership?"}
+
+    def setUp(self) -> None:
+        self.root, self.db = make_store_workspace()
+        self.addCleanup(self.db.engine.dispose)
+        self.db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
+        self.open = self.db.add_decision(KEY, "scope", "Approve this file ownership?", None, "zach", self.TRIO)
+        self.asked = self.db.add_decision(KEY, "design", "Split upload parser?")
+        self.answered = self.db.add_decision(KEY, "design", "Split upload parser?", "Split into two", "user",
+                                             {"status": "answered"})
+        self.forge = mock.MagicMock()
+        patcher = mock.patch.object(pg.forge, "for_workspace", return_value=self.forge)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        server = pg.make_server(self.root / "pages", 0, root=self.root, refresh=lambda r, n: None, every=3600)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        self.addCleanup(server.server_close)
+        self.port = server.server_address[1]
+
+    def request(self, method: str, path: str, data: dict[str, str] | None = None) -> tuple[int, str, str]:
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        body = urllib.parse.urlencode(data).encode() if data is not None else None
+        conn.request(method, path, body=body, headers={"Content-Type": "application/x-www-form-urlencoded"} if body else {})
+        resp = conn.getresponse()
+        text = resp.read().decode("utf-8")
+        conn.close()
+        return resp.status, resp.getheader("Location") or "", text
+
+    def test_an_open_decision_page_shows_the_field_set_and_the_answer_form(self) -> None:
+        status, _, page = self.request("GET", f"/decisions/{self.open.id}")
+        self.assertEqual(status, 200)
+        from fragment import issue_href
+        for text in ("Approve this file ownership?", "approve", "reject", "write: scripts/cache.py",
+                     "trio unavailable after 3 attempts", "timed out after 15 seconds", "Robin",
+                     "If you don't answer", "worker waits", f'href="{issue_href(KEY)}"'):
+            with self.subTest(text=text):
+                self.assertIn(text, page)
+        form = re.search(r'<form method="post" action="/" class="decision-form">.*?</form>', page, re.S)
+        self.assertIsNotNone(form)
+        self.assertIn(f'name="decision_id" value="{self.open.id}"', form[0])
+        self.assertIn(f'name="back" value="/decisions/{self.open.id}"', form[0])
+        self.assertIn('value="answer"', form[0])
+
+    def test_an_answered_decision_shows_the_answer_and_who_with_only_reverse_and_its_history(self) -> None:
+        for row in (self.asked, self.answered):  # the first row's id is the address; a later row's renders the same
+            with self.subTest(row=row.id):
+                status, _, page = self.request("GET", f"/decisions/{row.id}")
+                self.assertEqual(status, 200)
+                self.assertIn("Split upload parser?", page)
+                self.assertIn("Split into two", page)
+                self.assertIn("user", page)
+                form = re.search(r'<form method="post" action="/" class="decision-form">.*?</form>', page, re.S)
+                self.assertIsNotNone(form)
+                self.assertNotIn('value="answer"', form[0])
+                self.assertNotIn('value="reroute"', form[0])
+                self.assertIn('value="reverse"', form[0])
+                self.assertIn(f'name="decision_id" value="{self.answered.id}"', form[0])
+                self.assertIn(f'name="back" value="/decisions/{self.asked.id}"', form[0])
+                history = page.split("History", 1)[1]
+                self.assertLess(history.index(f"#{self.answered.id}"), history.index(f"#{self.asked.id}"))
+                self.assertNotIn(f"#{self.open.id} ", history)
+
+    def test_reverse_from_the_page_appends_a_reversal_intent_and_returns_to_the_page(self) -> None:
+        status, where, _ = self.request("POST", "/", {"decision_id": str(self.answered.id), "action": "reverse",
+                                                      "answer": "Keep single pass", "back": f"/decisions/{self.asked.id}"})
+        self.assertEqual((status, where), (303, f"/decisions/{self.asked.id}"))
+        row = self.db.decisions(KEY)[-1]
+        self.assertNotEqual(row.id, self.answered.id)
+        self.assertEqual((row.question, row.status, row.record["note"], row.intent),
+                         ("Split upload parser?", "reversed", "Keep single pass", "run"))
+        self.assertEqual(self.db.decision(self.answered.id).answer, "Split into two")  # appended, never overwritten
+        self.forge.write_stage.assert_not_called()
+        self.forge.comment.assert_not_called()
+        status, _, page = self.request("GET", f"/decisions/{self.asked.id}")
+        self.assertEqual(status, 200)
+        self.assertIn("Keep single pass", page)
+
+    def test_an_answer_from_the_page_returns_to_it_and_a_foreign_back_returns_to_the_list(self) -> None:
+        status, where, _ = self.request("POST", "/", {"decision_id": str(self.open.id), "action": "answer",
+                                                      "answer": "approve", "back": f"/decisions/{self.open.id}"})
+        self.assertEqual((status, where), (303, f"/decisions/{self.open.id}"))
+        later = self.db.add_decision(KEY, "plan", "Return to implementation?")
+        status, where, _ = self.request("POST", "/", {"decision_id": str(later.id), "action": "answer",
+                                                      "answer": "yes", "back": "http://elsewhere/x"})
+        self.assertEqual((status, where), (303, "/decisions"))
+
+    def test_an_unknown_id_is_404_and_an_authored_page_still_serves(self) -> None:
+        self.assertEqual(self.request("GET", "/decisions/9999")[0], 404)
+        (self.root / "pages" / "decision-pick-db.json").write_text(json.dumps({
+            "headline": "Pick a database", "ask": "Which one?", "recommended": "a", "why": "simpler",
+            "default": "a", "options": [{"key": "a", "title": "SQLite"}, {"key": "b", "title": "Postgres"}]}))
+        status, _, page = self.request("GET", "/decisions/pick-db")
+        self.assertEqual(status, 200)
+        self.assertIn("Pick a database", page)
+
+    def test_the_decisions_list_and_the_task_page_link_each_decision_to_its_page(self) -> None:
+        status, _, listing = self.request("GET", "/decisions")
+        self.assertEqual(status, 200)
+        self.assertIn(f'href="/decisions/{self.open.id}"', listing)
+        status, _, task = self.request("GET", "/issues/12")
+        self.assertEqual(status, 200)
+        for d in (self.open, self.asked):
+            with self.subTest(decision=d.id):
+                self.assertIn(f'href="/decisions/{d.id}"', task)
+        self.assertIn("Split upload parser?", task)
+
+
 class StorePagesAndRoutesTest(unittest.TestCase):
     """M6 item 1: issue_page, source_page, workers_page, and pages.py serve from the store with full issue keys."""
 
