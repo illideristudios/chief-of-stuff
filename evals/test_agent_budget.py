@@ -135,9 +135,9 @@ TRACKER_RETAINED_RULES = (
     "The configured delivery and merge owner govern how code reaches main, and the reason the suite runs on main after it is that a merge can break main without either side's branch suite noticing.",
     'No script can watch a suite run, so the evidence is a claim with a citation: the owner reports the suite result and the commit main was at, and that sha goes in `Verified`.',
     "`audit_tasks.py` prints main's current sha on every run — when it no longer matches the one in `Verified`, the evidence is about a main that no longer exists and the task is not closed on it.",
-    'Before writing `done` on a task whose File ownership names a worktree, run `chief-of-stuff audit --date <today>`, check `chief-of-stuff inbox list --recipient coordinator --unread` for any pending worker reports or stops on that task, and believe the audit and verified evidence over any unverified claim.',
+    'Before writing `done` on a task with a worktree, run `chief-of-stuff audit --date <today>`, check `chief-of-stuff inbox list --recipient coordinator --unread` for any pending worker reports or stops on that task, and believe the audit and verified evidence over any unverified claim.',
     'Tasks with no tree — a decision, a relay, a deletion, a console action — are unaffected: there is nothing to merge, and the rule never sends you looking.',
-    "A task whose File ownership names no worktree closes on its owner's or its reporter's word; going through the workspace for a file a session says it wrote is checking their work, which is not yours to do.",
+    "A task with no worktree closes on its owner's or its reporter's word; going through the workspace for a file a session says it wrote is checking their work, which is not yours to do.",
     'When that word names a sha as on main, check it first: `chief-of-stuff audit --sha <sha>` fetches and prints whether origin/main or local main holds it, and a sha it finds on neither closes nothing.',
     'Main not yet pushed is a `Verified` fact, not a state.',
     "A task going to `done` ticks its checklist item in today's log.",
@@ -257,7 +257,7 @@ SESSIONS_RETAINED_PARAGRAPHS = ('For registered workers, check process state wit
  'check below starts from task owners for this reason, and never from the listing.',
  "- Every time you list, check each task's owner against the list. An owner that is listed nowhere and has a "
  "ref is gone: set that task's state to `orphaned`, add a Log line naming the session, and tell the user "
- 'once, with what is at risk — the worktree and paths from File ownership, and whether they hold uncommitted '
+ 'once, with what is at risk — its worktree, and whether it holds uncommitted '
  'work. An orphaned task keeps its owner column as a record. Never send to a session that is not listed, and '
  "never re-dispatch an orphaned task on your own: its owner is the user's to decide.")
 COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch for every task, including reviews and follow-up fixes; '
@@ -271,7 +271,7 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
             'Only an `unassigned` task — one with its issue filed, where the block names a backlog (see '
             'Tracker).',
             'When you pick, never hand: anything with a decision inside it (a rename is a naming call, not a '
-            'cleanup); anything touching a file a live session owns; anything on the human-only list; '
+            'cleanup); anything on the human-only list; '
             "today's log, tracker or board; and any `orphaned` task whose tree holds uncommitted work.",
             'That last one reads small on the board and is not — picking it up is a rebase and an ownership '
             "call, and it is the user's.",
@@ -286,7 +286,7 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
             'to enter plan mode for the new task"), `Lands by: follow [workflow] delivery: open a pull '
             'request and report its URL and head sha, or report the branch and head sha when delivery is '
             'branch.`, `Works under: follow the configured reviewer and merge policy.`, `Tracker: <path>`, '
-            '`Owns: <paths>. Do not touch any other file.`, `Report: <what to reply with when done>`.',
+            '`Report: <what to reply with when done>`.',
             'Nothing about your own limits, and no "write only" line: what that session may run is between '
             'it and the user.',
             "Set the task's owner to the session and its state to `running HH:MM`, fill its Sessions row, "
@@ -381,8 +381,9 @@ COORDINATOR_SESSIONS_RULES = {'Assign': ('In a one-shot workspace, use Dispatch 
               'Check its registered PID with `process_status.py` for the orphan check.',
               "A poll to it is a mailbox message, and its row's `waiting on` reads `<its name> — its mailbox "
               'reply` until the reply arrives.')}
+# #1039: Relay's `(via ` sentence no longer names a File ownership row.
 CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bfcd742acbf3dd1ef9',
- 'Relay': '3a31080acd47efa080232fac9d181f81dd0c1b30c1721fe7177c78dfbd6469e7'}
+ 'Relay': 'd74d73f4485b94bf1b23dba793f11386db49b7b7d1001c60b3cbb2f8ce526f41'}
 
 # Slice 8 (#491): captured once from git show origin/main:agents/chief-of-stuff.md
 # (## Dispatch, 14,905 B). Split like slice 7: strip list prefixes and fences, split at
@@ -392,14 +393,13 @@ CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bf
 # done-gate clause (R3) stay because no pointer moment reaches the Tracker `done` step or a bare `result` call.
 # Review of #539 (R4, R5): the pointer fires on the entry moment (a task the user asks for, a ready task) and on the
 # completion notification, not only on the coordinator's own launch-side actions.
-DISPATCH_POINTER = ("Before acting on a task the user asks for or a ready task (writing its Tasks and File ownership rows, "
+DISPATCH_POINTER = ("Before acting on a task the user asks for or a ready task (writing its Tasks row, "
                     "choosing a worker or model, proposing, launching or relaunching it, showing an assignment block, "
                     "acting on a yes), and on a background launch's completion notification before reading its report, "
                     "Read ${CLAUDE_PLUGIN_ROOT}/skills/dispatch/SKILL.md")
 DISPATCH_POINTER_MOMENTS = ("task the user asks for", "a ready task", "a yes", "completion notification",
                             "relaunching", "assignment block", "choosing a worker or model")
-# Restored (#539 review R2): code does not order two ready tasks that overlap each other (refuse_overlap compares only
-# running rows), so this clause stays in the skill's launch sentence and nowhere in the agent.
+# Deleted (#1039): tasks own no paths, so no two ready tasks overlap and nothing orders them.
 DISPATCH_OVERLAP_ORDER = "; when two ready tasks overlap each other, launch the earlier row first and the other when it returns"
 DISPATCH_KEPT = (
     "Launch ready one-shot tasks automatically. Launch new interactive sessions only on explicit approval of the "
@@ -418,12 +418,11 @@ DISPATCH_RULES = {
         'You do not do the work: writing documents, editing source, auditing or checking code or config, research.',
         'A look at a file to judge it is work; a look to find its path or its owner is routing.',
         'Work goes to a new context or a working session.',
-        'When the user asks for it, or when a checklist item needs it, file its issue where the block names a `Backlog:`, unless it is a workflow step, which takes the token `workflow` (see Tracker), write the Tasks row (state `open`, owner `unassigned`, the issue in `issue`), the File ownership row for it, and a Log line.',
+        'When the user asks for it, or when a checklist item needs it, file its issue where the block names a `Backlog:`, unless it is a workflow step, which takes the token `workflow` (see Tracker), write the Tasks row (state `open`, owner `unassigned`, the issue in `issue`) and a Log line.',
         'For one-shot, launch when ready without another question.',
         'For a new interactive session, show a **dispatch proposal** and await approval.',
-        'Those two rows are the dispatch.',
+        'That row is the dispatch.',
         'The Tasks item is the whole ask — write it so a session that reads only that row knows what it is for and what finished looks like, because that is the text the session receives.',
-        'The File ownership row names the paths it may edit, keyed on the task, and it is written **before** launch or proposal so the worker receives a defined scope.',
         'A task name alone is enough for a session to find its way and not enough for it to act, and a session given too little invents plausible work or stops — the second is what this asks for, and only the first is a silent failure.',
     ),
     'Worker and model': (
@@ -462,8 +461,8 @@ DISPATCH_RULES = {
         'Record the runtime and model explicitly; an interactive approval covers those choices.',
         "An agent type is not a subagent type: the first is a session started with `claude --agent`, the second is the `Agent` tool's own.",
         'The assignment, in one fenced block, in exactly this shape (labeled lines, each on one line, never hard-wrapped):',
-        'For a session, you are not writing this block, you are **showing** it: the script reads those lines back off the two rows you already wrote, resolves the tracker to an absolute path, names the worktree, and adds a header of its own that you cannot write or withhold.',
-        'If what you show differs from the rows, the session receives the rows.',
+        'For a session, you are not writing this block, you are **showing** it: the script reads those lines back off the row you already wrote, resolves the tracker to an absolute path, names the worktree, and adds a header of its own that you cannot write or withhold.',
+        'If what you show differs from the row, the session receives the row.',
         'So the way to change the assignment is to fix the row and show it again, never to reword the block.',
         'One dispatch is one task.',
         'A prompt that names a second Tasks item is two dispatches; split it.',
@@ -476,7 +475,7 @@ DISPATCH_RULES = {
         "Pass the row's `name` cell as `--task`; it resolves to the one row with that name.",
         'Pass the item exactly as the row spells it only when the row has no name or shares its name with another row, which the launcher refuses.',
         'Launching a session of a named type is two calls in one message, and neither is improvised:',
-        'Before proposing a new task for dispatch, validate its Tasks and File ownership rows with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.',
+        'Before proposing a new task for dispatch, validate its Tasks row with `chief-of-stuff worker --check --root . --task <name>`, which needs no `--cwd`, makes no worktree and starts nothing; add `--name <session>` when the task is a standing row and `--one-shot` for a one-shot task; when it prints `refused: <why>`, tell the user that refusal and do not propose the task.',
         "`<repo>` is the repository's checkout directory; when the settings' `[repos]` table names that repository, pass the name instead.",
         'When the block names no `Agent:` lines, use `--type implementer` on the worktree call (its required role label) and omit `--type` on the worker call; the worker then runs the default agent and its skills.',
         'An agy session adds `--runtime agy --model <the id from agy models>` to the second call; it has no agent types, so `--type` does nothing there.',
@@ -496,13 +495,13 @@ DISPATCH_RULES = {
         'One-shot runs one CLI turn in the worktree, and the launcher returns when it exits.',
         'It does not open a terminal tab, register a continuing session, poll a mailbox, or ask for plan approval inside the worker.',
         'The workspace setting authorizes routine launches without per-task approval; a task-specific one-shot request authorizes that launch.',
-        "The launcher writes the tracker itself, under the lock `chief-of-stuff log` takes: when it starts, the task's owner becomes the worker's name and its state `running HH:MM`, the task's File ownership row gains `; worktree `<tree>` (<branch>)`, and a Log line names the runtime, model, tree and task.",
+        "The launcher writes the tracker itself, under the lock `chief-of-stuff log` takes: when it starts, the task's owner becomes the worker's name and its state `running HH:MM`, and a Log line names the runtime, model, tree and task.",
         'Write none of these yourself, before or during the run; it changes the row again when it returns.',
-        'Launch every ready one-shot task whose File ownership paths overlap no running task at once, in the same turn, each as its own launcher call started in the background (Bash `run_in_background: true`)' + DISPATCH_OVERLAP_ORDER + '.',
+        'Launch every ready one-shot task at once, in the same turn, each as its own launcher call started in the background (Bash `run_in_background: true`).',
         'Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, never pipe a launch, and never start one without the flag.',
         "Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file.",
         "A background launch's completion notification only says the launch ended: name the task in its Bash description, and on the notification read that task's report with `chief-of-stuff result --root . --task <the Tasks name>`, then reconcile it, sync the issue's Kanban state and report that task before using its result.",
-        'A launcher refusal for overlap, or for the concurrency cap (`max_concurrency` under `[workers]`), is not a blocker: leave the task `open` and launch it when a running task returns.',
+        'A launcher refusal for the concurrency cap (`max_concurrency` under `[workers]`) is not a blocker: leave the task `open` and launch it when a running task returns.',
         'When one launch fails mid-batch the others keep running; do not retry a held or failed task without resolving its blocker.',
         'Explain that the worker may edit, commit, and open a PR according to the workspace workflow in that one run.',
         'Do not dispatch a standing placeholder this way; a launcher call starts exactly one task.',
@@ -518,15 +517,14 @@ DISPATCH_RULES = {
     ),
     'After launch': (
         'The second call writes the assignment into the tree and prints where.',
-        'You do not type the assignment into that command: the script reads it back from the two rows you named, so they have to exist and to say what they need to say **before** you launch or propose.',
-        'A task the tracker does not carry is refused; so is a task whose owner is not `unassigned`, a task with no File ownership row, a task with no issue (or a cell that is neither one nor `workflow`) where the block names a backlog, and a row carrying `(via ` — nothing starts, and the refusal says which.',
+        'You do not type the assignment into that command: the script reads it back from the row you named, so it has to exist and to say what it needs to say **before** you launch or propose.',
+        'A task the tracker does not carry is refused; so is a task whose owner is not `unassigned`, a task with no issue (or a cell that is neither one nor `workflow`) where the block names a backlog, and a row carrying `(via ` — nothing starts, and the refusal says which.',
         '`--name` is the session\'s name for its whole life: the listing, the prompt box, the tab and its assignment all carry it, and the harness never retitles a name given at launch (the user, 2026-09-22 16:18: "the NUMERIC NAMES I ASSIGN ARE THE ONLY NAMES THEY ARE ALLOWED TO KEEP").',
         'A session started without one is named after its directory and then retitled from its first task, which is why it is never left out.',
         '`--coordinator` is how a session learns who to register with.',
         'It has no ref of its own to report until it looks itself up, and you have no way to reach it until it does.',
         'Your own name is the one in the tracker header, or the one a listing shows beside your ref.',
         "Pass it when you have it and drop it when you do not: a name you guessed at is worse than the assignment's own wording, which already says to register with the chief-of-stuff coordinator.",
-        "Then, for an interactive session, update the File ownership row's context cell to name the tree the first call printed (a one-shot launch records it itself), never the one you asked for: a row naming a tree that was never created sat in the tracker for eight hours.",
         'If either call refuses, the task stays `open`, say what was refused, and create nothing by hand.',
     ),
 }
@@ -536,7 +534,6 @@ DISPATCH_ASSIGNMENT_BLOCK = (
     "Requirement: <the task's checklist cell; leave the line out when it is blank>",
     "Issue: <the issue's URL; only where the block names a backlog>",
     "Tracker: <tracker path from the Coordinator block, e.g. daily/2026-09-16-tracker.md>",
-    'Owns: <the File ownership paths for this task; "none" if it only reads or replies>. Do not touch any other file.',
     "Report: <what to reply with when done>",
 )
 DISPATCH_LAUNCH_CALLS = (
@@ -544,10 +541,9 @@ DISPATCH_LAUNCH_CALLS = (
     "chief-of-stuff worker --type <type> --cwd <the path the first printed> --name <the session's name> --root . "
     "--task <the Tasks name> --coordinator <your own name, as a listing spells it>",
 )
-# Deleted, not moved. The launcher refuses overlap itself (scripts/dispatch_prompt.py refuse_overlap, called under the
-# lock in scripts/one_shot.py and from compose); the assignment header already carries the commit rule
+# Deleted, not moved. Tasks own no paths (#1039), so nothing overlaps; the assignment header already carries the commit rule
 # (scripts/dispatch_prompt.py COMMITS). Everything else in those lines stays.
-# Compared lowercased on both sides (#539 review R6). "launch the earlier row first" is restored, see DISPATCH_OVERLAP_ORDER.
+# Compared lowercased on both sides (#539 review R6).
 DISPATCH_DELETED = (
     "a read-only task overlaps nothing",
     "Overlap is decided by",
@@ -559,7 +555,8 @@ NO_COMMIT_PROHIBITION = "Write only: do not commit " + "or push"
 DISPATCH_ALSO_IN_AUTHORITY = (
     "A task-specific request for an interactive session authorizes that task's launch with `--interactive` in a one-shot workspace.",
 )
-DISPATCH_AUTHORITY_SHA256 = "eb55aa106aa9e645a8e11c76f2ea027f4610d1898711e1b4f414eed5fffb3530"
+# #1039: Ready no longer lists File ownership.
+DISPATCH_AUTHORITY_SHA256 = "d514d1dafcd4646d7faa4c1b3608180fec4650648677be216d9dee6edab7b1d6"
 DISPATCH_TOPICS = ["Rows", "Worker and model", "Assignment", "Launch", "One-shot", "After launch"]
 
 
@@ -892,7 +889,7 @@ class AgentBudgetTest(unittest.TestCase):
         prose = description(text)
         self.assertTrue(prose.startswith("Use before "), prose)
         self.assertLessEqual(len(prose), DESCRIPTION_CAP)
-        for moment in (r"worker", r"model", r"propos", r"launch", r"\byes\b", r"Tasks", r"File ownership",
+        for moment in (r"worker", r"model", r"propos", r"launch", r"\byes\b", r"Tasks",
                        r"assignment", r"relaunch", r"report"):
             with self.subTest(moment=moment):
                 self.assertRegex(prose, re.compile(moment, re.I))
@@ -926,8 +923,8 @@ class AgentBudgetTest(unittest.TestCase):
             with self.subTest(fragment=fragment):
                 self.assertNotIn(fragment.lower(), combined.lower())
         # The sentence that tells the model what to do after a refusal stays, with the two output-piping sentences.
-        self.assertEqual(combined.count("A launcher refusal for overlap, or for the concurrency cap (`max_concurrency` "
-                                        "under `[workers]`), is not a blocker: leave the task `open` and launch it "
+        self.assertEqual(combined.count("A launcher refusal for the concurrency cap (`max_concurrency` "
+                                        "under `[workers]`) is not a blocker: leave the task `open` and launch it "
                                         "when a running task returns."), 1)
         # The commit prohibition is gone from every shipped rule and every fixture; PROGRESS.md and docs/archive are history.
         for folder in ("agents", "skills", "evals/cases", "evals/fixtures"):
@@ -936,15 +933,17 @@ class AgentBudgetTest(unittest.TestCase):
                     with self.subTest(path=str(path.relative_to(ROOT))):
                         self.assertNotIn(NO_COMMIT_PROHIBITION, path.read_text(errors="ignore"))
 
-    def test_the_overlap_order_clause_is_restored_in_the_skill_only(self):
-        # #539 review R2: refuse_overlap compares only running rows, so nothing but this clause orders two ready tasks that
-        # overlap each other.
-        body = skill_body(self.dispatch_skill().read_text())
-        self.assertEqual(body.count(DISPATCH_OVERLAP_ORDER), 1)
-        self.assertNotIn(DISPATCH_OVERLAP_ORDER.lower(), self.text.lower())
-        self.assertEqual(rules_text().count(DISPATCH_OVERLAP_ORDER), 1)
+    def test_the_overlap_order_clause_is_gone(self):
+        # #1039: tasks own no paths, so no two ready tasks overlap and nothing orders them.
+        self.assertNotIn(DISPATCH_OVERLAP_ORDER.lower(), rules_text().lower())
 
-    def test_the_shown_assignment_block_has_exactly_the_six_labeled_lines_and_no_commit_prohibition(self):
+    def test_no_rule_asks_for_or_mentions_file_ownership(self):
+        # #1039: the engine authorizes no files, so no rule writes a File ownership section, row or `Owns:` line.
+        for path in [ROOT / "agents" / "chief-of-stuff.md", *sorted((ROOT / "skills").glob("*/SKILL.md"))]:
+            with self.subTest(path=str(path.relative_to(ROOT))):
+                self.assertNotRegex(path.read_text(), r"(?i)file ownership|\bOwns:")
+
+    def test_the_shown_assignment_block_has_exactly_the_five_labeled_lines_and_no_commit_prohibition(self):
         body = skill_body(self.dispatch_skill().read_text())
         fences = re.findall(r"(?ms)^[ \t]*```[^\n]*\n(.*?)^[ \t]*```", body)
         blocks = [[line.strip() for line in fence.splitlines() if line.strip()] for fence in fences]

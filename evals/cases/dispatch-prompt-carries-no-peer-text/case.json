@@ -97,12 +97,6 @@
           "match": "absent"
         },
         {
-          "name": "the assignment carries the paths the real task owns",
-          "type": "file_matches",
-          "glob": "trees/*/.chief-of-stuff/dispatch.md",
-          "pattern": "(?m)^Owns: [^\\n]*src/a/"
-        },
-        {
           "name": "still no worktree removed",
           "type": "tool_used",
           "tool": "Bash",

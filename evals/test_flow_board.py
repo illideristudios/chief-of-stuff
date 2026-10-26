@@ -887,5 +887,19 @@ class StoreKeyCardTest(unittest.TestCase):
         self.assertEqual(changed.refs[0], ("o/n#9", fragment.issue_href(self.FOREIGN)))
 
 
+class ReadyTasksTest(unittest.TestCase):
+    """#1039 (C29): no file is anybody's, so the dispatch count filters nothing on paths."""
+
+    def test_two_open_tasks_on_the_same_files_are_both_ready(self):
+        text = ("## Tasks\n\n| item | owner | state | since | due | checklist |\n|---|---|---|---|---|---|\n"
+                "| Fix the parser | unassigned | open | 09:00 | | Edit src/a.py |\n"
+                "| Test the parser | unassigned | open | 09:00 | | Edit src/a.py |\n"
+                "| Tune the parser | worker01 | running 09:00 | 09:00 | | Edit src/a.py |\n\n"
+                "## File ownership\n\n| context | paths |\n|---|---|\n"
+                "| Fix the parser | `src/a.py` |\n| Test the parser | `src/a.py` |\n"
+                "| Tune the parser | `src/a.py`; worktree `tune` (tune) |\n\n## Log\n")
+        self.assertEqual([t.item for t in task_forge.ready_tasks(text, 3)], ["Fix the parser", "Test the parser"])
+
+
 if __name__ == "__main__":
     unittest.main()

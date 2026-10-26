@@ -139,47 +139,6 @@ class StoreTest(unittest.TestCase):
         self.assertEqual({entry.message for entry in self.store.log(KEY)},
                          {"first", "second", *(f"w{n}" for n in range(len(writers)))})
 
-    def test_file_claim_replacement_keeps_every_open_segments_scope(self) -> None:
-        self.store.upsert_item(KEY)
-        self.store.replace_file_ownership(KEY, [("src", "write")])
-        self.store.set_ownership(KEY, "/tmp/worker-tree", "tree")
-        self.store.record_segment(KEY, "implement", 1, started_at="09:00")
-        self.store.record_segment(KEY, "review", 1, started_at="09:01", ended_at="09:02", outcome="done")
-        for pending in ([], [("docs", "read")]):
-            self.store.replace_file_ownership(KEY, pending)
-            self.assertEqual({(r.path, r.mode) for r in self.store.ownership(KEY)},
-                             {("src", "write"), ("/tmp/worker-tree", "tree")})
-        self.store.end_segment(KEY, "implement", 1, "09:03", "done")
-        self.store.replace_file_ownership(KEY, [("docs", "read")])
-        self.assertEqual({(r.path, r.mode) for r in self.store.ownership(KEY)},
-                         {("docs", "read"), ("/tmp/worker-tree", "tree")})
-
-    def test_scope_sync_waits_for_a_worker_start_transaction_before_replacing(self) -> None:
-        self.store.upsert_item(KEY)
-        self.store.replace_file_ownership(KEY, [("src", "write")])
-        other = store.Store(self.path)
-        self.addCleanup(other.engine.dispose)
-        started = threading.Event()
-        errors = []
-
-        def replace() -> None:
-            started.set()
-            try:
-                other.replace_file_ownership(KEY, [])
-            except BaseException as exc:
-                errors.append(exc)
-
-        with self.store.session() as session:
-            session.add(store.Segment(issue_key=KEY, stage="implement", attempt=1, started_at="09:00"))
-            session.flush()  # reserve the worker while another connection attempts the scope sync
-            thread = threading.Thread(target=replace)
-            thread.start()
-            self.assertTrue(started.wait(timeout=5))
-        thread.join(timeout=5)
-        self.assertFalse(thread.is_alive())
-        self.assertEqual(errors, [])
-        self.assertEqual([(r.path, r.mode) for r in self.store.ownership(KEY)], [("src", "write")])
-
     def test_rework_is_more_segments_on_the_one_item_not_more_items(self) -> None:
         self.store.upsert_item(KEY, title="x")
         self.store.record_segment(KEY, "implement", 1, started_at="09:00", ended_at="10:00", outcome="done")
@@ -237,14 +196,14 @@ class StoreTest(unittest.TestCase):
         with self.assertRaises(IntegrityError):
             self.store.record_segment("github:example/repo#404", "review", 1, started_at="09:00")
 
-    def test_ownership_decisions_and_log_hang_off_the_item(self) -> None:
+    def test_trees_decisions_and_log_hang_off_the_item(self) -> None:
         self.store.upsert_item(KEY, title="x")
-        self.store.set_ownership(KEY, "scripts/store.py", "write")
-        self.store.set_ownership(KEY, "scripts/store.py", "read")
+        self.store.set_tree(KEY, "/tmp/worker-tree")
+        self.store.set_tree(KEY, "/tmp/worker-tree")
         self.store.add_decision(KEY, topic="architecture", question="Split store?", answer="yes",
                                 decided_by="trio", record={"votes": ["yes", "yes", "yes"]})
         self.store.add_log(KEY, "launched", at="09:00")
-        self.assertEqual([(o.path, o.mode) for o in self.store.ownership(KEY)], [("scripts/store.py", "read")])
+        self.assertEqual([t.path for t in self.store.trees(KEY)], ["/tmp/worker-tree"])
         self.assertEqual([(d.topic, d.decided_by, d.record) for d in self.store.decisions(KEY)],
                          [("architecture", "trio", {"votes": ["yes", "yes", "yes"]})])
         self.assertEqual([(e.at, e.message) for e in self.store.log(KEY)], [("09:00", "launched")])
@@ -412,6 +371,24 @@ class MigrationTest(unittest.TestCase):
             self.assertEqual([w.decision_id[0] for w in decision_escalation.owner_waits(rows, (), ())], ["ask"])
             store.migrate(path)
             self.assertEqual(len(db.decisions(KEY)), len(rows))  # a second run appends nothing
+
+    def test_the_ownership_table_is_gone_after_migrating_and_tree_rows_move_to_worktree(self) -> None:
+        # #1039: no file ownership is stored; a worker's tree registration is cleanup's guard, so it is kept.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            command.upgrade(store._config(path), "0008")  # the revision before 0009_drop_ownership
+            with closing(sqlite3.connect(path)) as conn, conn:
+                conn.execute("INSERT INTO work_item VALUES (?, '', '', 'open', '', '', 0, '')", (KEY,))
+                conn.executemany("INSERT INTO ownership (issue_key, path, mode) VALUES (?, ?, ?)",
+                                 [(KEY, "src", "write"), (KEY, "docs", "read"), (KEY, "/w/issue-12-implement-1", "tree"),
+                                  (KEY, "/w/old-absolute-write-row", "write")])
+            store.migrate(path)
+            with closing(sqlite3.connect(path)) as conn:
+                tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            self.assertNotIn("ownership", tables)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            self.assertEqual([t.path for t in db.trees(KEY)], ["/w/issue-12-implement-1", "/w/old-absolute-write-row"])
 
     def test_migrating_twice_is_a_no_op_and_records_the_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
