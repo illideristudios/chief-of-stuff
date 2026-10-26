@@ -12,6 +12,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -20,7 +21,9 @@ FAKE = ROOT / "evals" / "fixtures" / "fake_claude.py"
 SID = "6f1c2a3e-8a4b-4c1d-9e2f-0a1b2c3d4e5f"
 sys.path.insert(0, str(ROOT / "scripts"))
 import claude_adapter  # noqa: E402
+import limits_probe  # noqa: E402
 import model_port  # noqa: E402
+import session_logs  # noqa: E402
 from model_port import Failure, Reply, Request  # noqa: E402
 
 
@@ -277,7 +280,7 @@ class CallTest(unittest.TestCase):
         names = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "AWS_REGION",
                  "AWS_PROFILE", "AWS_SECRET_ACCESS_KEY", "GOOGLE_APPLICATION_CREDENTIALS",
-                 "HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR")
+                 "HTTPS_PROXY", "SSL_CERT_FILE", "CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR")
         capture = self.dir / "environment"
         capture.write_text(f"#!{sys.executable}\nimport json,os\n"
                            "print(json.dumps({'type':'result','is_error':False,'result':json.dumps(dict(os.environ))}))\n")
@@ -288,6 +291,56 @@ class CallTest(unittest.TestCase):
         received = json.loads(got.text)
         self.assertEqual({name: received.get(name) for name in names}, env)
         self.assertNotIn("UNRELATED_SECRET", received)
+
+    def test_probe_and_launched_profile_share_one_account_directory(self):
+        profiles = self.dir / "profiles"
+        decoy = self.dir / "decoy"
+        account = profiles / "secondary"
+        transcript = account / "projects" / "any" / "session.jsonl"
+        transcript.parent.mkdir(parents=True)
+        decoy.mkdir()
+        stamp = datetime.now(timezone.utc)
+        transcript.write_text(json.dumps({"type": "rate_limit_event", "timestamp": stamp.isoformat(),
+                                          "rate_limit_info": {"rateLimitType": "weekly", "utilization": 0.4,
+                                                              "resetsAt": (stamp + timedelta(days=2)).timestamp()}}) + "\n")
+        capture = self.dir / "environment"
+        capture.write_text(f"#!{sys.executable}\nimport json,os\n"
+                           "print(json.dumps({'type':'result','is_error':False,'result':json.dumps(dict(os.environ))}))\n")
+        capture.chmod(0o755)
+        with mock.patch.dict(os.environ, {"CLAUDE_AS_PROFILES_DIR": str(profiles), "CLAUDE_CONFIG_DIR": str(decoy)}):
+            self.assertEqual(limits_probe.read("claude", "secondary")[0].used, 40)
+            self.assertEqual(session_logs.claude_home("secondary"), account)
+            with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+                got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary")
+            received = json.loads(got.text)
+            self.assertEqual(received.get("CLAUDE_AS_PROFILES_DIR"), str(profiles))
+            self.assertEqual(received.get("CLAUDE_CONFIG_DIR"), str(account))
+            run_dir = self.dir / "run"
+            run_dir.mkdir()
+            with mock.patch.object(claude_adapter, "resolve", return_value=str(capture)):
+                process = claude_adapter.start(Request(prompt="p", session_id=SID, cwd=str(self.dir)), run_dir,
+                                                claude_as_profile="secondary")
+                self.assertEqual(process.wait(timeout=5), 0)
+            self.assertTrue((run_dir / "exit.json").exists())
+            self.assertEqual(json.loads((run_dir / "command.json").read_text())["env"]["CLAUDE_CONFIG_DIR"], str(account))
+            child = json.loads(json.loads((run_dir / "stdout").read_text())["result"])
+            self.assertEqual(child.get("CLAUDE_CONFIG_DIR"), str(account))
+            self.assertEqual(child.get("CLAUDE_AS_PROFILES_DIR"), str(profiles))
+            os.symlink(account, profiles / "linked")
+            before = len(self.resolved)
+            # A trio consult reads a Failure; a raise would escape trio_gate._ask and fail the engine pass.
+            got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="linked")
+            self.assertIsInstance(got, Failure)
+            self.assertEqual((got.kind, got.retryable), ("error", False))
+            self.assertIn("symlink", got.message)
+            linked_run = self.dir / "linked-run"
+            linked_run.mkdir()
+            with self.assertRaises(ValueError):
+                claude_adapter.start(Request(prompt="p", session_id=SID, cwd=str(self.dir)), linked_run,
+                                     claude_as_profile="linked")
+            self.assertEqual(len(self.resolved), before)
+            self.assertFalse((linked_run / "command.json").exists())
+            self.assertFalse((linked_run / "exit.json").exists())
 
     def test_login_setup_cannot_replace_the_eval_shim_path(self):
         shell = self.dir / "bash"
@@ -493,15 +546,18 @@ class CallTest(unittest.TestCase):
         self.assertEqual((got.kind, got.retryable), ("unknown", True))
 
     def test_a_profile_launches_through_claude_as_and_reports_it_missing_never_falling_back(self):
-        # Ledger E12: no silent fallback to a bare `claude`.
-        self.assertEqual(claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary").text,
-                         "reply: p")
-        self.assertEqual(self.resolved, ["claude-as"])
-        self.resolved.clear()
-        with mock.patch.object(claude_adapter, "resolve", side_effect=lambda p: self.resolved.append(p)):
-            got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary")
-        self.assertEqual((got.kind, self.resolved), ("missing_program", ["claude-as"]))
-        self.assertIn("claude_as_profile", got.message)
+        # Ledger E12: no silent fallback to a bare `claude`. The pin stats this directory, not ~/.claude-profiles.
+        profiles = self.dir / "profiles"
+        (profiles / "secondary").mkdir(parents=True)
+        with mock.patch.dict(os.environ, {"CLAUDE_AS_PROFILES_DIR": str(profiles)}):
+            self.assertEqual(claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary").text,
+                             "reply: p")
+            self.assertEqual(self.resolved, ["claude-as"])
+            self.resolved.clear()
+            with mock.patch.object(claude_adapter, "resolve", side_effect=lambda p: self.resolved.append(p)):
+                got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="secondary")
+            self.assertEqual((got.kind, self.resolved), ("missing_program", ["claude-as"]))
+            self.assertIn("claude_as_profile", got.message)
 
 
 if __name__ == "__main__":
