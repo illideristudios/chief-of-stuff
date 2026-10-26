@@ -19,7 +19,7 @@ import process_status
 import readiness
 from forge_port import ForgeError
 from orphans import Claim
-from reconcile import Facts
+from reconcile import Facts, latest_segment
 
 
 def _blockers(forge: Any) -> tuple[dict[str, tuple[str, ...]] | None, str]:
@@ -176,9 +176,8 @@ def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | 
         if any(s.ended_at is None for s in history):
             continue
         completed = [s for s in history if s.started_at and s.ended_at and s.stage != "architect"]
-        latest = max(completed, key=lambda s: (datetime.fromisoformat(str(s.started_at)), s.attempt), default=None)
-        if (latest is None or latest.stage != "implement" or latest.outcome != "human_review"
-                or any(s.stage != latest.stage and s.started_at == latest.started_at for s in completed)):
+        latest, ambiguous = latest_segment(completed)
+        if latest is None or ambiguous or latest.stage != "implement" or latest.outcome != "human_review":
             continue
         runs = data.get("runs", {})
         run_name = f"implement-{latest.attempt}"

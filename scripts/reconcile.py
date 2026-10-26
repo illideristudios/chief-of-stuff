@@ -217,6 +217,18 @@ def _time(value: datetime | str) -> datetime:
     return when
 
 
+def latest_segment(completed: Sequence[Segment]) -> tuple[Segment | None, bool]:
+    """Pick by start, then attempt; flag different stages tied at the latest instant.
+
+    Callers supply eligible completed segments. A higher attempt does not resolve
+    a cross-stage tie, and equivalent timezone offsets represent the same start.
+    """
+    latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
+    ambiguous = latest is not None and len({s.stage for s in completed
+                                            if _time(s.started_at) == _time(latest.started_at)}) > 1
+    return latest, ambiguous
+
+
 def _order(item: WorkItem, created_at: Mapping[str, datetime]) -> tuple:
     namespace, _, number = item.issue_key.rpartition("#")
     return (item.issue_key not in created_at,
@@ -435,8 +447,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     # An architect segment is an out-of-band consultation unless the workflow names architect as a stage.
     completed = tuple(s for s in history if s.started_at and s.ended_at and (s.stage != "architect" or "architect" in stages)
                       and (stage != "merge" or s.stage != "merge"))
-    latest = max(completed, key=lambda s: (_time(s.started_at), s.attempt), default=None)
-    if latest and len({s.stage for s in completed if _time(s.started_at) == _time(latest.started_at)}) > 1:
+    latest, ambiguous = latest_segment(completed)
+    if ambiguous:
         return Wait(key, "human review" if item.human_review else "segments tie at the latest start")
     if item.human_review:
         # Only a failed launch, whose hold the engine restored itself, can release an extra hold.
