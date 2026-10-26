@@ -724,6 +724,43 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(history=order):
                 self.assertEqual(self.plan(history=order), [reconcile.Dispatch(KEY, "implement", "builder", 3)])
 
+    def test_latest_segment_picks_the_newest_start_then_the_highest_attempt(self):
+        old = NOW - timedelta(hours=3)
+        self.assertEqual(reconcile.latest_segment([]), (None, False))
+        only = Segment("implement")
+        self.assertEqual(reconcile.latest_segment([only]), (only, False))
+        newer, older = Segment("review"), Segment("implement", 9, started_at=old)
+        low, high = Segment("implement"), Segment("implement", 2)
+        for pair, expected in (((newer, older), newer), ((low, high), high)):
+            for order in (pair, pair[::-1]):
+                with self.subTest(order=order):
+                    self.assertEqual(reconcile.latest_segment(order), (expected, False))
+
+    def test_latest_segment_flags_stages_tied_at_the_latest_start(self):
+        old = NOW - timedelta(hours=3)
+        tied = [Segment("implement", 2), Segment("review")]
+        for order in (tied, tied[::-1]):
+            with self.subTest(order=order):
+                self.assertTrue(reconcile.latest_segment(order)[1])
+        newest = Segment("merge", started_at=NOW)
+        self.assertEqual(reconcile.latest_segment([Segment("implement", started_at=old),
+                                                   Segment("review", started_at=old), newest]), (newest, False))
+
+    def test_latest_segment_compares_instants_not_encodings(self):
+        east = timezone(timedelta(hours=5))
+        start = NOW - timedelta(hours=2)
+        for other in (start.astimezone(east), start.astimezone(east).isoformat()):
+            with self.subTest(other=other):
+                self.assertTrue(reconcile.latest_segment([Segment("implement", 2), Segment("review", started_at=other)])[1])
+                self.assertFalse(reconcile.latest_segment([Segment("implement"), Segment("implement", 2, started_at=other)])[1])
+        with self.assertRaises(ValueError):
+            reconcile.latest_segment([Segment("implement", started_at=start.replace(tzinfo=None))])
+
+    def test_equivalent_offsets_at_the_latest_start_wait(self):
+        east = (NOW - timedelta(hours=2)).astimezone(timezone(timedelta(hours=5)))
+        self.assertEqual(self.plan(history=[Segment("implement", 2), Segment("review", started_at=east.isoformat())]),
+                         [reconcile.Wait(KEY, "segments tie at the latest start")])
+
     def test_blocking_threshold_comes_from_review_policy(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"blocking_severity": "important"})
         item = replace(Item(), stage="review", review_state="none", merge_state="ready")
