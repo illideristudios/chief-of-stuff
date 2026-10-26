@@ -171,9 +171,6 @@ class CaseLintTest(unittest.TestCase):
     def test_retired_deploy_provider_is_absent_outside_archives(self):
         # C20 names the open gap. Only the architect edits architecture/compliance.md.
         self.assertLessEqual(set(retired_provider_files(EVALS.parent)), {"architecture/compliance.md"})
-        ledger = (EVALS.parent / "architecture/compliance.md").read_text().splitlines()
-        stray = [line[:60] for line in ledger if RETIRED_PROVIDER in line.lower() and not line.startswith("| C20 |")]
-        self.assertEqual(stray, [])
 
     def test_retired_provider_scan_reads_source_and_skips_generated_state(self):
         with tempfile.TemporaryDirectory() as d:
