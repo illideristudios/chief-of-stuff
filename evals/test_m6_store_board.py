@@ -484,7 +484,7 @@ class DecisionPageByIdTest(unittest.TestCase):
         from fragment import issue_href
         for text in ("Approve this file ownership?", "approve", "reject", "write: scripts/cache.py",
                      "trio unavailable after 3 attempts", "timed out after 15 seconds", "Robin",
-                     "If you don't answer", "worker waits", f'href="{issue_href(KEY)}"'):
+                     "If you don't answer", "default not recorded", f'href="{issue_href(KEY)}"'):
             with self.subTest(text=text):
                 self.assertIn(text, page)
         form = re.search(r'<form method="post" action="/" class="decision-form">.*?</form>', page, re.S)

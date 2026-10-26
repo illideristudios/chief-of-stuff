@@ -702,6 +702,25 @@ class StoreIndexTest(unittest.TestCase):
         self.assertIn(f'href="{escape(issue_href(foreign))}">o/n#4</a>', page)
         self.assertNotIn(">github:", page)
 
+    def test_a_store_decision_shows_its_recorded_default_and_an_old_row_says_none_was_recorded(self):
+        """#1128: "If you don't answer" is the default recorded with the decision, on its page and in the list."""
+        key = "github:example/repo#10"
+        self.store.upsert_item(key, title="Auth flow", stage="implement", forge_state="open")
+        new = self.store.add_decision(key, "scope", "Approve this file ownership?", None, "zach", asked_at=NOW.isoformat(),
+                                      record={"default": "Not written: nothing is written unapproved.",
+                                              "status": "blocked", "blocked_reason": "awaiting owner"})
+        old = self.store.add_decision(key, "design", "Split the parser?", asked_at=NOW.isoformat())
+        rows = self.page_data().decision_rows
+        page = dp.store_page(rows, new.id, dp.Context(NOW))
+        fallback = page.split("If you don't answer")[1]
+        self.assertIn("Not written: nothing is written unapproved.", fallback)
+        self.assertNotIn("awaiting owner", fallback)
+        self.assertNotIn("worker waits", page)
+        self.assertIn("default not recorded", dp.store_page(rows, old.id, dp.Context(NOW)).split("If you don't answer")[1])
+        listed, _ = dp.index(self.pages, dp.Context(NOW), NOW.date().isoformat(), db=self.page_data())
+        self.assertIn('<span class="fallback">Not written: nothing is written unapproved.</span>', listed)
+        self.assertIn('<span class="fallback">default not recorded</span>', listed)
+
 
 class DerivedPageTest(unittest.TestCase):
     """The decision page applies the same derivations when its JSON does not carry them."""
