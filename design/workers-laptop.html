@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<title>Workers</title>
+<script src="lib/86a3e9940611.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/ee8b56df405b.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/c271ee5c70f2.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/b80617d9b7e8.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/fddc117a5ff1.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/1ca85659ab25.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/d8bf25eb11d0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/624ea7e85a53.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/bab9dc1971b0.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/261638ad9761.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/517fcb8cabb3.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/b34c10a1ffe0.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/43dc1b9a0c96.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/5be63e946cc5.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("fonts/dedb7e4dce28.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3df86f009f15.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/4bb93aca54b3.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* greek-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/967b38372db4.woff2") format('woff2');
+  unicode-range: U+1F00-1FFF;
+}
+/* greek */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/9a9defceff14.woff2") format('woff2');
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/f1c49bfd357d.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5c1cb227aa5a.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Alegreya Sans';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/1a2f3006ecc7.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/b3cedae80e66.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/071a53d2119e.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/455dfdb0f51a.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/50e2fc3909a0.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("fonts/9777be10ff78.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+/* cyrillic-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/5bf655ce1293.woff2") format('woff2');
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+/* cyrillic */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/ea97db9e8f8b.woff2") format('woff2');
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+/* vietnamese */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/156f0047d272.woff2") format('woff2');
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+/* latin-ext */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/3b1c199b3a86.woff2") format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C4, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+/* latin */
+@font-face {
+  font-family: 'Cormorant SC';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/aab9ff2ff8f0.woff2") format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+</style>
+<style>
+body{margin:0;font-family:"Alegreya Sans","Gill Sans",system-ui,sans-serif;background:#f4efe1;color:#2f2630}
+a{color:#8a6c30}a:hover{color:#6b5325}
+.h2{margin:0 0 6px;font-family:'Cormorant SC',Georgia,serif;font-size:16px;font-weight:600;letter-spacing:.1em}
+.card{background:#fbf8ef;border:1px solid #ddd3bd;border-radius:5px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+.chip{font-size:10.5px;font-weight:700;letter-spacing:.06em;border-radius:3px;padding:0 6px;white-space:nowrap;justify-self:start}
+.w{display:grid;grid-template-columns:86px minmax(0,1.3fr) minmax(0,1.2fr) 64px 92px repeat(6,40px) 64px;gap:0 10px;align-items:center;padding:9px 14px}
+.w+.w{border-top:1px dotted #ddd3bd}
+.hd{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#6e6470;padding:6px 14px 4px;border-bottom:1px solid #ddd3bd}
+.dot{justify-self:center;width:12px;height:12px;border-radius:50%;box-sizing:border-box}
+.e{display:grid;grid-template-columns:52px 86px minmax(0,1fr) minmax(0,1.2fr) auto;gap:0 12px;align-items:baseline;padding:7px 14px;font-size:13px}
+.e+.e{border-top:1px dotted #ddd3bd}
+</style>
+</helmet>
+
+<div style="width: 1280px; height: 860px; box-sizing: border-box; padding: 24px 32px 22px; background: #f4efe1; color: #2f2630; display: flex; flex-direction: column; gap: 16px; overflow: hidden; font-size: 14px; line-height: 1.45;">
+
+  <div style="margin: -12px 0 -4px;"><dc-import name="Tabs" current="Workers" hint-size="100%,34px"></dc-import></div>
+
+  <div style="display: flex; align-items: flex-end; gap: 20px; border-bottom: 1px solid #a7843e; padding-bottom: 10px;">
+    <div style="flex-grow: 1;">
+      <div style="font-size: 12.5px; color: #6e6470;">session logs read 02:10</div>
+      <h1 style="margin: 2px 0 0; font-family: 'Cormorant SC', Georgia, serif; font-size: 27px; font-weight: 600; letter-spacing: .04em;">Workers</h1>
+    </div>
+    <div style="display: flex; gap: 8px; align-items: flex-end;">
+      <sc-for list="{{boxes}}" as="b" hint-placeholder-count="3">
+        <div style="{{b.style}}">
+          <div style="font-size: 9.5px; letter-spacing: .09em; text-transform: uppercase; color: #6e6470;">{{b.label}}</div>
+          <div class="mono" style="font-size: 18px;">{{b.value}}</div>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+  <div>
+    <h2 class="h2">RUNNING · 5</h2>
+    <div class="card">
+      <div class="w hd">
+        <span>state</span><span>worker</span><span>on</span><span>running</span><span>last activity</span>
+        <sc-for list="{{checkNames}}" as="c" hint-placeholder-count="6"><span style="text-align: center; font-size: 9.5px;">{{c.t}}</span></sc-for>
+        <span style="text-align: right;">tokens</span>
+      </div>
+      <sc-for list="{{rows}}" as="r" hint-placeholder-count="5">
+        <div class="w" style="{{r.rowStyle}}">
+          <span class="chip" style="{{r.stateStyle}}">{{r.state}}</span>
+          <span style="display: flex; flex-direction: column; min-width: 0;">
+            <a href="{{r.href}}" style="font-weight: 600; color: #2f2630; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.name}}</a>
+            <span style="font-size: 12px; color: #6e6470;">{{r.platform}} · {{r.kind}}</span>
+          </span>
+          <span style="display: flex; align-items: baseline; gap: 6px; min-width: 0;">
+            <a href="{{r.issueHref}}" class="mono" style="font-size: 12px;">{{r.issue}}</a>
+            <span style="font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{{r.title}}</span>
+            <span class="chip" style="{{r.stageStyle}}">{{r.stage}}</span>
+          </span>
+          <span class="mono" style="font-size: 12.5px;">{{r.running}}</span>
+          <span class="mono" style="{{r.lastStyle}}">{{r.last}}</span>
+          <sc-for list="{{r.checks}}" as="c" hint-placeholder-count="6"><span class="dot" title="{{c.title}}" style="{{c.style}}"></span></sc-for>
+          <span class="mono" style="font-size: 12px; text-align: right; color: #6e6470;">{{r.tokens}}</span>
+        </div>
+      </sc-for>
+    </div>
+    <div style="display: flex; gap: 16px; font-size: 11px; color: #6e6470; padding-top: 6px;">
+      <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #009E73;"></span>ok</span>
+      <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 10px; height: 10px; border-radius: 50%; background: #E69F00;"></span>watch</span>
+      <span style="display: inline-flex; align-items: center; gap: 5px;"><span style="width: 10px; height: 10px; border-radius: 50%; box-sizing: border-box; border: 3px solid #c9533a; background: #fbf8ef;"></span>act</span>
+    </div>
+  </div>
+
+  <div>
+    <h2 class="h2">ENDED TODAY · 3</h2>
+    <div class="card">
+      <sc-for list="{{ended}}" as="e" hint-placeholder-count="3">
+        <div class="e">
+          <span class="mono" style="font-size: 12px; color: #6e6470;">{{e.t}}</span>
+          <span class="chip" style="{{e.style}}">{{e.how}}</span>
+          <b style="font-weight: 600;">{{e.name}}</b>
+          <span style="color: #6e6470;">{{e.what}}</span>
+          <a href="{{e.href}}" style="font-size: 13px;">{{e.link}}</a>
+        </div>
+      </sc-for>
+    </div>
+  </div>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script="" data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:860}}">
+class Component extends DCLogic {
+  renderVals() {
+    var names = ['silence', 'looping', 'scope', 'budget', 'tests', 'context'];
+    var lv = {
+      o: 'background: #009E73;',
+      w: 'background: #E69F00;',
+      b: 'border: 3px solid #c9533a; background: #fbf8ef;'
+    };
+    var word = { o: 'ok', w: 'watch', b: 'act' };
+    var stage = { IMPLEMENT: '#0072B2', REVIEW: '#009E73', FIX: '#D55E00' };
+    // name, platform, kind, issue, title, stage, running, last, lastAgo(min), checks, tokens, href, issueHref
+    var R = [
+      ['implementer-claude-04', 'claude opus', 'session', '#105', 'Audit log retention', 'FIX', '1h23m', '01:59', 11, 'wbbwbw', '1.90M', 'Agent.dc.html', 'Issue.dc.html'],
+      ['implementer-claude-07', 'claude opus', 'one-shot', '#118', 'Rate limit headers', 'IMPLEMENT', '0h42m', '02:10', 0, 'oooooo', '0.61M', 'AgentHealthy.dc.html', 'AgentHealthy.dc.html'],
+      ['implementer-codex-03', 'codex', 'one-shot', '#121', 'CSV import quoting', 'IMPLEMENT', '0h18m', '02:09', 1, 'oooooo', '0.95M', '#', '#'],
+      ['reviewer-codex-02', 'codex', 'one-shot', '!48', 'Upload size limit', 'REVIEW', '0h12m', '02:09', 1, 'oooooo', '0.44M', '#', 'Task.dc.html'],
+      ['reviewer-claude-01', 'claude opus', 'one-shot', '!54', 'Search index rebuild', 'REVIEW', '0h09m', '02:08', 2, 'oooooo', '0.40M', '#', '#']
+    ];
+    var rows = R.map(function (r) {
+      var cs = r[9].split('');
+      var bad = cs.indexOf('b') >= 0;
+      return { name: r[0], platform: r[1], kind: r[2], issue: r[3], title: r[4], stage: r[5], running: r[6],
+        last: r[7] + (r[8] >= 2 ? ' · ' + r[8] + 'm' : ''),
+        lastStyle: 'font-size: 12.5px; ' + (r[8] >= 10 ? 'color: #a8660f; font-weight: 700;' : ''),
+        stageStyle: 'color: #2f2630; border: 1.5px solid ' + stage[r[5]] + ';',
+        state: bad ? 'LOOPING' : 'RUNNING',
+        stateStyle: bad ? 'color: #fbf8ef; background: #c9533a;' : 'color: #fbf8ef; background: #0072B2;',
+        rowStyle: bad ? 'background: #fbf1ec;' : '',
+        checks: cs.map(function (c, i) { return { title: names[i] + ' · ' + word[c], style: lv[c] }; }),
+        tokens: r[10], href: r[11], issueHref: r[12] };
+    });
+    var box = function (label, value, color) { return { label: label, value: value, style: 'background: #fbf8ef; border: 1px solid #ddd3bd; border-top: 3px solid ' + color + '; border-radius: 5px; padding: 4px 12px 6px; text-align: right;' }; };
+    return {
+      checkNames: names.map(function (n) { return { t: n }; }),
+      rows: rows,
+      boxes: [box('needs input', '1', '#c9533a'), box('running', '5', '#0072B2'), box('slots free', '1 of 6', '#ddd3bd')],
+      ended: [
+        ['01:50', 'DONE', 'implementer-claude-06', 'fix on #109 · pushed a7f03d1', 'Task.dc.html', '#109', 'color: #fbf8ef; background: #4f6b3a;'],
+        ['00:20', 'DONE', 'reviewer-codex-01', 'review round 1 on !48 · 4 threads', 'Task.dc.html', '!48', 'color: #fbf8ef; background: #4f6b3a;'],
+        ['23:58', 'CRASHED', 'implementer-codex-05', '#124 Webhook signature check · 2 commits', 'Dispatch.dc.html', 're-dispatch', 'color: #a3402b; border: 1px dashed #c9533a;']
+      ].map(function (e) { return { t: e[0], how: e[1], name: e[2], what: e[3], href: e[4], link: e[5], style: e[6] }; })
+    };
+  }
+}
+</script>
+
+
+</body></html>

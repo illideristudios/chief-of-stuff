@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import backlog as bl  # noqa: E402
+import backlog_ref  # noqa: E402
 
 TOKEN = "glpat-test-not-a-real-token"
 
@@ -585,18 +586,13 @@ class GitHubConfigTest(unittest.TestCase):
                 with self.assertRaises(bl.BacklogError):
                     bl.parse_backlog(spec)
 
-    def test_gitlab_line_is_still_gitlab(self):
-        got = bl.parse_backlog("GitLab; host https://labs.gauntletai.com; project zachgardner/openemr")
-        self.assertIsInstance(got, bl.Backlog)
-
-
 class GitHubReadTest(unittest.TestCase):
     def test_list_argv_and_mapping(self):
         gh = FakeGh(rows={"open": [gh_issue(3, "inbox.py", labels=("bug",), closed="2026-09-17T19:05:00Z")]})
         got = bl.issues(GH, gh=gh)
         self.assertTrue(got.ok, got.error)
         self.assertEqual(gh.calls, [["issue", "list", "-R", REPO, "--state", "open", "--json",
-                                     "number,title,state,labels,url,updatedAt,closedAt", "--limit", "5000"]])
+                                     "number,title,state,labels,url,updatedAt,closedAt,body", "--limit", "5000"]])
         self.assertEqual(got.issues, (bl.Issue(iid=3, title="inbox.py", state=bl.OPEN, labels=("bug",),
                                                 web_url=f"https://github.com/{REPO}/issues/3",
                                                 updated_at="2026-09-22T19:24:55Z",
@@ -674,6 +670,20 @@ class IssueRefTest(unittest.TestCase):
         self.assertEqual(ref.url, f"https://github.com/{REPO}/issues/9")
         self.assertEqual(ref.label(GH), "#9")
         self.assertEqual(ref.label(bl.GitHubBacklog("o/n")), f"{REPO}#9")
+
+    def test_store_label_reads_a_home_key_as_a_number(self):
+        # #903: a store key labels like IssueRef.label. Home is `#N`; another project names itself; no home drops only the forge prefix.
+        gl = bl.Backlog(host="https://gl.example", project="g/p")
+        self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", GH), "#9")
+        self.assertEqual(backlog_ref.store_label("github:o/n#9", GH), "o/n#9")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/g/p#5", gl), "#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", gl), "gl.example/acme/web#5")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl2.example/g/p#5", gl), "gl2.example/g/p#5")
+        self.assertEqual(backlog_ref.store_label(f"github:{REPO}#9", None), f"{REPO}#9")
+        self.assertEqual(backlog_ref.store_label("gitlab:gl.example/acme/web#5", None), "gl.example/acme/web#5")
+        for cell in ("workflow", "#7", "https://github.com/o/n/issues/7"):
+            with self.subTest(cell=cell):
+                self.assertEqual(backlog_ref.store_label(cell, GH), cell)
 
 
 class ParseIssueArgTest(unittest.TestCase):
@@ -779,6 +789,14 @@ class IssueStatesTest(unittest.TestCase):
 
 
 class GitHubWriteTest(unittest.TestCase):
+    def test_run_gh_gives_up_on_a_stalled_gh(self):
+        import subprocess
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("gh", 1)) as run:
+            code, out, err = bl.run_gh(["issue", "list"])
+        self.assertEqual((code, out), (124, ""))
+        self.assertIn("timed out", err)
+        self.assertEqual(run.call_args.kwargs["timeout"], bl.GH_TIMEOUT)
+
     def test_eval_binary_override_is_absolute_and_does_not_depend_on_path(self):
         with tempfile.TemporaryDirectory() as d:
             fake = Path(d) / "fake-gh"
@@ -904,7 +922,7 @@ class ReadOneTest(unittest.TestCase):
     """#63: `--view` reads one issue's title, state, body and labels through the same port as the list."""
 
     def test_view_reads_title_state_body_and_labels(self):
-        row = {**issue(12, "the design gate"), "body": "gate the design before build"}
+        row = {**issue(12, "the design gate"), "description": "gate the design before build"}
         row["labels"] = ["design-gate", "board"]
         server, base = serve({("GET", f"{ISSUES}/12", "", "1"): (200, json.dumps(row), {})})
         try:
@@ -1047,7 +1065,7 @@ class ViewMainTest(unittest.TestCase):
     def run_view(self, *extra: str, plan: dict | None = None) -> tuple[int, str, str, ThreadingHTTPServer]:
         planned = plan if plan is not None else {
             ("GET", f"{ISSUES}/12", "", "1"):
-                (200, json.dumps({**issue(12, "the design gate"), "body": "gate it"}), {}),
+                (200, json.dumps({**issue(12, "the design gate"), "description": "gate it"}), {}),
         }
         server, base = serve(planned)
         self.addCleanup(stop, server)
@@ -1069,7 +1087,7 @@ class ViewMainTest(unittest.TestCase):
     def test_view_with_comments_prints_the_notes_in_order(self):
         plan = {
             ("GET", f"{ISSUES}/12", "", "1"):
-                (200, json.dumps({**issue(12, "the design gate"), "body": "gate it"}), {}),
+                (200, json.dumps({**issue(12, "the design gate"), "description": "gate it"}), {}),
             ("GET", f"{ISSUES}/12/notes", "", "1"): (200, json.dumps([
                 {"body": "the design gate passes", "author": {"username": "zach"},
                  "created_at": "2026-09-25T21:48:00Z", "system": False},

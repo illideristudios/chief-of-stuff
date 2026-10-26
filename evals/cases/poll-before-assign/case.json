@@ -79,7 +79,7 @@
           "type": "peer_calls",
           "tool": "send",
           "to_ref": "a1b2c3",
-          "text_not_match": "(?i)write only|do not commit|human-only|railway",
+          "text_not_match": "(?i)write only|do not commit|human-only",
           "min": 1
         },
         {

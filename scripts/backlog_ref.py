@@ -176,6 +176,23 @@ class IssueRef:
         return f"{self.repo}#{self.number}" if self.host == GITHUB else f"{self.host}/{self.repo}#{self.number}"
 
 
+_REF_STORE = re.compile(r"^(github|gitlab):(.+)#(\d+)$")
+
+
+def store_label(key: str, home: Backlog | GitHubBacklog | None) -> str:
+    """`IssueRef.label` for a store key (`github:owner/repo#N`, `gitlab:host/project#N`). Anything else is unchanged."""
+    m = _REF_STORE.match(key)
+    if not m:
+        return key
+    kind, body, number = m.group(1), m.group(2), int(m.group(3))
+    if kind == "github":
+        ref = IssueRef(body, number)
+    else:
+        host, _, repo = body.partition("/")
+        ref = IssueRef(repo, number, host)
+    return ref.label(home)
+
+
 WORKFLOW = "workflow"  # an `issue` cell naming a step the pipeline performs: no issue, never looked up
 _REF_SHORT = re.compile(r"^([\w.-]+/[\w.-]+)?#(\d+)$")
 _REF_URL = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+)/issues/(\d+)/?$")

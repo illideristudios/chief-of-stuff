@@ -6,14 +6,34 @@ them, who the workers are and whether a stage holds. The board and the task page
 from __future__ import annotations
 
 from collections.abc import Container, Mapping
-from datetime import datetime
+from datetime import date, datetime, time
+from dataclasses import dataclass
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import board_sources
+import decision_actions
+from estimate import estimates, history, task_end
 import kanban as kanban_tool
+from md import section
+import ownership
 from settings import Kanban
+import tracker
 from tracker import Task, issue_key, launcher
+import tracker_log
 from tracker_log import Move
+
+
+def source_key(key: str, home) -> str:
+    """Translate an engine identity to the cache's repository-relative key without dropping its namespace."""
+    namespace, sep, number = key.rpartition("#")
+    if sep and number.isdecimal():
+        if namespace.startswith("github:"):
+            return issue_key(f"https://github.com/{namespace[len("github:"):]}/issues/{number}", home)
+        if namespace.startswith("gitlab:"):
+            host, _, project = namespace[len("gitlab:"):].partition("/")
+            return issue_key(f"https://{host}/{project}/-/issues/{number}", home)
+    return issue_key(key, home)
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
@@ -25,7 +45,7 @@ def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers:
     stage = task.stage.strip() if stage is None else stage
     if task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1]):
         return ""
-    if task.issue.strip() and issue_key(task.issue, home) in pending_refs:
+    if task.issue.strip() and source_key(task.issue, home) in pending_refs:
         return "decision"
     if kanban is not None and kanban.holds(stage):
         return stage
@@ -40,8 +60,8 @@ def worker_names(sources: board_sources.Sources) -> set[str]:
 
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
     """The changes naming the task's issue: the open ones, or else the merged ones."""
-    key = issue_key(task.issue, sources.home) if task.issue.strip() else None
-    named = [c for c in sources.changes.values() if key and key in c.issues and c.state != "closed"]
+    key = source_key(task.issue, sources.home) if task.issue.strip() else None
+    named = [c for c in sources.changes.values() if key and (key in c.issues or task.issue in c.issues) and c.state != "closed"]
     return tuple(c for c in named if c.state == "open") or tuple(named)
 
 
@@ -67,26 +87,71 @@ def hold_causes(tasks: list[Task], kanban: Kanban | None, sources: board_sources
                                     pending_refs=pending_refs, home=sources.home, lane=lanes.get(t.lane.strip())))}
 
 
+def current_tasks(tasks: list[Task], rows: list[Task], home) -> dict[str, Task | None]:
+    """Resolve a snapshot's names/items to today's tasks. Issue identity wins over a reused name.
+    Unmatched aliases stay explicitly unmatched, so that day's moves cannot fall back to today's names."""
+    by_name = {(t.name.strip() or t.item.strip()).casefold(): t for t in tasks if t.name.strip() or t.item.strip()}
+    by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip() and not t.workflow}
+
+    def today(t: Task) -> Task | None:
+        key = issue_key(t.issue, home) if t.issue.strip() and not t.workflow else None
+        if key and key in by_issue:
+            return by_issue[key]
+        named = by_name.get((t.name.strip() or t.item.strip()).casefold())
+        if key and named and named.issue.strip() and not named.workflow and issue_key(named.issue, home) != key:
+            return None
+        return named
+
+    return {k: today(t) for t in rows for k in (t.item.strip().casefold(), t.name.strip().casefold()) if k}
+
+
+def _current_tasks(tasks: list[Task], earlier: list[tuple[date, list[Task]]], home) -> dict[date | None, dict[str, Task | None]]:
+    """Keep each day's aliases separate: a rename and reuse must not steal each other's moves."""
+    return {None: current_tasks(tasks, tasks, home),
+            **{day: current_tasks(tasks, rows, home) for day, rows in earlier}}
+
+
+def looping(tasks: list[Task], moves: list[Move], lanes: dict, home, earlier: list[tuple[date, list[Task]]] = ()) -> set[Task]:
+    """Tasks with at least two entries into their lane's fix stage. Repeated logs at the same stage are one
+    entry; launcher lifecycle lines are not lane moves. Earlier row names resolve as they do for hold_began."""
+    find = _current_tasks(tasks, earlier, home)
+    last, visits = {}, {}
+    for move in sorted(moves, key=lambda m: m.at):
+        task = find.get(move.at.date(), find[None]).get(move.name.strip().casefold())
+        if task is None or move.launch:
+            continue
+        lane = lanes.get(task.lane.strip())
+        if task.kind == "done" or (lane and lane.stages and task.stage.strip() == lane.stages[-1]):
+            continue
+        if lane and "fix" in lane.stages and move.stage == "fix" and last.get(task) != "fix":
+            visits[task] = visits.get(task, 0) + 1
+        last[task] = move.stage
+    return {t for t, count in visits.items() if count >= 2}
+
+
 def hold_began(held: dict[Task, str], moves: list[Move], pending_refs: Mapping[str, datetime | None], home,
-               tasks: list[Task], earlier: list[Task] = ()) -> dict[Task, datetime | None]:
+               tasks: list[Task], earlier: list[tuple[date, list[Task]]] = ()) -> dict[Task, datetime | None]:
     """When each of the `held` tasks' holds began (#229): a decision when the first decision holding its issue was asked
     (`pending_refs`, decision_page.held_refs); a gate stage at the task's last move into it, the moves read as flow_chart
     reads them (by name or item in any case, a launcher line only until the task's first `stage:` move); a person's
-    wait, which no line records, None. A move may name an `earlier` tracker's row: it is today's task of that row's
-    name, or, renamed, of its issue."""
-    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
-    by_issue = {issue_key(t.issue, home): t for t in tasks if t.issue.strip()}
-
-    def today(t: Task) -> Task | None:
-        return by_name.get(t.name.strip().casefold()) or (by_issue.get(issue_key(t.issue, home)) if t.issue.strip() else None)
-
-    find = {**{k: cur for t in earlier for k in (t.item.strip().casefold(), t.name.strip().casefold())
-               if k and (cur := today(t))},
-            **{t.item.strip().casefold(): t for t in tasks if t.item.strip()}, **by_name}
-    row_of = launcher(tasks)
+    wait, which no line records, None. `earlier` holds dated task snapshots; a move belongs to the issue that
+    owned its name on that day."""
+    if earlier and isinstance(earlier[0], Task):
+        earlier = [(None, list(earlier))]
+    find = _current_tasks(tasks, [e for e in earlier if e[0] is not None], home)
+    if any(e[0] is None for e in earlier):
+        for _, rows in (e for e in earlier if e[0] is None):
+            find[None] = {**current_tasks(tasks, rows, home), **{k: v for k, v in find[None].items() if v is not None}}
+    launchers = {None: launcher(tasks), **{day: launcher(rows) for day, rows in earlier if day is not None}}
     staged, into = set(), {}
     for m in sorted(moves, key=lambda m: m.at):
-        t = find.get(m.name.strip().casefold()) or (row_of(m.name)[0] if m.launch else None)
+        aliases = find.get(m.at.date(), find[None])
+        key = m.name.strip().casefold()
+        t = aliases.get(key)
+        if key not in aliases and m.launch:
+            row, _ = launchers.get(m.at.date(), launchers[None])(m.name)
+            if row:
+                t = aliases.get(row.item.strip().casefold())
         if t is None or (m.launch and t in staged):
             continue
         staged |= set() if m.launch else {t}
@@ -105,8 +170,8 @@ def went_held(held: dict[Task, str], began: dict[Task, datetime | None], since: 
 
 
 def held_names(held: dict[Task, str]) -> dict[str, str]:
-    """`hold_causes` by task name, as flow_chart.build reads it. A nameless task has no name to hold it by (as forge_ends)."""
-    return {t.name.strip(): cause for t, cause in held.items() if t.name.strip()}
+    """`hold_causes` by task name (or item when nameless), as flow_chart.build reads it."""
+    return {(t.name.strip() or t.item.strip()): cause for t, cause in held.items() if t.name.strip() or t.item.strip()}
 
 
 def forge_ends(tasks: list[Task], sources: board_sources.Sources, zone: ZoneInfo) -> dict[str, tuple[datetime, str]]:
@@ -154,4 +219,123 @@ def drifts(task: Task, kanban: Kanban | None, sources: board_sources.Sources, st
     # ponytail: labels only; a GitHub Project's Status is not in the sources, so a project board never drifts here.
     if kanban is None or kanban.github_project or issue is None or not stage or task.kind == "done":
         return False
+    if stage in kanban.terminal_stages:  # a merged change: the forge already answered, mark or not (#240)
+        return False
     return bool(kanban_tool.drift(kanban, issue.labels, stage, allow_extra_hold=task.kind == "waiting"))
+
+
+def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
+    """The dispatcher's open, unassigned candidates, bounded by free slots and file ownership overlap."""
+    parsed = tracker.parse_tracker(tracker_text)
+    tasks = parsed.tasks
+
+    running = [t for t in tasks if t.kind == "running"]
+    free_slots = max(0, max_concurrency - len(running))
+    if free_slots <= 0:
+        return []
+
+    running_paths = [ownership.cell(tracker_text, {t.label, t.name, t.item}) or "" for t in running]
+
+    ready: list[tracker.Task] = []
+    accepted_paths: list[str] = []
+
+    for t in tasks:
+        if t.kind != "open" or t.owner.strip() != "unassigned":
+            continue
+        # standing_for unmarks the item; a bold name (`**impl03**: standing`) is still a placeholder when unassigned.
+        if t.workflow or t.standing or tracker.STANDING_ITEM.match(tracker._unmark(t.item).strip()) or tracker.STANDING_NAME.match(t.name.strip()):
+            continue
+        if t.stage.strip().startswith("hold"):
+            continue
+
+        paths = ownership.cell(tracker_text, {t.label, t.name, t.item})
+        if paths is None:
+            continue
+
+        # Check collision with running tasks
+        if any(ownership.overlaps(r, paths) for r in running_paths):
+            continue
+
+        # Check collision with already accepted candidate tasks
+        if any(ownership.overlaps(a, paths) for a in accepted_paths):
+            continue
+
+        ready.append(t)
+        accepted_paths.append(paths)
+        if len(ready) >= free_slots:
+            break
+
+    return ready
+
+
+def needs_input(tracker_text: str) -> int:
+    """Today's human-review ends: the Workers page's lead count, also shown in every tab bar."""
+    return sum(1 for line in section(tracker_text, "## Log")
+               if (m := tracker_log.ENDED.match(line.strip())) and m[4] == tracker_log.HUMAN_REVIEW)
+
+
+def tab_counts(tracker_text: str, cfg, now: datetime, lanes: dict, kanban: Kanban | None,
+               sources: board_sources.Sources, pending_refs: Mapping[str, datetime | None],
+               looked: datetime | None = None, earlier=(), slots: int = 1, *, held=None, ends=None,
+               tracker_day: date | None = None) -> dict:
+    """The pages' lead counts from the same tracker, hold rules, forecasts and cached forge facts as the board.
+    `earlier` is (day, tracker text) before this tracker; the board can supply its already computed holds and ends."""
+    tasks = [t for t in tracker.parse_tracker(tracker_text).tasks if not t.standing]
+    held = hold_causes(tasks, kanban, sources, lanes, pending_refs) if held is None else held
+    since = looked or datetime.combine(now.date(), time(), cfg.zone)
+    hold_earlier = [(d, text) for d, text in earlier if d >= since.astimezone(cfg.zone).date()]
+    moves = [m for day, text in [*hold_earlier, (tracker_day or now.date(), tracker_text)]
+             for m in tracker_log.moves(text, day, cfg.zone)]
+    began = hold_began(held, moves, pending_refs, sources.home, tasks,
+                       [(d, tracker.parse_tracker(text).tasks) for d, text in hold_earlier])
+    shown = since.astimezone(cfg.zone)
+    if ends is None:
+        active = [t for t in tasks if t.kind != "done"]
+        est = estimates(active, cfg, now, history(tasks, cfg, now))
+        ends = {t.item: end[0] for t in active
+                if (end := task_end(t, cfg, now, now, est))[1] in ("due", "derived")}
+    return {"workers": needs_input(tracker_text),
+            "dispatch": len(ready_tasks(tracker_text, slots)),
+            "since": (went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == now.date() else f"{shown:%a %H:%M}"),
+            "epics": epic_risk(tasks, sources, ends, cfg.zone, now)}
+
+
+@dataclass(frozen=True)
+class PageData:
+    """Detached rows for all page presenters; never retains a store connection."""
+    work_items: tuple
+    stage_segments: tuple
+    board_decisions: tuple
+    stage_reports: tuple
+    resumes: dict[str, Any]
+    issue_logs: tuple = ()
+    engine_logs: tuple = ()
+
+    def items(self):
+        return self.work_items
+
+    def item(self, key):
+        return next((i for i in self.work_items if i.issue_key == key), None)
+
+    def segments(self):
+        return self.stage_segments
+
+    def decisions(self):
+        return self.board_decisions
+
+    def reports(self, key, *, stage, attempt):
+        return [r for r in self.stage_reports if (r.issue_key, r.stage, r.attempt) == (key, stage, attempt)]
+
+    def log(self, key=None):
+        return [entry for entry in self.issue_logs if key is None or entry.issue_key == key]
+
+    def resume(self, key):
+        return self.resumes.get(key)
+
+
+def page_data(store) -> PageData:
+    """Read the store through the use case once, before handing rows to presenters."""
+    items = tuple(store.items())
+    # Decision rows are append-only; presenters see each decision's latest row only.
+    return PageData(items, tuple(store.segments()), tuple(decision_actions.current_rows(store.decisions())), tuple(store.reports()),
+                    {i.issue_key: store.resume(i.issue_key) for i in items}, tuple(store.log()), tuple(store.engine_log()))

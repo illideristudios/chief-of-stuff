@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from evals.rules_text import rules_text
@@ -28,6 +29,7 @@ from test_board_flow_design import outline  # noqa: E402
 import tracker as tr  # noqa: E402
 from backlog import Backlog, GitHubBacklog  # noqa: E402
 import settings as st  # noqa: E402
+import task_forge  # noqa: E402
 
 CT = ZoneInfo("America/Chicago")
 NOW = datetime(2026, 9, 16, 14, 30, tzinfo=CT)
@@ -363,6 +365,17 @@ class RenderTest(unittest.TestCase):
                 html = rb.render(LANED_TRACKER.replace("| 09:00 | 17:00 |", f"| {bad} | {bad} |", 1), self.cfg, NOW)
                 self.assertIn("Write eval README", html)
 
+    def test_the_header_shows_the_latest_policy_change(self) -> None:
+        early = SimpleNamespace(kind="policy_change", message="engine: policy changed: aaaaaaaaaaaa (overlay policy.toml)")
+        late = SimpleNamespace(kind="policy_change", message="engine: policy changed: bbbbbbbbbbbb (overlay policy.toml)")
+        page = task_forge.PageData((), (), (), (), {}, (), (early, late))
+        html = rb.render(TRACKER, self.cfg, NOW, db=page)
+        self.assertIn("bbbbbbbbbbbb", html)
+        self.assertIn("overlay policy.toml", html)
+        self.assertNotIn("aaaaaaaaaaaa", html)
+        quiet = rb.render(TRACKER, self.cfg, NOW, db=task_forge.PageData((), (), (), (), {}))
+        self.assertNotIn("policy changed", quiet)
+
 
 class ShortNameTest(unittest.TestCase):
     def test_short_name(self) -> None:
@@ -662,13 +675,9 @@ class CliTest(unittest.TestCase):
         self.assertIn(">ANSWERED · B<", (pages / "decision-cache-size.html").read_text())
         self.assertIn(">PENDING<", (pages / "decision-deploy-window.html").read_text())
         self.assertEqual((pages / "decision-broken.html").exists(), False)
-        # The board's DECISIONS panel lists the same pending entries as decisions.html, the unreadable one apart.
-        self.assertIn('<a class="panels-link" href="/decisions">decisions page</a><b class="panels-count">1</b>', board)
-        self.assertIn('<a class="panels-name" href="/decisions/deploy-window">Decide deploy-window</a>', board)
-        # #349: the artboard's label. Its six tiles have no DECISIONS; the pending count is the tab bar's badge.
-        self.assertNotIn('<span class="panels-label">DECISIONS</span>', board)
-        self.assertIn('<span class="badge" title="1 pending">1</span>', board)
-        self.assertIn('decision-broken.json', board)
+        # #208: detail stays on the Decisions page; the board's tab retains its pending count.
+        self.assertIn('<a href="/decisions" data-tone="pending">Decisions<span class="badge" title="1 pending">1</span></a>', board)
+        self.assertNotIn('id="decisions"', board)
 
     def test_summary_line_counts_long_items(self) -> None:
         root = Path(tempfile.mkdtemp())
@@ -1452,13 +1461,12 @@ Coordinator: coordinator. Board: board-7.
 class SectionOrderTest(unittest.TestCase):
     """The page's sections appear in the Flow artboard's order (#259).
 
-    Tabs, header, tiles, BUILD, the MERGE ORDER / DECISIONS / WORKERS panels, then the Flow charts (this tracker
-    has no stage history, so none; test_board_flow_design.py pins their place after the panels).
+    Tabs, header, tiles, BUILD, then the Flow charts (this tracker
+    has no stage history, so none; test_board_flow_design.py pins their place after BUILD).
     Due next, Blocked, the 24-hour day strip, Lanes and Sessions are not in the design, so none is drawn.
     """
 
-    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>",
-             '<div class="panels">']
+    ORDER = ['<nav class="tabs"', '<header class="panels-head"', '<nav class="panels-tiles"', "<h2>Build</h2>"]
 
     def setUp(self) -> None:
         self.cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
@@ -1473,8 +1481,8 @@ class SectionOrderTest(unittest.TestCase):
         # This tracker has no stage history, so the two Flow charts are not drawn (test_board_flow_design.py pins them).
         h2, ids, sections = outline(self.html)
         self.assertEqual(h2, ["Build"])
-        self.assertEqual(ids, ["flow", "merge", "decisions", "workers"])
-        self.assertEqual(sections, 4)
+        self.assertEqual(ids, ["flow"])
+        self.assertEqual(sections, 1)
 
 
 class InlineMarksTest(unittest.TestCase):
@@ -1957,7 +1965,7 @@ class LaneColumnsTest(unittest.TestCase):
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         html = rb.render(TRACKER_LANED, cfg, NOW, lanes=self.LANES)
         self.assertIn('<section id="flow"><h2>Build</h2>', html)
-        build = html.split('<section id="flow">')[1].split('<div class="panels">')[0]
+        build = html.split('<section id="flow">')[1].split('</figure></section>')[0]
         self.assertIn("Cut the release", build)
         self.assertNotIn("Console", build)
         self.assertNotIn("columns-foot", html)
@@ -1965,7 +1973,7 @@ class LaneColumnsTest(unittest.TestCase):
         # A tracker with no lanes has no stage columns, and its tasks are not drawn in BUILD at all.
         plain = rb.render(TRACKER, cfg, NOW)
         self.assertIn('<figure class="columns"', plain)
-        self.assertNotIn("<table", plain.split('<section id="flow">')[1].split('<div class="panels">')[0])
+        self.assertNotIn("<table", plain.split('<section id="flow">')[1].split('</figure></section>')[0])
         self.assertNotIn('class="columns-card', plain)  # the bare word is also in the page's CSS
 
 
@@ -2010,3 +2018,24 @@ class DensityTest(unittest.TestCase):
         html = rb.render(TRACER_TRACKER, cfg, NOW)
         self.assertLess(len(html), 32_000,
                         f"Board page is {len(html)} bytes, budget is 32 000")
+
+
+class StoreDecisionLabelTest(unittest.TestCase):
+    """#903: a decision row for the workspace backlog reads `#N`; another project names itself. The href stays the full key."""
+
+    def test_anchor_text_follows_issue_ref_label(self) -> None:
+        from types import SimpleNamespace
+
+        from fragment import issue_href
+
+        home = GitHubBacklog("team/app")
+        own, foreign = "github:team/app#9", "github:o/n#4"
+
+        def row(n: int, key: str, question: str):
+            return SimpleNamespace(id=n, issue_key=key, question=question, answer=None, rerouted_to="",
+                                   record={"status": "open"})
+
+        html = rb._render_store_decisions([row(1, own, "Ship?"), row(2, foreign, "Wait?")], home)
+        self.assertIn(f'href="{issue_href(own)}">#9</a>', html)
+        self.assertIn(f'href="{issue_href(foreign)}">o/n#4</a>', html)
+        self.assertNotIn(">github:", html)

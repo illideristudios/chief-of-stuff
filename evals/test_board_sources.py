@@ -21,6 +21,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "scripts"), str(Path(_
 
 import board_sources as bs  # noqa: E402
 import render_board as rb  # noqa: E402
+import workers_page  # noqa: E402
 from tracker import issue_key  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
 import test_flow_chart as fc_test  # noqa: E402
@@ -190,6 +191,22 @@ class GitLabTest(unittest.TestCase):
         with mock.patch.object(bs.backlog, "token", return_value=""):
             got = bs.refresh(root, NOW, call=lambda *a, **k: self.fail("no call without a token"))
         self.assertIn("no token", got.errors["kanban"])
+
+    def test_a_store_workspace_reads_every_open_merge_request(self):
+        # #896: a store board names its changes in no tracker row, so every open one is read.
+        root = workspace("GitLab issues; host https://labs.example.test; project team/app")
+        (root / "store.db").touch()
+        mr = {"iid": "77", "webUrl": "https://labs.example.test/team/app/-/merge_requests/77", "title": "Search",
+              "state": "opened", "draft": False, "mergedAt": None, "targetBranch": "develop", "description": "Closes #115",
+              "approved": False, "approvedBy": {"nodes": []}, "headPipeline": None, "diffStats": []}
+
+        def call(method, url, token, timeout, payload=None):
+            opened = {"open": {"nodes": [mr]}} if "state: opened" in payload["query"] else {}
+            return {"data": {"p0": {"issues": {"nodes": []}, "mergeRequests": {"nodes": []}, "merged": {"nodes": []}, **opened}}}, {}, ""
+
+        with mock.patch.dict(os.environ, {"CHIEF_OF_STUFF_GITLAB_TOKEN": "tok"}):
+            got = bs.refresh(root, NOW, call=call)
+        self.assertEqual((got.changes["!77"].state, got.changes["!77"].issues), ("open", ("#115",)))
 
 
 # Stage 2 of the issue page: per-file stats, pipeline jobs, conflicts, review threads and the issue body.
@@ -1050,19 +1067,19 @@ class LaunchedWorkerNameTest(unittest.TestCase):
         cfg = parse_coordinator((root / "CLAUDE.md").read_text(), today=NOW.date())
         self.workers = bs.workers(root, cfg, rb.parse_tracker(text), text, NOW.date())
         self.by_tree = {w.tree: w for w in self.workers if w.kind == "one-shot"}
-        self.facts = {r.name: r.facts for r in rb.worker_panel(replace(bs.EMPTY, workers=self.workers), NOW).rows}
+        self.html = workers_page.render(text, replace(bs.EMPTY, workers=self.workers), NOW, root / "trees", None)
 
-    def test_the_workers_panel_names_the_row_a_launch_maps_to(self):
+    def test_the_workers_page_names_the_row_a_launch_maps_to(self):
         # Rules 1–2: a started line whose task begins with a row's item, or carries the row's issue ref, shows that
         # row's name; the prompt's later sentences appear nowhere.
         for tree, worker, name in (("upload", "impl-1", "Upload size limit"), ("keys", "impl-2", "Key rotation")):
             with self.subTest(task=name):
                 self.assertEqual(self.by_tree[tree].name, worker)
-                self.assertIn(name, self.facts[worker])
+                self.assertIn(name, self.html)
         for sentence in fc_test.PROMPT_SENTENCES:
             with self.subTest(sentence=sentence):
                 self.assertNotIn(sentence, repr(self.workers))
-                self.assertNotIn(sentence, repr(self.facts))
+                self.assertNotIn(sentence, self.html)
 
     def test_no_workers_fact_is_longer_than_its_rows_name(self):
         # Rule 4: no Workers fact is longer than the row name it maps to.
