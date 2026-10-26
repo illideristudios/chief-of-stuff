@@ -29,16 +29,13 @@ class Started:
 def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None = None, commit: bool = False,
           ask_id: int | None = None, answer: str = "") -> Started:
     """`forge` is None when the workspace has no `Backlog:` line. With no `issue`, one is filed first; a supplied one must exist on
-    the forge and be open. Filing requires a valid File ownership section; an existing undeclared issue waits in readiness.
-    The row takes the forge's title and follows the issue; nothing is written unless `commit`."""
+    the forge and be open. A File ownership section is never required (#1039, C29). The row takes the forge's title and follows the issue; nothing is written unless `commit`."""
     if forge is None:
         return Started(refused="no `Backlog:` line, so no issue can be filed and no work starts", setup=SETUP)
     if ask_id is not None and (issue is None or ask_id <= 0 or not answer.strip()):
         return Started(refused="answering an ask requires an existing --issue, a positive --answer-ask and a nonempty --answer")
     if issue is None:
         declared = ownership.issue_scopes(body)
-        if declared is None:
-            return Started(refused="needs file ownership: add a valid ## File ownership section with write or read-only paths")
         made = forge.create_issue(title, body=body, commit=commit)
         if made.error or (made.done and not made.iid):
             return Started(refused=f"issue not filed: {made.error or 'the forge named no issue number'}")

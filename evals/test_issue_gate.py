@@ -67,15 +67,13 @@ class GateTest(unittest.TestCase):
                 got = issue_gate.start(f, self.store, "Parser", body=body if number is None else "ignored", issue=number, commit=True)
                 self.assertEqual([(r.path, r.mode) for r in self.store.ownership(got.issue_key)], [("src", "read")])
 
-    def test_new_issue_without_valid_scope_is_refused_before_any_forge_or_store_write(self):
+    def test_new_issue_without_a_file_ownership_section_is_filed(self):
+        # #1039 (C29): no work is refused over file ownership.
         for body in ("", "## File ownership\n", "## File ownership\n- typo: `src/`"):
-            for commit in (False, True):
-                with self.subTest(body=body, commit=commit):
-                    gh = tf.FakeGh()
-                    got = issue_gate.start(forge.Forge(tf.GH, gh=gh), self.store, "Parser", body=body, commit=commit)
-                    self.assertIn("needs file ownership", got.refused)
-                    self.assertEqual(gh.all_calls, [])
-                    self.assertEqual(self.store.items(), [])
+            with self.subTest(body=body):
+                got = issue_gate.start(forge.Forge(tf.GH, gh=tf.FakeGh()), self.store, "Parser", body=body, commit=True)
+                self.assertEqual(got.refused, "")
+                self.assertEqual(self.store.ownership(got.issue_key), [])
 
     def test_an_existing_undeclared_issue_is_cached_without_inventing_scope(self):
         f = forge.Forge(tf.GH, gh=tf.FakeGh(issues=[tf.gh_issue(3, "Parser")]))
@@ -224,14 +222,10 @@ class WorkMainTest(unittest.TestCase):
         self.assertEqual((self.root / "store.db").exists() or (state / "migrate.lock").exists(), False,
                          "a preview must not create, migrate or lock the store")
 
-    def test_new_issue_without_scope_refuses_preview_and_commit(self):
-        for args in ((), ("--commit",)):
-            with self.subTest(args=args):
-                code, out, err = self.run_work("--body", "", *args)
-                self.assertEqual(code, 1)
-                self.assertIn("needs file ownership", err)
-                self.assertEqual(out, "")
-                self.assertEqual((self.gh.all_calls, self.items()), ([], []))
+    def test_new_issue_without_scope_previews_like_any_other(self):
+        code, out, err = self.run_work("--body", "")
+        self.assertEqual(code, 0, err)
+        self.assertIn("would create: Add a flag", out)
 
     def test_work_records_an_answer_for_the_named_issues_ask(self):
         self.gh = tf.FakeGh(issues=[{**tf.gh_issue(3, "Parser"), "body": SCOPE}, tf.gh_issue(4, "Other")])
@@ -255,8 +249,7 @@ class WorkMainTest(unittest.TestCase):
         from types import SimpleNamespace
         facts = engine_facts.gather(forge=SimpleNamespace(blocked_by=lambda: {}), store=db,
                                     root=self.root, trees=self.root / "trees", now=datetime.now(timezone.utc))
-        self.assertIsNone(readiness.why_not(key, claims=facts.claims, running=(), blockers=(),
-                                          asks=facts.asks, reports=facts.reports))
+        self.assertIsNone(readiness.why_not(key, blockers=(), asks=facts.asks, reports=facts.reports))
 
     def test_existing_issue_preview_does_not_open_the_store(self):
         self.gh = tf.FakeGh(issues=[tf.gh_issue(3, "Fix the parser")])

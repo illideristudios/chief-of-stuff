@@ -123,8 +123,8 @@ class MCPTest(unittest.TestCase):
         self.assertEqual(self.db.asks(KEY)[0].question, "stdio question")
 
 
-class ScopeProposalTest(unittest.TestCase):
-    """#915: a plan run proposes the implementation's file ownership through report; ownership.py checks it."""
+class NoScopeProposalTest(unittest.TestCase):
+    """#1039 (C29): report takes no file ownership, so no plan run proposes a scope."""
 
     def tools(self, stage):
         from datetime import datetime, timezone
@@ -144,20 +144,11 @@ class ScopeProposalTest(unittest.TestCase):
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, title="A widget", stage="plan")
 
-    def test_a_plan_runs_proposal_is_kept_for_the_trio(self):
-        self.tools("plan").report("done", "Planned", file_ownership=[
-            {"path": "src/widget.py", "mode": "write"}, {"path": "docs/design.md", "mode": "read"}])
-        self.assertEqual(self.db.resume(KEY)["scope_proposal"],
-                         {"stage": "plan", "attempt": 1, "scopes": [["src/widget.py", "write"], ["docs/design.md", "read"]]})
-
-    def test_a_malformed_proposal_or_one_from_another_stage_is_refused_and_nothing_is_kept(self):
-        for entries in ([{"path": ".", "mode": "write"}], [{"path": "../x", "mode": "write"}], [],
-                        [{"path": "src/*.py", "mode": "write"}], [{"path": "src/a.py", "mode": "own"}]):
-            with self.subTest(entries=entries), self.assertRaises(ValueError):
-                self.tools("plan").report("done", "Planned", file_ownership=entries)
-        with self.assertRaisesRegex(ValueError, "only a plan run"):
-            self.tools("implement").report("done", "Built", file_ownership=[{"path": "src/a.py", "mode": "write"}])
-        self.assertEqual(self.db.reports(KEY), [])
+    def test_a_plan_report_takes_no_file_ownership_and_keeps_no_proposal(self):
+        with self.assertRaises(TypeError):
+            self.tools("plan").report("done", "Planned", file_ownership=[{"path": "src/widget.py", "mode": "write"}])
+        self.tools("plan").report("done", "Planned")
+        self.assertEqual([r.summary for r in self.db.reports(KEY)], ["Planned"])
         self.assertNotIn("scope_proposal", self.db.resume(KEY) or {})
 
 

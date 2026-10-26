@@ -6,7 +6,6 @@ from typing import Literal
 from mcp.server.mcpserver import MCPServer
 from pydantic import BaseModel, ConfigDict, Field, StrictStr, field_validator
 
-import ownership
 from guard_binding import Binding
 from policy import SEVERITIES
 from store import Store
@@ -29,12 +28,6 @@ class Finding(BaseModel):
         return value
 
 
-class ScopeEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-    path: str = Field(min_length=1)
-    mode: Literal["write", "read"]
-
-
 class ReportInput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     outcome: Literal["done", "failed", "blocked"]
@@ -44,7 +37,6 @@ class ReportInput(BaseModel):
     failed: int | None = None
     skipped: int | None = None
     xfailed: int | None = None
-    file_ownership: list[ScopeEntry] | None = None
 
 
 class AskInput(BaseModel):
@@ -60,33 +52,19 @@ class EngineTools:
 
     def report(self, outcome: Literal["done", "failed", "blocked"], summary: str,
                findings: list[Finding] | None = None, passed: int | None = None, failed: int | None = None,
-               skipped: int | None = None, xfailed: int | None = None,
-               file_ownership: list[ScopeEntry] | None = None) -> dict:
+               skipped: int | None = None, xfailed: int | None = None) -> dict:
         """Record this run's result. Call before stopping, including when blocked or failed.
 
         passed, failed, skipped and xfailed are the final suite run's counts. Omit a count when it is unknown.
-        A plan run proposes the implementation's file ownership as file_ownership: repository-relative paths, each
-        write or read, never `.`. The trio approves it before the engine writes it to the issue.
         """
         data = ReportInput.model_validate({
             "outcome": outcome, "summary": summary, "findings": [] if findings is None else findings,
-            "passed": passed, "failed": failed, "skipped": skipped, "xfailed": xfailed,
-            "file_ownership": file_ownership})
+            "passed": passed, "failed": failed, "skipped": skipped, "xfailed": xfailed})
         b = self.binding
-        scopes = None
-        if data.file_ownership is not None:
-            if b.stage != "plan":
-                raise ValueError("only a plan run proposes file ownership")
-            scopes = ownership.proposal_scopes([entry.model_dump() for entry in data.file_ownership])
-            if scopes is None:
-                raise ValueError("file_ownership is malformed: repository-relative paths, each write or read, never `.`")
         report_id = self.store.add_report(
             b.issue_key, b.stage, b.attempt, b.session_id, data.outcome, data.summary,
             [f.model_dump(exclude_none=True) for f in data.findings],
             suite={"passed": data.passed, "failed": data.failed, "skipped": data.skipped, "xfailed": data.xfailed})
-        if scopes is not None:
-            proposal = {"stage": b.stage, "attempt": b.attempt, "scopes": [list(scope) for scope in scopes]}
-            self.store.update_resume(b.issue_key, lambda state: state.__setitem__("scope_proposal", proposal))
         return {"report_id": report_id}
 
     def ask(self, question: str, options: list[str] | None = None, context: str = "") -> dict:

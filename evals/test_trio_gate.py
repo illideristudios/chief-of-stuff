@@ -527,9 +527,6 @@ class DefaultTest(unittest.TestCase):
             # reconcile._gate waits at a gate until its answer is approve
             "Hold": trio_gate.Decision(KEY, "plan", "gate requires Zach's approval", ("approve", "hold"),
                                        context="implement-1", gate=True),
-            # engine._settle_scopes writes nothing unapproved
-            "Not written": trio_gate.Decision(KEY, "scope", "Approve this file ownership?", ("approve", "reject"),
-                                              context="write: scripts/cache.py"),
             # engine_mcp's ask: the worker reports blocked and waits for the engine
             "The worker waits": trio_gate.Decision(KEY, "ask", "Which parser?", OPTIONS, instance="ask-2"),
         }

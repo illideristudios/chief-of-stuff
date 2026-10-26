@@ -477,7 +477,8 @@ class EngineTest(unittest.TestCase):
     def test_refused_verification_keeps_stage_and_is_planned_again_next_pass(self):
         self.assert_unconfirmed_merge_keeps_review_stage(ForgeError("head changed"), "merge refused: head changed")
 
-    def test_declared_file_scopes_conflict_before_dispatch(self):
+    def test_two_items_touching_the_same_files_both_dispatch(self):
+        # #1039 (C29): overlapping edits surface as merge conflicts at review, never as an ownership wait.
         self.db.upsert_item(KEY, stage="implement", forge_state="open")
         self.db.upsert_item(OTHER, stage="implement", forge_state="open")
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
@@ -489,9 +490,8 @@ class EngineTest(unittest.TestCase):
         self.db.set_resume(OTHER, {"runs": {"implement-1": {
             "pid": 123, "session_id": "fake-session", "identity": "fake-start",
             "run_dir": str(run_dir), "tree": str(self.trees / "fake")}}})
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, f"file ownership conflict with {OTHER}")])
-        self.assertEqual(self.launched, [])
-        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [("src/a.py", "write")])
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual([row[0] for row in self.launched], [KEY])
 
     def test_launch_worktree_rows_do_not_conflict_two_fresh_issues(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
@@ -506,33 +506,21 @@ class EngineTest(unittest.TestCase):
                                           trees=self.trees, now=self.now)
         self.assertEqual(set(facts.read_only), {KEY, OTHER})
 
-    def test_undeclared_issues_wait_without_owning_files_or_taking_slots(self):
-        for body in ("", "## File ownership\n- typo: `src/`"):
-            with self.subTest(body=body):
-                self.forge.rows[0]["body"] = body
-                self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
-                self.assertEqual(self.db.ownership(KEY), [])
-                self.assertEqual(self.db.segments(KEY), [])
-        self.assertEqual(self.launched, [])
-        self.assertIn("wait: needs file ownership", [row.message for row in self.db.log(KEY)])
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
-        self.assertEqual(self.run_pass(max_concurrency=1), [reconcile.Wait(KEY, "needs file ownership"),
-                                                          reconcile.Dispatch(OTHER, "implement", "builder", 1)])
-        self.assertEqual([row[0] for row in self.launched], [OTHER])
-
-    def test_adding_a_valid_scope_releases_the_wait_on_the_next_pass(self):
+    def test_undeclared_issues_dispatch_without_owning_files(self):
+        # #1039 (C29): an issue with no File ownership section is never held for one.
         self.forge.rows[0]["body"] = ""
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
+                                "body": "## File ownership\n- typo: `src/`"})
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
+                                          reconcile.Dispatch(OTHER, "implement", "builder", 1)])
+        for key in (KEY, OTHER):
+            self.assertEqual([r for r in self.db.ownership(key) if r.mode != "tree"], [])
+        self.assertFalse(any("file ownership" in row.message for key in (KEY, OTHER) for row in self.db.log(key)))
 
-    def test_removing_scope_after_implementation_holds_the_review_launch(self):
+    def test_removing_scope_after_implementation_does_not_hold_the_review_launch(self):
         self.run_pass()
         self.finish("implement")
         self.forge.rows[0]["body"] = ""
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
-        self.assertEqual([row[1] for row in self.launched], ["implement"])
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
         self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
 
     def test_scope_edits_wait_for_the_open_segment_and_keep_worktree_registrations(self):
@@ -545,30 +533,8 @@ class EngineTest(unittest.TestCase):
             self.run_pass()
             self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("src/a.py", "write")})
         self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
-        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree")})
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `docs/`"
         self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
-        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("docs", "read")})
-
-    def test_removed_or_malformed_scope_keeps_a_live_write_lock_until_collection_ends_it(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
-        self.run_pass()
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
-                                "body": "## File ownership\n- write: `src/a.py`"})
-        for body in ("", "## File ownership\n- typo: src/", "## File ownership\n- read-only: docs/"):
-            with self.subTest(body=body):
-                self.forge.rows[0]["body"] = body
-                self.assertEqual(self.run_pass(), [reconcile.Wait(OTHER, f"file ownership conflict with {KEY}")])
-                self.assertIsNone(self.db.segments(KEY)[0].ended_at)
-                self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [("src", "write")])
-        self.forge.rows[0]["body"] = ""
-        self.publish_exit()
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 1, 0), False, NOW)):
-            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership"),
-                                              reconcile.Dispatch(OTHER, "implement", "builder", 1)])
-        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
-        self.assertEqual(self.db.ownership(KEY), [])
+        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree")})
 
     def test_unreadable_declaration_cannot_erase_read_only_completion_evidence(self):
         self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
@@ -588,13 +554,13 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.ownership(KEY), [])
         self.assertEqual(len(self.launched), 1)
 
-    def test_root_layout_keeps_declared_file_scopes(self):
+    def test_root_layout_dispatches_overlapping_declared_scopes_together(self):
         self.trees = self.root
         self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
                                 "body": "## File ownership\n- write: `src/a.py`"})
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
-                                          reconcile.Wait(OTHER, f"file ownership conflict with {KEY}")])
+                                          reconcile.Dispatch(OTHER, "implement", "builder", 1)])
 
     def test_a_closed_issue_still_releases_its_gone_worker_slot(self):
         self.run_pass()
@@ -931,12 +897,12 @@ class EngineTest(unittest.TestCase):
         self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
         self.cleanup.assert_called()
 
-    def test_a_new_issue_with_an_unreadable_body_waits_without_inventing_scope(self):
+    def test_a_new_issue_with_an_unreadable_body_dispatches_without_inventing_scope(self):
         self.forge.rows[0]["body"] = None
         with mock.patch.object(self.forge, "issue", side_effect=ForgeError("offline")):
-            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "needs file ownership")])
-        self.assertEqual(self.db.ownership(KEY), [])
-        self.assertEqual(self.launched, [])
+            self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual([r for r in self.db.ownership(KEY) if r.mode != "tree"], [])
+        self.assertEqual(len(self.launched), 1)
         self.assertIn("ownership read failed: offline", self.db.log(KEY)[0].message)
 
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
@@ -2038,90 +2004,34 @@ class EngineTest(unittest.TestCase):
         self.db.sync_from_forge(self.forge.snapshots())
         self.db.record_segment(KEY, "plan", 1, started_at=NOW.isoformat(), ended_at=NOW.isoformat(), outcome="done")
 
-    def test_a_planned_issue_with_no_file_ownership_replans_to_propose_it(self):
+    def test_a_planned_issue_with_no_file_ownership_dispatches_implement(self):
+        # #1039 (C29): a plan result without file_ownership goes on to implement; it is never re-planned for scope.
         self.planned_without_scope()
         self.run_pass()
-        self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched], [(KEY, "plan", 2)])
+        self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched], [(KEY, "implement", 1)])
 
-    def test_a_replan_that_failed_at_launch_does_not_spend_one(self):
-        self.planned_without_scope()
-        for attempt in range(2, 2 + reconcile.SCOPE_REPLANS):  # refused starts: recorded at one instant, failed
-            self.db.record_segment(KEY, "plan", attempt, started_at=NOW.isoformat(), ended_at=NOW.isoformat(),
-                                   outcome="failed")
-        self.run_pass()
-        self.assertEqual([(key, stage, attempt) for key, stage, attempt, *_ in self.launched],
-                         [(KEY, "plan", 2 + reconcile.SCOPE_REPLANS)])
-
-    def test_an_issue_with_no_finished_plan_is_held_after_its_replans_fail(self):
-        # Architect review of #960: with no done plan, every launched plan run counts, so failures cannot loop.
-        later = (NOW + timedelta(minutes=1)).isoformat()
-        history = [SimpleNamespace(stage="plan", attempt=n, outcome="failed", started_at=NOW.isoformat(), ended_at=later)
-                   for n in range(1, 1 + reconcile.SCOPE_REPLANS)]
-        wait = reconcile.Wait(KEY, "needs file ownership")
-        got = reconcile._replan_for_scope(wait, SimpleNamespace(issue_key=KEY), history, reconcile.Facts(),
-                                          SimpleNamespace(stages={"plan": SimpleNamespace(persona="builder")}), ())
-        self.assertIs(got, wait)
-
-    def test_a_pending_scope_proposal_or_spent_replans_wait_instead(self):
-        self.planned_without_scope()
-        self.db.update_resume(KEY, lambda data: data.__setitem__("scope_proposal", {"stage": "plan", "attempt": 1,
-                                                                                    "scopes": []}))
-        self.run_pass()
-        self.db.update_resume(KEY, lambda data: data.pop("scope_proposal"))
-        for attempt in range(2, 2 + reconcile.SCOPE_REPLANS):  # re-plans already launched after the first done plan
-            self.db.record_segment(KEY, "plan", attempt, started_at=NOW.isoformat(),
-                                   ended_at=(NOW + timedelta(minutes=1)).isoformat(), outcome="done")
-        self.run_pass()
-        self.assertEqual(self.launched, [])
-        self.assertTrue(any(e.message == "wait: needs file ownership" for e in self.db.log(KEY)))
-
-    def proposal(self, scopes=(("src/a.py", "write"), ("docs/design.md", "read"))):
+    def test_a_stored_scope_proposal_raises_no_scope_decision_and_writes_nothing(self):
+        # #1039 (C29): resume data written before the removal stays readable and is never consulted on.
+        self._trio()
         self.forge.rows[0]["body"] = "Fix the widget."
         self.db.sync_from_forge(self.forge.snapshots())
-        self.db.update_resume(KEY, lambda data: data.__setitem__(
-            "scope_proposal", {"stage": "plan", "attempt": 1, "scopes": [list(s) for s in scopes]}))
-
-    def test_an_approved_scope_proposal_is_written_to_the_issue_and_the_store(self):
-        self._trio()
-        self.proposal()
+        proposal = {"stage": "plan", "attempt": 1, "scopes": [["src/a.py", "write"]]}
+        self.db.update_resume(KEY, lambda data: data.__setitem__("scope_proposal", proposal))
         with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
             self.run_pass(model=self._votes([("adopt", "approve")] * 3))
-        (number, body, commit), = self.forge.bodies
-        self.assertEqual((number, commit), (1, True))
-        self.assertIn("## File ownership\n- write: `src/a.py`\n- read: `docs/design.md`", body)
-        self.assertTrue(body.startswith("Fix the widget."))
-        self.assertEqual(sorted((r.path, r.mode) for r in self.db.ownership(KEY) if r.mode != "tree"),
-                         [("docs/design.md", "read"), ("src/a.py", "write")])
-        self.assertNotIn("scope_proposal", self.db.resume(KEY))
-
-    def test_a_rejected_scope_proposal_is_never_written(self):
-        self._trio()
-        self.proposal()
-        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
-            self.run_pass(model=self._votes([("adopt", "reject")] * 3))
         self.assertFalse(getattr(self.forge, "bodies", []))
-        self.assertNotIn("scope_proposal", self.db.resume(KEY))
-        self.assertTrue(any("file ownership proposal rejected" in e.message for e in self.db.log(KEY)))
-
-    def test_a_split_on_a_scope_proposal_goes_to_the_owner_and_writes_nothing(self):
-        self._trio()
-        self.proposal()
-        with mock.patch.object(self.forge, "snapshot", lambda issue_key, **_: {**self.forge.rows[0], "stage_mark": None}):
-            self.run_pass(model=self._votes([("adopt", "approve"), ("concern", "reject"), ("adopt", "approve")]))
-        self.assertFalse(getattr(self.forge, "bodies", []))
-        waits = decision_escalation.owner_waits(self.db.decisions(KEY), self.db.segments(KEY), self.db.asks(KEY))
-        self.assertEqual([w.decision_id[0] for w in waits], ["scope"])  # a real decision for the owner
-        self.assertIn("scope_proposal", self.db.resume(KEY))  # kept until the owner answers
+        self.assertEqual([r.topic for r in self.db.decisions(KEY) if r.topic == "scope"], [])
+        self.assertEqual(self.db.resume(KEY)["scope_proposal"], proposal)
 
     def test_trio_consults_stop_starting_once_the_pass_budget_is_spent(self):
         # #927: consults run inside the pass, so a slow trio must not hold the pass (and worker collection) for long.
         self._trio()
         other = KEY.rpartition("#")[0] + "#2"
         self.forge.rows.append({**self.forge.rows[0], "issue_key": other})
-        self.proposal()
-        self.db.update_resume(other, lambda data: data.__setitem__(
-            "scope_proposal", {"stage": "plan", "attempt": 1, "scopes": [["src/b.py", "write"]]}))
-        votes = self._votes([("adopt", "approve")] * 6)
+        for key in (KEY, other):
+            self.db.upsert_item(key, title="Parser", stage="implement")
+            self.db.add_ask(key, "implement", 1, "session", "Which parser?", ["Split the parser", "Keep the parser"], "")
+        votes = self._votes([("adopt", "Split the parser")] * 6)
 
         def slow(request):
             self.now += timedelta(seconds=engine.TRIO_PASS_BUDGET_S)  # each vote uses up the whole budget

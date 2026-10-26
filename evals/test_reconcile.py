@@ -1002,10 +1002,10 @@ class ReconcileTest(unittest.TestCase):
         self.assertEqual(self.plan(history=[replace(open_seg, started_at=NOW - timedelta(hours=2))], facts=stalled),
                          [reconcile.Wait(KEY, "stalled")])
         claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(other, "src/a.py"))
-        conflict = reconcile.Facts(claims=claims, blockers=(), alive=(((other, "implement", 1), True),))
+        overlap = reconcile.Facts(claims=claims, blockers=(), alive=(((other, "implement", 1), True),))
         actions = reconcile.plan([Item(), replace(Item(), issue_key=other)],
-                                 {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=conflict)
-        self.assertEqual(actions, [reconcile.Wait(KEY, f"file ownership conflict with {other}")])
+                                 {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=overlap)
+        self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 1)])  # #1039: no ownership wait
 
     def test_released_read_only_hold_is_not_reinstated_from_a_retained_tree(self):
         facts = reconcile.Facts(claims=(readiness.Claim(KEY, ".", "read"),), read_only=(KEY,), changed=((KEY, True),), blockers=())
