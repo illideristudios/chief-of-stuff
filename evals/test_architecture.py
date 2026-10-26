@@ -235,6 +235,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0005_segment_human_review",
         "migrations/versions/0006_log_operation",
         "migrations/versions/0007_engine_log",
+        "migrations/versions/0008_withdraw_scope_decisions",
     }),
     "drivers": frozenset({
         "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
