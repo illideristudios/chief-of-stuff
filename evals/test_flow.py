@@ -41,6 +41,7 @@ max_concurrency = 2
 
 
 def make_workspace(root: Path, tracker_text: str, toml_text: str = SAMPLE_TOML) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
     (root / "CLAUDE.md").write_text(SAMPLE_CLAUDE_MD)
     (root / "chief-of-stuff.toml").write_text(toml_text)
     (root / "daily").mkdir(parents=True, exist_ok=True)
@@ -51,6 +52,10 @@ def make_workspace(root: Path, tracker_text: str, toml_text: str = SAMPLE_TOML) 
 
 class FlowEngineTests(unittest.TestCase):
     def setUp(self):
+        env = mock.patch.dict(os.environ)
+        env.start()
+        self.addCleanup(env.stop)
+        os.environ.pop("CHIEF_OF_STUFF_WORKSPACE", None)
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -528,6 +533,21 @@ class FlowEngineTests(unittest.TestCase):
         empty_dir.mkdir()
         code = flow.main(["--root", str(empty_dir)])
         self.assertEqual(code, 0)
+
+    def test_not_a_workspace_ignores_an_inherited_workspace_variable(self):
+        # A worker inherits CHIEF_OF_STUFF_WORKSPACE; the bad TOML makes a leaked tick fail loudly.
+        bad = make_workspace(self.root / "inherited", "## Tasks\n", toml_text="[workers\n")
+        inner = FlowEngineTests("test_main_exits_zero_cleanly_when_not_a_workspace")
+        result = unittest.TestResult()
+        with mock.patch.dict(os.environ, {"CHIEF_OF_STUFF_WORKSPACE": str(bad)}), \
+             mock.patch.object(flow, "tick", wraps=flow.tick) as tick, \
+             mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            unittest.TestSuite([inner]).run(result)
+            self.assertEqual(os.environ["CHIEF_OF_STUFF_WORKSPACE"], str(bad))
+        self.assertIsNone(os.environ.get("CHIEF_OF_STUFF_WORKSPACE"))
+        self.assertTrue(result.wasSuccessful(), (result.failures, result.errors, err.getvalue()))
+        self.assertEqual(err.getvalue(), "")
+        tick.assert_not_called()
 
     def test_main_exits_zero_cleanly_when_claude_md_has_no_coordinator_block(self):
         plain = self.root / "plain"
