@@ -105,14 +105,34 @@ class Render(unittest.TestCase):
         with self.assertRaises(ValueError):
             gantt.render([row(seg(-1, 0, kind='x" onclick="y'))], DAY)
 
-    def test_a_bar_is_focusable_and_carries_its_detail(self) -> None:
+    def test_a_bar_is_not_focusable_and_keeps_its_accessible_detail(self) -> None:
         html = gantt.render([row(seg(0, 1.5, "fix", "forecast", "worker-04"))], DAY)
         bar = re.search(r'<span class="gantt-bar gantt-forecast"[^>]*>', html).group(0)
-        self.assertIn('tabindex="0"', bar)
+        self.assertNotIn('tabindex', bar)
+        self.assertIn('role="img"', bar)
         self.assertIn('data-cat="fix"', bar)
         label = re.search(r'aria-label="([^"]*)"', bar).group(1)
         self.assertEqual(label, "fix 02:10–03:40 · worker-04 · forecast")
         self.assertIn(f'title="{label}"', bar)
+
+    def test_more_attempts_do_not_add_tab_stops_or_hide_bar_details(self) -> None:
+        kinds = ("done", "running", "forecast", "hold")
+        for count in (1, 201, 413):
+            with self.subTest(attempts=count):
+                segments = tuple(seg(0, 1, kind=kinds[i % len(kinds)], title=f"worker-{i}") for i in range(count))
+                linked_row = gantt.Row("#98", "Locale fallback", "needs input", segments, href="/issues/98")
+                html = gantt.render([linked_row], DAY)
+                rendered = re.findall(r'<span class="gantt-bar[^>]*>', html)
+                self.assertEqual(len(rendered), count)
+                self.assertIsNone(re.search(r'\btabindex\s*=', html))
+                self.assertEqual(re.findall(r'<a [^>]*>', html), ['<a href="/issues/98" class="gantt-ref">'])
+                for i, bar in enumerate(rendered):
+                    self.assertIn('role="img"', bar)
+                    self.assertNotIn('aria-hidden', bar)
+                    kind = "needs input" if kinds[i % len(kinds)] == "hold" else kinds[i % len(kinds)]
+                    label = f"implement 02:10–03:10 · worker-{i} · {kind}"
+                    self.assertIn(f'aria-label="{label}"', bar)
+                    self.assertIn(f'title="{label}"', bar)
 
     def test_a_hold_bar_uses_needs_input_in_its_accessible_label(self):
         html = gantt.render([row(seg(0, 1, kind="hold"))], DAY)
@@ -240,6 +260,7 @@ class Palette(unittest.TestCase):
 
     def test_the_legend_lists_categories_then_kinds(self) -> None:
         html = gantt.legend({"alpha": "#123456", "beta": "#654321"})
+        self.assertNotIn("tabindex", html)
         self.assertEqual(re.findall(r"</span>([^<]+)</span>", html), ["alpha", "beta", "forecast", "needs input"])
         self.assertIn('data-cat="alpha"', html)
         self.assertIn('class="gantt-bar gantt-hold"', html)

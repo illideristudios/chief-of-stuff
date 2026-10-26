@@ -97,7 +97,7 @@ def _bar(g: Segment, win: Window) -> str:
         return at.strftime("%a %H:%M" if win.end - win.start > DAY or at.date() != win.now.date() else "%H:%M")
 
     label = _esc(" · ".join(p for p in (f"{g.category} {clock(g.start)}–{clock(g.end)}", g.title, "needs input" if g.kind == "hold" else g.kind) if p))
-    return (f'<span class="gantt-bar gantt-{_kind(g.kind)}" data-cat="{_esc(g.category)}" tabindex="0" role="img" '
+    return (f'<span class="gantt-bar gantt-{_kind(g.kind)}" data-cat="{_esc(g.category)}" role="img" '
             f'aria-label="{label}" title="{label}" style="{place(g.start, g.end, win.start, win.end)}"></span>')
 
 
@@ -153,7 +153,6 @@ BASE_CSS = """\
 .gantt-track{position:relative;flex-grow:1;height:14px;border-left:1px solid var(--gantt-edge)}
 .gantt-note{width:var(--gantt-note);flex:none;padding-left:10px;box-sizing:border-box;font-size:11px;color:var(--gantt-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gantt-bar{--c:var(--gantt-muted);--e:var(--c);position:absolute;top:0;height:14px;border-radius:2px;box-sizing:border-box}
-.gantt-bar:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
 .gantt-bar.gantt-done{background:var(--c);box-shadow:inset 0 0 0 1px var(--e)}
 .gantt-bar.gantt-forecast{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--c) 40%,transparent) 0 3px,transparent 3px 6px);box-shadow:inset 0 0 0 1px var(--c)}
 .gantt-bar.gantt-hold{background:repeating-linear-gradient(135deg,var(--gantt-hold) 0 2px,var(--gantt-bg) 2px 5px);box-shadow:inset 0 0 0 1px var(--gantt-hold)}
