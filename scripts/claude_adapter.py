@@ -191,7 +191,10 @@ def call(request: Request, *, claude_as_profile: str = "", extra_args: tuple[str
         return Failure("error", f"session_id {request.session_id!r} must be a UUID to start a session")
     source = os.environ if env is None else env
     environment = model_env(source)
-    _pin_config_dir(environment, claude_as_profile)
+    try:
+        _pin_config_dir(environment, claude_as_profile)
+    except ValueError as exc:
+        return Failure("error", str(exc))
     try:
         prepared = command(request, claude_as_profile, extra_args=extra_args,
                            path_prefix=source.get("CHIEF_OF_STUFF_PATH_PREFIX", ""))
