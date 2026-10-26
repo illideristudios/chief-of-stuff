@@ -1650,7 +1650,7 @@ class TaskStateCarriesAShaTest(unittest.TestCase):
         """Confirmed against the rendered artifact, not the call graph: chief-of-stuff-improvements
         read the code and said the sha would show; it also said its own read was a hypothesis."""
         text = ("# T\n\n## Tasks\n\n" + LANED_HEAD
-                + f"| A oldest | A oldest | worker | done 09:00–10:00 {self.SHA} | 2026-09-15 |  | M | build | merge |  | c |\n")
+                + f"| A oldest | A oldest | worker | done 09:00–10:00 {self.SHA} | 2026-09-15 |  | M | build | main |  | c |\n")  # done draws only at main (#1153)
         cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
         html = rb.render(text, cfg, NOW)
         self.assertIn(self.SHA, html)
