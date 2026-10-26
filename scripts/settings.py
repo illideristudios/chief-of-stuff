@@ -538,7 +538,8 @@ def _policy_overlay(table, root: Path) -> str:
     path = table.get("overlay", "")
     if not isinstance(path, str) or not path.strip() or "\0" in path:
         raise SettingsError('[policy] overlay: a policy TOML path, relative to the workspace root')
-    if not (Path(root) / path).resolve().is_relative_to(Path(root).resolve()):
+    # An absolute path discards `root` when joined, so one that happens to sit inside the root is still not relative.
+    if Path(path).is_absolute() or not (Path(root) / path).resolve().is_relative_to(Path(root).resolve()):
         raise SettingsError(f"[policy] overlay: {path!r} is outside the workspace root")
     return path
 
@@ -610,11 +611,13 @@ def load_policy(path: Path = POLICY) -> policy.Policies:
 
 def workspace_policy_data(root: Path, overlay: str = "") -> dict:
     """The shipped policy's tables with the workspace's `[policy] overlay` merged over them (#827). A named overlay
-    that is not a file is refused, never a silent fallback to the shipped policy."""
+    that is missing, absolute, or resolves outside the workspace is refused, never a silent fallback."""
     data = _policy_toml(POLICY, str(POLICY))
     if not overlay:
         return data
     path = Path(root) / overlay
+    if Path(overlay).is_absolute() or not path.resolve().is_relative_to(Path(root).resolve()):
+        raise policy.PolicyError(f"[policy] overlay {overlay}: outside the workspace root")
     if not path.is_file():
         raise policy.PolicyError(f"[policy] overlay {overlay}: no such file")
     return policy.overlay(data, _policy_toml(path, overlay), f"[policy] overlay {overlay}")

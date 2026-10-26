@@ -173,13 +173,16 @@ The board and `notify.py sync` also read precise deadlines from tracker `## Deci
 
 ## Workspace policy
 
-The engine runs the shipped policy, `assets/policy.toml`, unless the workspace names an overlay: set `[policy] overlay = "policy.toml"` in the workspace TOML, with the path relative to the workspace root. The overlay's keys are merged over the shipped policy. A table merges key by key, and a field is replaced whole. For example, `[stages.review.policy] architect = false` stops architect requests in that workspace only. An overlay changes keys of tables the shipped policy has: a persona, stage, room or workflow it does not have is refused by name, and so is an unknown key. A named overlay that is missing is refused at startup; the engine never falls back to the shipped policy. The engine, `init` and the board load the same merged policy, and the engine logs `engine: policy changed: <fingerprint>` when the merged policy differs from the one the workspace last ran.
+The engine runs the shipped policy, `assets/policy.toml`, unless the workspace names an overlay: set `[policy] overlay = "policy.toml"` in the workspace TOML, with the path relative to the workspace root. An absolute path, or one that resolves outside the workspace, is refused. The overlay's keys are merged over the shipped policy. A table merges key by key, and a field is replaced whole. For example, `[stages.review.policy] architect = false` stops architect requests in that workspace only. An overlay changes keys of tables the shipped policy has: a persona, stage, room or workflow it does not have is refused by name, and so is an unknown key. A named overlay that is missing is refused at startup; the engine never falls back to the shipped policy. The engine, `init` and the board load the same merged policy, and the engine logs `engine: policy changed: <fingerprint>` when the merged policy differs from the one the workspace last ran.
 
 ```
-O := the workspace names an overlay      F := the overlay file exists      K := every key and table it names is known
+O := the workspace names an overlay
+R := the path is relative and resolves inside the workspace
+F := the overlay file exists      K := every key and table it names is known
 P := the merged policy runs
 
-O ∧ F ∧ K → P              [#827: keys merged over the shipped policy]
+O ∧ R ∧ F ∧ K → P          [#827: keys merged over the shipped policy]
+O ∧ ¬R → ¬P                [absolute or outside the workspace is refused]
 O ∧ ¬F → ¬P                [a refusal, never a silent fallback]
 O ∧ ¬K → ¬P                [refused by name]
 ¬O → the shipped policy runs
