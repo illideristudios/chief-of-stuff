@@ -385,6 +385,34 @@ class MigrationTest(unittest.TestCase):
             self.addCleanup(db.engine.dispose)
             self.assertEqual([s.required_human_review for s in db.segments(KEY)], [True, False])
 
+    def test_a_scope_decision_left_open_reads_as_answered_after_the_migration(self) -> None:
+        # #1039 (C29): nothing closes a scope decision any more, so the migration withdraws the open ones.
+        import decision_actions
+        import decision_escalation
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "store.db"
+            command.upgrade(store._config(path), "0007")  # the revision before 0008_withdraw_scope_decisions
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            db.upsert_item(KEY)
+            split = {"decision": {"options": ["approve", "reject"], "stage": "plan", "attempt": 1}, "default": "Not written"}
+            db.add_decision(KEY, "scope", "Approve this file ownership? A", None, "zach", split)
+            db.add_decision(KEY, "scope", "Approve this file ownership? B", None, "zach", {**split, "status": "blocked"})
+            db.add_decision(KEY, "scope", "Approve this file ownership? C", None, "zach", split)
+            db.add_decision(KEY, "scope", "Approve this file ownership? C", "approve", "user", split)
+            db.add_decision(KEY, "ask", "Which parser?", None, "zach", split)
+            before = [(r.id, r.answer, r.record) for r in db.decisions(KEY)]
+            store.migrate(path)
+            rows = db.decisions(KEY)
+            self.assertEqual([(r.id, r.answer, r.record) for r in rows[:len(before)]], before)  # history is untouched
+            got = {(s.gate, s.prompt[-1]): (s.status, s.answer) for s in decision_actions.states(rows)}
+            withdrawn = "withdrawn: §8 has no scope decisions (#1039)"
+            self.assertEqual(got, {("scope", "A"): ("answered", withdrawn), ("scope", "B"): ("answered", withdrawn),
+                                   ("scope", "C"): ("answered", "approve"), ("ask", "?"): ("open", "")})
+            self.assertEqual([w.decision_id[0] for w in decision_escalation.owner_waits(rows, (), ())], ["ask"])
+            store.migrate(path)
+            self.assertEqual(len(db.decisions(KEY)), len(rows))  # a second run appends nothing
+
     def test_migrating_twice_is_a_no_op_and_records_the_revision(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "store.db"
