@@ -179,18 +179,22 @@ class IssueRef:
 _REF_STORE = re.compile(r"^(github|gitlab):(.+)#(\d+)$")
 
 
-def store_label(key: str, home: Backlog | GitHubBacklog | None) -> str:
-    """`IssueRef.label` for a store key (`github:owner/repo#N`, `gitlab:host/project#N`). Anything else is unchanged."""
+def store_ref(key: str) -> IssueRef | None:
+    """A store key (`github:owner/repo#N`, `gitlab:host/project#N`), independent of the workspace backlog."""
     m = _REF_STORE.match(key)
     if not m:
-        return key
+        return None
     kind, body, number = m.group(1), m.group(2), int(m.group(3))
     if kind == "github":
-        ref = IssueRef(body, number)
-    else:
-        host, _, repo = body.partition("/")
-        ref = IssueRef(repo, number, host)
-    return ref.label(home)
+        return IssueRef(body, number)
+    host, _, repo = body.partition("/")
+    return IssueRef(repo, number, host)
+
+
+def store_label(key: str, home: Backlog | GitHubBacklog | None) -> str:
+    """`IssueRef.label` for a store key (`github:owner/repo#N`, `gitlab:host/project#N`). Anything else is unchanged."""
+    ref = store_ref(key)
+    return key if ref is None else ref.label(home)
 
 
 WORKFLOW = "workflow"  # an `issue` cell naming a step the pipeline performs: no issue, never looked up

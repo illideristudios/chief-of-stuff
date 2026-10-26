@@ -26,14 +26,8 @@ from tracker_log import Move
 
 def source_key(key: str, home) -> str:
     """Translate an engine identity to the cache's repository-relative key without dropping its namespace."""
-    namespace, sep, number = key.rpartition("#")
-    if sep and number.isdecimal():
-        if namespace.startswith("github:"):
-            return issue_key(f"https://github.com/{namespace[len("github:"):]}/issues/{number}", home)
-        if namespace.startswith("gitlab:"):
-            host, _, project = namespace[len("gitlab:"):].partition("/")
-            return issue_key(f"https://{host}/{project}/-/issues/{number}", home)
-    return issue_key(key, home)
+    ref = tracker.store_ref(key)
+    return issue_key(key, home) if ref is None else ref.label(home)
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],

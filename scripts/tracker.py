@@ -11,7 +11,7 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from backlog_ref import WORKFLOW, Backlog, GitHubBacklog, IssueRef, issue_ref
+from backlog_ref import WORKFLOW, Backlog, GitHubBacklog, IssueRef, issue_ref, store_ref
 from clock import DATE, HHMM, RAN, hhmm as _hhmm
 from md import cells as _cells, is_separator as _is_separator, section as _section, split_row as _split_row, unmark as _unmark
 from workspace import Config
