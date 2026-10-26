@@ -34,7 +34,6 @@ from settings import Kanban
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
 OTHER = "github:example/project#2"
-SCOPE = "## File ownership\n- write: `.`"
 
 
 def review_report(db, key, attempt=1, counts=None):
@@ -48,10 +47,6 @@ def review_report(db, key, attempt=1, counts=None):
     db.add_report(key, "review", attempt, session, "done", "reviewed",
                   [{"severity": severity, "title": "finding", "evidence": "seen"}
                    for severity, n in (counts or {}).items() for _ in range(n)])
-
-
-def owned_issue(*args, **kwargs):
-    return {**tf.gh_issue(*args, **kwargs), "body": SCOPE}
 
 
 def policies():
@@ -82,7 +77,7 @@ class FakeForge:
 
     def snapshot(self, issue_key, *, issue=None, request=None):
         row = next(r for r in self.rows if r["issue_key"] == issue_key)
-        return {"body": SCOPE, **dict(row), "stage_mark": None}
+        return {**dict(row), "stage_mark": None}
 
     def mark(self, number):
         return f"#{number}"
@@ -99,18 +94,13 @@ class FakeForge:
         self.rows[0]["human_review"] = True
         return ""
 
-    def set_body(self, number, body, commit=False):
-        self.bodies = [*getattr(self, "bodies", []), (number, body, commit)]
-        next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))["body"] = body
-        return ""
-
     def closing_request(self, issue_key):
         return SimpleNamespace(number=10, verdict="ready", approval="", head=tf.tma.HEAD)
 
     def issue(self, number):
         row = next(row for row in self.rows if row["issue_key"].endswith(f"#{number}"))
         return SimpleNamespace(ok=True, issue=SimpleNamespace(is_open=row["forge_state"] == "open", labels=[],
-                               body=row.get("body", SCOPE)))
+                               body=row.get("body", "")))
 
     def merge(self, number, commit=False, issue_key=None, approval=None, head=None, stage_mark=None):
         self.merges.append((number, commit, issue_key))
@@ -187,7 +177,7 @@ class EngineTest(unittest.TestCase):
 
     def released_implementation(self, *, request=True, held=False, shared=False):
         pr = {**tf.tma.pr(10, [], draft=True), "headRefName": "work/issue-1"}
-        gh = tf.FakeGh(issues=[owned_issue(1, "Released work", ["stage: doing"] + (["needs human"] if held else []))],
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Released work", ["stage: doing"] + (["needs human"] if held else []))],
                        prs=[pr] if request else [], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 1 if shared else 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -234,9 +224,9 @@ class EngineTest(unittest.TestCase):
 
     def test_request_read_failure_waits_and_does_not_hold_an_unaffected_sibling(self):
         self.released_implementation()
-        snapshot = {**self.forge.snapshots()[0], "body": "## File ownership\n- write: `src/`"}
+        snapshot = self.forge.snapshots()[0]
         sibling = {"issue_key": OTHER, "stage": "implement", "forge_state": "open", "human_review": False,
-                   "body": "## File ownership\n- write: `docs/`", "stage_mark": None}
+                   "stage_mark": None}
         with mock.patch.object(engine.forge.Forge, "snapshots", return_value=[snapshot, sibling]), \
              mock.patch.object(engine.forge.Forge, "requests", side_effect=ForgeError("partial request read")):
             self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "implementation request evidence is unknown"),
@@ -342,8 +332,7 @@ class EngineTest(unittest.TestCase):
         status = "none"
         self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status=status)
         self.forge.landings = lambda pipeline, keys, **kwargs: {KEY: (True, pipeline.status == "passed")}
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
-             mock.patch.object(engine.engine_facts, "_changed", return_value=False):
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)):
             for status in ("none", "running", "failed"):
                 with self.subTest(status=status):
                     actions = self.run_pass(max_concurrency=1)
@@ -353,7 +342,6 @@ class EngineTest(unittest.TestCase):
                     self.assertEqual(len(self.launched), 2)
                     self.assertEqual(slots.running(self.db), 1)  # Only OTHER's worker is live.
                     self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
-                    self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [(".", "write")])
                     self.assertTrue(next(item for item in self.db.items() if item.issue_key == KEY).human_review)
                     self.assertNotIn(KEY, self.cleanup.call_args.kwargs["completed"])
                     self.assertEqual(self.forge.writes, [])
@@ -482,9 +470,6 @@ class EngineTest(unittest.TestCase):
         self.db.upsert_item(KEY, stage="implement", forge_state="open")
         self.db.upsert_item(OTHER, stage="implement", forge_state="open")
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
-        self.forge.rows[1]["body"] = "## File ownership\n- write: `src/a.py`"
-        self.db.replace_file_ownership(OTHER, [("src/a.py", "write")])
         self.db.record_segment(OTHER, "implement", 1, started_at=NOW.isoformat())
         run_dir = engine.worker._run_dir(self.root, OTHER, "implement", 1)
         self.db.set_resume(OTHER, {"runs": {"implement-1": {
@@ -495,70 +480,15 @@ class EngineTest(unittest.TestCase):
 
     def test_launch_worktree_rows_do_not_conflict_two_fresh_issues(self):
         self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
-        self.forge.rows[1]["body"] = "## File ownership\n- read-only: `.`"
         self.db.upsert_item(KEY, stage="implement", forge_state="open")
         self.db.upsert_item(OTHER, stage="implement", forge_state="open")
-        self.db.set_ownership(KEY, str(self.trees / "issue-1-implement-1"))
-        self.db.set_ownership(OTHER, str(self.trees / "issue-2-implement-1"))
+        self.db.set_tree(KEY, str(self.trees / "issue-1-implement-1"))
+        self.db.set_tree(OTHER, str(self.trees / "issue-2-implement-1"))
         self.assertEqual({a.issue_key for a in self.run_pass()}, {KEY, OTHER})
-        facts = engine.engine_facts.gather(forge=self.forge, store=self.db, root=self.root,
-                                          trees=self.trees, now=self.now)
-        self.assertEqual(set(facts.read_only), {KEY, OTHER})
 
-    def test_undeclared_issues_dispatch_without_owning_files(self):
-        # #1039 (C29): an issue with no File ownership section is never held for one.
-        self.forge.rows[0]["body"] = ""
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
-                                "body": "## File ownership\n- typo: `src/`"})
-        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
-                                          reconcile.Dispatch(OTHER, "implement", "builder", 1)])
-        for key in (KEY, OTHER):
-            self.assertEqual([r for r in self.db.ownership(key) if r.mode != "tree"], [])
-        self.assertFalse(any("file ownership" in row.message for key in (KEY, OTHER) for row in self.db.log(key)))
-
-    def test_removing_scope_after_implementation_does_not_hold_the_review_launch(self):
-        self.run_pass()
-        self.finish("implement")
-        self.forge.rows[0]["body"] = ""
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
-
-    def test_scope_edits_wait_for_the_open_segment_and_keep_worktree_registrations(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/a.py`"
-        self.run_pass()
-        tree = str(self.trees / "fake")
-        self.db.set_ownership(KEY, tree, "tree")
-        for body in ("## File ownership\n- read-only: `docs/`", "scope removed"):
-            self.forge.rows[0]["body"] = body
-            self.run_pass()
-            self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree"), ("src/a.py", "write")})
-        self.finish("implement")
-        self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
-        self.assertEqual({(r.path, r.mode) for r in self.db.ownership(KEY)}, {(tree, "tree")})
-
-    def test_unreadable_declaration_cannot_erase_read_only_completion_evidence(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
-        self.run_pass()
-        self.forge.rows[0]["body"] = ""
-        self.run_pass()
-        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [(".", "read")])
-        self.forge.rows[0]["body"] = "## File ownership\n- typo: src/"
-        self.publish_exit()
-        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
-             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "current-head")):
-            self.run_pass()
-        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
-        self.assertTrue(self.db.items()[0].human_review)
-        self.assertTrue(any("read-only run left changes" in row.message for row in self.db.log(KEY)))
-        self.assertEqual(self.db.ownership(KEY), [])
-        self.assertEqual(len(self.launched), 1)
-
-    def test_root_layout_dispatches_overlapping_declared_scopes_together(self):
+    def test_root_layout_dispatches_two_items_together(self):
         self.trees = self.root
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
-                                "body": "## File ownership\n- write: `src/a.py`"})
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1),
                                           reconcile.Dispatch(OTHER, "implement", "builder", 1)])
 
@@ -595,7 +525,6 @@ class EngineTest(unittest.TestCase):
         self.forge.rows.append({**self.forge.rows[0], "issue_key": OTHER})
         for key in (KEY, OTHER):
             self.db.upsert_item(key, stage="implement")
-            self.db.replace_file_ownership(key, [(".", "write")])
             self.db.record_segment(key, "implement", 1, started_at=NOW.isoformat())
             self.launch(key, "implement", 1, "builder")
             run = Path(self.db.resume(key)["runs"]["implement-1"]["run_dir"])
@@ -636,22 +565,6 @@ class EngineTest(unittest.TestCase):
         for key in (KEY, OTHER):
             self.assertIs(self.db.resume(key)["verified_landing"], True)
 
-    def test_normal_exit_enforces_read_only_scope_before_closing(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
-        self.run_pass()
-        self.publish_exit()
-        self.forge.branch_head = lambda ref: SimpleNamespace(sha="main-sha", status="passed")
-        # HEAD changed after launch, but all commits are pushed and on main: only the read-only rule holds it.
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)), \
-             mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]), \
-             mock.patch.object(engine.engine_facts.git_trees, "git", return_value=(0, "current-head")):
-            self.run_pass()
-            self.assertTrue(self.db.items()[0].human_review)
-            self.assertTrue(any("worker implement attempt 1:" in row.message and "read-only run left changes" in row.message
-                            for row in self.db.log(KEY)))
-            self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
-            self.assertEqual(len(self.launched), 1)
-
     def test_writable_control_with_the_same_clean_on_main_tree_has_no_hold(self):
         self.run_pass()
         self.publish_exit()
@@ -672,27 +585,13 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
 
     def test_clean_detached_review_finishes_without_a_human_hold(self):
-        self.forge.rows[0].update(stage="review", body="## File ownership\n- read-only: `.`")
+        self.forge.rows[0].update(stage="review")
         self.run_pass()
         self.publish_exit(stage="review")
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("(detached)", 0, 2, 0), False, NOW)), \
-             mock.patch.object(engine.engine_facts, "_changed", return_value=False):
+        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("(detached)", 0, 2, 0), False, NOW)):
             self.run_pass()
         self.assertFalse(self.db.items()[0].human_review)
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
-
-    def test_releasing_a_read_only_completion_hold_allows_the_next_stage(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
-        self.forge.kanban = SimpleNamespace(stage_map={}, holds=lambda stage: False, hold_stages=())
-        self.forge.add_human_hold = lambda number: self.forge.rows[0].update(human_review=True)
-        self.run_pass()
-        self.publish_exit()
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)):
-            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "human review")])
-            self.forge.rows[0]["human_review"] = False
-            self.assertEqual(self.run_pass(), [reconcile.Review(KEY, 1)])
-        self.assertFalse(self.db.items()[0].human_review)
-        self.assertEqual(len(self.launched), 2)
 
     def test_terminal_worker_exit_requires_landing_from_its_workflow(self):
         self.p.workflows["standard"] = policy.Workflow("standard", "implement")
@@ -779,10 +678,10 @@ class EngineTest(unittest.TestCase):
     def test_both_completion_paths_use_the_same_missing_and_unknown_facts(self):
         self.run_pass()
         segment = self.db.segments(KEY)[0]
-        for changed, unreadable in (((), ()), (((KEY, None),), ()), (((KEY, None),), (KEY,))):
-            facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),), changed=changed, unreadable=unreadable)
+        for unreadable in ((), (KEY,)):
+            facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),), unreadable=unreadable)
             planned = reconcile._abandoned(self.db.items()[0], segment, facts, self.p.workflow_for(None))
-            with self.subTest(changed=changed, unreadable=unreadable), \
+            with self.subTest(unreadable=unreadable), \
                  mock.patch.object(engine, "_close_segment") as close:
                 engine._finish_worker(self.forge, self.db, segment,
                                       "failed", "", NOW, policies=self.p, facts=facts)
@@ -791,7 +690,6 @@ class EngineTest(unittest.TestCase):
                     self.assertEqual(close.call_args.args[6], planned.reason)
 
     def test_unreadable_failed_and_quota_runs_are_held_without_advancing(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
         self.run_pass()
         self.publish_exit("failed")
         self.run_pass()  # the fake recorded tree is missing
@@ -820,21 +718,8 @@ class EngineTest(unittest.TestCase):
                 self.assertEqual(self.db.segments(KEY)[-1].outcome, outcome)
                 self.assertIn("retry later", self.db.log(KEY)[-1].message)
 
-    def test_read_only_verdict_preserves_failure_after_a_failed_adapter_exit(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
-        self.run_pass()
-        self.publish_exit("failed")
-        with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 1, 0), False, NOW)), \
-             mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
-            self.run_pass()
-        self.assertTrue(self.db.items()[0].human_review)
-        self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
-        self.assertTrue(any("worker implement attempt 1:" in row.message and "read-only run left changes" in row.message
-                            for row in self.db.log(KEY)))
-
-    def test_root_layout_reads_a_live_tree_and_advances_a_clean_read_only_exit(self):
+    def test_root_layout_reads_a_live_tree_and_advances_a_clean_exit(self):
         self.trees = self.root
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `.`"
         self.run_pass()
         self.now += timedelta(hours=1)
         with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, self.now)), \
@@ -884,26 +769,6 @@ class EngineTest(unittest.TestCase):
         read.assert_not_called()
         self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
         self.cleanup.assert_called()
-
-    def test_a_failed_ownership_read_keeps_existing_scopes_and_collects_workers(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- read-only: `src/`"
-        self.run_pass()
-        self.publish_exit("blocked")
-        self.forge.rows[0]["body"] = None  # an older snapshot provider needs a per-issue fallback
-        with mock.patch.object(self.forge, "issue", side_effect=ForgeError("offline")), \
-             mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 0, 0, 0), True, NOW)):
-            self.run_pass()
-        self.assertEqual([(r.path, r.mode) for r in self.db.ownership(KEY)], [("src", "read")])
-        self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
-        self.cleanup.assert_called()
-
-    def test_a_new_issue_with_an_unreadable_body_dispatches_without_inventing_scope(self):
-        self.forge.rows[0]["body"] = None
-        with mock.patch.object(self.forge, "issue", side_effect=ForgeError("offline")):
-            self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
-        self.assertEqual([r for r in self.db.ownership(KEY) if r.mode != "tree"], [])
-        self.assertEqual(len(self.launched), 1)
-        self.assertIn("ownership read failed: offline", self.db.log(KEY)[0].message)
 
     def test_a_close_that_holds_for_review_writes_the_hold_to_the_forge(self):
         self.forge.kanban = SimpleNamespace(holds=lambda stage: False, stage_map={}, hold_stages=())
@@ -965,9 +830,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.items()[0].forge_state, "open")
 
     def test_one_failed_action_does_not_stop_the_next(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
-                                "body": "## File ownership\n- write: `docs/`"})
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         self.launch = mock.Mock(side_effect=[RuntimeError("spawn failed"), ("model", "low")])
         self.run_pass()
         self.assertEqual(self.launch.call_args_list[-1].args, (OTHER, "implement", 1, "builder"))
@@ -1015,9 +878,7 @@ class EngineTest(unittest.TestCase):
                 self.assertIn(field, self.db.resume(KEY))
 
     def test_free_slots_cap_dispatches_including_existing_workers(self):
-        self.forge.rows[0]["body"] = "## File ownership\n- write: `src/`"
-        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open",
-                                "body": "## File ownership\n- write: `docs/`"})
+        self.forge.rows.append({"issue_key": OTHER, "stage": "implement", "forge_state": "open"})
         self.run_pass(max_concurrency=1)
         self.assertEqual([call[0] for call in self.launched], [KEY])
         self.assertEqual(self.db.log(OTHER)[-1].message, "wait: no free worker slots")
@@ -1105,7 +966,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(self.launched), 2)
 
     def test_stage_write_human_hold_prevents_merge_after_worker_finishes(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Held review", ["stage: doing"])],
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held review", ["stage: doing"])],
                        prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
                        hold_stages=("review",))
@@ -1133,7 +994,7 @@ class EngineTest(unittest.TestCase):
         self.assert_relaunch_releases_hold("review")
 
     def assert_relaunch_releases_hold(self, stage):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Retry", ["stage: doing", "bug"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         gh.issues[1]["labels"][0]["name"] = board.label_for(stage)
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -1163,7 +1024,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["keep"], "context")
 
     def test_failed_hold_release_keeps_human_review_and_does_not_launch(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Retry", ["stage: doing", "needs human"])],
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "needs human"])],
                        fail=[("issue", "edit")])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -1182,7 +1043,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.launched, [(KEY, "implement", 2, "builder")])
 
     def test_relaunch_keeps_a_stage_required_hold(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Held retry", ["stage: doing", "needs human"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held retry", ["stage: doing", "needs human"])])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
                        hold_stages=("implement",))
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -1194,7 +1055,7 @@ class EngineTest(unittest.TestCase):
         self.assertFalse(any(c[:2] == ["issue", "edit"] for c in gh.all_calls))
 
     def test_unverified_release_is_retried_even_if_the_label_was_already_removed(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Retry", ["stage: doing", "needs human"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "needs human"])])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.sync_from_forge(self.forge.snapshots())
@@ -1346,7 +1207,7 @@ class EngineTest(unittest.TestCase):
         self.forge.request_base = lambda n: "main"
         self.forge.closing_request = lambda key: SimpleNamespace(number=10, branch="feature/work", head="head")
         self.forge.issue = lambda n: SimpleNamespace(ok=True, issue=SimpleNamespace(
-            title="Build a thing", body=SCOPE))
+            title="Build a thing", body=""))
 
         def launch(key, stage, attempt, persona):
             return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root,
@@ -1421,7 +1282,7 @@ class EngineTest(unittest.TestCase):
         self.assert_cursor_start_failure(restore_error=True)
 
     def test_launch_failure_creates_the_owned_hold_used_by_the_next_pass(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Retry", ["stage: doing", "bug"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Retry", ["stage: doing", "bug"])])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         with mock.patch.object(self, "launch", side_effect=RuntimeError("spawn failed")):
@@ -1480,7 +1341,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 3)])
 
     def test_failed_review_launch_after_implementation_moves_the_card_and_owns_the_hold(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Handoff", ["stage: doing", "bug"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Handoff", ["stage: doing", "bug"])])
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
         self.db.sync_from_forge(self.forge.snapshots())
@@ -1548,7 +1409,7 @@ class EngineTest(unittest.TestCase):
         self.assertIn("hold release failed: unrelated", [e.message for e in self.db.log(KEY)][-1])
 
     def test_merge_hold_is_written_before_merging_and_waits_for_release(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Held merge", ["stage: doing"])],
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held merge", ["stage: doing"])],
                        prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
                        hold_stages=("merge",))
@@ -1572,7 +1433,7 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("needs human", [label["name"] for label in gh.issues[1]["labels"]])
 
     def test_shared_label_preserves_implement_when_it_reads_back_as_plan(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Shared stages", ["stage: doing"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Shared stages", ["stage: doing"])])
         board = Kanban(tf.FLOW.stages, "needs human",
                        {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)
@@ -1597,7 +1458,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual([call[1] for call in self.launched], ["plan", "implement", "review"])
 
     def test_retried_merge_hold_write_cannot_merge_on_the_retry_pass(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Held merge", ["stage: doing"])],
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Held merge", ["stage: doing"])],
                        prs=[tf.tma.pr(10, [])], bodies={10: "Closes #1"})
         board = Kanban(tf.FLOW.stages, "needs human", {"implement": 1, "review": 2, "merge": 0},
                        hold_stages=("merge",))
@@ -1618,7 +1479,7 @@ class EngineTest(unittest.TestCase):
         self.assertNotIn("pending_stage", self.db.resume(KEY))
 
     def test_manual_move_to_a_different_label_overrides_the_stored_stage(self):
-        gh = tf.FakeGh(issues=[owned_issue(1, "Moved by hand", ["stage: review"])])
+        gh = tf.FakeGh(issues=[tf.gh_issue(1, "Moved by hand", ["stage: review"])])
         board = Kanban(tf.FLOW.stages, "needs human",
                        {"plan": 1, "implement": 1, "fix": 1, "review": 2, "merge": 0})
         self.forge = engine.forge.Forge(tf.backlog.GitHubBacklog("example/project"), kanban=board, gh=gh)

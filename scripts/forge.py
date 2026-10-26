@@ -968,16 +968,6 @@ class Forge:
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
 
-    def set_body(self, number: int, body: str, commit: bool = False) -> str:
-        """Replace an issue's body, as the approved file ownership section is written (#915). The error, or ""."""
-        if not commit:
-            return ""
-        if self.github:
-            _, repo = home_of(self.home)
-            code, _out, err = self.gh(["issue", "edit", str(number), "-R", repo, "--body-file", "-"], body)
-            return "" if code == 0 else f"gh: {err.strip() or f'exit {code}'}"
-        return backlog.set_description(self.home, number, body, token=self._token())
-
     def comment(self, number: int, body: str, commit: bool = False) -> str:
         """Post or preview a comment on an issue."""
         if not commit:

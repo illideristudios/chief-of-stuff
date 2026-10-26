@@ -1,7 +1,7 @@
 """The issue-keyed store: one row per forge issue, written by upsert only.
 
 The forge is the source of truth. The forge-owned columns of a `WorkItem` (title, stage, forge/review/merge state, and the
-human-review flag when kanban is configured) and declared file ownership are rebuildable; segments, decisions, tree ownership, log,
+human-review flag when kanban is configured) are rebuildable; segments, decisions, worker trees, log,
 and resume are the engine's own and are never touched by a sync. Omitted snapshot fields keep their stored values.
 The schema lives in `migrations/`, not in `create_all`: `migrate` is the one place
 it changes, and a test holds these models to what the migrations build.
@@ -125,13 +125,13 @@ class Decision(Base):
         return int(self.record.get("superseded_by", 0)) if isinstance(self.record, dict) else 0
 
 
-class Ownership(Base):
-    __tablename__ = "ownership"
+class Worktree(Base):
+    """A tree a worker was launched in: cleanup removes it only once its item is finished (#1039)."""
+    __tablename__ = "worktree"
     __table_args__ = (UniqueConstraint("issue_key", "path"),)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"))
     path: Mapped[str] = mapped_column(String)
-    mode: Mapped[str] = mapped_column(String, default="write")  # "write", "read", or engine-owned "tree"
 
 
 class LogEntry(Base):
@@ -411,31 +411,12 @@ class Store:
                     row._runner = str(run_meta["runner"])
         return rows
 
-    # ownership
-    def set_ownership(self, issue_key: str, path: str, mode: str = "write") -> None:
-        self._upsert(Ownership, ("issue_key", "path"), {"issue_key": issue_key, "path": path, "mode": mode})
+    # worker trees
+    def set_tree(self, issue_key: str, path: str) -> None:
+        self._upsert(Worktree, ("issue_key", "path"), {"issue_key": issue_key, "path": path})
 
-    def ownership(self, issue_key: str) -> list[Ownership]:
-        return self._all(select(Ownership).where(Ownership.issue_key == issue_key).order_by(Ownership.path))
-
-    def replace_file_ownership(self, issue_key: str, scopes: list[tuple[str, str]]) -> None:
-        """Replace the forge's declaration atomically once every segment for the issue has ended.
-
-        Retain engine worktree registrations. Check open segments under the same write lock as
-        the replacement, so a concurrent worker start cannot lose its launch scope.
-        Older workers registered absolute tree paths as write rows; adopt those as tree rows too.
-        Declared file paths are always repository-relative.
-        """
-        with self.session() as s:
-            if s.scalar(select(Segment.id).where(Segment.issue_key == issue_key, Segment.ended_at.is_(None)).limit(1)) is not None:
-                return
-            for row in s.scalars(select(Ownership).where(Ownership.issue_key == issue_key)).all():
-                if row.mode == "tree" or Path(row.path).is_absolute():
-                    row.mode = "tree"
-                else:
-                    s.delete(row)
-            s.flush()
-            s.add_all(Ownership(issue_key=issue_key, path=path, mode=mode) for path, mode in scopes)
+    def trees(self, issue_key: str) -> list[Worktree]:
+        return self._all(select(Worktree).where(Worktree.issue_key == issue_key).order_by(Worktree.path))
 
     # decisions and log (append-only)
     def add_decision(self, issue_key: str, topic: str, question: str, answer: str | None = None,

@@ -12,13 +12,6 @@ from typing import Sequence
 
 
 @dataclass(frozen=True)
-class Claim:
-    issue_key: str
-    path: str
-    mode: str = "write"  # "write" or "read"; a stored declaration, never a gate
-
-
-@dataclass(frozen=True)
 class Ask:
     issue_key: str
     answer: str | None = None

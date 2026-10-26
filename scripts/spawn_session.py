@@ -411,7 +411,7 @@ def main(argv_in: list[str] | None = None) -> int:
                     help="one of " + ", ".join(e for e in EFFORTS if e) + "; not supported for " + ", ".join(r.name for r in runtimes.RUNTIMES if not r.takes_effort))
     ap.add_argument("--dry-run", action="store_true", help="print the argv and start nothing")
     ap.add_argument("--check", action="store_true",
-                    help="print the assignment the task row composes, or the refusal; checks the Tasks and File ownership rows only: "
+                    help="print the assignment the task row composes, or the refusal; checks the Tasks row only: "
                          "needs no --cwd, makes no worktree, starts nothing and writes nothing; "
                          "--name checks a standing row, --one-shot a one-shot task; other launch flags are ignored")
     mode = ap.add_mutually_exclusive_group()

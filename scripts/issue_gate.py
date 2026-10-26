@@ -9,8 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-import ownership
-
 SETUP = ("Name the forge with a `Backlog:` line under `## Coordinator` in the workspace's CLAUDE.md, one of:\n"
          "- Backlog: GitHub issues; repo OWNER/NAME\n"
          "- Backlog: GitLab; host https://HOST; project GROUP/NAME; token env CHIEF_OF_STUFF_GITLAB_TOKEN\n"
@@ -29,13 +27,12 @@ class Started:
 def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None = None, commit: bool = False,
           ask_id: int | None = None, answer: str = "") -> Started:
     """`forge` is None when the workspace has no `Backlog:` line. With no `issue`, one is filed first; a supplied one must exist on
-    the forge and be open. A File ownership section is never required (#1039, C29). The row takes the forge's title and follows the issue; nothing is written unless `commit`."""
+    the forge and be open. The row takes the forge's title and follows the issue; nothing is written unless `commit`."""
     if forge is None:
         return Started(refused="no `Backlog:` line, so no issue can be filed and no work starts", setup=SETUP)
     if ask_id is not None and (issue is None or ask_id <= 0 or not answer.strip()):
         return Started(refused="answering an ask requires an existing --issue, a positive --answer-ask and a nonempty --answer")
     if issue is None:
-        declared = ownership.issue_scopes(body)
         made = forge.create_issue(title, body=body, commit=commit)
         if made.error or (made.done and not made.iid):
             return Started(refused=f"issue not filed: {made.error or 'the forge named no issue number'}")
@@ -49,8 +46,6 @@ def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None 
         if found.issue.state == "closed":
             return Started(refused=f"issue #{issue} is closed; reopen it before starting work")
         title = found.issue.title
-        body = found.issue.body
-        declared = ownership.issue_scopes(body)
         if not commit:
             return Started(preview=f"would answer ask {ask_id} on {forge.key(issue)}: {answer}" if ask_id is not None
                            else f"would start: {forge.key(issue)} {title}")
@@ -61,6 +56,4 @@ def start(forge: Any, store: Any, title: str, body: str = "", issue: int | None 
         except (KeyError, ValueError) as exc:
             return Started(refused=str(exc))
     store.upsert_item(key, title=title)
-    # The store atomically retains the launch scope while any segment is open.
-    store.replace_file_ownership(key, declared or [])
     return Started(issue_key=key)

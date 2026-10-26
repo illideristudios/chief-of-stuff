@@ -45,12 +45,6 @@ TRACKER = """# Tracker 2026-09-18
 | Security audit | unassigned | open | 09:00 |  | Checklist: Security audit of the upload handler |
 | Draft release notes | Robin | open | 09:00 |  | Checklist: Draft release notes |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Security audit | `src/a/`, `notes/audit.md` |
-
 ## Log
 
 - 09:00 opened the day
@@ -85,12 +79,6 @@ NAMED = """# Tracker 2026-09-18
 | twin | Rotate the staging keys | unassigned | open | 09:00 |  | S | Checklist: rotate |
 | twin | Rotate the demo keys | unassigned | open | 09:00 |  | S | Checklist: rotate |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| alpha | `src/a/` |
-
 ## Log
 
 - 09:00 opened the day
@@ -120,10 +108,10 @@ class TaskByNameTest(unittest.TestCase):
         tmp, self.root = workspace(NAMED)
         self.addCleanup(tmp.cleanup)
 
-    def test_a_name_resolves_to_its_item_and_its_ownership_row(self):
+    def test_a_name_resolves_to_its_item_and_composes(self):
         item = dp.resolve_task(self.root, "2026-09-18", "alpha")
         self.assertEqual(item, "Harden the upload handler against path traversal")
-        self.assertIn("Owns: `src/a/`", dp.compose(self.root, "2026-09-18", item))
+        self.assertIn(f"Task: {item}", dp.compose(self.root, "2026-09-18", item))
 
     def test_an_item_still_resolves_to_itself(self):
         item = "Harden the upload handler against path traversal"
@@ -172,7 +160,6 @@ class ComposeTest(unittest.TestCase):
         body = dp.compose(self.root, "2026-09-18", "Security audit")
         self.assertIn(f"Tracker: {self.root.resolve()}/daily/2026-09-18-tracker.md", body)
 
-
     def test_the_tracker_path_resolves_from_the_worktree_not_the_workspace(self):
         """The file is read by a session whose cwd is its tree, not the root the path is written against.
 
@@ -194,7 +181,6 @@ class ComposeTest(unittest.TestCase):
         for absent in ("Upload handler fix", "$(whoami)", "`id`", ""):
             with self.assertRaises(dp.RefusedError, msg=absent):
                 dp.compose(self.root, "2026-09-18", absent)
-
 
     def test_a_task_that_already_has_an_owner_is_refused(self):
         """Two trees were handed the same task and the same file. The rule said unassigned; nothing checked.
@@ -240,55 +226,22 @@ class AssignmentTest(unittest.TestCase):
         body = dp.compose(root, "2026-09-18", ask)
         self.assertIn("Done when every path is checked", body)
 
-    def test_it_names_the_paths_the_task_owns(self):
-        self.assertIn("Owns: `src/a/`, `notes/audit.md`", self.body())
+    def test_a_task_with_no_file_ownership_row_is_not_refused(self):
+        """#1039 (C29): the engine has no authorized files. A Tasks row is the whole dispatch, one-shot or interactive."""
+        self.assertNotIn("## File ownership", TRACKER)
+        for one_shot in (False, True):
+            with self.subTest(one_shot=one_shot):
+                body = self.body(worktree=self.root / "tree", one_shot=one_shot)
+                self.assertIn("Task: Security audit", body)
+                self.assertNotIn("Owns:", body)
+                self.assertNotIn("File ownership", body)
 
-    def test_a_bullet_row_is_read_like_a_table_row(self):
-        """Audit reads bullets; a dispatch refusing the same row sent the coordinator to rewrite it (#74)."""
-        tmp, root = workspace(TRACKER.replace("| context | paths |\n|---|---|\n| Security audit | `src/a/`, `notes/audit.md` |",
-                                              "- Security audit: `src/a/`, `notes/audit.md`"))
+    def test_an_old_tracker_s_file_ownership_row_is_ignored(self):
+        """Old trackers keep their section; nothing reads it."""
+        tmp, root = workspace(TRACKER.replace("## Log", "## File ownership\n\n| context | paths |\n|---|---|\n"
+                                                       "| Security audit | `src/a/` |\n\n## Log"))
         self.addCleanup(tmp.cleanup)
-        self.assertIn("Owns: `src/a/`, `notes/audit.md`", dp.compose(root, "2026-09-18", "Security audit"))
-
-    def test_owning_nothing_is_said_rather_than_left_out(self):
-        tmp, root = workspace(TRACKER.replace("| Security audit | `src/a/`, `notes/audit.md` |",
-                                              "| Security audit | none |"))
-        self.addCleanup(tmp.cleanup)
-        self.assertIn("Owns: none", dp.compose(root, "2026-09-18", "Security audit"))
-
-    def test_a_task_with_no_file_ownership_row_is_refused(self):
-        """Ownership is what keeps two sessions off one file. A dispatch without it is finding 55 again."""
-        tmp, root = workspace(TRACKER.replace("| Security audit | `src/a/`, `notes/audit.md` |", ""))
-        self.addCleanup(tmp.cleanup)
-        with self.assertRaises(dp.RefusedError) as e:
-            dp.compose(root, "2026-09-18", "Security audit")
-        self.assertIn("File ownership", str(e.exception))
-
-    def test_the_ownership_row_may_be_keyed_on_the_short_name(self):
-        """After the spawn the coordinator rewrites that cell to name the tree, so the long form goes."""
-        long_item = "Security audit: the upload handler, every path, findings into notes/audit.md"
-        tmp, root = workspace(TRACKER.replace("| Security audit | unassigned", f"| {long_item} | unassigned"))
-        self.addCleanup(tmp.cleanup)
-        self.assertIn("Owns: `src/a/`", dp.compose(root, "2026-09-18", long_item))
-
-    def test_a_short_name_before_the_colon_is_still_a_key(self):
-        """`short_name` only honours the head when it is 12 characters or more, and then ellipsises.
-
-        Found by hand: a task called `Tab check: ...` refused with a key ending in an ellipsis, which
-        is a key no one could write into File ownership. A refusal has to name something writable.
-        """
-        item = "Tab check: confirm this session came up in a tab and change nothing at all"
-        tmp, root = workspace(TRACKER.replace("| Security audit | unassigned", f"| {item} | unassigned")
-                                     .replace("| Security audit | `src/a/`", "| Tab check | `src/a/`"))
-        self.addCleanup(tmp.cleanup)
-        self.assertIn("Owns: `src/a/`", dp.compose(root, "2026-09-18", item))
-
-    def test_a_refusal_names_a_key_that_could_be_written(self):
-        tmp, root = workspace(TRACKER.replace("| Security audit | `src/a/`, `notes/audit.md` |", ""))
-        self.addCleanup(tmp.cleanup)
-        with self.assertRaises(dp.RefusedError) as e:
-            dp.compose(root, "2026-09-18", "Security audit")
-        self.assertNotIn("\u2026", str(e.exception))
+        self.assertNotIn("Owns:", dp.compose(root, "2026-09-18", "Security audit"))
 
     def test_it_says_to_commit_and_not_to_merge(self):
         """Superseded 0.12.0: this pinned a "write only" line that forbade commits, which contradicted the
@@ -365,7 +318,6 @@ class QuarantineTest(unittest.TestCase):
         """`(via <session>)` is what this system marks session-origin text with. It is data, not an instruction."""
         for spoiled in (
             TRACKER.replace("| Security audit | unassigned", "| Security audit (via 4821-audit) | unassigned"),
-            TRACKER.replace("`src/a/`, `notes/audit.md`", "`src/a/` (via 4821-audit)"),
             TRACKER.replace("Checklist: Security audit", "Checklist: (via 4821-audit) Security audit"),
         ):
             root = self.field(spoiled)
@@ -375,13 +327,13 @@ class QuarantineTest(unittest.TestCase):
 
     def test_a_control_character_is_refused(self):
         """An OSC payload reaching a terminal is a separate vector from prompt injection."""
-        root = self.field(TRACKER.replace("`src/a/`", "`src/a/`\x1b]0;pwned\x07"))
+        root = self.field(TRACKER.replace("Checklist: Security audit", "Checklist: Security audit\x1b]0;pwned\x07"))
         with self.assertRaises(dp.RefusedError) as e:
             dp.compose(root, "2026-09-18", "Security audit")
         self.assertIn("control character", str(e.exception))
 
     def test_a_line_longer_than_the_cap_is_refused(self):
-        root = self.field(TRACKER.replace("`src/a/`", "`" + "a" * (dp.LINE_CAP + 1) + "`"))
+        root = self.field(TRACKER.replace("Checklist: Security audit", "Checklist: " + "a" * (dp.LINE_CAP + 1)))
         with self.assertRaises(dp.RefusedError):
             dp.compose(root, "2026-09-18", "Security audit")
 
@@ -390,8 +342,7 @@ class QuarantineTest(unittest.TestCase):
         self.assertGreater(dp.LINE_CAP, 1700)
         long_item = "Security audit: " + ("word " * 340).strip()
         root = self.field(TRACKER.replace("| Security audit | unassigned", f"| {long_item} | unassigned"))
-        self.assertIn("Owns: `src/a/`", dp.compose(root, "2026-09-18", long_item))
-
+        self.assertIn(f"Task: {long_item}", dp.compose(root, "2026-09-18", long_item))
 
 
 class PlanScopeAssignmentTest(unittest.TestCase):
@@ -457,10 +408,6 @@ class PositiveHalfTest(unittest.TestCase):
         self.assertIn("Commit small and often", self.body)
         self.assertIn("never push to main or merge locally", self.body)
 
-    def test_owns_is_a_duty_with_a_failure_mode(self):
-        self.assertIn("yours to keep true", self.body)
-        self.assertIn("your error", self.body)
-
     def test_a_flagged_problem_in_your_own_paths_is_your_assignment(self):
         self.assertIn("is your assignment", self.body)
         self.assertIn("do not act", self.body)
@@ -469,24 +416,19 @@ class PositiveHalfTest(unittest.TestCase):
         self.assertIn("costs one `git revert`", self.body)
         self.assertIn("costs the deliverable", self.body)
 
-    def test_owns_none_gains_no_duty_clause(self):
-        tracker = (self.root / "daily" / "2026-09-18-tracker.md")
-        tracker.write_text(tracker.read_text().replace(
-            "| Security audit | `src/a/`, `notes/audit.md` |", "| Security audit | none |"))
-        body = dp.compose(self.root, "2026-09-18", "Security audit")
-        self.assertIn("Owns: none", body)
-        self.assertNotIn("yours to keep true", body.split("Owns: none")[1])
-
-
 class StopKindsTest(unittest.TestCase):
-    """Four stops take four routes. Arriving as indistinguishable English is how they landed as prose to interpret."""
+    """Two stops take two routes. Arriving as indistinguishable English is how they landed as prose to interpret."""
 
-    def test_the_assignment_names_the_four_kinds(self):
+    def test_the_assignment_names_the_two_kinds(self):
+        """#1039 (C29): no file is anybody's, so `ownership` and `scope` are no stops."""
         tmp, root = workspace()
         self.addCleanup(tmp.cleanup)
         body = dp.compose(root, "2026-09-18", "Security audit")
-        for kind in ("permission", "authorization", "ownership", "scope"):
+        self.assertIn("`Stop:` is one of two words", body)
+        for kind in ("`permission`", "`authorization`"):
             self.assertIn(kind, body)
+        for kind in ("`ownership`", "`scope`", "Owns:", "paths below"):
+            self.assertNotIn(kind, body)
 
 
 class NameRuleTravelsTest(unittest.TestCase):
@@ -635,17 +577,11 @@ class PromptCharacterBoundsTest(unittest.TestCase):
     def test_large_assignment_with_max_realistic_content_stays_under_cap(self):
         item = "Security audit " + ("x" * 1600)
         chk = "Checklist: " + ("y" * 1000)
-        owns = "`src/" + ("z" * 500) + "`"
         large_tracker = f"""# Tracker 2026-09-18
 ## Tasks
 | item | owner | state | since | due | checklist |
 |---|---|---|---|---|---|
 | {item} | unassigned | open | 09:00 |  | {chk} |
-
-## File ownership
-| context | paths |
-|---|---|
-| {item} | {owns} |
 
 ## Log
 - 09:00 opened
@@ -688,19 +624,14 @@ class PromptCharacterBoundsTest(unittest.TestCase):
                        one_shot=True, settings=loaded)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
-        item = "Security audit " + ("x" * 2000)
-        chk = "Checklist: " + ("y" * 2000)
-        owns = "`src/" + ("z" * 2000) + "`"
+        # Both fields just under LINE_CAP, so the body clears BODY_CAP whatever length the machine's paths are (#1039).
+        item = "Security audit " + ("x" * (dp.LINE_CAP - 30))
+        chk = "Checklist: " + ("y" * (dp.LINE_CAP - 30))
         oversized_tracker = f"""# Tracker 2026-09-18
 ## Tasks
 | item | owner | state | since | due | checklist |
 |---|---|---|---|---|---|
 | {item} | unassigned | open | 09:00 |  | {chk} |
-
-## File ownership
-| context | paths |
-|---|---|
-| {item} | {owns} |
 
 ## Log
 - 09:00 opened
@@ -744,29 +675,28 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
     def _one_shot_paragraph(self, text):
         return one_shot_paragraph(text)
 
-    def test_one_shot_tasks_with_no_shared_path_launch_together_in_the_background(self):
+    def test_ready_one_shot_tasks_launch_together_in_the_background(self):
         # #365, the user: "I literally intend for you to be a COORDINATOR of PARALLEL work, so why serialize?" The review (R8) found two
         # Bash calls in one Claude Code message run one after the other, and a foreground launch blocks up to its 60-minute limit
         # against Bash's 10-minute cap, so "in the same turn" alone serializes. Each of these sentences must stand verbatim in the
         # one-shot paragraph (the line that starts `If `[workers] mode = "one-shot"``), and the eval graders quote the first.
         #
-        #   LAUNCH   "Launch every ready one-shot task whose File ownership paths overlap no running task at once, in the same turn, each as its own launcher call started in the background (Bash `run_in_background: true`)." (#491: the clause "a read-only task overlaps nothing" is gone; the launcher refuses overlap itself. #539 review R2: "; when two ready tasks overlap each other, launch the earlier row first and the other when it returns" is back, because refuse_overlap compares only running rows)
+        #   LAUNCH   "Launch every ready one-shot task at once, in the same turn, each as its own launcher call started in the background (Bash `run_in_background: true`)." (#1039: tasks own no paths, so no overlap condition or overlap order)
         #   BACKGROUND "Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, never pipe a launch, and never start one without the flag."
         #   NOPIPE   "Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file." (the eval graders quote BACKGROUND and NOPIPE together, as the file has them: NOPIPE straight after BACKGROUND)
         #   NOTIFY   "A background launch's completion notification only says the launch ended: name the task in its Bash description, and on the notification read that task's report with `chief-of-stuff result --root . --task <the Tasks name>`, then reconcile it, sync the issue's Kanban state and report that task before using its result."
-        #   DECIDE   (#491: deleted. `refuse_overlap` in scripts/dispatch_prompt.py decides, under the lock in scripts/one_shot.py; REFUSAL below tells the model what to do after it refuses.)
-        #   REFUSAL  "A launcher refusal for overlap, or for the concurrency cap (`max_concurrency` under `[workers]`), is not a blocker: leave the task `open` and launch it when a running task returns."
+        #   REFUSAL  "A launcher refusal for the concurrency cap (`max_concurrency` under `[workers]`) is not a blocker: leave the task `open` and launch it when a running task returns."
         #   FAILURE  "When one launch fails mid-batch the others keep running; do not retry a held or failed task without resolving its blocker."
         #   PLACE    "Do not dispatch a standing placeholder this way; a launcher call starts exactly one task."
         # And stay: "Write none of these yourself, before or during the run; it changes the row again when it returns."
         # Gone: "Run tasks sequentially in the foreground", "more than one task this way", "before selecting the next ready task".
         paragraph = self._one_shot_paragraph(self.content)
         for required in (
-            "Launch every ready one-shot task whose File ownership paths overlap no running task at once, in the same turn, each as its own launcher call started in the background (Bash `run_in_background: true`); when two ready tasks overlap each other, launch the earlier row first and the other when it returns.",
+            "Launch every ready one-shot task at once, in the same turn, each as its own launcher call started in the background (Bash `run_in_background: true`).",
             "Give each launch its own Bash call with `run_in_background: true`; never chain launches with `;` or `&&`, never pipe a launch, and never start one without the flag.",
             "Add no `| head`, `| tail` or `| cut` to a launch: its whole output is read from the notification's output file.",
             "A background launch's completion notification only says the launch ended: name the task in its Bash description, and on the notification read that task's report with `chief-of-stuff result --root . --task <the Tasks name>`, then reconcile it, sync the issue's Kanban state and report that task before using its result.",
-            "A launcher refusal for overlap, or for the concurrency cap (`max_concurrency` under `[workers]`), is not a blocker: leave the task `open` and launch it when a running task returns.",
+            "A launcher refusal for the concurrency cap (`max_concurrency` under `[workers]`) is not a blocker: leave the task `open` and launch it when a running task returns.",
             "When one launch fails mid-batch the others keep running; do not retry a held or failed task without resolving its blocker.",
             "Do not dispatch a standing placeholder this way; a launcher call starts exactly one task.",
             "Write none of these yourself, before or during the run; it changes the row again when it returns.",
@@ -775,7 +705,7 @@ class CoordinatorPromptWorkflowTest(unittest.TestCase):
                 self.assertIn(required, paragraph)
         for gone in ("Run tasks sequentially in the foreground", "more than one task this way", "before selecting the next ready task",
                      "a read-only task overlaps nothing", "Overlap is decided by",
-                     "run overlapping tasks one after the other"):
+                     "run overlapping tasks one after the other", "File ownership", "overlap"):
             self.assertNotIn(gone, paragraph)
         self.assertEqual(self.SERIAL.findall(paragraph), [], "the one-shot paragraph serializes launches")
 
@@ -1089,15 +1019,6 @@ ISSUE_TRACKER = """# Tracker 2026-09-18
 | Garbled | Garbled task | unassigned | open | 09:00 |  | S | soon | Checklist: garbled |
 | impl02 — standing implementer | impl02: standing implementer. Wait idle for the next item. | unassigned | open | 09:00 |  | S |  | Checklist: impl02 standing |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| Security audit | `src/a/` |
-| Unfiled task | `src/b/` |
-| Garbled task | `src/c/` |
-| impl02: standing implementer. Wait idle for the next item. | `src/d/` |
-
 ## Log
 
 - 09:00 opened the day
@@ -1143,11 +1064,8 @@ class IssueDispatchTest(unittest.TestCase):
     # A Tasks row whose issue cell is exactly `workflow` is a workflow step: the no-issue refusal does not apply to it.
     WORKFLOW = "| Review | Review the open merge request | unassigned | open | 09:00 |  | S | workflow | Checklist: review |\n"
 
-    def workflow_workspace(self, row: str | None = None, owns: bool = True):
+    def workflow_workspace(self, row: str | None = None):
         text = ISSUE_TRACKER.replace("| impl02 —", (row or self.WORKFLOW) + "| impl02 —")
-        if owns:
-            text = text.replace("| impl02: standing implementer. Wait idle for the next item. | `src/d/` |",
-                                "| Review the open merge request | `src/e/` |\n| impl02: standing implementer. Wait idle for the next item. | `src/d/` |")
         tmp, root = workspace(text, ISSUE_CLAUDE)
         self.addCleanup(tmp.cleanup)
         return root
@@ -1156,11 +1074,6 @@ class IssueDispatchTest(unittest.TestCase):
         body = dp.compose(self.workflow_workspace(), "2026-09-18", "Review the open merge request")
         self.assertIn("Review the open merge request", body)
         self.assertNotIn("Issue: ", body)
-
-    def test_a_workflow_row_still_needs_its_file_ownership_row(self):
-        with self.assertRaises(dp.RefusedError) as e:
-            dp.compose(self.workflow_workspace(owns=False), "2026-09-18", "Review the open merge request")
-        self.assertIn("no File ownership row", str(e.exception))
 
     def test_a_workflow_row_that_is_owned_is_still_refused(self):
         root = self.workflow_workspace(self.WORKFLOW.replace("| unassigned |", "| robin |"))
@@ -1459,52 +1372,6 @@ class DetachedWorktreeTest(unittest.TestCase):
         self.assertIn("Commit the finished change on this worktree's branch", on_branch)
 
 
-class ReadOnlyAssignmentTest(unittest.TestCase):
-    """#57: a task whose File ownership cell starts with `none` is read-only; a worker told to commit did, and opened a PR."""
-
-    SENTENCE = "Do not edit, commit, push, merge or open a pull request: this task is read-only. Write what you found in your result or report, and nothing else."
-    ONE_SHOT_COMMITS = ("Commit the finished change on this worktree's branch and open a pull request when tests pass; do not merge.",
-                        "Commit the finished change on this worktree's branch; do not push or merge without existing authorization.")
-
-    def body(self, cell: str, *, one_shot: bool, delivery: str = "pull-request") -> str:
-        tmp, root = workspace(TRACKER.replace("`src/a/`, `notes/audit.md`", cell),
-                              CLAUDE + "- Settings: `cos.toml`\n")
-        self.addCleanup(tmp.cleanup)
-        (root / "cos.toml").write_text(f'[workflow]\ndelivery = "{delivery}"\n')
-        return dp.compose(root, "2026-09-18", "Security audit", worktree=root / "tree", one_shot=one_shot)
-
-    def test_a_read_only_one_shot_is_not_told_to_commit_or_open_a_pull_request(self):
-        for delivery in ("pull-request", "branch"):
-            with self.subTest(delivery=delivery):
-                body = self.body("none; read-only review of the importer", one_shot=True, delivery=delivery)
-                self.assertIn("\n" + self.SENTENCE + "\n", body)
-                for sentence in self.ONE_SHOT_COMMITS:
-                    self.assertNotIn(sentence, body)
-
-    def test_a_read_only_one_shot_is_told_so_and_is_not_told_to_edit_paths(self):
-        body = self.body("none; read-only review of the importer", one_shot=True)
-        self.assertIn("\n" + self.SENTENCE + "\n", body)
-        owns = next(line for line in body.splitlines() if line.startswith("Owns:"))
-        self.assertNotIn("Edit only", owns)
-
-    def test_a_one_shot_that_owns_paths_keeps_its_lines(self):
-        for delivery, commit in zip(("pull-request", "branch"), self.ONE_SHOT_COMMITS):
-            with self.subTest(delivery=delivery):
-                body = self.body("`src/a/`", one_shot=True, delivery=delivery)
-                self.assertIn("Owns: `src/a/`. Edit only these paths and task-local files in this worktree.", body)
-                self.assertIn(commit, body)
-                self.assertNotIn(self.SENTENCE, body)
-
-    def test_a_read_only_interactive_task_is_told_so_and_not_to_commit(self):
-        for cell in ("none; read-only review", "none"):
-            for delivery in ("pull-request", "branch"):
-                with self.subTest(cell=cell, delivery=delivery):
-                    body = self.body(cell, one_shot=False, delivery=delivery)
-                    self.assertIn(self.SENTENCE, body)
-                    self.assertNotIn("Commit small and often", body)
-                    self.assertNotIn("Do not touch any other file", body)
-
-
 class ReviewReportTest(unittest.TestCase):
     """#563: every agent that reviews a pull or merge request reports in one shape, whatever its runtime, because
     Triage reads R-numbers, axis, severity, confidence and the suggestion off it. Zach, 2026-10-08 21:10: "we need a
@@ -1570,12 +1437,6 @@ class ArchitectureAndReviewSkillTest(unittest.TestCase):
 | name | item | owner | state | since | due | size | lane | stage | issue | checklist |
 |---|---|---|---|---|---|---|---|---|---|---|
 | audit | Security audit | unassigned | open | 09:00 |  | S | build | review |  | Checklist: Security audit of the upload handler |
-
-## File ownership
-
-| context | paths |
-|---|---|
-| Security audit | `src/a/` |
 
 ## Log
 

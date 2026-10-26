@@ -895,7 +895,7 @@ class ReconcileTest(unittest.TestCase):
     def released_facts(self, product=True, observed=False, attempt=1, **kwargs):
         return reconcile.Facts(hold_observations=((KEY, observed),),
                                implementation_requests=(((KEY, "implement", attempt), product),),
-                               claims=(readiness.Claim(KEY, "src/"),), blockers=(), **kwargs)
+                               blockers=(), **kwargs)
 
     def test_released_implementation_follows_success_edge(self):
         history = [Segment("implement", outcome="human_review")]
@@ -974,16 +974,15 @@ class ReconcileTest(unittest.TestCase):
             with self.subTest(slots=slots, now=now), self.assertRaises(ValueError):
                 reconcile.plan([Item()], {}, self.p, {}, slots, now, {})
 
-    def test_an_item_that_waits_for_a_slot_claims_nothing_for_the_next(self):
+    def test_one_free_slot_dispatches_one_item_and_the_rest_wait(self):
         keys = [f"github:example/project#{n}" for n in (1, 2, 3)]
         items = [replace(Item(), issue_key=key) for key in keys]
-        claims = (readiness.Claim(keys[0], "docs/"), readiness.Claim(keys[1], "src/a.py"), readiness.Claim(keys[2], "src/a.py"))
-        got = reconcile.plan(items, {}, self.p, {}, 1, NOW, {}, facts=reconcile.Facts(claims=claims, blockers=()))
+        got = reconcile.plan(items, {}, self.p, {}, 1, NOW, {}, facts=reconcile.Facts(blockers=()))
         self.assertEqual([type(a).__name__ for a in got], ["Dispatch", "Wait", "Wait"])
         self.assertEqual([a.reason for a in got[1:]], ["no free worker slots"] * 2)
 
     def test_unknown_blockers_wait_with_their_reason(self):
-        facts = reconcile.Facts(claims=(readiness.Claim(KEY, "src/"),), blockers=None, blockers_error="auth required")
+        facts = reconcile.Facts(blockers=None, blockers_error="auth required")
         self.assertEqual(self.plan(facts=facts),
                          [reconcile.Wait(KEY, "dependency blockers unknown: auth required")])
 
@@ -1001,28 +1000,17 @@ class ReconcileTest(unittest.TestCase):
                                   stall_after=timedelta(minutes=45))
         self.assertEqual(self.plan(history=[replace(open_seg, started_at=NOW - timedelta(hours=2))], facts=stalled),
                          [reconcile.Wait(KEY, "stalled")])
-        claims = (readiness.Claim(KEY, "src/a.py"), readiness.Claim(other, "src/a.py"))
-        overlap = reconcile.Facts(claims=claims, blockers=(), alive=(((other, "implement", 1), True),))
+        overlap = reconcile.Facts(blockers=(), alive=(((other, "implement", 1), True),))
         actions = reconcile.plan([Item(), replace(Item(), issue_key=other)],
                                  {KEY: (), other: [open_seg]}, self.p, {}, 4, NOW, {}, facts=overlap)
         self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 1)])  # #1039: no ownership wait
-
-    def test_released_read_only_hold_is_not_reinstated_from_a_retained_tree(self):
-        facts = reconcile.Facts(claims=(readiness.Claim(KEY, ".", "read"),), read_only=(KEY,), changed=((KEY, True),), blockers=())
-        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
-        self.assertEqual(self.plan(item=replace(Item(), human_review=True), history=[Segment("implement")], facts=facts),
-                         [reconcile.Wait(KEY, "human review")])
-
-    def test_unknown_finished_tree_does_not_reinstate_a_released_read_only_hold(self):
-        facts = reconcile.Facts(claims=(readiness.Claim(KEY, ".", "read"),), read_only=(KEY,), changed=((KEY, None),), blockers=())
-        self.assertEqual(self.plan(history=[Segment("implement")], facts=facts), [reconcile.Review(KEY, 1)])
 
     def test_workflow_terminal_worker_requires_landing_when_it_disappears(self):
         import readiness
         self.p.workflows["standard"] = policy.Workflow("standard", "implement")
         facts = reconcile.Facts(alive=(((KEY, "implement", 1), False),),
                                 reports=(readiness.Report(KEY, "done", "implement", 1),),
-                                on_main=((KEY, False),), changed=((KEY, False),))
+                                on_main=((KEY, False),))
         action = self.plan(history=[Segment("implement", ended_at=None)], facts=facts)[0]
         self.assertEqual(action, reconcile.Close(KEY, "implement", 1, "done", "not on main", True))
 
@@ -1034,7 +1022,7 @@ class ReconcileTest(unittest.TestCase):
         report = (readiness.Report(KEY, "done", "implement", 1),)
         open_seg = [Segment("implement", ended_at=None)]
         held = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
-                               trees=((KEY, TreeState("work", 3, 0, 0)),), changed=((KEY, True),),
+                               trees=((KEY, TreeState("work", 3, 0, 0)),),
                                suites=suite, require_green=True)
         action = self.plan(history=open_seg, facts=held)[0]
         self.assertEqual(action.outcome, "done")
@@ -1042,13 +1030,13 @@ class ReconcileTest(unittest.TestCase):
         self.assertFalse(action.suite_hold)
         self.assertIn("uncommitted", action.reason)
         clean = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
-                                changed=((KEY, False),), suites=suite, require_green=True)
+                                suites=suite, require_green=True)
         action = self.plan(history=open_seg, facts=clean)[0]
         self.assertEqual(action, reconcile.Close(
             KEY, "implement", 1, "human_review",
             "suite is not green; Suite: passed=0, failed=1, skipped=0, xfailed=0; worker said: reported done",
             True, True))
-        missing = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report, changed=((KEY, False),),
+        missing = reconcile.Facts(alive=(((KEY, "implement", 1), False),), reports=report,
                                   suites=(((KEY, "implement", 1),
                                            ({"passed": None, "failed": None, "skipped": None, "xfailed": None},
                                             "reported done")),),

@@ -80,13 +80,12 @@ class ResultTests(unittest.TestCase):
 
     def tracker(self, *tasks: tuple[str, str], days_ago: int = 0) -> None:
         """Today's tracker (the workspace zone is UTC), or an earlier day's, holding `tasks` as (name, item) rows: each
-        open and unassigned, with a File ownership row of its own, which the launcher's `record_launch` needs."""
+        open and unassigned."""
         rows = "".join(f"| {name} | {item} | unassigned | open | 01:28 |  | M |  |  |\n" for name, item in tasks)
-        owned = "".join(f"| {item} | `src/a/` read-only |\n" for _, item in tasks)
         path = self.tracker_path(days_ago)
         path.parent.mkdir(exist_ok=True)
         path.write_text("# Tracker\n\n## Tasks\n\n| name | item | owner | state | since | due | size | issue | checklist |\n"
-                        f"|---|---|---|---|---|---|---|---|---|\n{rows}\n## File ownership\n\n| context | paths |\n|---|---|\n{owned}"
+                        f"|---|---|---|---|---|---|---|---|---|\n{rows}"
                         "\n## Log\n")
 
     def plant(self, stem: str, data: dict | str | bytes | None = None, age: int = 0, mtime: float | None = None) -> Path:
@@ -271,21 +270,16 @@ class ResultTests(unittest.TestCase):
     def test_git_violations_take_precedence_over_the_suite_gate(self):
         self.suite_policy()
         for counts in ({}, {"passed": 1, "failed": 0, "skipped": 1, "xfailed": 0}):
-            for read_only, actual, commits, expected in (
-                (True, " M pending.py", one_shot.NO_COMMITS, "read-only task left changes"),
-                (True, "", "abc123 changed tracked files", "read-only task left changes"),
-                (False, " M pending.py", one_shot.NO_COMMITS, "worktree is not clean"),
-            ):
-                with self.subTest(counts=counts, read_only=read_only, actual=actual):
-                    cwd = self.launched("rate-limit", result={
-                        "status": "done", "reason": "finished", "changes": "tested", **counts})
-                    with mock.patch.object(one_shot, "changed_files", return_value=actual), mock.patch.object(
-                            one_shot, "committed_changes", return_value=commits):
-                        written = one_shot.reconcile(self.root, self.tracker_path().name[:10],
-                                                     "Rate limit headers", "rate-limit", cwd, 0, read_only=read_only)
-                    self.assertEqual(written["status"], "human_review")
-                    self.assertIn(expected, written["reason"])
-                    self.assertNotIn("suite is not green", written["reason"])
+            with self.subTest(counts=counts):
+                cwd = self.launched("rate-limit", result={
+                    "status": "done", "reason": "finished", "changes": "tested", **counts})
+                with mock.patch.object(one_shot, "changed_files", return_value=" M pending.py"), mock.patch.object(
+                        one_shot, "committed_changes", return_value=one_shot.NO_COMMITS):
+                    written = one_shot.reconcile(self.root, self.tracker_path().name[:10],
+                                                 "Rate limit headers", "rate-limit", cwd, 0)
+                self.assertEqual(written["status"], "human_review")
+                self.assertIn("worktree is not clean", written["reason"])
+                self.assertNotIn("suite is not green", written["reason"])
 
     def test_result_command_normalizes_report_suite_counts(self):
         green = {"passed": 23, "failed": 0, "skipped": 0, "xfailed": 0}
@@ -552,7 +546,7 @@ class ResultTests(unittest.TestCase):
         done = self.one("--task", "Rate limit headers")
         self.assertEqual((done["worker"], done["reason"], done["worktree"]), ("launcher", "the real reason", "rate-limit"))
 
-    def test_no_worktrees_directory_and_no_file_ownership_row_is_consulted(self):
+    def test_no_worktrees_directory_is_consulted(self):
         # CLAUDE.md has no Coordinator block (so no Worktrees line, no tracker), and `trees` does not exist.
         (self.root / "CLAUDE.md").write_text("# Workspace\n\nNo coordinator here.\n")
         self.plant("rate-limit")
