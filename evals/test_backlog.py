@@ -686,6 +686,38 @@ class IssueRefTest(unittest.TestCase):
                 self.assertEqual(backlog_ref.store_label(cell, GH), cell)
 
 
+class StoreRefTest(unittest.TestCase):
+    def test_keys_preserve_their_namespace_and_label_relative_to_home(self):
+        cases = (
+            ("gitlab:gl2.example/g/p#5", GL, bl.IssueRef("g/p", 5, "gl2.example"), "gl2.example/g/p#5"),
+            ("gitlab:gl2.example/only#5", GL, bl.IssueRef("only", 5, "gl2.example"), "gl2.example/only#5"),
+            ("gitlab:gl2.example/team/nested/app#5", GL,
+             bl.IssueRef("team/nested/app", 5, "gl2.example"), "gl2.example/team/nested/app#5"),
+            ("gitlab:gl.example/g/p#5", GL, bl.IssueRef("g/p", 5, "gl.example"), "#5"),
+            ("gitlab:gl.example/acme/web#5", GL, bl.IssueRef("acme/web", 5, "gl.example"), "gl.example/acme/web#5"),
+            (f"github:{REPO}#9", GH, bl.IssueRef(REPO, 9), "#9"),
+            ("github:o/n#9", GH, bl.IssueRef("o/n", 9), "o/n#9"),
+            (f"github:{REPO}#9", None, bl.IssueRef(REPO, 9), f"{REPO}#9"),
+            ("gitlab:gl2.example/g/p#5", None, bl.IssueRef("g/p", 5, "gl2.example"), "gl2.example/g/p#5"),
+        )
+        for key, home, expected, label in cases:
+            with self.subTest(key=key, home=home):
+                ref = backlog_ref.store_ref(key)
+                self.assertEqual(ref, expected)
+                self.assertEqual(ref.label(home), label)
+                self.assertEqual(backlog_ref.store_label(key, home), label)
+
+    def test_non_keys_are_not_parsed_and_keep_their_label(self):
+        for key in ("", "workflow", "#5", "https://gl2.example/g/p/-/issues/5",
+                    "gitlab:gl2.example/g/p#5/extra", "gitlab:gl2.example/g/p#x", " github:o/n#5"):
+            with self.subTest(key=key):
+                self.assertIsNone(backlog_ref.store_ref(key))
+                self.assertEqual(backlog_ref.store_label(key, GL), key)
+
+    def test_naming_a_foreign_store_key_does_not_allow_fetching_its_url(self):
+        self.assertIsNone(bl.issue_ref("https://gl2.example/g/p/-/issues/5", GL))
+
+
 class ParseIssueArgTest(unittest.TestCase):
     """#44: a CLI argument may be a bare `N`; a tracker cell may not. Two parsers, one responsibility each."""
 
