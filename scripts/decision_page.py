@@ -722,8 +722,8 @@ def store_decision_form(d: DecisionState, back: str = "") -> str:
 
 
 def _fallback(d: DecisionState) -> str:
-    """What happens while the decision waits."""
-    return escape(d.blocked_reason or "worker waits")
+    """What happens if nobody answers: the default recorded with the decision (§6, #1128)."""
+    return escape(str((d.record or {}).get("default") or "default not recorded"))
 
 
 def _store_pending_row(d: DecisionState, asked: datetime | None, ctx: Context, page: int) -> str:

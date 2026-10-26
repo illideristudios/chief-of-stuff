@@ -234,6 +234,7 @@ class GateTest(unittest.TestCase):
                           "runtime": "claude", "model": PERSONAS[name].model}  # #879: each vote names what cast it
                          for name, reason in zip(DEFAULT, reasons)],
             "recommendation": "Split the parser", "unanimous": True,
+            "default": "The worker waits: the issue holds until this is answered.",  # #1128
         })
 
     def test_direct_answer_settlement_belongs_to_decision_actions(self):
