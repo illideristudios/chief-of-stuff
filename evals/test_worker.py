@@ -1724,6 +1724,25 @@ class RecoveryTest(unittest.TestCase):
         refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
         self.assertIn(self.head, refs.splitlines())
 
+    def test_review_recovery_quarantines_the_old_detached_checkout(self):
+        branch = "work/issue-1-implement-1"
+        make_repo.git(["push", "origin", branch], self.clone)
+        self.forge.closing_request = lambda key: SimpleNamespace(number=9, branch=branch, head=self.head)
+        self.forge.rows[0]["stage"] = "review"
+        self.run_pass()
+        record = self.db.resume(KEY)["runs"]["review-1"]
+        run, review = Path(record["run_dir"]), Path(record["tree"])
+        (run / "stdout").write_text('{"is_error": true, "result": "failed"}')
+        (run / "stderr").write_text("")
+        self.identity.return_value = None
+        self.run_pass()
+        self.assertEqual(len(self.started), 2)
+        self.assertFalse(review.exists())
+        self.assertTrue(list((self.trees / "quarantine").glob(f"{review.name}-*")))
+        self.assertNotIn("recovery", self.db.resume(KEY))
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+
     def test_a_conflicted_detached_head_stays_reachable_after_quarantine(self):
         self.dead_run()
         make_repo.git(["checkout", "--detach"], self.tree)

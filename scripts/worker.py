@@ -436,7 +436,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     number = int(issue_key.rpartition("#")[2])
     tree_name = f"issue-{number}-{stage}-{attempt}"
     branch = f"work/{tree_name}"
-    recovered = ("recovery" in data or data.get("recovery_fresh")) and stage != "review"
+    recovered = "recovery" in data or data.get("recovery_fresh")
     if "recovery" in data and recovered:
         _recover(store, issue_key, trees=trees, clone=clone or root)
         data = _resume(store, issue_key)
