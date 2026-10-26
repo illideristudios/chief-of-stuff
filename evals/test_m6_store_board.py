@@ -340,9 +340,22 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.db.add_decision(KEY2, "plan", "Use Redis for cache?", "Yes, use Redis", "user",
                              {"status": "blocked", "blocked_reason": "merge conflicts"})
 
-    def test_board_renders_open_and_blocked_decisions_and_blocked_is_never_closed(self) -> None:
+    def test_the_board_shows_no_decision_item_and_no_decision_form(self) -> None:
+        """Zach: decisions live on /decisions only; the board keeps no inline block (#895)."""
+        html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
+        for absent in ("decision-item", "decision-form", "board-decisions", "<form", "Split upload parser?"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, html)
+
+    def test_needs_input_and_the_decisions_tab_link_to_the_decisions_page(self) -> None:
+        """#1122: the NEEDS INPUT tile and the Decisions tab both open /decisions."""
+        html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
+        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions"><span class="panels-label">NEEDS INPUT')
+        self.assertRegex(html, r'<a href="/decisions"[^>]*>Decisions')
+
+    def test_decisions_page_renders_open_and_blocked_decisions_and_blocked_is_never_closed(self) -> None:
         board_path, *_ = pg.write_board(self.root, now=NOW)
-        html = board_path.read_text(encoding="utf-8")
+        html = (board_path.parent / "decisions.html").read_text(encoding="utf-8")
         self.assertIn("Split upload parser?", html)
         self.assertIn("Use Redis for cache?", html)
         self.assertIn("merge conflicts", html)
@@ -354,7 +367,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.db.add_decision(KEY, "design", "Replaced question?")
         self.db.add_decision(KEY, "design", "Replaced question?", "Yes", "user",
                              {"status": "superseded", "superseded_by": self.d_open.id})
-        html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
+        html = (pg.write_board(self.root, now=NOW)[0].parent / "decisions.html").read_text(encoding="utf-8")
         self.assertIn("Split upload parser?", html)
         self.assertNotIn("Replaced question?", html)
 
@@ -521,6 +534,7 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         resp = conn.getresponse()
         body = resp.read().decode()
         conn.close()
+        self.location = resp.getheader("Location")
         return resp.status, body
 
     def test_wal_commit_invalidates_board_without_checkpoint(self):
@@ -602,13 +616,37 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         board = next((self.root / "pages").glob("*-board.html")).read_text()
         self.assertIn("Upload size limit", board)
 
-    def test_store_decisions_have_only_board_post(self):
+    def test_store_decisions_post_only_through_the_store_answer_path(self):
         dec = self.db.add_decision(KEY, "design", "Choose parser")
         status, _ = self.request("POST", "/decisions", {"decision_id": dec.id, "answer": "Split"})
         self.assertEqual(status, 404)
         self.assertEqual(self.db.decision(dec.id).status, "open")
-        body = self.request("GET", "/")[1]
-        self.assertRegex(body, r'<form method="post" action="/" class="decision-form">')
+
+    def test_a_decisions_page_form_records_its_answer_in_the_store(self):
+        """#895: GET /decisions, post the open store decision's own form, and the store holds the person's answer;
+        the server records it only, and sends the person back to /decisions."""
+        status, page = self.request("GET", "/decisions")
+        self.assertEqual(status, 200)
+        row = next(r for r in page.split('<div class="row pend"')[1:] if "Approve cache eviction policy?" in r)
+        form = re.search(r'<form method="post" action="([^"]*)" class="decision-form">(.*?)</form>', row, re.S)
+        fields = dict(re.findall(r'<input type="hidden" name="(\w+)" value="([^"]*)"', form[2]))
+        with mock.patch.object(pg.forge, "for_workspace", side_effect=AssertionError("the page server never writes")):
+            status, _ = self.request("POST", form[1], {**fields, "action": "answer", "answer": "Evict least recent"})
+        self.assertEqual((status, self.location), (303, "/decisions"))
+        saved = self.db.decisions(KEY2)[-1]
+        self.assertEqual((saved.question, saved.status, saved.answer, saved.decided_by),
+                         ("Approve cache eviction policy?", "answered", "Evict least recent", "user"))
+        self.assertEqual(self.db.item(KEY2).stage, "review")
+
+    def test_an_answered_decision_on_the_decisions_page_has_no_live_form(self):
+        """#924: a COMPLETED row is read-only; only an open or blocked decision carries a form."""
+        dec = self.db.decisions(KEY2)[-1]
+        self.request("POST", "/", {"decision_id": dec.id, "action": "answer", "answer": "Evict least recent"})
+        page = self.request("GET", "/decisions")[1]
+        pending, done = page.split("COMPLETED")
+        self.assertIn("Approve cache eviction policy?", done)
+        self.assertNotIn("Approve cache eviction policy?", pending)
+        self.assertNotIn("<form", done)
 
 
 if __name__ == "__main__":

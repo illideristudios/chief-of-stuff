@@ -651,7 +651,7 @@ class StoreIndexTest(unittest.TestCase):
         self.assertLess(pending.index("Approve rollout gate?"), pending.index("Split auth token refresh?"))
         self.assertIn("BLOCKED · awaiting owner", pending)
         self.assertIn('href="/issues/github%3Aexample%2Frepo%2310"', pending)
-        self.assertIn("github:example/repo#10", pending)
+        self.assertIn("example/repo#10", pending)
         self.assertIn('<form method="post" action="/" class="decision-form">', pending)
         self.assertNotIn("Stale question on closed issue?", page)
         self.assertIn("0 completed today", page)
@@ -678,10 +678,24 @@ class StoreIndexTest(unittest.TestCase):
         self.assertIn(" · 2</h2>", done)
         self.assertLess(done.index("Permission requested for Bash"), done.index("Use volume service?"))
         for text in ("Permission requested for Bash", "allow", "trio", "Use volume service?", "option A", "user",
-                     'href="/issues/github%3Aexample%2Frepo%2310"', "github:example/repo#10"):
+                     'href="/issues/github%3Aexample%2Frepo%2310"', "example/repo#10"):
             with self.subTest(text=text):
                 self.assertIn(text, done)
         self.assertNotIn("Yesterday in Chicago", done)
+        self.assertNotIn("<form", done)  # #924: an answered row is read-only
+
+    def test_store_rows_label_the_home_repo_short_and_a_foreign_one_by_name(self):
+        """#903: a row for the workspace backlog reads `#N`; another project names itself. The href stays the full key."""
+        from fragment import issue_href
+        own, foreign = "github:team/app#9", "github:o/n#4"
+        for key, question in ((own, "Ship?"), (foreign, "Wait?")):
+            self.store.upsert_item(key, title=question, stage="implement", forge_state="open")
+            self.store.add_decision(key, "scope", question, asked_at=NOW.isoformat())
+        page, _ = dp.index(self.pages, dp.Context(NOW, forge=GitHubBacklog("team/app")), NOW.date().isoformat(),
+                           db=self.page_data())
+        self.assertIn(f'href="{escape(issue_href(own))}">#9</a>', page)
+        self.assertIn(f'href="{escape(issue_href(foreign))}">o/n#4</a>', page)
+        self.assertNotIn(">github:", page)
 
 
 class DerivedPageTest(unittest.TestCase):
