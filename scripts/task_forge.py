@@ -16,7 +16,6 @@ import decision_actions
 from estimate import estimates, history, task_end
 import kanban as kanban_tool
 from md import section
-import ownership
 from settings import Kanban
 import tracker
 from tracker import Task, issue_key, launcher
@@ -225,7 +224,7 @@ def drifts(task: Task, kanban: Kanban | None, sources: board_sources.Sources, st
 
 
 def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
-    """The dispatcher's open, unassigned candidates, bounded by free slots and file ownership overlap."""
+    """The dispatcher's open, unassigned candidates, bounded by free slots."""
     parsed = tracker.parse_tracker(tracker_text)
     tasks = parsed.tasks
 
@@ -234,10 +233,7 @@ def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
     if free_slots <= 0:
         return []
 
-    running_paths = [ownership.cell(tracker_text, {t.label, t.name, t.item}) or "" for t in running]
-
     ready: list[tracker.Task] = []
-    accepted_paths: list[str] = []
 
     for t in tasks:
         if t.kind != "open" or t.owner.strip() != "unassigned":
@@ -248,20 +244,7 @@ def ready_tasks(tracker_text: str, max_concurrency: int = 1) -> list[Task]:
         if t.stage.strip().startswith("hold"):
             continue
 
-        paths = ownership.cell(tracker_text, {t.label, t.name, t.item})
-        if paths is None:
-            continue
-
-        # Check collision with running tasks
-        if any(ownership.overlaps(r, paths) for r in running_paths):
-            continue
-
-        # Check collision with already accepted candidate tasks
-        if any(ownership.overlaps(a, paths) for a in accepted_paths):
-            continue
-
         ready.append(t)
-        accepted_paths.append(paths)
         if len(ready) >= free_slots:
             break
 
