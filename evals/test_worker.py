@@ -1707,8 +1707,44 @@ class RecoveryTest(unittest.TestCase):
         self.run_pass()
         self.assertEqual(self.started[-1], str(self.tree))
 
+    def move_main(self):
+        (self.clone / "upstream.txt").write_text("landed elsewhere\n")
+        make_repo.git(["add", "upstream.txt"], self.clone)
+        make_repo.git(["commit", "-m", "upstream"], self.clone)
+        make_repo.git(["push", "origin", "main"], self.clone)
+        return make_repo.git(["rev-parse", "main"], self.clone)
+
+    def test_a_branch_with_its_own_commits_is_reused_after_main_moves(self):
+        self.dead_run()
+        self.move_main()
+        self.run_pass()
+        self.assertEqual(self.started, [str(self.tree), str(self.tree)])
+        self.assertEqual(make_repo.git(["symbolic-ref", "--short", "HEAD"], self.tree), "work/issue-1-implement-1")
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), self.head)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+        self.assertFalse((self.trees / "quarantine").exists())
+
+    def test_a_branch_without_its_own_commits_fast_forwards_to_main(self):
+        self.dead_run()
+        make_repo.git(["reset", "main"], self.tree)
+        main = self.move_main()
+        self.run_pass()
+        self.assertEqual(self.started[-1], str(self.tree))
+        self.assertEqual(make_repo.git(["rev-parse", "HEAD"], self.tree), main)
+        self.assertTrue((self.tree / "scratch.txt").exists())
+
+    def test_a_repeated_recovery_read_failure_is_logged_once(self):
+        self.db.update_resume(KEY, lambda d: d.__setitem__("recovery", {"stage": "implement", "candidates": [{}]}))
+        with mock.patch.object(engine.engine_facts, "recovery_candidates", return_value=None):
+            self.run_pass()
+            self.run_pass()
+        failed = [row for row in self.db.log(KEY) if row.message.startswith("recovery read failed")]
+        self.assertEqual(len(failed), 1)
+
     def test_failed_fast_forward_quarantines_and_starts_fresh_without_a_hold(self):
         self.dead_run()
+        make_repo.git(["reset", "main"], self.tree)  # only a branch with no commits of its own fast-forwards
+        self.head = make_repo.git(["rev-parse", "HEAD"], self.tree)
         trusted = worker.make_worktree.git_trusted
         def fail_merge(args, cwd):
             return (1, "cannot fast-forward") if args[0] == "merge" else trusted(args, cwd)
@@ -1721,6 +1757,7 @@ class RecoveryTest(unittest.TestCase):
         refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
         self.assertIn(self.head, refs.splitlines())
         self.assertEqual(len(list((self.trees / "quarantine").glob("*/scratch.txt"))), 1)
+        self.assertTrue(any(row.message.startswith("recovery quarantined") for row in self.db.log(KEY)))
 
     def test_unreadable_checkout_is_quarantined_and_a_fresh_tree_starts(self):
         self.dead_run()
@@ -1776,6 +1813,7 @@ class RecoveryTest(unittest.TestCase):
 
     def test_interrupted_quarantine_cannot_restore_the_set_aside_branch(self):
         self.dead_run()
+        make_repo.git(["reset", "main"], self.tree)  # only a branch with no commits of its own fast-forwards
         trusted = worker.make_worktree.git_trusted
         def interrupt_move(args, cwd):
             if args[:2] == ["worktree", "move"]:
