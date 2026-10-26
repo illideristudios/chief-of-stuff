@@ -45,8 +45,24 @@ class RoundTripTest(unittest.TestCase):
         for status, outcome in (("done", tl.COMPLETED), ("human_review", tl.HUMAN_REVIEW)):
             with self.subTest(status=status):
                 line = tl.ended_line("10:20", "worker01", status, "fixed the cap", "a.py b.py")
-                self.assertEqual(tl.ENDED.match(line).groups(), ("10", "20", "worker01", outcome))
+                self.assertEqual(tl.ENDED.match(line).groups(), ("10", "20", "worker01", outcome, None))
                 self.assertIsNone(tl.RELAUNCH.match(line))
+
+    def test_an_ended_line_with_each_cause_round_trips(self):
+        self.assertEqual(tl.CAUSES, ("worker's call", "no result file", "timeout", "runtime exit", "launcher check"))
+        started = tl.started_line("09:15", "worker01", "codex", "", TREE, "Security audit")
+        for cause in tl.CAUSES:
+            with self.subTest(cause=cause):
+                line = tl.ended_line("10:20", "worker01", "human_review", "needs a decision", "a.py", cause=cause)
+                self.assertEqual(line, f"- 10:20 one-shot worker01: {tl.HUMAN_REVIEW} ({cause}) — needs a decision. Changes: a.py.")
+                self.assertEqual(tl.ENDED.match(line).groups(), ("10", "20", "worker01", tl.HUMAN_REVIEW, cause))
+                self.assertIsNone(tl.RELAUNCH.match(line))
+                got = tl.moves(f"## Log\n\n{started}\n{line}\n", DAY, CT)
+                self.assertEqual([(m.at.time(), m.name, m.stage, m.launch, m.worker) for m in got],
+                                 [(time(9, 15), "Security audit", "implement", True, "worker01"),
+                                  (time(10, 20), "Security audit", "review", True, "worker01")])
+        done = tl.ended_line("10:20", "worker01", "done", "fixed the cap", "a.py", cause="timeout")
+        self.assertEqual(tl.ENDED.match(done).groups(), ("10", "20", "worker01", tl.COMPLETED, None))
 
     def test_a_relaunch_line(self):
         line = tl.relaunch_line("10:20", "worker01", "Security audit", "target PR merged before work began")
@@ -252,6 +268,70 @@ class RelaunchStopTest(unittest.TestCase):
                 self.assertEqual([(m.at.time(), m.name, m.worker, m.line) for m in got], [
                     (time(9, 15), "Check parser", "worker01", started),
                     (time(10, 20), "Check parser", "worker01", stopped)])
+
+
+class ReviewCausesTest(unittest.TestCase):
+    """#203: `review_causes` returns each task's latest human-review stop cause when nothing moved the task after it."""
+
+    def test_a_review_end_with_a_cause_is_returned_for_its_task(self):
+        lines = ("\n".join((
+            "## Log", "",
+            tl.started_line("09:15", "worker01", "codex", "", TREE, "Security audit"),
+            tl.ended_line("09:45", "worker01", "human_review", "blocked on creds", "none", cause="worker's call"),
+            tl.started_line("10:00", "worker02", "codex", "", TREE, "Cap uploads"),
+            tl.ended_line("10:20", "worker02", "human_review", "timed out", "none", cause="timeout"),
+            "")))
+        self.assertEqual(tl.review_causes(tl.moves(lines, DAY, CT)),
+                         {"Security audit": "worker's call", "Cap uploads": "timeout"})
+
+    def test_a_review_end_following_an_earlier_stage_to_implement_is_kept(self):
+        lines = ("\n".join((
+            "## Log", "",
+            tl.stage_line("09:00", "Upload size limit", "implement"),
+            tl.started_line("09:15", "worker01", "codex", "", TREE, "Cap uploads — full prompt"),
+            tl.ended_line("09:45", "worker01", "human_review", "crashed", "none", cause="runtime exit"),
+            "")))
+        names = {"upload size limit": "Upload size limit", "cap uploads — full prompt": "Upload size limit"}
+        self.assertEqual(tl.review_causes(tl.moves(lines, DAY, CT), lambda n: names.get(n.casefold())),
+                         {"Upload size limit": "runtime exit"})
+
+    def test_any_later_move_or_classless_review_clears_the_cause(self):
+        started = tl.started_line("09:15", "worker01", "codex", "", TREE, "Cap uploads — full prompt")
+        held = tl.ended_line("09:45", "worker01", "human_review", "crashed", "none", cause="runtime exit")
+        names = {"upload size limit": "Upload size limit", "cap uploads — full prompt": "Upload size limit"}
+        later_cases = {
+            "later start": [tl.started_line("10:00", "worker02", "codex", "", TREE, "Cap uploads — full prompt")],
+            "later stage move with short name": [tl.stage_line("10:00", "Upload size limit", "implement")],
+            "later relaunch": [
+                tl.started_line("10:00", "worker02", "codex", "", TREE, "Cap uploads — full prompt"),
+                tl.relaunch_line("10:15", "worker02", "Cap uploads — full prompt", "base moved"),
+            ],
+            "later completed end": [
+                tl.started_line("10:00", "worker02", "codex", "", TREE, "Cap uploads — full prompt"),
+                tl.ended_line("10:15", "worker02", "done", "fixed", "a.py"),
+            ],
+            "later classless review end": [
+                tl.started_line("10:00", "worker02", "codex", "", TREE, "Cap uploads — full prompt"),
+                tl.ended_line("10:15", "worker02", "human_review", "old line", "none"),
+            ],
+        }
+        for label, tail in later_cases.items():
+            with self.subTest(case=label):
+                text = "\n".join(("## Log", "", started, held, *tail, ""))
+                self.assertEqual(tl.review_causes(tl.moves(text, DAY, CT), lambda n: names.get(n.casefold())), {})
+
+    def test_moves_are_ordered_by_timestamp_and_unresolved_tasks_are_skipped(self):
+        text = "\n".join((
+            "## Log", "",
+            tl.started_line("09:15", "worker01", "codex", "", TREE, "Security audit"),
+            tl.ended_line("09:45", "worker01", "human_review", "crashed", "none", cause="runtime exit"),
+            tl.stage_line("10:00", "Security audit", "implement"),
+            tl.started_line("09:20", "worker02", "codex", "", TREE, "Gone task"),
+            tl.ended_line("09:50", "worker02", "human_review", "missing", "none", cause="no result file"),
+            ""))
+        moves = list(reversed(tl.moves(text, DAY, CT)))
+        known = {"Security audit": "Security audit"}
+        self.assertEqual(tl.review_causes(moves, lambda n: known.get(n)), {})
 
 
 if __name__ == "__main__":

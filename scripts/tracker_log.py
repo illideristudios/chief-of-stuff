@@ -22,10 +22,11 @@ COMPLETED = "completed; awaiting integration"
 HUMAN_REVIEW = "HUMAN REVIEW NEEDED"
 RELAUNCHED = ": relaunch requested for {task} — "
 RELAUNCH_STAGE = "relaunch"
+CAUSES = ("worker's call", "no result file", "timeout", "runtime exit", "launcher check")
 
 STAGE = re.compile(r"^- (\d{1,2}):(\d{2}) stage: (.+) → (\S+)\s*$")
 STARTED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+) started: .*, task (.+?)\s*$")
-ENDED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (completed; awaiting integration|HUMAN REVIEW NEEDED)\b")
+ENDED = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (completed; awaiting integration|HUMAN REVIEW NEEDED)\b(?: \(([^)]+)\))?")
 # RELAUNCHED's Log line, grouped as ENDED is.
 RELAUNCH = re.compile(r"^- (\d{1,2}):(\d{2}) one-shot (\S+): (relaunch) requested for ")
 # A run whose wait ran out relaunches once into its tree (#110); this line is the once-per-row marker the
@@ -57,11 +58,11 @@ def one_period(reason: str) -> str:
     return reason if reason.endswith(".") else reason + "."
 
 
-def ended_line(at: str, name: str, status: str, reason: str, changes: str) -> str:
+def ended_line(at: str, name: str, status: str, reason: str, changes: str, cause: str = "") -> str:
     """The launcher's line when worker `name` stops `done`, or with any other status for review. `reason` and
     `changes` come already on one line."""
-    return (f"- {at} one-shot {name}: {COMPLETED if status == 'done' else HUMAN_REVIEW}"
-            f" — {one_period(reason)} Changes: {changes}.")
+    outcome = COMPLETED if status == "done" else f"{HUMAN_REVIEW} ({cause})" if cause else HUMAN_REVIEW
+    return f"- {at} one-shot {name}: {outcome} — {one_period(reason)} Changes: {changes}."
 
 
 def relaunch_line(at: str, name: str, task: str, reason: str) -> str:
@@ -141,4 +142,18 @@ def moves(text: str, day: date, zone: ZoneInfo) -> list[Move]:
                     continue
             stage = RELAUNCH_STAGE if m.re is RELAUNCH else "pr" if m[4].startswith("completed") else "review"
             out.append(Move(at, task_of.pop(m[3]), stage, True, line, m[3]))
+    return out
+
+
+def review_causes(moves: list[Move], resolve=lambda name: name) -> dict:
+    """Each task's latest human-review stop cause when no later Log move followed it (#203)."""
+    out: dict = {}
+    for m in sorted(moves, key=lambda move: move.at):
+        key = resolve(m.name)
+        if key is None:
+            continue
+        if m.launch and m.stage == "review" and (end := ENDED.match(m.line)) and end[5]:
+            out[key] = end[5]
+        else:
+            out.pop(key, None)
     return out

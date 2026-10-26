@@ -47,7 +47,7 @@ LOCALE_DRIVER = ("import sys; sys.path.insert(0, sys.argv[1]); import one_shot; 
 
 def report(task: str = "Rate limit headers", **over) -> dict:
     """What `one_shot.reconcile` writes for a worker that finished and left the tracker updated."""
-    return {"status": "human_review", "task": task, "worker": "rate-limit", "runtime_exit": 0,
+    return {"status": "human_review", "cause": "worker's call", "task": task, "worker": "rate-limit", "runtime_exit": 0,
             "reason": "the 429 path sends Retry-After in milliseconds", "changes": "M src/a/headers.py\nWorking tree clean",
             "errors": [], **over}
 
@@ -587,11 +587,18 @@ class ResultTests(unittest.TestCase):
         self.assertNotIn("SYSTEM", self.result("--task", "Rate limit headers").stdout)
 
     def test_a_report_missing_a_key_still_prints_every_key(self):
-        data = report()
-        del data["changes"]
-        self.plant("rate-limit", data)
-        self.assertEqual(sorted(self.one("--task", "Rate limit headers")),
-                         sorted([*getattr(dispatch_prompt, "REPORT_KEYS", ()), "worktree"]))
+        for missing in ("changes", "cause"):
+            with self.subTest(missing=missing):
+                data = report()
+                del data[missing]
+                self.plant("rate-limit", data)
+                got = self.one("--task", "Rate limit headers")
+                self.assertEqual(sorted(got), sorted([*getattr(dispatch_prompt, "REPORT_KEYS", ()), "worktree"]))
+                self.assertIsNone(got[missing])
+
+    def test_a_report_carrying_a_cause_prints_it(self):
+        self.plant("rate-limit", report(cause="timeout"))
+        self.assertEqual(self.one("--task", "Rate limit headers")["cause"], "timeout")
 
     def test_a_task_prints_no_control_character_but_keeps_the_newlines_and_tabs_of_a_reason(self):
         self.plant("rate-limit", report(reason="a\x1b]0;pwn\x07\x1b[2Jb\x00c\nline two\tcolumn",
