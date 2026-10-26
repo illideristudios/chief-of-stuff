@@ -653,6 +653,11 @@ class StoreIndexTest(unittest.TestCase):
         self.assertIn('href="/issues/github%3Aexample%2Frepo%2310"', pending)
         self.assertIn("example/repo#10", pending)
         self.assertIn('<form method="post" action="/" class="decision-form">', pending)
+        # #1124: blocked means an intent failed permanently and a newer answer clears it, so it keeps its form.
+        blocked_row = re.search(r'<div class="row pend" data-status="blocked">.*?</div>', pending, re.S)
+        self.assertIsNotNone(blocked_row)
+        self.assertIn('<form method="post" action="/" class="decision-form">', blocked_row.group(0))
+        self.assertNotIn("Answered · engine waiting", page)
         self.assertNotIn("Stale question on closed issue?", page)
         self.assertIn("0 completed today", page)
         self.assertIn(" · 0</h2>", done)

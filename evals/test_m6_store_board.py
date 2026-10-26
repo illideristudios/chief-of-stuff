@@ -353,6 +353,14 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions"><span class="panels-label">NEEDS INPUT')
         self.assertRegex(html, r'<a href="/decisions"[^>]*>Decisions')
 
+    def test_needs_input_and_the_decisions_badge_count_open_and_blocked_decisions(self) -> None:
+        """#1124: a blocked row is a failed intent a person's newer answer clears, so it still needs input."""
+        html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
+        self.assertIn('<span class="panels-label">NEEDS INPUT</span><b class="panels-count">2</b>', html)
+        self.assertIn('<span class="badge" title="2 pending">2</span>', html)
+        data = task_forge.page_data(self.db)
+        self.assertEqual(decision_actions.tab_counts(data.items(), data.decisions(), data.segments())["decisions"], 2)
+
     def test_decisions_page_renders_open_and_blocked_decisions_and_blocked_is_never_closed(self) -> None:
         board_path, *_ = pg.write_board(self.root, now=NOW)
         html = (board_path.parent / "decisions.html").read_text(encoding="utf-8")
