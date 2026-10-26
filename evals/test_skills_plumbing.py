@@ -172,7 +172,7 @@ class SkillsPlumbingTest(unittest.TestCase):
             "tracker-rows": "Never set the cell by hand or write that line as free text.",
             "review-pipeline": "A verify pass with nothing open moves the task to `merge`.",
             "coordinator-sessions": "When a session's state is in question, poll it; do not ask the user.",
-            "dispatch": "Those two rows are the dispatch.",
+            "dispatch": "That row is the dispatch.",
         }
         release = start.install(root, self.base / "install")
         agent = (release / "agents" / "chief-of-stuff.md").read_text()
