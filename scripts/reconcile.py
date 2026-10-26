@@ -183,14 +183,11 @@ Action = Dispatch | Review | Merge | Ask | Escalate | Limit | Wait | Close
 class Facts:
     """One pass's readiness, completion and stall facts. Empty means the caller did not gather them."""
 
-    claims: tuple[readiness.Claim, ...] = ()
     blockers: tuple[tuple[str, tuple[str, ...] | None], ...] | None = None  # None: the relationship read failed
     asks: tuple[readiness.Ask, ...] = ()
     reports: tuple[readiness.Report, ...] = ()
     alive: tuple[tuple[tuple[str, str, int], bool], ...] = ()  # (issue, stage, attempt) → worker alive
-    read_only: tuple[str, ...] = ()
-    changed: tuple[tuple[str, bool | None], ...] = ()  # dirty; read-only also checks the launch HEAD
-    unreadable: tuple[str, ...] = ()  # git tree/status could not be read; independent of baseline evidence
+    unreadable: tuple[str, ...] = ()  # git tree/status could not be read
     on_main: tuple[tuple[str, bool | None], ...] = ()
     suite_on_main: tuple[tuple[str, bool | None], ...] = ()
     landing_heads: tuple[tuple[str, str], ...] = ()  # source head of the forge-verified landing
@@ -385,7 +382,6 @@ def completion_verdict(key: str, segment: Segment, facts: Facts, workflow: Workf
         claims = tuple(Claim(claim.owner, False, "has no process", claim.ref) if claim.owner == key else claim for claim in claims)
     verdict = completion.abandoned(
         worker_alive, report=report,
-        read_only=key in facts.read_only, changed=dict(facts.changed).get(key),
         on_main=dict(facts.on_main).get(key), suite_on_main=dict(facts.suite_on_main).get(key),
         tree_unreadable=key in facts.unreadable,
         tree=dict(facts.trees).get(key), tree_name=dict(facts.tree_names).get(key, ""),

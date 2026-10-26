@@ -173,21 +173,6 @@ def _progress(tree: Path, view: git_view.View) -> datetime | None | object:
     return when if when.utcoffset() is not None else object()
 
 
-def _changed(state: Any, tree: Path, starting_head: str | None) -> bool | None:
-    """Read-only changes belong to this run, not to the unmerged branch it checked out."""
-    if state is None or state.dirty is None:
-        return None
-    if state.dirty:
-        return True
-    if not isinstance(starting_head, str) or not starting_head:
-        return None
-    try:
-        code, head = git_trees.git(["rev-parse", "HEAD"], tree)
-    except (OSError, git_view.CacheError, subprocess.SubprocessError):
-        return None
-    return head != starting_head if code == 0 and head else None
-
-
 def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]:
     try:
         with git_view.opened(tree, git_trees.audit_env()) as view:
@@ -203,15 +188,6 @@ def _tree_facts(tree: Path) -> tuple[Any, bool | None, datetime | None | object]
         return None, None, object()
 
 
-def _in_trees(root: Path, trees: Path, path: str) -> bool:
-    if not Path(path).is_absolute():
-        return False  # file scopes remain scopes even when Worktrees: .
-    try:
-        return (root / path).resolve().is_relative_to(trees.resolve())
-    except (OSError, RuntimeError, ValueError):
-        return False
-
-
 def _recorded_tree(raw: Any, root: Path, trees: Path) -> Path | None:
     try:
         tree = None
@@ -223,22 +199,6 @@ def _recorded_tree(raw: Any, root: Path, trees: Path) -> Path | None:
         return tree if tree is not None and any(tree.is_relative_to(base.resolve()) for base in (root, trees)) else None
     except (OSError, RuntimeError, ValueError):
         return None
-
-
-def _starting_head(record: dict | None) -> str | None:
-    """Older records may still have a durable launch baseline or a pinned review head."""
-    if not record:
-        return None
-    head = record.get("starting_head") or record.get("reviewed_head")
-    if isinstance(head, str) and head.strip():
-        return head.strip()
-    run = record.get("run_dir")
-    if isinstance(run, str) and run and "\x00" not in run:
-        try:
-            return (Path(run) / "starting_head").read_text(encoding="utf-8").strip() or None
-        except (OSError, UnicodeError, ValueError):
-            pass
-    return None
 
 
 def _implementation_requests(forge: Any, store: Any, observed: dict[str, bool | None]) -> tuple:
@@ -301,20 +261,11 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
     """Read recorded worker trees directly; discovery is not evidence that a recorded tree is unreadable."""
     if now.utcoffset() is None:
         raise ValueError("timestamps must include a timezone")
-    claims: list[readiness.Claim] = []
     asks: list[readiness.Ask] = []
     reports: list[readiness.Report] = []
-    read_only: list[str] = []
     for item in store.items():
-        # worker.launch also records the worktree path here; that is a tree claim, not a file scope.
-        rows = [row for row in store.ownership(item.issue_key)
-                if row.mode != "tree" and not _in_trees(root, trees, row.path)]
-        claims.extend(readiness.Claim(item.issue_key, row.path, row.mode) for row in rows)
-        if rows and all(row.mode == "read" for row in rows):
-            read_only.append(item.issue_key)
         asks.extend(readiness.Ask(row.issue_key, row.answer, row.stage, row.attempt) for row in store.asks(item.issue_key))
     alive: list[tuple[tuple[str, str, int], bool]] = []
-    changed: list[tuple[str, bool | None]] = []
     unreadable: list[str] = []
     on_main: list[tuple[str, bool | None]] = []
     tree_rows: list[tuple[str, Any]] = []
@@ -348,10 +299,6 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
             names.append((segment.issue_key, tree.name))
             tree_claims.append((segment.issue_key, (Claim(segment.issue_key, flag is not False,
                                                          "" if flag is not False else "has no process"),)))
-        changes = None if state is None or state.dirty is None else bool(state.dirty)
-        if segment.issue_key in read_only:
-            changes = _changed(state, tree, _starting_head(record))
-        changed.append((segment.issue_key, changes))
         if landed is not None:
             on_main.append((segment.issue_key, landed))
         # Unknown progress is no evidence of progress; the bounded silence rule must still run.
@@ -406,9 +353,9 @@ def gather(*, forge: Any, store: Any, root: Path, trees: Path, now: datetime,
             suites.append(((rows[-1].issue_key, rows[-1].stage, rows[-1].attempt),
                            (dispatch_prompt.suite_counts(raw), rows[-1].summary or "")))
     blockers, why = _blockers(forge)
-    return Facts(claims=tuple(claims), blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
-                 asks=tuple(asks), reports=tuple(reports), alive=tuple(alive), read_only=tuple(read_only),
-                 changed=tuple(changed), unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
+    return Facts(blockers=None if blockers is None else tuple(blockers.items()), blockers_error=why,
+                 asks=tuple(asks), reports=tuple(reports), alive=tuple(alive),
+                 unreadable=tuple(unreadable), on_main=tuple(on_main), suite_on_main=tuple(suite_on_main),
                  landing_heads=tuple(landing_heads.items()), landed_trees=tuple(landed_trees),
                  trees=tuple(tree_rows), tree_names=tuple(names),
                  tree_claims=tuple(tree_claims), progress=tuple(progress), landing_errors=tuple(landing_errors.items()),

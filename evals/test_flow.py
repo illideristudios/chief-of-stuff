@@ -18,7 +18,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import flow
 import tracker
-import ownership
 from settings import load as load_settings
 
 
@@ -61,7 +60,8 @@ class FlowEngineTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.tz = ZoneInfo("America/Chicago")
 
-    def test_ready_one_shot_tasks_filters_overlap_and_workflow(self):
+    def test_two_open_tasks_on_the_same_files_are_both_ready_and_workflow_is_not(self):
+        """#1039 (C29): no file is anybody's, so an old tracker's File ownership paths overlapping filter nothing."""
         tracker_text = """## Tasks
 
 | name | item | owner | state | since | due | size | lane | stage | issue | checklist |
@@ -88,18 +88,11 @@ class FlowEngineTests(unittest.TestCase):
 
 - 10:00 started
 """
-        make_workspace(self.root, tracker_text)
+        make_workspace(self.root, tracker_text, SAMPLE_TOML.replace("max_concurrency = 2", "max_concurrency = 5"))
         settings = load_settings(self.root, "chief-of-stuff.toml")
         ready = flow.ready_one_shot_tasks(self.root, tracker_text, settings)
-
-        # task-d is running (takes 1 slot). max_concurrency is 2. So 1 slot available!
-        # Candidates: task-a, task-c.
-        # task-b overlaps with task-a (so task-b excluded).
-        # task-e overlaps with task-d (which is running, so task-e excluded).
-        # task-w is workflow (excluded).
-        # Since 1 slot is available, only the first non-conflicting ready task (task-a) is returned!
-        self.assertEqual(len(ready), 1)
-        self.assertEqual(ready[0].name, "task-a")
+        # task-d runs (one of five slots); task-b shares task-a's file and task-e the running task-d's; task-w is workflow.
+        self.assertEqual([t.name for t in ready], ["task-a", "task-b", "task-c", "task-e"])
 
     def test_ready_one_shot_tasks_respects_max_concurrency_when_free(self):
         tracker_text = """## Tasks
@@ -223,15 +216,9 @@ class FlowEngineTests(unittest.TestCase):
 |---|---|---|---|---|---|---|---|---|---|---|
 | task-d | Improve module D | worker-d | running 10:00 | 2026-10-08 | | S | build | build | #4 | |
 
-## File ownership
-
-| context | paths |
-|---|---|
-| task-d | `src/d.py`; worktree `tree-d` (branch-d) |
-
 ## Log
 
-- 10:00 started
+- 10:00 one-shot worker-d started: codex, worktree `tree-d`, task Improve module D
 """
         make_workspace(self.root, tracker_text)
         settings = load_settings(self.root, "chief-of-stuff.toml")

@@ -517,7 +517,7 @@ class WorkerTest(unittest.TestCase):
                      mock.patch.object(worker.claude_adapter, "start", side_effect=RuntimeError("refused")):
                     with self.assertRaisesRegex(RuntimeError, "refused"):
                         self.launch(stage)
-                self.assertIn(str(tree), [row.path for row in self.db.ownership(KEY)])
+                self.assertIn(str(tree), [row.path for row in self.db.trees(KEY)])
                 self.db.upsert_item(KEY, forge_state="closed")
                 items, guards = cleanup.owner_guards(tree, cleanup.owned_items(self.root, self.db))
                 self.assertEqual([item.issue_key for item in items], [KEY])
@@ -681,7 +681,7 @@ class WorkerTest(unittest.TestCase):
         self.assertNotEqual(build.call_args.args[3], self.tree.name)
         self.assertEqual(start.call_args.args[0].cwd, str(fresh))
         self.assertEqual(self.db.resume(KEY)["review_trees"]["1"]["head"], "new-head")
-        self.assertEqual({row.path for row in self.db.ownership(KEY)}, {str(self.tree), str(fresh)})
+        self.assertEqual({row.path for row in self.db.trees(KEY)}, {str(self.tree), str(fresh)})
 
     def test_live_review_is_adopted_before_changed_head_can_rebuild_its_tree(self):
         with mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
@@ -706,7 +706,7 @@ class WorkerTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "does not match the request head"):
                 self.launch("review")
         start.assert_not_called()
-        self.assertEqual([row.path for row in self.db.ownership(KEY)], [str(self.tree)])
+        self.assertEqual([row.path for row in self.db.trees(KEY)], [str(self.tree)])
 
     def test_rework_reuses_tree_and_branch_without_build(self):
         self.launched()
@@ -868,8 +868,6 @@ class WorkerTest(unittest.TestCase):
         fresh = KEY.rpartition("#")[0] + "#3"
         forge.rows.extend([{"issue_key": other, "stage": "implement", "forge_state": "open"},
                            {"issue_key": fresh, "stage": "implement", "forge_state": "open"}])
-        for number, row in enumerate(forge.rows):
-            row["body"] = f"## File ownership\n- write: `src/{number}.py`"
         self.db.upsert_item(other, stage="implement")
         self.db.record_segment(other, "implement", 1, NOW.isoformat())
         launch = mock.Mock(return_value=("example", ""))
@@ -1216,7 +1214,7 @@ class WorkerTest(unittest.TestCase):
                                  NOW + timedelta(hours=3), {}, quota_resets={KEY: NOW + timedelta(hours=2)})
         self.assertEqual(planned, [reconcile.Dispatch(KEY, "implement", "builder", 6)])
 
-    def test_engine_syncs_forge_before_collecting_so_completion_uses_declared_ownership(self):
+    def test_engine_syncs_forge_before_collecting(self):
         order = []
         self.forge.snapshots = mock.Mock(side_effect=lambda: order.append("forge") or [])
         with mock.patch.object(engine.worker, "collect", side_effect=lambda *a, **kw: order.append("collect") or kw["gather"]()), \

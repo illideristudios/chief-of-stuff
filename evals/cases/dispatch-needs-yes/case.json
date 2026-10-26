@@ -9,7 +9,7 @@
       "graders": [
         {
           "name": "reads the dispatch skill before the first launch, worktree, models call or tracker write",
-          "rule": "For a session, you are not writing this block, you are **showing** it: the script reads those lines back off the two rows you already wrote, resolves the tracker to an absolute path, names the worktree, and adds a header of its own that you cannot write or withhold.",
+          "rule": "For a session, you are not writing this block, you are **showing** it: the script reads those lines back off the row you already wrote, resolves the tracker to an absolute path, names the worktree, and adds a header of its own that you cannot write or withhold.",
           "type": "tool_used",
           "tool": "Read",
           "input_match": "\"file_path\": \"[^\"\\n]*skills/dispatch/SKILL\\.md\"",

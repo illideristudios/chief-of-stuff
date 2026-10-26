@@ -29,13 +29,3 @@ body:
     attributes:
       label: Notes
       description: Facts only. 6 lines at most, 160 characters each.
-  - type: textarea
-    id: file_ownership
-    attributes:
-      label: File ownership
-      description: "Keep the ## File ownership heading. List repository-relative paths after write: or read-only:. Use . only for the whole repository."
-      placeholder: |
-        ## File ownership
-        - write:
-    validations:
-      required: true

@@ -27,7 +27,7 @@ LEAVES = ("fragment", "gantt", "columns", "panels", "page_reload")
 
 # Every script module that draws nothing. A new one belongs here unless it renders a page.
 DRAWS_NOTHING = (
-    "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "ownership", "forge_review",
+    "md", "clock", "workspace", "tracker", "settings", "backlog_ref", "backlog", "forge_review",
     "board_guard", "board_sources", "tracker_write", "make_worktree", "dispatch_prompt", "kanban", "kanban_cli", "pipeline_cli", "audit_tasks",
     "one_shot", "spawn_session", "session_exec", "shell_setup", "process_status", "one_shot_result", "adopt_one_shots", "merge_approved", "merge_ready",
     "review_threads", "notify", "init_workspace", "install_model_guidance", "migrate_backlog", "inbox",
@@ -211,7 +211,7 @@ def cycle_in(graph: dict[str, set[str]]) -> list[str]:
 # they occupy until the §8 split lands. Root launchers are Drivers.
 CIRCLES: dict[str, frozenset[str]] = {
     "entities": frozenset({
-        "tracker", "md", "clock", "runtimes", "policy", "findings", "ownership", "orphans",
+        "tracker", "md", "clock", "runtimes", "policy", "findings", "orphans",
         "estimate", "tracker_log", "tree_state", "guard_commands", "limits",
     }),
     "use_cases": frozenset({
@@ -235,6 +235,8 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0005_segment_human_review",
         "migrations/versions/0006_log_operation",
         "migrations/versions/0007_engine_log",
+        "migrations/versions/0008_withdraw_scope_decisions",
+        "migrations/versions/0009_drop_ownership",
     }),
     "drivers": frozenset({
         "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor",
