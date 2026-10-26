@@ -329,7 +329,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
             return Wait(key, "architect consultation is required")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
-    # An answer whose action is blocked, or an intent not yet done, holds merge; pending_decisions holds reversals.
+    # A blocked or unfinished intent holds merge (§6); pending_decisions holds reversals.
     if any(st.status == "blocked" or st.intent for st in decision_actions.states(decisions)):
         return Wait(key, "decision pending")
     if workflow.start == "merge" and not any(e.target == "merge" for e in workflow.edges):
