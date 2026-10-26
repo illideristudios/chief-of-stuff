@@ -328,8 +328,11 @@ class CallTest(unittest.TestCase):
             self.assertEqual(child.get("CLAUDE_AS_PROFILES_DIR"), str(profiles))
             os.symlink(account, profiles / "linked")
             before = len(self.resolved)
-            with self.assertRaises(ValueError):
-                claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="linked")
+            # A trio consult reads a Failure; a raise would escape trio_gate._ask and fail the engine pass.
+            got = claude_adapter.call(Request(prompt="p", cwd=str(self.dir)), claude_as_profile="linked")
+            self.assertIsInstance(got, Failure)
+            self.assertEqual((got.kind, got.retryable), ("error", False))
+            self.assertIn("symlink", got.message)
             linked_run = self.dir / "linked-run"
             linked_run.mkdir()
             with self.assertRaises(ValueError):
