@@ -265,39 +265,10 @@ def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: i
     """Six counts in the artboard's order and words, each linking to where its items are listed. ALL counts every
     task; NEEDS INPUT the held cards; RUNNING workers, or running tasks when no worker source is read."""
     approved = sum(c.state == "open" and c.approved for c in sources.changes.values())
-    return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked"),
+    return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked", "/decisions"),
             panels.Tile("RUNNING", len(sources.workers) or running, "flow", "running"),
             panels.Tile("APPROVED", approved, "flow", "approved"),
             panels.Tile("ORPHANED", orphaned, "flow", "orphaned"), panels.Tile("DRIFT", drift, "flow", "drift")]
-
-
-def _render_store_decisions(decisions: list, home=None) -> str:
-    """Open and blocked decisions under a heading; answered ones folded below them, still reversible (#971)."""
-    if not decisions:
-        return ""
-    live = [d for d in decisions if state_of(d).status in ("open", "blocked")]
-    done = [d for d in decisions if state_of(d).status not in ("open", "blocked", "superseded")]
-    title = f"Decisions · {len(live)} open" if live else "Decisions · none open"
-    fold = (f'<details class="decisions-answered"><summary>{len(done)} answered</summary>\n'
-            f'{_decision_items(done, home)}\n</details>\n') if done else ""
-    return f'<div class="board-decisions">\n<h3>{title}</h3>\n{_decision_items(live, home)}\n{fold}</div>\n'
-
-
-def _decision_items(decisions: list, home=None) -> str:
-    items: list[str] = []
-    for d in decisions:
-        st = state_of(d)
-        if st.status == "superseded":  # its replacement carries the card
-            continue
-        badge = decision_page.store_decision_badge(st)
-        ans = f' <span class="decision-answer">({_esc(st.answer)})</span>' if st.answer else ""
-        form = decision_page.store_decision_form(st)
-        items.append(
-            f'<div class="decision-item" data-status="{_esc(st.status)}">'
-            f'{badge} <a href="{_esc(issue_href(st.issue_key))}">{_esc(store_label(st.issue_key, home))}</a> '
-            f'<strong>{_esc(st.prompt)}</strong>{ans}{form}</div>'
-        )
-    return "\n".join(items)
 
 
 def _tasks_from_store(db: PageData, cfg: Config, lanes: dict | None, kanban: Kanban | None,
@@ -388,11 +359,10 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     earlier = list(rows.items())
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops)
-    decisions_html = _render_store_decisions(store_decisions, sources.home)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
-                  f'{decisions_html}</section>\n')
+                  '</section>\n')
     known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
@@ -469,17 +439,6 @@ html{{scroll-behavior:auto}}
 section{{margin-top:0}}
 figure{{margin:0;padding:0;background:none;border:0}}
 @media (max-width:420px){{body{{padding:12px 12px 36px}}}}
-.board-decisions{{margin-top:24px;border-top:1px solid var(--line);padding-top:8px}}
-.board-decisions h3{{font-family:"Cormorant SC","Cormorant Garamond",Georgia,serif;font-size:15px;letter-spacing:.08em;margin:4px 0 8px}}
-.decision-item{{background:var(--surface);border:1px solid var(--line);border-radius:4px;padding:8px 10px;margin:0 0 6px}}
-.decision-badge{{font-size:11px;letter-spacing:.06em;padding:1px 6px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}}
-.decision-badge.open,.decision-badge.blocked{{border-color:var(--dl);color:var(--dl)}}
-.decision-answer{{color:var(--muted)}}
-.decision-form{{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}}
-.decision-form :is(input,button){{font:14px/1.4 "Alegreya Sans","Gill Sans",system-ui,sans-serif}}
-.decision-form input[type=text]{{flex:1 1 140px;padding:3px 6px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px}}
-.decision-form button{{padding:3px 10px;background:var(--surface);color:var(--fg);border:1px solid var(--brass);border-radius:3px;cursor:pointer}}
-.decisions-answered>summary{{cursor:pointer;color:var(--muted);margin:8px 0}}
 </style>
 <body>
 <div class="board" data-rendered-at="{_iso(now)}" data-tz="{_esc(cfg.tz)}" data-deadline="{_iso(nearest.at)}" data-deadline-name="{_esc(nearest.name)}">

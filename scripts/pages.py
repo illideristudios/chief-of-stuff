@@ -480,7 +480,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if RENDERED.fullmatch(page.name):
                 RENDERED_AT[str(page)] = 0, None, ""
         self.send_response(303)
-        self.send_header("Location", "/")
+        self.send_header("Location", "/decisions")  # the store's forms live on /decisions only (#895)
         self.send_header("Content-Length", "0")
         self.end_headers()
 

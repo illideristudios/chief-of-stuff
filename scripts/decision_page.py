@@ -46,7 +46,7 @@ from html import escape
 from pathlib import Path
 
 import board_sources
-from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config
+from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
 from decision_actions import DecisionState, OPEN_STATES, states, tab_counts as store_tab_counts
 from fragment import FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
@@ -718,7 +718,7 @@ def _store_pending_row(d: DecisionState, asked: datetime | None, ctx: Context) -
     topic = f'<span class="topic">{escape(d.gate)}</span>' if d.gate else ""
     badge = store_decision_badge(d)
     ans = f' <span class="decision-answer">({escape(d.answer)})</span>' if d.answer else ""
-    link = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(d.issue_key)}</a>'
+    link = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
     fallback = escape(d.blocked_reason or "worker waits")
     return (f'      <div class="row pend" data-status="{escape(d.status)}">\n        <span class="stack">{when}{age}</span>\n'
             f'        <span class="stack"><span class="line"><strong class="headline">{escape(d.prompt)}</strong>{topic} {badge}{ans}</span></span>\n'
@@ -734,7 +734,7 @@ def _store_done_row(d: DecisionState, when: datetime, ctx: Context) -> str:
     keyed = f'<span class="key">{escape(by)}</span>' if by else ""
     ans = d.answer or (f"→ {d.rerouted_to}" if d.rerouted_to else d.status)
     words = escape(d.answer or d.note or d.status)
-    since = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(d.issue_key)}</a>'
+    since = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
     return (f'      <div class="row done" data-status="{escape(d.status)}">\n'
             f'        <span class="stack"><span class="when">{ctx.when(when)}</span><span class="took">{took}</span></span>\n'
             f'        <span class="stack">{head}</span>\n        <span>{keyed}{escape(ans)}</span>\n'
@@ -1007,6 +1007,13 @@ h2.pend{color:var(--link)}
 .row .wi button{padding:0 8px;font-size:12px}
 .words{font-style:italic}
 .holds>span,.fallback,.since,.none{font-size:12.5px;color:var(--muted)}
+.decision-badge{font-size:11px;letter-spacing:.06em;padding:1px 6px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.decision-badge.open,.decision-badge.blocked{border-color:var(--dl);color:var(--dl)}
+.decision-answer{color:var(--muted)}
+.decision-form{display:flex;flex-wrap:wrap;gap:6px}
+.decision-form :is(input,button){font:13px/1.4 "Alegreya Sans","Gill Sans",system-ui,sans-serif}
+.decision-form input[type=text]{flex:1 1 120px;min-width:0;padding:1px 6px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px}
+.decision-form button{padding:0 8px;background:var(--ref-bg);color:var(--link);border:1px solid var(--brass);border-radius:3px;cursor:pointer}
 .unread{border-left:3px dashed var(--dl)} .unread .why{color:var(--dl)} .unread .when{color:var(--muted)}
 @media (max-width:760px){.row.pend,.row.done{grid-template-columns:minmax(0,1fr);gap:4px}.row.head{display:none}.row .stack:first-child{flex-direction:row;gap:8px}.unread .none{display:none}}
 @media (max-width:900px){.cols{grid-template-columns:minmax(0,1fr)}}

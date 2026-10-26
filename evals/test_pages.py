@@ -635,7 +635,7 @@ class RenderOnRequestTest(unittest.TestCase):
         self.assertIn("PENDING · 2", decisions)
         self.assertIn("1 completed today", decisions)
         self.assertIn("COMPLETED · 1", decisions)
-        for text in ("First store ask", "Second store ask", "Answered store ask", "github:example/repo#42"):
+        for text in ("First store ask", "Second store ask", "Answered store ask", "example/repo#42"):
             with self.subTest(text=text):
                 self.assertIn(text, decisions)
 
