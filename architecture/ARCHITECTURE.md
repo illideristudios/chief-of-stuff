@@ -298,7 +298,7 @@ Ch ∧ P ∧ G ∧ A ∧ X ∧ O → S
 Engine workers can run on Claude, Codex, Cursor and Antigravity (owner, 2026-10-17, pulling #700 and #701 forward). Each host is an adapter behind the model port, as design decision 7 intended.
 - **One contract.** Every host adapter implements the same start, cancel and classify contract as `claude_adapter.py`, and writes the same run evidence in the run directory: `command.json`, the spawn record, `started.json` and `exit.json`. The engine, `worker.py` and recovery see no difference between hosts.
 - **The registry builds the command.** Each host's argv, prompt bootstrap and environment come from its `runtimes.py` entry (Entities). No adapter imports the one-shot launcher, which retires (#830). Process plumbing shared by the adapters lives in one place (DRY). Each host's argv and error classification stay in its own entry or adapter (SOLID).
-- **Outcomes reach the engine through the report tool.** The engine's `report` and `ask` MCP server is registered for every host at launch, with the same binding, and its configuration lives outside the worker tree. It is callable without an approval prompt on every host. A host mode that drops plugin servers (Claude's `--strict-mcp-config`) is given it explicitly, and a host that refuses calls needing approval (Codex's `-a never`) approves the engine's server and no other (#952). A worker that stops without a report is "stopped without reporting an outcome", whatever the host.
+- **Outcomes reach the engine through the report tool.** The engine's `report` and `ask` MCP server is registered for every host at launch, with the same binding, and its configuration lives outside the worker tree, except on a host that reads it only from the tree (Zach, 2026-10-25). Cursor is that host: the 2026-10-17 spike found it reads only `.cursor/mcp.json` in the tree. The in-tree path is named in that host's `runtimes.py` entry. The engine writes the file at launch and keeps it out of git through the tree's `info/exclude`. It never replaces a file there that it did not write, and cleanup treats a `.cursor/` holding only that file as clean. It is callable without an approval prompt on every host. A host mode that drops plugin servers (Claude's `--strict-mcp-config`) is given it explicitly, and a host that refuses calls needing approval (Codex's `-a never`) approves the engine's server and no other (#952). A worker that stops without a report is "stopped without reporting an outcome", whatever the host.
 - **The guard holds on every host.** The Claude plugin's PreToolUse gate does not load on other hosts, so a non-Claude worker gets a host-neutral guard with the same judgements:
   - **Shims:** a `PATH` shim directory, placed first by the engine, wraps `git`, `gh` and `glab` and refuses what `guard_commands` refuses: merges, pushes to protected or ambiguous refs, and forge calls outside the allowlist. It reuses `guard_commands` rather than copying it. A shim, like the hook, is a guard rail. The forge and the engine are the boundary.
   - **Branch protection:** a non-Claude entry launches only in a workspace whose forge protects its default branch and the branch its requests target, which can differ, for example `main` and `develop`. Otherwise the worker moves to the next entry in its rotation.
@@ -312,13 +312,16 @@ B := the forge protects the default branch and the request target branch
 Rm(c) := commit c is a merge the engine recorded      P := every protected branch
 Fr(c) := the forge records c as the merge commit of a request opened before the run started
 N := a non-Claude worker may launch      Ok := the run passes the post-run check
+Ct := the engine's MCP config is in the worker tree      Hc := the host reads its MCP config only from the tree
+Nr := the in-tree path is named in the host's runtimes.py entry      X := the file is git-excluded and replaces no file the engine did not write
 
 H ∧ R            [design decision 7; #830 retires the one-shot argv]
+Ct → Hc ∧ Nr ∧ X [Zach, 2026-10-25: option A; Hc holds for Cursor alone, 2026-10-17 spike]
 N → G ∧ B        [the guard holds on every host; an unprotected branch means the next entry]
 Ok ↔ ∀b ∈ P, ∀c ∈ first-parent(start(b)..end(b)): Rm(c) ∨ Fr(c)      [unreadable branch or forge record → ¬Ok; #860, #949 (Zach, 2026-10-24)]
 Fr(c) is read from the forge's record, never from c's subject or a branch name      [a worker writes those]
 ¬Ok → held for human review, each commit named, never silent
-∴ other hosts run behind the same port, the same evidence and an equivalent guard
+∴ other hosts run behind the same port, the same evidence and an equivalent guard, and only a host that must read its channel from the tree gets one there
 ```
 
 ## 14. Release installation
