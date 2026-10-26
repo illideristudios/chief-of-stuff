@@ -624,8 +624,9 @@ class PromptCharacterBoundsTest(unittest.TestCase):
                        one_shot=True, settings=loaded)
 
     def test_excessive_assignment_exceeding_cap_raises_refused_error(self):
-        item = "Security audit " + ("x" * 2000)
-        chk = "Checklist: " + ("y" * 2000)
+        # Both fields just under LINE_CAP, so the body clears BODY_CAP whatever length the machine's paths are (#1039).
+        item = "Security audit " + ("x" * (dp.LINE_CAP - 30))
+        chk = "Checklist: " + ("y" * (dp.LINE_CAP - 30))
         oversized_tracker = f"""# Tracker 2026-09-18
 ## Tasks
 | item | owner | state | since | due | checklist |
