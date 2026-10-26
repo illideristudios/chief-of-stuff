@@ -126,6 +126,29 @@ class GatherTest(unittest.TestCase):
         self.assertEqual(self.release_gather(f).implementation_requests, ())
         f.requests.assert_not_called()
 
+    def test_equivalent_starts_in_other_offsets_are_a_tie_and_gather_no_evidence(self):
+        self.released_segment(attempt=2)
+        start = NOW - timedelta(hours=2)
+        east = start.astimezone(timezone(timedelta(hours=5))).isoformat()
+        self.db.record_segment(KEY, "review", 1, started_at=east, ended_at=(NOW-timedelta(hours=1)).isoformat(),
+                               outcome="done")
+        self.assertNotEqual(east, start.isoformat())
+        self.assertEqual(next(s for s in self.db.segments(KEY) if s.stage == "review").started_at, east)
+        f = self.release_forge([self.released_request()])
+        self.assertEqual(self.release_gather(f).implementation_requests, ())
+        f.requests.assert_not_called()
+
+    def test_same_stage_tie_selects_the_higher_attempt_and_a_newer_start_beats_a_larger_attempt(self):
+        self.released_segment()
+        self.db.record_segment(KEY, "implement", 2, started_at=(NOW-timedelta(hours=2)).isoformat(),
+                               ended_at=(NOW-timedelta(hours=1)).isoformat(), outcome="human_review")
+        self.db.set_resume(KEY, {"runs": {"implement-1": {"branch": "old"}, "implement-2": {"branch": "work/issue-1"}}})
+        f = self.release_forge([self.released_request()])
+        self.assertEqual(dict(self.release_gather(f).implementation_requests), {(KEY, "implement", 2): True})
+        self.db.record_segment(KEY, "implement", 3, started_at=(NOW-timedelta(hours=5)).isoformat(),
+                               ended_at=(NOW-timedelta(hours=4)).isoformat(), outcome="human_review")
+        self.assertEqual(dict(self.release_gather(f).implementation_requests), {(KEY, "implement", 2): True})
+
     def test_no_request_read_without_an_eligible_release(self):
         self.released_segment()
         for observations in ((), ((KEY, None),), ((KEY, True),)):
