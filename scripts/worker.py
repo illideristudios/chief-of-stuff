@@ -237,7 +237,6 @@ def _recover(store: Any, key: str, *, trees: Path, clone: Path) -> None:
             survivor = None
         else:
             store.update_resume(key, lambda d: d.update(worktree=str(tree), work_branch=survivor.branch))
-            store.set_ownership(key, str(tree), "tree")
     if survivor is None:
         def fresh(d):
             d.pop("worktree", None)
