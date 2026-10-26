@@ -578,7 +578,7 @@ class EngineTest(unittest.TestCase):
         self.forge.rows[0]["forge_state"] = "closed"
         with mock.patch.object(engine.worker.process_status, "identity", return_value=None):
             actions = self.run_pass()
-        self.assertEqual(actions, [])  # collection has already released the closed issue's slot
+        self.assertIsInstance(actions[0], reconcile.Close)
         self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
 
     def test_a_root_level_or_missing_tree_holds_a_gone_worker(self):
@@ -586,7 +586,7 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         with mock.patch.object(engine.worker.process_status, "identity", return_value=None):
             actions = self.run_pass()
-        self.assertEqual(actions, [reconcile.Wait(KEY, "human review")])
+        self.assertTrue(actions[0].human_review)
         self.assertTrue(self.db.items()[0].human_review)
 
     def test_unreadable_live_tree_still_reaches_stall_judgement(self):

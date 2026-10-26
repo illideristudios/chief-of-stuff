@@ -661,6 +661,9 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())
                     continue
             missing_exit = not (run_dir / "exit.json").exists()
+            if missing_exit and not any((run_dir / name).exists() for name in ("stdout", "stderr")) and not (
+                    store.segment_reports(key, segment.stage, segment.attempt)):
+                continue  # no adapter output or report to classify yet; the planner still sees the abandoned run
             teardown_once(store, root, key, segment.stage, segment.attempt, teardown_command, now.isoformat())
             code, exited_at = (1, None) if missing_exit else _exit_record(run_dir)
             runtime = record.get("runtime", "claude")
