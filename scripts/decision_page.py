@@ -18,7 +18,8 @@ server thing"). The JSON holds:
 What the JSON leaves out the page reads from the workspace (decision_context): `asked` from the first
 Log line naming `decision-<slug>`, else the file's mtime; the answer and its chip from the latest Decisions row naming
 it, the key being the option its words name; a reference's status from the tracker's stage and board_sources. Rendering
-the board re-renders every page, and `decisions.html` lists them (Decisions.dc.html). MODULE GRAPH (module_graph.py)
+the board re-renders every page, and `decisions.html` lists them (Decisions.dc.html); on engine workspaces (`store.db`
+present) `decisions.html` also lists open and today's completed store decisions. MODULE GRAPH (module_graph.py)
 is drawn for the first change the references name that board_sources knows.
 
 A timeline `kind` colours its dot: a lane stage (implement, pr, review, triage, fix, verify, merge), `hot` or
@@ -45,14 +46,16 @@ from html import escape
 from pathlib import Path
 
 import board_sources
-from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config
+from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
-from fragment import FONTS, PROSE_CSS, TAB_CSS, href, tab_bar, theme
+from decision_actions import DecisionState, OPEN_STATES, states, tab_counts as store_tab_counts
+from fragment import FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
 from module_graph import section as _graph
 from notify_service import atomic_write
 from settings import Graph, SettingsError, load as load_settings
+from task_forge import PageData
 from tracker import decision_rows, issue_key, parse_tracker
 from workspace import ConfigError, daily_trackers, pages_address, read_config
 
@@ -677,11 +680,83 @@ def held_refs(pending: list[tuple[str, dict | None, datetime | None, str]], ctx:
     return out
 
 
-def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) -> tuple[str, list[tuple[str, dict | None, datetime | None, str]]]:
+def _stamp(raw: str | None, now: datetime) -> datetime | None:
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if not now.tzinfo:
+        return dt
+    return dt.replace(tzinfo=now.tzinfo) if dt.tzinfo is None else dt.astimezone(now.tzinfo)
+
+
+def store_decision_badge(d: DecisionState) -> str:
+    if d.status == "blocked":
+        why = d.blocked_reason or "action blocked"
+        return f'<span class="decision-badge blocked">BLOCKED · {escape(why)}</span>'
+    return f'<span class="decision-badge {escape(d.status)}">{escape(d.status.upper())}</span>'
+
+
+def store_decision_form(d: DecisionState) -> str:
+    return (
+        f'<form method="post" action="/" class="decision-form">'
+        f'<input type="hidden" name="decision_id" value="{d.id}">'
+        f'<input type="text" name="answer" value="{escape(d.answer or "")}">'
+        f'<input type="text" name="target_stage" value="{escape(d.rerouted_to or "")}">'
+        f'<button type="submit" name="action" value="answer">Answer</button>'
+        f'<button type="submit" name="action" value="reverse">Reverse</button>'
+        f'<button type="submit" name="action" value="reroute">Re-route</button>'
+        f'</form>'
+    )
+
+
+def _store_pending_row(d: DecisionState, asked: datetime | None, ctx: Context) -> str:
+    when = f'<span class="when">{ctx.when(asked)}</span>' if asked else ""
+    age = f'<span class="age">{span(ctx.now - asked)}</span>' if asked else ""
+    topic = f'<span class="topic">{escape(d.gate)}</span>' if d.gate else ""
+    badge = store_decision_badge(d)
+    ans = f' <span class="decision-answer">({escape(d.answer)})</span>' if d.answer else ""
+    link = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
+    fallback = escape(d.blocked_reason or "worker waits")
+    return (f'      <div class="row pend" data-status="{escape(d.status)}">\n        <span class="stack">{when}{age}</span>\n'
+            f'        <span class="stack"><span class="line"><strong class="headline">{escape(d.prompt)}</strong>{topic} {badge}{ans}</span></span>\n'
+            f'        {store_decision_form(d)}\n        <span class="stack holds"><span>{link}</span></span>\n'
+            f'        <span class="fallback">{fallback}</span>\n      </div>')
+
+
+def _store_done_row(d: DecisionState, when: datetime, ctx: Context) -> str:
+    asked = _stamp(d.asked_at, ctx.now)
+    took = f"in {span(when - asked)}" if asked and when >= asked and when != asked else ""
+    head = f'<span class="headline">{escape(d.prompt)}</span><span class="page">{escape(d.gate or d.status)}</span>'
+    by = d.decided_by or d.status
+    keyed = f'<span class="key">{escape(by)}</span>' if by else ""
+    ans = d.answer or (f"→ {d.rerouted_to}" if d.rerouted_to else d.status)
+    words = escape(d.answer or d.note or d.status)
+    since = f'<a class="ref" href="{escape(issue_href(d.issue_key))}">{escape(store_label(d.issue_key, ctx.forge))}</a>'
+    return (f'      <div class="row done" data-status="{escape(d.status)}">\n'
+            f'        <span class="stack"><span class="when">{ctx.when(when)}</span><span class="took">{took}</span></span>\n'
+            f'        <span class="stack">{head}</span>\n        <span>{keyed}{escape(ans)}</span>\n'
+            f'        <span class="words">{words}</span>\n        <span class="since">{since}</span>\n      </div>')
+
+
+def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, *,
+          db: PageData | None = None, navigation: dict | None = None) -> tuple[str, list[tuple[str, dict | None, datetime | None, str]]]:
     """`decisions.html` (Decisions.dc.html) and its pending entries (`entries`, read here unless given), which the
     board's DECISIONS panel lists too."""
     pending = entries(pages_dir, ctx) if pending is None else pending
     rows, held = [], held_refs(pending, ctx)
+    store_states: list[DecisionState] = []
+    pending_store: list[tuple[DecisionState, datetime | None]] = []
+    if db is not None:
+        opened = {i.issue_key for i in db.items() if getattr(i, "forge_state", "open") != "closed"}
+        store_states = states(db.decisions())
+        pending_store = sorted(
+            ((d, _stamp(d.asked_at, ctx.now)) for d in store_states if d.status in OPEN_STATES and d.issue_key in opened),
+            key=lambda item: (-(item[1].timestamp() if item[1] else 0), -item[0].id),
+        )
+        rows.extend(_store_pending_row(d, asked, ctx) for d, asked in pending_store)
     linker = Linker(ctx.forge)
     for slug, d, asked, why in pending:
         when = f'<span class="when">{ctx.when(asked)}</span>' if asked else ""
@@ -711,8 +786,13 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
         today = date.fromisoformat(day)
     except ValueError:
         today = ctx.now.date()
-    done = []
-    for row in sorted((r for r in ctx.rows if r.day == today), key=lambda r: (r.when is None, -(r.when.timestamp() if r.when else 0))):
+    done_items: list[tuple[datetime | None, str]] = []
+    for d in store_states:
+        if d.status not in OPEN_STATES and d.status != "superseded":
+            when = _stamp(d.answered_at or d.asked_at, ctx.now)
+            if when is not None and when.date() == today:
+                done_items.append((when, _store_done_row(d, when, ctx)))
+    for row in (r for r in ctx.rows if r.day == today):
         page = next(iter(PAGE_REF.findall(row.item)), None)
         source = pages_dir / f"{page}.json" if page else None
         try:
@@ -736,18 +816,22 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
         ref = refs[0] if refs else ""
         since = f"{ctx.ref(ref)} {escape(ctx.where(ref))}" if ref else ""
         keyed = f'<span class="key">{escape(key)}</span>' if key else ""
-        done.append(f'      <div class="row done">\n        <span class="stack"><span class="when">{ctx.when(row.when) if row.when else ""}</span>'
-                    f'<span class="took">{took}</span></span>\n        <span class="stack">{head}</span>\n'
-                    f"        <span>{keyed}{escape(answer)}</span>\n        <span class=\"words\">{_md(row.words, linker)}</span>\n"
-                    f'        <span class="since">{since}</span>\n      </div>')
+        done_items.append((row.when,
+                           f'      <div class="row done">\n        <span class="stack"><span class="when">{ctx.when(row.when) if row.when else ""}</span>'
+                           f'<span class="took">{took}</span></span>\n        <span class="stack">{head}</span>\n'
+                           f"        <span>{keyed}{escape(answer)}</span>\n        <span class=\"words\">{_md(row.words, linker)}</span>\n"
+                           f'        <span class="since">{since}</span>\n      </div>'))
+    done = [html_row for _, html_row in sorted(done_items, key=lambda r: (r[0] is None, -(r[0].timestamp() if r[0] else 0)))]
     ready = [a for _, d, a, _ in pending if d is not None]
+    total_pending = len(ready) + len(pending_store)
+    asked_times = [a for a in [*ready, *(a for _, a in pending_store)] if a is not None]
     mrs = sum(1 for r in held if ctx.is_change(r))
     unread = len(pending) - len(ready)
-    meta = [f"{len(ready)} pending"]  # (#215) no render clock: the sources' read times and counts stay
+    meta = [f"{total_pending} pending"]  # (#215) no render clock: the sources' read times and counts stay
     if n_saved := sum(1 for _, d, _, _ in pending if d is not None and saved(d)):
         meta.append(f"{n_saved} saved")
-    if any(ready):
-        meta.append(f"oldest {span(ctx.now - min(a for a in ready if a))}")
+    if asked_times:
+        meta.append(f"oldest {span(ctx.now - min(asked_times))}")
     if held:
         meta.append(f"holding {_plural(len(held) - mrs, 'issue')}, {_plural(mrs, 'merge request')}")
     if unread:
@@ -757,21 +841,23 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None) 
     meta.append('<a href="/">board</a>')
     words = f"{escape(ctx.user)}'s words" if ctx.user else "words"
     none = '      <div class="row"><span class="none">none</span></div>'
-    body = (f'  <section>\n    <h2 class="pend">PENDING · {len(ready)}</h2>\n    <div class="list">\n'
+    body = (f'  <section>\n    <h2 class="pend">PENDING · {total_pending}</h2>\n    <div class="list">\n'
             '      <div class="row pend head cap"><span>asked</span><span>decision</span><span>options</span><span>holding</span><span>if unanswered</span></div>\n'
             + ("\n".join(rows) or none) + "\n    </div>\n  </section>\n"
             f'  <section>\n    <h2>COMPLETED · {len(done)}</h2>\n    <div class="list fin">\n'
             f'      <div class="row done head cap"><span>answered</span><span>decision</span><span>answer</span><span>{words}</span><span>since</span></div>\n'
             + ("\n".join(done) or none) + "\n    </div>\n  </section>\n")
+    nav = navigation if navigation is not None else (store_tab_counts(db.items(), db.decisions(), db.segments()) if db is not None else {})
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', len(ready))}"
+            f"<title>Decisions · {escape(_day(day))}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decisions\">\n{tab_bar('Decisions', total_pending, **nav)}"
             f'  <header class="top">\n    <div>\n      <h1>Decisions · {escape(_day(day))}</h1>\n'
             f'      <span class="eyebrow">{" · ".join(meta)}</span>\n    </div>\n  </header>\n'
             + body + "</main>\n" + ANSWER_JS + "</body>\n</html>\n"), pending
 
 
-def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None) -> list[tuple[str, dict | None, datetime | None, str]]:
+def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None, *,
+              db: PageData | None = None, navigation: dict | None = None) -> list[tuple[str, dict | None, datetime | None, str]]:
     """Re-render every readable decision's page from its JSON and the context, and `decisions.html`; the pending entries."""
     pending = entries(pages_dir, ctx)
     count = sum(d is not None for _, d, _, _ in pending)
@@ -782,7 +868,7 @@ def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None)
         except BAD:
             continue
         write_if_changed(source.with_suffix(".html"), page)
-    html, pending = index(pages_dir, ctx, day, pending)
+    html, pending = index(pages_dir, ctx, day, pending, db=db, navigation=navigation)
     write_if_changed(pages_dir / "decisions.html", html)
     return pending
 
@@ -921,6 +1007,13 @@ h2.pend{color:var(--link)}
 .row .wi button{padding:0 8px;font-size:12px}
 .words{font-style:italic}
 .holds>span,.fallback,.since,.none{font-size:12.5px;color:var(--muted)}
+.decision-badge{font-size:11px;letter-spacing:.06em;padding:1px 6px;border-radius:3px;border:1px solid var(--line);color:var(--muted)}
+.decision-badge.open,.decision-badge.blocked{border-color:var(--dl);color:var(--dl)}
+.decision-answer{color:var(--muted)}
+.decision-form{display:flex;flex-wrap:wrap;gap:6px}
+.decision-form :is(input,button){font:13px/1.4 "Alegreya Sans","Gill Sans",system-ui,sans-serif}
+.decision-form input[type=text]{flex:1 1 120px;min-width:0;padding:1px 6px;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:3px}
+.decision-form button{padding:0 8px;background:var(--ref-bg);color:var(--link);border:1px solid var(--brass);border-radius:3px;cursor:pointer}
 .unread{border-left:3px dashed var(--dl)} .unread .why{color:var(--dl)} .unread .when{color:var(--muted)}
 @media (max-width:760px){.row.pend,.row.done{grid-template-columns:minmax(0,1fr);gap:4px}.row.head{display:none}.row .stack:first-child{flex-direction:row;gap:8px}.unread .none{display:none}}
 @media (max-width:900px){.cols{grid-template-columns:minmax(0,1fr)}}

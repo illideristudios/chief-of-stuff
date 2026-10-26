@@ -610,6 +610,99 @@ class IndexTest(unittest.TestCase):
             self.assertEqual(mine["light"][token], board["light"][token])
 
 
+class StoreIndexTest(unittest.TestCase):
+    """Issue #895: on an engine workspace (store.db present), decisions.html lists open store decisions in PENDING and
+    today's answered store decisions in COMPLETED, matching decision_actions.tab_counts."""
+
+    def setUp(self):
+        import store
+        import task_forge
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pages = self.tmp / "pages"
+        self.pages.mkdir()
+        self.db_path = self.tmp / "store.db"
+        store.migrate(self.db_path)
+        self.store = store.Store(self.db_path)
+        self.addCleanup(self.store.engine.dispose)
+        self.page_data = lambda: task_forge.page_data(self.store)
+
+    def test_pending_store_decisions_render_and_match_tab_counts(self):
+        import decision_actions
+        self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
+        self.store.upsert_item("github:example/repo#11", title="Closed item", stage="merge", forge_state="closed")
+        self.store.add_decision("github:example/repo#10", "scope", "Split auth token refresh?",
+                                asked_at="2026-09-26T01:15:00-05:00")
+        self.store.add_decision("github:example/repo#10", "plan", "Approve rollout gate?",
+                                asked_at="2026-09-26T01:45:00-05:00",
+                                record={"status": "blocked", "blocked_reason": "awaiting owner"})
+        self.store.add_decision("github:example/repo#11", "scope", "Stale question on closed issue?",
+                                asked_at="2026-09-26T01:50:00-05:00")
+        data = self.page_data()
+        nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        self.assertEqual(nav["decisions"], 2)
+
+        dp.write_all(self.pages, dp.Context(NOW), "2026-09-26", db=data, navigation=nav)
+        page = (self.pages / "decisions.html").read_text()
+        pending, done = page.split("COMPLETED")
+        self.assertIn("2 pending", page)
+        self.assertIn("PENDING · 2", page)
+        self.assertIn('<span class="badge" title="2 pending">2</span>', page)
+        self.assertLess(pending.index("Approve rollout gate?"), pending.index("Split auth token refresh?"))
+        self.assertIn("BLOCKED · awaiting owner", pending)
+        self.assertIn('href="/issues/github%3Aexample%2Frepo%2310"', pending)
+        self.assertIn("example/repo#10", pending)
+        self.assertIn('<form method="post" action="/" class="decision-form">', pending)
+        # #1124: blocked means an intent failed permanently and a newer answer clears it, so it keeps its form.
+        blocked_row = re.search(r'<div class="row pend" data-status="blocked">.*?</div>', pending, re.S)
+        self.assertIsNotNone(blocked_row)
+        self.assertIn('<form method="post" action="/" class="decision-form">', blocked_row.group(0))
+        self.assertNotIn("Answered · engine waiting", page)
+        self.assertNotIn("Stale question on closed issue?", page)
+        self.assertIn("0 completed today", page)
+        self.assertIn(" · 0</h2>", done)
+
+    def test_completed_store_decisions_answered_today_in_workspace_zone_appear_under_completed(self):
+        self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
+        # 2026-09-26T06:40:00Z is 01:40 CDT on 2026-09-26 in America/Chicago.
+        self.store.add_decision("github:example/repo#10", "permission", "Permission requested for Bash",
+                                answer="allow", decided_by="trio", asked_at="2026-09-26T00:30:00-05:00",
+                                record={"status": "answered", "answered_at": "2026-09-26T06:40:00Z"})
+        self.store.add_decision("github:example/repo#10", "design", "Use volume service?",
+                                answer="option A", decided_by="user", asked_at="2026-09-26T01:00:00-05:00",
+                                record={"status": "answered", "answered_at": "2026-09-26T01:20:00-05:00"})
+        # 2026-09-26T03:30:00Z is 22:30 CDT on 2026-09-25 in America/Chicago (yesterday).
+        self.store.add_decision("github:example/repo#10", "scope", "Yesterday in Chicago",
+                                answer="yes", decided_by="trio", asked_at="2026-09-25T22:00:00-05:00",
+                                record={"status": "answered", "answered_at": "2026-09-26T03:30:00Z"})
+        data = self.page_data()
+        page, _ = dp.index(self.pages, dp.Context(NOW), "2026-09-26", db=data)
+        done = page.split("COMPLETED")[1]
+        self.assertIn("0 pending", page)
+        self.assertIn("2 completed today", page)
+        self.assertIn(" · 2</h2>", done)
+        self.assertLess(done.index("Permission requested for Bash"), done.index("Use volume service?"))
+        for text in ("Permission requested for Bash", "allow", "trio", "Use volume service?", "option A", "user",
+                     'href="/issues/github%3Aexample%2Frepo%2310"', "example/repo#10"):
+            with self.subTest(text=text):
+                self.assertIn(text, done)
+        self.assertNotIn("Yesterday in Chicago", done)
+        self.assertNotIn("<form", done)  # #924: an answered row is read-only
+
+    def test_store_rows_label_the_home_repo_short_and_a_foreign_one_by_name(self):
+        """#903: a row for the workspace backlog reads `#N`; another project names itself. The href stays the full key."""
+        from fragment import issue_href
+        own, foreign = "github:team/app#9", "github:o/n#4"
+        for key, question in ((own, "Ship?"), (foreign, "Wait?")):
+            self.store.upsert_item(key, title=question, stage="implement", forge_state="open")
+            self.store.add_decision(key, "scope", question, asked_at=NOW.isoformat())
+        page, _ = dp.index(self.pages, dp.Context(NOW, forge=GitHubBacklog("team/app")), NOW.date().isoformat(),
+                           db=self.page_data())
+        self.assertIn(f'href="{escape(issue_href(own))}">#9</a>', page)
+        self.assertIn(f'href="{escape(issue_href(foreign))}">o/n#4</a>', page)
+        self.assertNotIn(">github:", page)
+
+
 class DerivedPageTest(unittest.TestCase):
     """The decision page applies the same derivations when its JSON does not carry them."""
 

@@ -31,6 +31,7 @@ class Tile:
     count: int
     anchor: str  # the id it links to
     kind: str
+    route: str = ""  # a page it links to instead of the anchor
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,7 @@ def header(h: Header) -> str:
 
 def tiles(ts: list[Tile]) -> str:
     return ('<nav class="panels-tiles" aria-label="counts">'
-            + "".join(f'<a class="panels-tile" data-kind="{_kind(t.kind)}" href="#{_kind(t.anchor)}">'
+            + "".join(f'<a class="panels-tile" data-kind="{_kind(t.kind)}" {_href(t.route or "#" + _kind(t.anchor))}>'
                       f'<span class="panels-label">{_esc(t.label)}</span><b class="panels-count">{t.count}</b></a>' for t in ts)
             + "</nav>")
 
