@@ -672,10 +672,11 @@ class Page(unittest.TestCase):
 
     def test_each_tile_links_to_the_cards_that_carry_its_facts(self) -> None:
         # #208: the removed panels no longer have anchors; tiles reach BUILD, and tabs reach the detail pages.
-        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="#([a-z]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
+        links = re.findall(r'<a class="panels-tile" data-kind="([a-z]+)" href="([#/][a-z]+)"><span class="panels-label">([A-Z ]+)</span>', self.body)
         # #349 review: the kind is what the stylesheet colours a tile by, so each is pinned with its link and label.
-        self.assertEqual(links, [("all", "flow", "ALL"), ("blocked", "flow", "NEEDS INPUT"), ("running", "flow", "RUNNING"),
-                                 ("approved", "flow", "APPROVED"), ("orphaned", "flow", "ORPHANED"), ("drift", "flow", "DRIFT")])
+        # #1122: NEEDS INPUT opens the decisions page.
+        self.assertEqual(links, [("all", "#flow", "ALL"), ("blocked", "/decisions", "NEEDS INPUT"), ("running", "#flow", "RUNNING"),
+                                 ("approved", "#flow", "APPROVED"), ("orphaned", "#flow", "ORPHANED"), ("drift", "#flow", "DRIFT")])
 
     def test_every_tile_kind_has_a_colour_and_all_draws_in_the_artboards_ink(self) -> None:
         # #349 review: the artboard's tone map gives ALL ink (Flow.dc.html `all: '#2f2630'`, the light --fg); a tile with
