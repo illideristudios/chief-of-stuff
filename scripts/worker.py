@@ -117,6 +117,23 @@ def _quarantine_run(run_dir: Path) -> None:
     run_dir.rename(destination)
 
 
+def preserve_start(run_dir: Path) -> bool:
+    """Keep a durable host start or a possibly live spawn; set aside an empty interrupted start."""
+    if (run_dir / "started.json").exists():
+        return True
+    command = run_dir / "command.json"
+    if command.exists():
+        try:
+            session = json.loads(command.read_text()).get("session_id")
+            if session and process_status.carriers(session):
+                return True
+        except (OSError, RuntimeError, ValueError, AttributeError):
+            return True
+    if run_dir.exists():
+        _quarantine_run(run_dir)
+    return False
+
+
 def recovery_stopped(store: Any, key: str) -> bool:
     """Unknown process identity is a wait, never permission to move a checkout."""
     for record in _resume(store, key).get("runs", {}).values():
@@ -151,6 +168,11 @@ def _quarantine(candidate: completion.Candidate, *, trees: Path, clone: Path, ke
                 raise RuntimeError(f"cannot preserve quarantined ref: {detail}")
         else:
             head = ""
+    if candidate.head:
+        detached = f"refs/quarantine/{key.rpartition('#')[2]}/{stamp}/HEAD"
+        code, detail = make_worktree.git_trusted(["update-ref", detached, candidate.head], clone)
+        if code:
+            raise RuntimeError(f"cannot preserve quarantined HEAD: {detail}")
     if candidate.path:
         tree = Path(candidate.path)
         if not tree.resolve().is_relative_to(trees.resolve()) or tree.resolve() == trees.resolve():
@@ -595,16 +617,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     store.drop_segment(key, segment.stage, segment.attempt)
                     continue  # interrupted recovery reserved a slot but never reached a host start
                 if run_dir.exists() and not (run_dir / "started.json").exists():
-                    command = run_dir / "command.json"
-                    if command.exists():
-                        session = json.loads(command.read_text()).get("session_id")
-                        if session:
-                            try:
-                                if process_status.carriers(session):
-                                    continue
-                            except (OSError, RuntimeError):
-                                continue
-                    _quarantine_run(run_dir)
+                    if preserve_start(run_dir):
+                        continue
                     store.drop_segment(key, segment.stage, segment.attempt)
                     continue
                 try:

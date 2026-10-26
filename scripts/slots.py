@@ -48,7 +48,8 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
           max_concurrency: int | None, launch: Callable[[], tuple[str, ...] | None],
           clock: clock.Clock = clock.system,
           runtime: str | None = None, model: str | None = None,
-          effort: str | None = None, agent_type: str | None = None) -> None:
+          effort: str | None = None, agent_type: str | None = None,
+          preserve_start: Callable[[], bool] | None = None) -> None:
     """Claim one worker slot: reserve it under the lock, launch outside it, then stamp the real start — or refuse.
 
     The reservation is an open segment, so concurrent claims count it; an ordinary launch error drops it.
@@ -67,6 +68,10 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
         used = launch()
     except Exception:
         store.drop_segment(issue_key, stage, attempt)
+        raise
+    except BaseException:
+        if preserve_start is not None and not preserve_start():
+            store.drop_segment(issue_key, stage, attempt)
         raise
     ran = None
     if used is not None:

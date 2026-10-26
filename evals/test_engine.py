@@ -408,7 +408,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(len(waits), 1)
         self.assertIn("compare: permission denied", waits[0])
 
-    def test_terminal_failed_exit_replaces_its_live_claim_but_keeps_other_live_owners(self):
+    def test_terminal_failed_exit_preserves_recoverable_work_without_a_hold(self):
         self.p.workflows["standard"] = policy.Workflow("standard", "implement")
         self.run_pass()
         segment = self.db.segments(KEY)[0]
@@ -419,7 +419,7 @@ class EngineTest(unittest.TestCase):
                  mock.patch.object(engine, "_close_segment") as close:
                 engine._finish_worker(self.forge, self.db, segment,
                                       "failed", "exit 1", NOW, policies=self.p, facts=facts)
-                self.assertEqual(close.call_args.args[7], not bool(others))
+                self.assertFalse(close.call_args.args[7])
 
     def assert_unconfirmed_merge_keeps_review_stage(self, outcome, message, *, merge_pending=False):
         self.run_pass()
@@ -578,7 +578,7 @@ class EngineTest(unittest.TestCase):
         self.forge.rows[0]["forge_state"] = "closed"
         with mock.patch.object(engine.worker.process_status, "identity", return_value=None):
             actions = self.run_pass()
-        self.assertIsInstance(actions[0], reconcile.Close)
+        self.assertEqual(actions, [])  # collection has already released the closed issue's slot
         self.assertIsNotNone(self.db.segments(KEY)[0].ended_at)
 
     def test_a_root_level_or_missing_tree_holds_a_gone_worker(self):
@@ -586,7 +586,7 @@ class EngineTest(unittest.TestCase):
         self.run_pass()
         with mock.patch.object(engine.worker.process_status, "identity", return_value=None):
             actions = self.run_pass()
-        self.assertTrue(actions[0].human_review)
+        self.assertEqual(actions, [reconcile.Wait(KEY, "human review")])
         self.assertTrue(self.db.items()[0].human_review)
 
     def test_unreadable_live_tree_still_reaches_stall_judgement(self):
@@ -862,7 +862,7 @@ class EngineTest(unittest.TestCase):
         self.assertTrue(self.db.items()[0].human_review)
         self.assertEqual(len(self.launched), 1)
 
-    def test_a_failed_adapter_exit_with_unlanded_changes_requires_a_hold(self):
+    def test_a_failed_adapter_exit_with_unlanded_changes_retries_without_a_hold(self):
         self.run_pass()
         run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
         run.mkdir(parents=True)
@@ -872,8 +872,8 @@ class EngineTest(unittest.TestCase):
         with mock.patch.object(engine.engine_facts, "_tree_facts", return_value=(TreeState("work", 1, 2, None), False, NOW)), \
              mock.patch.object(engine.engine_facts.git_trees, "discover", return_value=[self.trees / "fake"]):
             self.run_pass()
-        self.assertTrue(self.db.items()[0].human_review)
-        self.assertEqual(len(self.launched), 1)
+        self.assertFalse(self.db.items()[0].human_review)
+        self.assertEqual(len(self.launched), 2)
 
     def test_failed_completion_hold_write_keeps_the_segment_open(self):
         self.run_pass()

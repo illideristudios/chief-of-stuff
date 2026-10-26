@@ -1624,9 +1624,9 @@ class RecoveryTest(unittest.TestCase):
         return worker.launch(key, stage, attempt, persona, store=self.db, root=self.root, trees=self.trees,
                              clone=self.clone, policies=self.p, forge=self.forge, clock=lambda: self.now)
 
-    def run_pass(self):
+    def run_pass(self, **kwargs):
         return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root, trees=self.trees,
-            clone=self.clone, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: self.now)
+            clone=self.clone, launch=self.launch, workers=engine.settings.Workers(), clock=lambda: self.now, **kwargs)
 
     def dead_run(self):
         self.run_pass()
@@ -1654,6 +1654,9 @@ class RecoveryTest(unittest.TestCase):
         actions = self.run_pass()
         self.assertEqual(self.db.segments(KEY)[0].outcome, "quota")
         self.assertIn(reconcile.Wait(KEY, "quota reset pending"), actions)
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertEqual(self.db.decisions(KEY), [])
+        self.assertNotIn("interrupt", self.db.resume(KEY))
         self.now += timedelta(hours=2)
         self.run_pass()
         self.assertEqual(len(self.started), 2)
@@ -1721,6 +1724,18 @@ class RecoveryTest(unittest.TestCase):
         refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
         self.assertIn(self.head, refs.splitlines())
 
+    def test_a_conflicted_detached_head_stays_reachable_after_quarantine(self):
+        self.dead_run()
+        make_repo.git(["checkout", "--detach"], self.tree)
+        (self.tree / "detached.txt").write_text("retained detached work\n")
+        make_repo.git(["add", "detached.txt"], self.tree)
+        make_repo.git(["commit", "-m", "detached work"], self.tree)
+        detached = make_repo.git(["rev-parse", "HEAD"], self.tree)
+        self.run_pass()
+        refs = make_repo.git(["for-each-ref", "--format=%(objectname)", "refs/quarantine/1/"], self.clone)
+        self.assertIn(detached, refs.splitlines())
+        self.assertEqual(len(self.started), 2)
+
     def test_branch_without_a_checkout_is_a_single_candidate(self):
         self.dead_run()
         # Moving outside the configured discovery directory leaves the registered checkout in git.
@@ -1745,6 +1760,46 @@ class RecoveryTest(unittest.TestCase):
         self.run_pass()
         self.assertNotEqual(self.started[-1], str(self.tree))
         self.assertTrue(list((self.trees / "quarantine").glob("*/scratch.txt")))
+
+    def test_a_disappearing_conflict_reuses_the_survivor_and_retires_its_question(self):
+        self.dead_run()
+        make_repo.git(["branch", "work/issue-1-plan-1", "main"], self.clone)
+        self.run_pass()
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
+        make_repo.git(["branch", "-m", "work/issue-1-plan-1", "another-issue"], self.clone)
+        self.run_pass()
+        self.assertEqual(self.started[-1], str(self.tree))
+        self.assertFalse(engine.decision_escalation.pending_decisions(self.db.decisions(KEY), ()))
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
+
+    def test_recovery_uses_the_trio_and_consults_a_split_only_once(self):
+        self.dead_run()
+        make_repo.git(["branch", "work/issue-1-plan-1", "main"], self.clone)
+        self.p = replace(self.p, base=replace(self.p.base, trio=("builder", "critic", "operator")),
+            personas={**self.p.personas, "operator": replace(self.p.personas["critic"], name="operator")})
+        votes = iter(("adopt", "concern", "adopt"))
+        model = mock.Mock(side_effect=lambda request: worker.Reply("", {
+            "vote": next(votes), "choice": "abort", "reasoning": "preserve both histories"}, "", 0.0, 1))
+        self.run_pass(model=model)
+        self.run_pass(model=model)
+        self.assertEqual(model.call_count, 3)
+        self.assertEqual(len(self.db.decisions(KEY)), 1)
+        self.assertEqual(len(self.started), 1)
+
+    def test_a_unanimous_recovery_trio_aborts_without_a_human_prompt(self):
+        self.dead_run()
+        make_repo.git(["branch", "work/issue-1-plan-1", "main"], self.clone)
+        self.p = replace(self.p, base=replace(self.p.base, trio=("builder", "critic", "operator")),
+            personas={**self.p.personas, "operator": replace(self.p.personas["critic"], name="operator")})
+        model = mock.Mock(return_value=worker.Reply("", {
+            "vote": "adopt", "choice": "abort", "reasoning": "preserve both histories"}, "", 0.0, 1))
+        self.run_pass(model=model)
+        self.assertEqual(model.call_count, 3)
+        self.assertEqual(self.db.decisions(KEY)[0].answer, "abort")
+        self.assertEqual(self.db.decisions(KEY)[0].decided_by, "trio")
+        self.assertEqual(len(self.started), 2)
+        self.assertEqual(self.db.asks(KEY), [])
+        self.assertNotIn("decision_interrupts", self.db.resume(KEY))
 
     def test_abort_quarantines_every_tree_and_ref_and_starts_fresh(self):
         self.dead_run()

@@ -836,6 +836,14 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                     recovery_pending.add(key)
                 else:
                     store.update_resume(key, lambda d: d.__setitem__("recovery_choice", choice))
+            else:
+                for row in decision_escalation.latest(store.decisions(key)).values():
+                    if row.topic == "recovery" and not row.answer:
+                        # The question no longer describes the facts. Preserve the remaining
+                        # work and retire the old hold so it cannot block later review/merge.
+                        trio_gate.record(store, key, decision_escalation.DecisionUpdate(
+                            row.topic, row.question, "hold", "engine", {
+                                **row.record, "status": "superseded", "note": "recovery conflict no longer exists"}))
         except Exception as exc:
             recovery_errors.add(key)
             store.add_log(key, f"recovery read failed: {exc}", at)
@@ -915,6 +923,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
                 try:
                     slots.claim(trees, store, issue_key=key, stage=stage, attempt=action.attempt,
                                 max_concurrency=max_concurrency, clock=clock, launch=start,
+                                preserve_start=partial(worker.preserve_start, worker._run_dir(root, key, stage, action.attempt)),
                                 agent_type=agent_name)
                 except BaseException:
                     # claim removes the reservation on failure; retain a real launch failure only.
