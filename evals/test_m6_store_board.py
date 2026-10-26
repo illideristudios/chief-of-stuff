@@ -706,6 +706,18 @@ class ReviewRegressionsTest(StorePagesAndRoutesTest):
         self.assertIn("Ended today · 2", body)
         self.assertRegex(body, r'<b>1</b><span class="cap">NEEDS INPUT')
 
+    def test_a_segment_that_starts_and_ends_at_one_instant_lists_started_first(self):
+        t = (NOW - timedelta(minutes=10)).isoformat()
+        t2 = (NOW - timedelta(minutes=3)).isoformat()
+        self.db.record_segment(KEY, "plan", 2, started_at=t, ended_at=t, outcome="failed", runner="plan-2")
+        self.db.record_segment(KEY, "plan", 3, started_at=t2, ended_at=t2, outcome="failed", runner="plan-3")
+        self.db.add_log(KEY, "dispatch failed: could not verify worker start", at=t)
+        body = issue_page.render(12, [], bs.EMPTY, NOW, root=self.root, db=task_forge.page_data(self.db))
+        history = body.split("How it got here", 1)[1]
+        self.assertLess(history.index("plan started · plan-2"), history.index("plan failed · plan-2"))
+        self.assertLess(history.index("plan failed · plan-2"), history.index("dispatch failed: could not verify worker start"))
+        self.assertLess(history.index("plan started · plan-3"), history.index("plan failed · plan-3"))
+
     def test_presenters_render_detached_use_case_data(self):
         data = task_forge.page_data(self.db)
         self.db.engine.dispose()
