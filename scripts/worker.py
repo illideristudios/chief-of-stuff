@@ -623,7 +623,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                     continue
                 try:
                     record = _existing_run(data, run_dir, segment.stage, segment.attempt, trees, clock, collecting=True)
-                except RuntimeError:
+                except (OSError, RuntimeError):
                     # Incomplete durable identity: preserve the reservation until it can be verified.
                     continue
                 if record is not None:

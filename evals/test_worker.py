@@ -1158,6 +1158,16 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
         self.assertEqual(self.db.asks(KEY), [])
 
+    def test_unrecorded_start_waits_when_the_process_probe_is_unavailable(self):
+        self.launched()
+        data = self.db.resume(KEY)
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.process_status, "identity", side_effect=OSError("process view unavailable")):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(slots.running(self.db), 1)
+        self.assertEqual(self.db.asks(KEY), [])
+
     def test_an_unstarted_live_runner_keeps_its_reservation(self):
         run = worker._run_dir(self.root, KEY, "implement", 1)
         run.mkdir(parents=True)
