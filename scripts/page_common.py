@@ -133,3 +133,11 @@ def markdown_blocks(text: str, resolve: ReferenceResolver | None = None) -> str:
     """Block prose: CommonMark plus tables, with raw HTML escaped."""
     with _MARKDOWN_LOCK:
         return _MARKDOWN.render(str(text), {'resolve': resolve})
+
+
+STEP_TIMELINE_CSS = """
+.step-body{min-width:0}
+details.step-report{margin-top:4px}
+details.step-report>summary{font-size:12px;color:var(--muted);cursor:pointer}
+details.step-report>.prose{margin-top:4px}
+"""
