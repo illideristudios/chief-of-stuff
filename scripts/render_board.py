@@ -1,7 +1,7 @@
 """Render a tracker-based daily board without opening a server or browser.
 
-The page is the Flow board (Flow.dc.html): header, tiles, BUILD, the MERGE ORDER, DECISIONS and WORKERS
-panels, and the Flow charts. It carries tracker and deadline metadata and ticks its clocks client-side.
+The page is the Flow board (Flow.dc.html): header, tiles, BUILD, the MERGE ORDER and WORKERS panels,
+and the Flow charts. Decisions live on /decisions, which the NEEDS INPUT tile opens (#895). It carries tracker and deadline metadata and ticks its clocks client-side.
 The renderer writes the board HTML and prints its path and summary.
 """
 
