@@ -2049,6 +2049,34 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(self.db.asks(KEY)[0].answer, "deny")
         self.assertNotIn("decision_interrupts", self.db.resume(KEY) or {})
 
+    def test_an_answered_permission_ask_appends_its_answer_as_the_settling_row(self):
+        # C30 (#1152): a pre-#874 ask (no options) already answered deny, whose decision's newest row is a trio
+        # retry with an empty decided_by, settles to that answer once, and the decision reads answered.
+        import decision_page
+        self.db.upsert_item(KEY, title="Parser", stage="implement")
+        context = json.dumps({"tool_name": "Bash", "tool_input": {"command": "ls docs"}})
+        ask_id = self.db.add_ask(KEY, "plan", 1, "session", "Permission requested for Bash", [], context)
+        self.db.answer_ask(KEY, ask_id, "deny")
+        asked = {"topic": "ask", "question": "Permission requested for Bash", "context": context,
+                 "instance": f"ask-{ask_id}", "stage": "plan", "attempt": 1, "gate": False}
+        first = self.db.add_decision(KEY, "ask", "Permission requested for Bash", None, "zach",
+                                     {"decision": {**asked, "options": []}, "error": "options must be two"})
+        timeout = {"persona": "critic", "vote": "concern", "choice": None,
+                   "reasoning": "model failure (unknown): cursor timed out after 60s"}
+        self.db.add_decision(KEY, "ask", "Permission requested for Bash", None, "",
+                             {"decision": {**asked, "options": ["allow", "deny"]}, "failures": 1,
+                              "verdicts": [{"persona": "builder", "vote": "adopt", "choice": "allow"}, timeout,
+                                           {"persona": "operator", "vote": "adopt", "choice": "allow"}]})
+        model = mock.Mock()
+        self.run_pass(model=model)
+        self.run_pass(model=model)
+        model.assert_not_called()
+        rows = self.db.decisions(KEY)
+        self.assertEqual(len(rows), 3)  # appended once, never rewritten
+        self.assertEqual((rows[-1].answer, rows[-1].decided_by), ("deny", "guard"))
+        page = decision_page.store_page(rows, first.id, decision_page.Context(self.now))
+        self.assertIn("no one: answered by guard", page)
+
     def test_a_split_trio_escalates_once(self):
         self._trio()
         self.db.upsert_item(KEY, title="Parser", stage="implement")

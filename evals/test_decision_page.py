@@ -662,6 +662,34 @@ class StoreIndexTest(unittest.TestCase):
         self.assertIn("0 completed today", page)
         self.assertIn(" · 0</h2>", done)
 
+    def test_only_a_decision_needs_owner_names_waits_on_the_owner_or_counts_as_pending(self):
+        """C30 (#1152): an unanswered newest row whose decided_by is empty (a trio retry, or an old permission row)
+        waits on no one; only a row decided_by zach does."""
+        import decision_actions
+        key = "github:example/repo#10"
+        self.store.upsert_item(key, title="Auth flow", stage="implement", forge_state="open")
+        retry = self.store.add_decision(key, "ask", "Permission requested for Bash", None, "",
+                                        {"decision": {"options": ["allow", "deny"], "instance": "ask-1"}, "failures": 1},
+                                        asked_at="2026-09-26T01:00:00-05:00")
+        legacy = self.store.add_decision(key, "permission", "Permission requested for Read",
+                                         record={"options": ["allow", "deny"], "why": "outside the worktree"},
+                                         asked_at="2026-09-26T01:05:00-05:00")
+        owner = self.store.add_decision(key, "scope", "Split auth token refresh?", None, "zach",
+                                        asked_at="2026-09-26T01:10:00-05:00")
+        data = self.page_data()
+        nav = decision_actions.tab_counts(data.items(), data.decisions(), data.segments())
+        self.assertEqual(nav["decisions"], 1)
+        page, _ = dp.index(self.pages, dp.Context(NOW), "2026-09-26", db=data, navigation=nav)
+        pending = page.split("COMPLETED")[0]
+        self.assertIn("1 pending", page)
+        self.assertIn("Split auth token refresh?", pending)
+        self.assertNotIn("Permission requested", pending)
+        ctx = dp.Context(NOW, user="Robin")
+        self.assertIn("<p>Robin</p>", dp.store_page(data.decision_rows, owner.id, ctx))
+        for row in (retry, legacy):
+            with self.subTest(row=row.topic):
+                self.assertIn("no one: answered by the engine", dp.store_page(data.decision_rows, row.id, ctx))
+
     def test_completed_store_decisions_answered_today_in_workspace_zone_appear_under_completed(self):
         self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
         # 2026-09-26T06:40:00Z is 01:40 CDT on 2026-09-26 in America/Chicago.
