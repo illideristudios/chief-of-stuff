@@ -631,7 +631,7 @@ class StoreIndexTest(unittest.TestCase):
         import decision_actions
         self.store.upsert_item("github:example/repo#10", title="Auth flow", stage="implement", forge_state="open")
         self.store.upsert_item("github:example/repo#11", title="Closed item", stage="merge", forge_state="closed")
-        self.store.add_decision("github:example/repo#10", "scope", "Split auth token refresh?",
+        self.store.add_decision("github:example/repo#10", "scope", "Split auth token refresh?", None, "zach",
                                 asked_at="2026-09-26T01:15:00-05:00")
         self.store.add_decision("github:example/repo#10", "plan", "Approve rollout gate?",
                                 asked_at="2026-09-26T01:45:00-05:00",
@@ -723,7 +723,7 @@ class StoreIndexTest(unittest.TestCase):
         own, foreign = "github:team/app#9", "github:o/n#4"
         for key, question in ((own, "Ship?"), (foreign, "Wait?")):
             self.store.upsert_item(key, title=question, stage="implement", forge_state="open")
-            self.store.add_decision(key, "scope", question, asked_at=NOW.isoformat())
+            self.store.add_decision(key, "scope", question, None, "zach", asked_at=NOW.isoformat())
         page, _ = dp.index(self.pages, dp.Context(NOW, forge=GitHubBacklog("team/app")), NOW.date().isoformat(),
                            db=self.page_data())
         self.assertIn(f'href="{escape(issue_href(own))}">#9</a>', page)
@@ -737,7 +737,7 @@ class StoreIndexTest(unittest.TestCase):
         new = self.store.add_decision(key, "scope", "Approve this file ownership?", None, "zach", asked_at=NOW.isoformat(),
                                       record={"default": "Not written: nothing is written unapproved.",
                                               "status": "blocked", "blocked_reason": "awaiting owner"})
-        old = self.store.add_decision(key, "design", "Split the parser?", asked_at=NOW.isoformat())
+        old = self.store.add_decision(key, "design", "Split the parser?", None, "zach", asked_at=NOW.isoformat())
         rows = self.page_data().decision_rows
         page = dp.store_page(rows, new.id, dp.Context(NOW))
         fallback = page.split("If you don't answer")[1]

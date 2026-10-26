@@ -320,11 +320,16 @@ def _permission(ask: Any) -> dict | None:
     return None
 
 
+def _permission_decision(store: Any, key: str, ask: Any) -> Any | None:
+    """The decision a permission ask was consulted on; the trio is asked allow/deny whatever options the ask carries."""
+    return decision_escalation.ask_decision(store.decisions(key), ask, ("allow", "deny"))
+
+
 def _settle_permission(store: Any, key: str, ask: Any, answer: str, why: str, at: str) -> None:
     """#890: a permission request is never an owner decision. The guard's rule or the trio answers it; a split,
     unavailable or exhausted trio denies it, with the reason on the run's log. The answer is appended, never a delete."""
     store.answer_ask(key, ask.id, answer)
-    row = decision_escalation.ask_decision(store.decisions(key), ask)
+    row = _permission_decision(store, key, ask)
     if row is not None and not (row.answer or "").strip():
         trio_gate.record(store, key, decision_escalation.DecisionUpdate(
             row.topic, row.question, answer, "guard", {**row.record, "recommendation": answer, "settled_by": why}))
@@ -345,8 +350,15 @@ def _route_asks(store: Any, policies: policy.Policies, model, at: str, clock: en
         _link_replacement_asks(store, key, replacements)
         _settle_asks(store, key)
         asks = store.asks(key)
-        for ask in (ask for ask in asks if not ask.answer):
+        for ask in asks:
             permission = _permission(ask)
+            if ask.answer:
+                # C30: an answered permission ask settles its decision too, so the decision never waits on anyone.
+                row = _permission_decision(store, key, ask) if permission is not None else None
+                if (row is not None and not (row.answer or "").strip() and not decision_escalation.is_reversed(row)
+                        and not decision_escalation.is_restarted(row)):
+                    _settle_permission(store, key, ask, ask.answer, "the ask was already answered", at)
+                continue
             if permission is not None:
                 # Judged again by today's rule, so an ask raised under a narrower one is closed by its answer.
                 verdict, why = guard_commands.permission_judgement(permission, ())

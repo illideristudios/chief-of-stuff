@@ -148,8 +148,8 @@ def served(pending: int, answered: int, lead_counts: bool = False) -> dict[str, 
             try:
                 db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
                 db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
-                db.add_decision("github:example/repo#110", "scope", "First choice")
-                db.add_decision("github:example/repo#110", "design", "Second choice")
+                db.add_decision("github:example/repo#110", "scope", "First choice", None, "zach")
+                db.add_decision("github:example/repo#110", "design", "Second choice", None, "zach")
             finally:
                 db.engine.dispose()
         server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)

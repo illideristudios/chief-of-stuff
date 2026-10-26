@@ -48,7 +48,8 @@ from pathlib import Path
 import board_sources
 from backlog_ref import Backlog, BacklogError, GitHubBacklog, backlog_from_config, store_label
 from clock import leading
-from decision_actions import DecisionState, OPEN_STATES, addresses, state_of, states, tab_counts as store_tab_counts
+from decision_actions import (DecisionState, OPEN_STATES, addresses, current_rows, state_of, states,
+                              tab_counts as store_tab_counts, waits_on_owner)
 from fragment import FONTS, PROSE_CSS, TAB_CSS, href, issue_href, tab_bar, theme
 from page_common import TOKEN, markdown_blocks, markdown_inline
 from md import section as md_section
@@ -793,7 +794,7 @@ def store_page(rows, row_id: int, ctx: Context, navigation: dict | None = None) 
         done = (f'<div class="card answered"><span><span class="key">{escape(d.decided_by or "—")}</span>'
                 f'{escape(d.answer or d.note or d.status)}</span><span class="saved">{escape(d.status)} {when(d.answered_at or d.asked_at)}</span></div>')
     form = store_decision_form(d, f"/decisions/{page}") if d.status in OPEN_STATES | {"answered"} else ""
-    waits = escape(ctx.user or "the owner") if d.status in OPEN_STATES else f"no one: answered by {escape(d.decided_by or 'the engine')}"
+    waits = escape(ctx.user or "the owner") if waits_on_owner(history[0]) else f"no one: answered by {escape(d.decided_by or 'the engine')}"
     steps = []
     for r in history:
         st = state_of(r)
@@ -848,7 +849,8 @@ def index(pages_dir: Path, ctx: Context, day: str, pending: list | None = None, 
         opened = {i.issue_key for i in db.items() if getattr(i, "forge_state", "open") != "closed"}
         store_states = states(db.decisions())
         pending_store = sorted(
-            ((d, _stamp(d.asked_at, ctx.now)) for d in store_states if d.status in OPEN_STATES and d.issue_key in opened),
+            ((state_of(r), _stamp(state_of(r).asked_at, ctx.now)) for r in current_rows(db.decisions())
+             if waits_on_owner(r) and r.issue_key in opened),
             key=lambda item: (-(item[1].timestamp() if item[1] else 0), -item[0].id),
         )
         rows.extend(_store_pending_row(d, asked, ctx, ids.get(d.id, d.id)) for d, asked in pending_store)

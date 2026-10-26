@@ -296,8 +296,10 @@ def preserve_ask_link(decisions: Sequence[Any], update: DecisionUpdate) -> Decis
     return link_ask(update, ask_id) if ask_id is not None else update
 
 
-def ask_decision(decisions: Sequence[Any], ask: Any) -> Any | None:
-    """Find only the decision this ask can answer, including a replacement's explicit link."""
+def ask_decision(decisions: Sequence[Any], ask: Any, options: Sequence[str] | None = None) -> Any | None:
+    """Find only the decision this ask can answer, including a replacement's explicit link. `options` are the ones the
+    decision was consulted with when they differ from the ask's own (a permission ask is consulted on allow/deny)."""
+    options = ask.options if options is None else options
     for row in reversed(tuple(latest(decisions).values())):
         record = row.record if isinstance(row.record, dict) else {}
         prior = record.get("decision")
@@ -306,7 +308,7 @@ def ask_decision(decisions: Sequence[Any], ask: Any) -> Any | None:
         linked = _ask_link(row, decisions)
         matches = linked == ask.id if linked is not None else identity(row) == ("ask", ask.question, f"ask-{ask.id}")
         if (matches and row.question == ask.question and prior.get("context", "") == ask.context
-                and tuple(prior.get("options") or ()) == tuple(ask.options)):
+                and tuple(prior.get("options") or ()) == tuple(options)):
             return row
     return None
 

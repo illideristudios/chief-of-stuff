@@ -620,8 +620,8 @@ class RenderOnRequestTest(unittest.TestCase):
         try:
             now_iso = datetime.now(ZoneInfo(ZONE)).isoformat(timespec="seconds")
             db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
-            db.add_decision("github:example/repo#42", "scope", "First store ask", asked_at=now_iso)
-            db.add_decision("github:example/repo#42", "design", "Second store ask", asked_at=now_iso)
+            db.add_decision("github:example/repo#42", "scope", "First store ask", None, "zach", asked_at=now_iso)
+            db.add_decision("github:example/repo#42", "design", "Second store ask", None, "zach", asked_at=now_iso)
             db.add_decision("github:example/repo#42", "permission", "Answered store ask",
                             answer="allow", decided_by="trio", asked_at=now_iso,
                             record={"status": "answered", "answered_at": now_iso})
