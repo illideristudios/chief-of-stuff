@@ -1981,6 +1981,34 @@ class LaneColumnsTest(unittest.TestCase):
         self.assertNotRegex(html, r'href="[^"]*workflow')
         self.assertNotIn("#workflow", html)
 
+    def test_a_held_card_names_its_review_cause_when_present_and_plain_needs_input_otherwise(self) -> None:
+        # #203: a card waiting on the user at a non-gate stage carries `NEEDS INPUT · <cause>` when its latest Log move
+        # is a classified human-review stop, and plain `NEEDS INPUT` when class-less or without a review end.
+        cfg = parse_coordinator(CLAUDE_MD, today=NOW.date())
+        tracker = (
+            "# Tracker 2026-09-16\n\nCoordinator: coordinator. Board: board-7.\n\n## Tasks\n\n"
+            "| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+            "|---|---|---|---|---|---|---|---|---|---|---|\n"
+            "| Cut the release | Cut the release branch | Robin | waiting | 10:30 | 23:00 | M | build | implement | #9 | Checklist: cut |\n"
+            "| Write README | Write eval README | Robin | waiting | 09:00 | 17:00 | S | build | implement | #10 | Checklist: readme |\n"
+            "\n## Log\n\n"
+            "- 09:00 stage: Cut the release → implement\n"
+            "- 09:15 one-shot impl-1 started: codex, worktree `trees/cut`, task Cut the release branch\n"
+            "- 09:45 one-shot impl-1: HUMAN REVIEW NEEDED (worker's call) — conflicting test. Changes: none.\n"
+            "- 10:00 one-shot impl-2 started: codex, worktree `trees/readme`, task Write eval README\n"
+            "- 10:20 one-shot impl-2: HUMAN REVIEW NEEDED — old class-less line. Changes: none.\n"
+        )
+        html = rb.render(tracker, cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        build = html.split('<section id="flow">')[1].split('<div class="panels">')[0]
+        self.assertIn(">NEEDS INPUT · worker&#x27;s call<", build)
+        self.assertEqual(build.count(">NEEDS INPUT<"), 1)
+        # A later stage move using the task's short name clears the review cause even when the launch used the longer item.
+        cleared = rb.render(tracker + "- 10:30 stage: Cut the release → implement\n",
+                            cfg, NOW, lanes=self.LANES, tracker_day=NOW.date())
+        cleared_build = cleared.split('<section id="flow">')[1].split('<div class="panels">')[0]
+        self.assertNotIn("NEEDS INPUT ·", cleared_build)
+        self.assertEqual(cleared_build.count(">NEEDS INPUT<"), 2)
+
 
 class WorkflowTokenTest(unittest.TestCase):
     """#366 review R15: the token is tracker-row vocabulary, so `Task` answers it once and audit_tasks, dispatch_prompt,

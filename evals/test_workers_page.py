@@ -438,6 +438,22 @@ class OnRequestTest(unittest.TestCase):
         self.assertIn("01:00", words(row(ended, "impl-f6")).split())
         self.assertIn(column(running, row(running, "impl-a1"), "token"), token_forms(TOKENS + 1000))
 
+    def test_a_human_review_end_with_a_cause_shows_its_cause_and_need_you_counts_both(self):
+        # #203: a classified review end shows `human review · <cause>`, an old class-less line stays `human review`,
+        # and the `need you` header box counts both.
+        ws = self.ws
+        ws.launch("Docs p1", "impl-f6", "claude", "sonnet", "00:50")
+        one_shot.update_tracker(ws.tracker, "Docs p1", "impl-f6", "Robin", "human_review", "timed out", "y.py",
+                                "01:00", cause="timeout")
+        ws.touch(ws.tracker)
+        html = self.fetch()
+        ended = table(html, "ended today")
+        self.assertIn("human review · timeout", words(row(ended, "impl-f6")).casefold())
+        d4 = words(row(ended, "impl-d4")).casefold()
+        self.assertIn("human review", d4)
+        self.assertNotIn("human review ·", d4)
+        self.assertEqual(box(html, "need you"), "2")
+
 
 if __name__ == "__main__":
     unittest.main()

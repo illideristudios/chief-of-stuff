@@ -157,7 +157,8 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
 
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
-                  held: dict[Task, str] | None = None) -> list[columns.Column]:
+                  held: dict[Task, str] | None = None,
+                  causes: dict[Task, str] | None = None) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
@@ -187,8 +188,10 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         refs = ((issue, page(issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         marks = change_marks(changes) + ((columns.Mark("drift", "drift"),) if drifts(task, kanban, sources, stage) else ())
         owner = task.shown_owner
+        cause = (causes or {}).get(task)
+        flag = columns.Mark(f"NEEDS INPUT · {cause}" if cause else "NEEDS INPUT", "hold") if task in held else None
         return columns.Card(task.label, task.kind, refs, owner, task.state, marks,
-                            flag=columns.Mark("NEEDS INPUT", "hold") if task in held else None,
+                            flag=flag,
                             href=page(task.issue, next((c.url for c in changes if c.state == "open"), url)),
                             owner_href="/workers" if owner in workers else "")
 
@@ -325,18 +328,27 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # #228: what holds each task, decided once, so the BUILD flag, the NEEDS INPUT tile and the Flow note agree.
     pending_refs = pending_refs or {}
     held = hold_causes(tasks, kanban, sources, lanes or {}, pending_refs)
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held)
-    build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
-                  f'{columns.render(build_cols)}</section>\n')
     flow_moves = [m for day, text in [*(stage_log or []), (tracker_day or today, tracker_text)]
                   for m in tracker_log.moves(text, day, zone)]
+    earlier = [t for _, text in stage_log or [] for t in parse_tracker(text).tasks]
+    known = earlier + tasks
+    by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
+    by_issue = {issue_key(t.issue, sources.home): t for t in tasks if t.issue.strip() and not t.workflow}
+    find = {k.strip().casefold(): today_task
+            for t in known
+            if (today_task := (t if t in tasks else by_name.get(t.name.strip().casefold())
+                               or (by_issue.get(issue_key(t.issue, sources.home)) if not t.workflow else None)))
+            for k in (t.item, t.name) if k.strip()}
+    causes = tracker_log.review_causes(flow_moves, lambda name: find.get(name.strip().casefold()))
+    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, causes=causes)
+    build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
+                  f'{columns.render(build_cols)}</section>\n')
     look_moves = [m for day, text in look_log or [] for m in tracker_log.moves(text, day, zone)]
     began = hold_began(held, look_moves + flow_moves, pending_refs, sources.home, tasks,
                        [t for _, text in [*(look_log or []), *(stage_log or [])] for t in parse_tracker(text).tasks])
     since = looked or datetime.combine(today, time(), zone)
     shown = since.astimezone(zone)  # a look on another day names its day
     went = went_held(held, began, since), f"{shown:%H:%M}" if shown.date() == today else f"{shown:%a %H:%M}"
-    known = [t for _, text in stage_log or [] for t in parse_tracker(text).tasks] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     epics = epic_risk(tasks, sources, ends, zone, now)

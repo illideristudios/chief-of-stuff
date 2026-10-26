@@ -86,9 +86,10 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             task_of[m[3]] = m[4]
         elif m := ENDED.match(line) or RELAUNCH.match(line):
             t, name = row_of(task_of.get(m[3], ""))
-            ended.append([f"{int(m[1]):02d}:{m[2]}", HOW[m[4]], escape(m[3]), _task(t, name)])
+            how = f"{HOW[m[4]]} · {m[5]}" if m.re is ENDED and m[5] else HOW[m[4]]
+            ended.append([f"{int(m[1]):02d}:{m[2]}", escape(how), escape(m[3]), _task(t, name)])
     ended.reverse()  # newest first
-    need = sum(e[1] == "human review" for e in ended)
+    need = sum(e[1].startswith("human review") for e in ended)
     shots = sum(w.kind == "one-shot" for w in sources.workers)
     boxes = [("need you", str(need), " hot" if need else ""), ("running", str(len(running)), "")]
     if cap:
