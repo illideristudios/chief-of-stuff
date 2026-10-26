@@ -7,6 +7,7 @@ this module only reads.
 from __future__ import annotations
 
 import subprocess
+import json
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,7 @@ from typing import Any
 
 import dispatch_prompt
 import completion
+import decision_escalation
 import git_trees
 import git_view
 import process_status
@@ -23,7 +25,8 @@ from orphans import Claim
 from reconcile import Facts, latest_segment
 
 
-def recovery_candidates(store: Any, key: str, *, trees: Path, clone: Path | None) -> tuple[completion.Candidate, ...] | None:
+def recovery_candidates(store: Any, key: str, *, trees: Path, clone: Path | None,
+                        root: Path | None = None) -> tuple[completion.Candidate, ...] | None:
     """Read one stopped issue's survivors. None means no recovery is due (or no clone)."""
     if clone is None:
         return None
@@ -31,7 +34,14 @@ def recovery_candidates(store: Any, key: str, *, trees: Path, clone: Path | None
     history = store.segments(key)
     latest = history[-1] if history else None
     record = _record(store, key, latest.stage, latest.attempt) if latest else None
-    if "recovery" not in data:
+    if record is None and latest is not None and root is not None:
+        run = root / ".chief-of-stuff" / "runs" / f"{key.rpartition('#')[2]}-{latest.stage}-{latest.attempt}"
+        if (run / "started.json").exists():
+            record = json.loads((run / "started.json").read_text())
+            record["run_dir"] = str(run)
+    decision_open = any(row.topic == "recovery" and (not row.answer or row.answer == "hold")
+                        for row in decision_escalation.latest(store.decisions(key)).values())
+    if "recovery" not in data and not decision_open:
         if latest is None or latest.ended_at is not None or record is None:
             return None
         if record.get("run_dir") and (Path(record["run_dir"]) / "exit.json").exists():
@@ -51,6 +61,10 @@ def recovery_candidates(store: Any, key: str, *, trees: Path, clone: Path | None
         path = Path(raw).resolve()
         if path.is_relative_to(trees.resolve()) and "quarantine" not in path.relative_to(trees.resolve()).parts:
             paths.add(path)
+    code, refs = git_trees.git(["for-each-ref", "--format=%(refname)", f"refs/quarantine/{number}/"], clone)
+    if code:
+        raise RuntimeError("cannot read quarantined branches")
+    quarantined = {ref.split("/", 4)[4] for ref in refs.splitlines() if len(ref.split("/", 4)) == 5}
     candidates, checked_out = [], set()
     # A quarantined checkout can still name its old ref if the engine died during the rename.
     for path in (trees / "quarantine").glob("**/.git"):
@@ -75,14 +89,15 @@ def recovery_candidates(store: Any, key: str, *, trees: Path, clone: Path | None
             merging = any((layout.gitdir / name).exists() for name in ("MERGE_HEAD", "rebase-merge", "rebase-apply"))
         except git_view.Unviewable:
             merging = False
-        candidates.append(completion.Candidate(str(path), branch, head if ok == 0 else "", readable, False, merging))
+        candidates.append(completion.Candidate(str(path), branch, head if ok == 0 else "", readable,
+                                               branch in quarantined, merging))
     code, refs = git_trees.git(["for-each-ref", "--format=%(refname:short) %(objectname)", f"refs/heads/{prefix}*"], clone)
     if code:
         raise RuntimeError("cannot read orphan branches")
     for line in refs.splitlines():
         branch, _, head = line.partition(" ")
         if branch not in checked_out:
-            candidates.append(completion.Candidate("", branch, head, True, False, False))
+            candidates.append(completion.Candidate("", branch, head, True, branch in quarantined, False))
     return tuple(candidates)
 
 

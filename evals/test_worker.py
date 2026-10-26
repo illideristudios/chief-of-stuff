@@ -1147,6 +1147,27 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(slots.running(self.db), 1)
         self.assertEqual(self.db.resume(KEY)["runs"]["implement-1"]["pid"], 77)
 
+    def test_finished_unrecorded_start_without_exit_uses_its_session_report(self):
+        run = self.launched()
+        self.report(run)
+        data = self.db.resume(KEY)
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.process_status, "identity", return_value=None):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "done")
+        self.assertEqual(self.db.asks(KEY), [])
+
+    def test_an_unstarted_live_runner_keeps_its_reservation(self):
+        run = worker._run_dir(self.root, KEY, "implement", 1)
+        run.mkdir(parents=True)
+        (run / "command.json").write_text(json.dumps({"session_id": "starting-session"}))
+        self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
+        with mock.patch.object(worker.process_status, "carriers", return_value=[78]):
+            worker.collect(self.db, self.root, lambda: NOW, trees=self.trees)
+        self.assertTrue(run.exists())
+        self.assertEqual(slots.running(self.db), 1)
+
     def test_malformed_run_records_and_result_end_failed(self):
         self.db.record_segment(KEY, "implement", 1, NOW.isoformat())
         self.db.set_resume(KEY, {"runs": ["invalid"]})
@@ -1708,6 +1729,22 @@ class RecoveryTest(unittest.TestCase):
         self.db.update_resume(KEY, lambda d: (d.pop("worktree"), d.pop("work_branch")))
         found = engine_facts.recovery_candidates(self.db, KEY, trees=self.trees, clone=self.clone)
         self.assertTrue(any(c.branch == "work/issue-1-implement-1" and not c.path for c in found))
+
+    def test_interrupted_quarantine_cannot_restore_the_set_aside_branch(self):
+        self.dead_run()
+        trusted = worker.make_worktree.git_trusted
+        def interrupt_move(args, cwd):
+            if args[:2] == ["worktree", "move"]:
+                raise KeyboardInterrupt
+            return (1, "cannot fast-forward") if args[0] == "merge" else trusted(args, cwd)
+        with mock.patch.object(worker.make_worktree, "git_trusted", side_effect=interrupt_move):
+            with self.assertRaises(KeyboardInterrupt):
+                self.run_pass()
+        found = engine_facts.recovery_candidates(self.db, KEY, trees=self.trees, clone=self.clone)
+        self.assertIsNone(completion.recovery(found))
+        self.run_pass()
+        self.assertNotEqual(self.started[-1], str(self.tree))
+        self.assertTrue(list((self.trees / "quarantine").glob("*/scratch.txt")))
 
     def test_abort_quarantines_every_tree_and_ref_and_starts_fresh(self):
         self.dead_run()

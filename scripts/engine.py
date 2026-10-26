@@ -11,7 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Collection
-from dataclasses import is_dataclass, replace
+from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime, timedelta
 from functools import cache, partial
 from pathlib import Path
@@ -697,9 +697,8 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
     for item in store.items():
         key = item.issue_key
         try:
-            candidates = engine_facts.recovery_candidates(store, key, trees=trees, clone=clone)
+            candidates = engine_facts.recovery_candidates(store, key, trees=trees, clone=clone, root=root)
             if candidates is not None:
-                from dataclasses import asdict
                 store.update_resume(key, lambda d: d.__setitem__("recovery", {
                     "stage": item.stage, "candidates": [asdict(c) for c in candidates]}))
         except Exception as exc:

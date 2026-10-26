@@ -136,6 +136,21 @@ def _quarantine(candidate: completion.Candidate, *, trees: Path, clone: Path, ke
     """Move a checkout and rename its ref; preserve commits and every uncommitted byte."""
     stamp = str(uuid.uuid4())
     target = f"refs/quarantine/{key.rpartition('#')[2]}/{stamp}/{candidate.branch or 'HEAD'}"
+    source, head = "", ""
+    if candidate.branch:
+        make_worktree.check_branch(candidate.branch)
+        if not candidate.branch.startswith(f"work/issue-{key.rpartition('#')[2]}-"):
+            raise RuntimeError("cannot quarantine a branch belonging to another issue")
+        source = f"refs/heads/{candidate.branch}"
+        code, head = make_worktree.git(["rev-parse", "--verify", source], clone)
+        if code == 0:
+            # Publish the name first. Discovery treats this branch as quarantined even if
+            # the engine dies before moving its checkout or retiring the original name.
+            code, detail = make_worktree.git_trusted(["update-ref", target, head], clone)
+            if code:
+                raise RuntimeError(f"cannot preserve quarantined ref: {detail}")
+        else:
+            head = ""
     if candidate.path:
         tree = Path(candidate.path)
         if not tree.resolve().is_relative_to(trees.resolve()) or tree.resolve() == trees.resolve():
@@ -151,22 +166,15 @@ def _quarantine(candidate: completion.Candidate, *, trees: Path, clone: Path, ke
             destination = None
     else:
         destination = None
-    if candidate.branch:
-        source = f"refs/heads/{candidate.branch}"
-        code, head = make_worktree.git(["rev-parse", "--verify", source], clone)
-        if code == 0:
-            code, detail = make_worktree.git_trusted(["update-ref", target, head], clone)
+    if source and head:
+        if destination is not None and candidate.readable:
+            # Point the retained checkout at the retained ref before retiring the original name.
+            code, detail = make_worktree.git_trusted(["symbolic-ref", "HEAD", target], destination)
             if code:
-                raise RuntimeError(f"cannot preserve quarantined ref: {detail}")
-            if destination is not None:
-                # Point the retained checkout at the retained ref before retiring the original name.
-                code, detail = make_worktree.git_trusted(["symbolic-ref", "HEAD", target], destination)
-                if code and candidate.readable:
-                    # A damaged .git file still has its registered HEAD in the trusted common dir.
-                    raise RuntimeError(f"cannot rename quarantined checkout ref: {detail}")
-            code, detail = make_worktree.git_trusted(["update-ref", "-d", source, head], clone)
-            if code:
-                raise RuntimeError(f"cannot rename quarantined ref: {detail}")
+                raise RuntimeError(f"cannot rename quarantined checkout ref: {detail}")
+        code, detail = make_worktree.git_trusted(["update-ref", "-d", source, head], clone)
+        if code:
+            raise RuntimeError(f"cannot rename quarantined ref: {detail}")
 
 
 def _recover(store: Any, key: str, *, trees: Path, clone: Path) -> None:
@@ -179,7 +187,7 @@ def _recover(store: Any, key: str, *, trees: Path, clone: Path) -> None:
         raise RuntimeError("recovery host has not stopped")
     survivor = verdict.candidate if isinstance(verdict, completion.Recovery) else None
     for candidate in candidates:
-        if candidate != survivor and not candidate.quarantined:
+        if candidate != survivor:
             _quarantine(candidate, trees=trees, clone=clone, key=key)
     if survivor is not None:
         error = make_worktree.git_trees.fetch_base(clone)
@@ -202,12 +210,13 @@ def _recover(store: Any, key: str, *, trees: Path, clone: Path) -> None:
         def fresh(d):
             d.pop("worktree", None)
             d.pop("work_branch", None)
+            d["recovery_fresh"] = True
         store.update_resume(key, fresh)
     store.update_resume(key, lambda d: (d.pop("recovery", None), d.pop("recovery_choice", None)))
 
 
 def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
-                  trees: Path, clock: engine_clock.Clock) -> dict | None:
+                  trees: Path, clock: engine_clock.Clock, *, collecting: bool = False) -> dict | None:
     """Recover a detached start before changing its tree or moving its exit evidence."""
     if not run_dir.exists():
         return None
@@ -248,7 +257,11 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
     host_live = host is not None and ("identity" not in record or host == record["identity"])
     runner_live = runner is not None and ("runner_identity" not in record or runner == record["runner_identity"])
     if not host_live and not runner_live:
-        return None
+        if not collecting:
+            return None
+        record.setdefault("identity", "")
+        record.setdefault("runner_identity", "")
+        return record  # started.json and the session report also outlive both processes
     record.setdefault("identity", host)
     record.setdefault("runner_identity", runner or "")
     if not record["identity"]:
@@ -578,14 +591,26 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             if record is None and trees is not None:
                 # slots.claim reserves before launch saves the record: adopt a start that outlived the engine.
                 run_dir = _run_dir(root, key, segment.stage, segment.attempt)
+                if not run_dir.exists() and ("recovery" in data or data.get("recovery_fresh")):
+                    store.drop_segment(key, segment.stage, segment.attempt)
+                    continue  # interrupted recovery reserved a slot but never reached a host start
                 if run_dir.exists() and not (run_dir / "started.json").exists():
+                    command = run_dir / "command.json"
+                    if command.exists():
+                        session = json.loads(command.read_text()).get("session_id")
+                        if session:
+                            try:
+                                if process_status.carriers(session):
+                                    continue
+                            except (OSError, RuntimeError):
+                                continue
                     _quarantine_run(run_dir)
                     store.drop_segment(key, segment.stage, segment.attempt)
                     continue
                 try:
-                    record = _existing_run(data, run_dir, segment.stage, segment.attempt, trees, clock)
+                    record = _existing_run(data, run_dir, segment.stage, segment.attempt, trees, clock, collecting=True)
                 except RuntimeError:
-                    # command.json without started.json (or incomplete identity): keep the reservation open.
+                    # Incomplete durable identity: preserve the reservation until it can be verified.
                     continue
                 if record is not None:
                     _save_run(store, key, segment.stage, segment.attempt, record)
@@ -609,14 +634,14 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             if runner is not None and runner.poll() is not None:
                 _runners.pop(str(run_dir))
             if not (run_dir / "exit.json").exists():
-                if not isinstance(record.get("identity"), str) or not record["identity"]:
+                if not isinstance(record.get("identity"), str):
                     raise ValueError("incomplete run identity")
                 try:
                     alive = process_status.identity(record["pid"], record["session_id"], host=True)
-                    if alive == record["identity"]:
+                    if alive is not None:
                         continue
                     # The runner may be between wait() and its atomic exit write.
-                    if process_status.identity(record["runner_pid"], record["session_id"]) == record["runner_identity"]:
+                    if process_status.identity(record["runner_pid"], record["session_id"]) is not None:
                         continue
                 except (OSError, RuntimeError) as exc:
                     store.add_log(key, f"worker identity unverified: {exc}", now.isoformat())

@@ -51,7 +51,8 @@ def claim(trees: Path, store: Any, *, issue_key: str, stage: str, attempt: int,
           effort: str | None = None, agent_type: str | None = None) -> None:
     """Claim one worker slot: reserve it under the lock, launch outside it, then stamp the real start — or refuse.
 
-    The reservation is an open segment, so concurrent claims count it; a failed launch drops it. Launch may
+    The reservation is an open segment, so concurrent claims count it; an ordinary launch error drops it.
+    Process-control exceptions retain the claim for collection of durable started.json evidence. Launch may
     return the (model, effort) actually used, or (model, effort, runtime) when another host ran it (#700).
     """
     with _exclusive(trees):
