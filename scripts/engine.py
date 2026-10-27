@@ -37,6 +37,7 @@ import policy
 import readiness
 import reconcile
 import runtimes
+import self_update
 import settings
 import shell_setup
 import slots
@@ -999,6 +1000,20 @@ def _prepare_handoff(release: Path) -> Path | None:
         return None
 
 
+def _follow_main(root: Path) -> None:
+    """Install each new origin/main as the release when the engine runs installed on its own repository (Zach, 2026-10-27)."""
+    if supervisor.RELEASE.parent.name != "versions":
+        return  # run from a checkout: there is no installed `current` to move
+    try:
+        release = self_update.follow_main(root, supervisor.RELEASE.parent.parent,
+                                          supervisor.state_dir(root) / "main-release")
+    except Exception as exc:
+        print(f"engine: cannot install origin/main: {exc}", file=sys.stderr, flush=True)
+        return
+    if release is not None:
+        print(f"engine: installed origin/main as {release.name}", file=sys.stderr, flush=True)
+
+
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
     os.execv(str(python), [str(python), str(release / "scripts/engine.py"),
                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
@@ -1079,6 +1094,7 @@ def main(argv: list[str] | None = None) -> int:
                     if args.once:
                         return 1 if failed else 0
                     time.sleep(args.interval)
+                    _follow_main(root)
                     if (installed := supervisor.current_release()) != supervisor.RELEASE:
                         if (python := _prepare_handoff(installed)) is not None:
                             newer = installed, python
