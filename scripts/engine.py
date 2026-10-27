@@ -1005,8 +1005,13 @@ def _follow_main(root: Path) -> None:
     if supervisor.RELEASE.parent.name != "versions":
         return  # run from a checkout: there is no installed `current` to move
     try:
-        release = self_update.follow_main(root, supervisor.RELEASE.parent.parent,
-                                          supervisor.state_dir(root) / "main-release")
+        upstream = json.loads((supervisor.RELEASE / ".claude-plugin/plugin.json").read_text()).get("repository", "")
+        # Lock order is engine.lock -> supervisor.lock, as in _prepare_handoff; `current` is every workspace's.
+        with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+            release = self_update.follow_main(root, supervisor.RELEASE.parent.parent,
+                                              supervisor.state_dir(root) / "main-release", upstream)
+    except supervisor.ServiceError:
+        return  # another workspace or the CLI holds the lock; a later pass installs
     except Exception as exc:
         print(f"engine: cannot install origin/main: {exc}", file=sys.stderr, flush=True)
         return

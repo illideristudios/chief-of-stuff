@@ -28,7 +28,7 @@ class FollowMainTest(unittest.TestCase):
         self.upstream = str(self.base / "origin.git")
 
     def follow(self, root, upstream=None):
-        return self_update.follow_main(root, self.install_dir, self.seen, upstream or self.upstream)
+        return self_update.follow_main(root, self.install_dir, self.seen, self.upstream if upstream is None else upstream)
 
     def test_a_new_main_commit_is_installed_once_and_becomes_current(self):
         root = make_repo.build(self.base, {"files": PLUGIN})
