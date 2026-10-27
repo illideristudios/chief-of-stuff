@@ -1001,7 +1001,7 @@ def _prepare_handoff(release: Path) -> Path | None:
 
 
 def _follow_main(root: Path) -> None:
-    """Install each new origin/main as the release when the engine runs installed on its own repository (Zach, 2026-10-27)."""
+    """Install each new origin/main as the release when the engine runs installed on its own repository (the owner, 2026-10-27)."""
     if supervisor.RELEASE.parent.name != "versions":
         return  # run from a checkout: there is no installed `current` to move
     try:

@@ -1,4 +1,4 @@
-"""The engine on chief-of-stuff's own repository installs each new origin/main as its release (Zach, 2026-10-27).
+"""The engine on chief-of-stuff's own repository installs each new origin/main as its release (the owner, 2026-10-27).
 
 The loop already hands off to whatever `current` names, so moving `current` is the whole reinstall. Only a
 workspace whose `origin` is the upstream the running release names may move it: `current` is shared by every

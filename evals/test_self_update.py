@@ -1,4 +1,4 @@
-"""The engine on its own repository installs each new origin/main as its release (Zach, 2026-10-27)."""
+"""The engine on its own repository installs each new origin/main as its release (the owner, 2026-10-27)."""
 import contextlib
 import io
 import json
