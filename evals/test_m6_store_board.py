@@ -334,7 +334,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
         self.db.upsert_item(KEY2, workflow="build", stage="implement", forge_state="open", title="Cache warmup")
-        self.d_open = self.db.add_decision(KEY, "design", "Split upload parser?")
+        self.d_open = self.db.add_decision(KEY, "design", "Split upload parser?", None, "zach")
         self.d_blocked = self.db.add_decision(KEY2, "plan", "Use Redis for cache?")
         self.db.add_decision(KEY2, "plan", "Use Redis for cache?", "Yes, use Redis", "user", {"status": "answered"})
         self.db.add_decision(KEY2, "plan", "Use Redis for cache?", "Yes, use Redis", "user",
@@ -592,7 +592,7 @@ class StorePagesAndRoutesTest(unittest.TestCase):
             reason="Edge case needs human input", changes="src/cache.py",
             recorded_at=(NOW - timedelta(minutes=10)).isoformat(),
         )
-        self.db.add_decision(KEY2, "design", "Approve cache eviction policy?")
+        self.db.add_decision(KEY2, "design", "Approve cache eviction policy?", None, "zach")
 
     def test_server_routes_full_issue_key_and_workers_from_store(self) -> None:
         # Reopen before the HTTP route reads failed-start evidence: it must survive a restart.
