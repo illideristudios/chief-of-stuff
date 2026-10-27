@@ -28,7 +28,10 @@ class FollowMainTest(unittest.TestCase):
         self.upstream = str(self.base / "origin.git")
 
     def follow(self, root, upstream=None):
-        return self_update.follow_main(root, self.install_dir, self.seen, self.upstream if upstream is None else upstream)
+        # The fixture's origin is a local path, which same_repo rightly refuses; compare it as a plain string here.
+        with mock.patch.object(self_update, "same_repo", lambda a, b: bool(b) and a.strip() == b):
+            return self_update.follow_main(root, self.install_dir, self.seen,
+                                           self.upstream if upstream is None else upstream)
 
     def test_a_new_main_commit_is_installed_once_and_becomes_current(self):
         root = make_repo.build(self.base, {"files": PLUGIN})
@@ -56,9 +59,26 @@ class FollowMainTest(unittest.TestCase):
         (self.base / "plain").mkdir()
         self.assertIsNone(self.follow(self.base / "plain"))
 
+    def test_a_refspec_that_maps_another_ref_onto_main_is_ignored(self):
+        # Only the upstream's refs/heads/main is installed, whatever the workspace's fetch refspec says.
+        root = make_repo.build(self.base, {"files": PLUGIN})
+        make_repo.git(["checkout", "-b", "proposal"], root)
+        (root / "scripts/engine.py").write_text("print('unreviewed')\n")
+        make_repo.git(["commit", "-am", "unreviewed"], root)
+        make_repo.git(["push", "origin", "proposal"], root)
+        make_repo.git(["config", "remote.origin.fetch", "+refs/heads/proposal:refs/remotes/origin/main"], root)
+        make_repo.git(["fetch", "origin"], root)  # origin/main now names the unreviewed branch
+        release = self.follow(root)
+        self.assertEqual((release / "scripts/engine.py").read_text(), "print('one')\n")
+
     def test_ssh_and_https_urls_name_the_same_repository(self):
-        self.assertTrue(self_update.same_repo("git@github.com:example/tool.git", "https://github.com/Example/tool"))
-        self.assertFalse(self_update.same_repo("git@github.com:fork/tool.git", "https://github.com/example/tool"))
+        upstream = "https://github.com/example/tool"
+        for same in ("git@github.com:example/tool.git", "https://github.com/Example/tool.git", "ssh://git@github.com/example/tool"):
+            self.assertTrue(self_update.same_repo(same, upstream), same)
+        for other in ("git@github.com:fork/tool.git", "https://evil.test/example/tool", "github.com/example/tool",
+                      "./github.com/example/tool", "/srv/github.com/example/tool", "file://github.com/example/tool",
+                      "ext::sh -c x github.com/example/tool", "https://github.com/x/../example/tool", ""):
+            self.assertFalse(self_update.same_repo(other, upstream), other)
 
 
 class EngineFollowsMainTest(unittest.TestCase):
