@@ -1007,16 +1007,17 @@ def _follow_main(root: Path) -> None:
     try:
         upstream = json.loads((supervisor.RELEASE / ".claude-plugin/plugin.json").read_text()).get("repository", "")
         # Lock order is engine.lock -> supervisor.lock, as in _prepare_handoff; `current` is every workspace's.
-        with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
-            release = self_update.follow_main(root, supervisor.RELEASE.parent.parent,
-                                              supervisor.state_dir(root) / "main-release", upstream)
+        # The fetch runs before it, so the machine-wide lock is held only for the install.
+        result = self_update.follow_main(root, supervisor.RELEASE.parent.parent, supervisor.state_dir(root) / "main-release",
+                                         upstream, lock=lambda: supervisor.lock(supervisor.data_dir() / "supervisor.lock"))
     except supervisor.ServiceError:
         return  # another workspace or the CLI holds the lock; a later pass installs
     except Exception as exc:
         print(f"engine: cannot install origin/main: {exc}", file=sys.stderr, flush=True)
         return
-    if release is not None:
-        print(f"engine: installed origin/main as {release.name}", file=sys.stderr, flush=True)
+    if result is not None:
+        print(f"engine: installed origin/main as {Path(result['release']).name}; plugin {result['plugin']}",
+              file=sys.stderr, flush=True)
 
 
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:

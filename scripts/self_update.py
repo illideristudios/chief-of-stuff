@@ -6,18 +6,17 @@ workspace, so a fork or any other clone carrying chief-of-stuff's files never re
 
 from __future__ import annotations
 
+import contextlib
 import io
-import os
 import re
 import subprocess
 import sys
 import tarfile
 import tempfile
-import uuid
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # start_coordinator lives at the release root
-import start_coordinator  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # chief_of_stuff lives at the release root
+import chief_of_stuff  # noqa: E402
 
 
 MAIN = "refs/chief-of-stuff/main"  # private to self-update, outside every remote-tracking namespace
@@ -43,8 +42,10 @@ def same_repo(a: str, b: str) -> bool:
     return (remote := _remote(a)) is not None and remote == _remote(b)
 
 
-def follow_main(root: Path, install_dir: Path, seen: Path, upstream: str) -> Path | None:
-    """Install origin/main and point `current` at it, once per new main commit; None when there is nothing to do."""
+def follow_main(root: Path, install_dir: Path, seen: Path, upstream: str, *,
+                bin_dir: Path = chief_of_stuff.DEFAULT_BIN_DIR, lock=contextlib.nullcontext) -> dict | None:
+    """Install origin/main the way `chief-of-stuff install` does, once per new main commit; the install's result,
+    or None when there is nothing to do. The fetch runs outside `lock`; the install runs inside it."""
     try:
         origin = _git(root, "remote", "get-url", "origin").decode()
     except (OSError, subprocess.CalledProcessError):
@@ -59,13 +60,8 @@ def follow_main(root: Path, install_dir: Path, seen: Path, upstream: str) -> Pat
     with tempfile.TemporaryDirectory(prefix=".chief-main-") as tmp:
         with tarfile.open(fileobj=io.BytesIO(_git(root, "archive", head))) as archive:
             archive.extractall(tmp, filter="data")
-        release = start_coordinator.install(Path(tmp), install_dir)
-    staged = install_dir / f".current-{uuid.uuid4().hex}"
-    try:
-        staged.symlink_to(release.relative_to(install_dir))
-        os.replace(staged, install_dir / "current")
-    finally:
-        staged.unlink(missing_ok=True)
+        with lock():
+            result = chief_of_stuff.install(source=Path(tmp), install_dir=install_dir, bin_dir=bin_dir)
     seen.parent.mkdir(parents=True, exist_ok=True)
     seen.write_text(head + "\n")
-    return release
+    return result
