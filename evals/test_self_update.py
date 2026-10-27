@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+import claude_adapter
 import self_update
 from evals import make_repo
 
@@ -26,16 +27,22 @@ class FollowMainTest(unittest.TestCase):
         (self.install_dir / "versions").mkdir(parents=True)
         self.seen = self.base / "state" / "main-release"
         self.upstream = str(self.base / "origin.git")
+        self.bin = self.base / "bin"
+        self.bin.mkdir()
+        # No test runs the real claude: the install's plugin step answers from here.
+        patcher = mock.patch.object(claude_adapter, "update_plugin", return_value={"plugin": "1.0.0"})
+        self.plugin = patcher.start()
+        self.addCleanup(patcher.stop)
 
-    def follow(self, root, upstream=None):
+    def follow(self, root, upstream=None, lock=contextlib.nullcontext):
         # The fixture's origin is a local path, which same_repo rightly refuses; compare it as a plain string here.
         with mock.patch.object(self_update, "same_repo", lambda a, b: bool(b) and a.strip() == b):
             return self_update.follow_main(root, self.install_dir, self.seen,
-                                           self.upstream if upstream is None else upstream)
+                                           self.upstream if upstream is None else upstream, bin_dir=self.bin, lock=lock)
 
     def test_a_new_main_commit_is_installed_once_and_becomes_current(self):
         root = make_repo.build(self.base, {"files": PLUGIN})
-        first = self.follow(root)
+        first = Path(self.follow(root)["release"])
         self.assertEqual((self.install_dir / "current").resolve(), first)
         self.assertEqual((first / "scripts/engine.py").read_text(), "print('one')\n")
         self.assertIsNone(self.follow(root))  # nothing new on main: no install
@@ -43,10 +50,29 @@ class FollowMainTest(unittest.TestCase):
         make_repo.git(["commit", "-am", "two"], root)
         make_repo.git(["push", "origin", "main"], root)
         make_repo.git(["reset", "--hard", "HEAD~1"], root)  # the workspace checkout is not what is installed
-        second = self.follow(root)
+        second = Path(self.follow(root)["release"])
         self.assertNotEqual(second, first)
         self.assertEqual((self.install_dir / "current").resolve(), second)
         self.assertEqual((second / "scripts/engine.py").read_text(), "print('two')\n")
+
+    def test_an_install_takes_the_one_install_path_and_brings_the_plugin(self):
+        # §14: every install gives I → Pl ∨ F, so self-update installs the way `chief-of-stuff install` does.
+        root = make_repo.build(self.base, {"files": PLUGIN})
+        result = self.follow(root)
+        self.assertTrue((self.bin / "chief-of-stuff").is_file())
+        self.plugin.assert_called_once_with(self.install_dir / "current", "1.0.0")
+        self.assertEqual(result["plugin"], "1.0.0")
+
+    def test_the_fetch_runs_before_the_lock_and_only_the_install_inside_it(self):
+        # The machine-wide lock is never held across a network fetch.
+        root = make_repo.build(self.base, {"files": PLUGIN})
+        def held():
+            raise RuntimeError("held")
+        with self.assertRaises(RuntimeError):
+            self.follow(root, lock=held)
+        subprocess.run(["git", "-C", str(root), "rev-parse", "--verify", self_update.MAIN], check=True, capture_output=True)
+        self.assertFalse((self.install_dir / "current").exists())
+        self.assertFalse(self.seen.exists())
 
     def test_an_origin_that_is_not_the_running_releases_upstream_installs_nothing(self):
         # A fork or any other clone carrying chief-of-stuff's files must not replace the release every workspace runs.
@@ -68,7 +94,7 @@ class FollowMainTest(unittest.TestCase):
         make_repo.git(["push", "origin", "proposal"], root)
         make_repo.git(["config", "remote.origin.fetch", "+refs/heads/proposal:refs/remotes/origin/main"], root)
         make_repo.git(["fetch", "origin"], root)  # origin/main now names the unreviewed branch
-        release = self.follow(root)
+        release = Path(self.follow(root)["release"])
         self.assertEqual((release / "scripts/engine.py").read_text(), "print('one')\n")
 
     def test_ssh_and_https_urls_name_the_same_repository(self):
@@ -89,28 +115,34 @@ class EngineFollowsMainTest(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         self.base = Path(tmp.name)
 
-    def run_step(self, release, failure=None, lock=contextlib.nullcontext):
+    def run_step(self, release, failure=None, result=None):
         (release / ".claude-plugin").mkdir(parents=True, exist_ok=True)
         (release / ".claude-plugin/plugin.json").write_text(json.dumps({"repository": "https://github.com/example/tool"}))
         with mock.patch.object(self.engine.supervisor, "RELEASE", release), \
-                mock.patch.object(self.engine.supervisor, "lock", side_effect=lambda path: lock()) as locked, \
-                mock.patch.object(self.engine.self_update, "follow_main", side_effect=failure) as follow, \
+                mock.patch.object(self.engine.supervisor, "lock") as locked, \
+                mock.patch.object(self.engine.self_update, "follow_main", side_effect=failure, return_value=result) as follow, \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             self.engine._follow_main(self.base / "ws")
+            locked.assert_not_called()  # the engine holds no lock across the fetch
+            if follow.called:
+                follow.call_args.kwargs["lock"]()
         return follow, locked, err.getvalue()
 
     def test_a_failed_install_is_logged_and_the_loop_goes_on(self):
         follow, locked, err = self.run_step(self.base / "share/versions/1.0.0-abc", subprocess.CalledProcessError(128, "git"))
-        follow.assert_called_once_with(self.base / "ws", self.base / "share", mock.ANY, "https://github.com/example/tool")
+        follow.assert_called_once_with(self.base / "ws", self.base / "share", mock.ANY, "https://github.com/example/tool",
+                                       lock=mock.ANY)
         self.assertTrue(str(locked.call_args.args[0]).endswith("supervisor.lock"))  # installs never race another workspace
         self.assertIn("engine: cannot install origin/main", err)
 
     def test_a_busy_supervisor_lock_waits_for_a_later_pass_quietly(self):
-        def busy():
-            raise self.engine.supervisor.ServiceError("busy")
-        follow, _, err = self.run_step(self.base / "share/versions/1.0.0-abc", lock=busy)
-        follow.assert_not_called()
+        _, _, err = self.run_step(self.base / "share/versions/1.0.0-abc", self.engine.supervisor.ServiceError("busy"))
         self.assertEqual(err, "")
+
+    def test_an_install_logs_the_release_and_where_the_plugin_stands(self):
+        report = {"release": str(self.base / "share/versions/1.0.0-def"), "plugin": "behind 1.0.0: user at 0.9.0"}
+        _, _, err = self.run_step(self.base / "share/versions/1.0.0-abc", result=report)
+        self.assertIn("engine: installed origin/main as 1.0.0-def; plugin behind 1.0.0: user at 0.9.0", err)
 
     def test_an_engine_run_from_a_checkout_installs_nothing(self):
         follow, _, _ = self.run_step(self.base / "checkout")
