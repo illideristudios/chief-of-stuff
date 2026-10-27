@@ -20,18 +20,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # start_coordin
 import start_coordinator  # noqa: E402
 
 
+MAIN = "refs/chief-of-stuff/main"  # private to self-update, outside every remote-tracking namespace
+
+
 def _git(root: Path, *args: str) -> bytes:
     return subprocess.run(["git", "-C", str(root), *args], capture_output=True, check=True, timeout=120).stdout
 
 
-def _repo(url: str) -> str:
-    """host/owner/name for git@host:owner/name.git, https://host/owner/name or a local path."""
-    url = re.sub(r"^[a-z+]+://", "", url.strip().lower()).removesuffix("/").removesuffix(".git")
-    return re.sub(r"^[^@/]+@", "", url).replace(":", "/", 1)
+REMOTE = (re.compile(r"(?:https|ssh)://(?:[^@/]+@)?([^/:@]+)(?::\d+)?/([\w.-]+/[\w.-]+?)(?:\.git)?/?", re.I),
+          re.compile(r"(?:[^@/:]+@)?([^/:@]+):([\w.-]+/[\w.-]+?)(?:\.git)?/?"))  # scp-style user@host:owner/name
+
+
+def _remote(url: str) -> tuple[str, str] | None:
+    """(host, owner/name) of a network remote; None for a local path, file:// or any other transport."""
+    for pattern in REMOTE:
+        if (m := pattern.fullmatch(url.strip())) and ".." not in m[2]:
+            return m[1].lower(), m[2].lower()
+    return None
 
 
 def same_repo(a: str, b: str) -> bool:
-    return bool(a.strip()) and _repo(a) == _repo(b)
+    return (remote := _remote(a)) is not None and remote == _remote(b)
 
 
 def follow_main(root: Path, install_dir: Path, seen: Path, upstream: str) -> Path | None:
@@ -42,8 +51,9 @@ def follow_main(root: Path, install_dir: Path, seen: Path, upstream: str) -> Pat
         return None  # not a git checkout with an origin
     if not upstream or not same_repo(origin, upstream):
         return None
-    _git(root, "fetch", "--quiet", "origin", "main")
-    head = _git(root, "rev-parse", "origin/main").decode().strip()
+    # An explicit refspec, so a configured one can never map another ref onto what is installed.
+    _git(root, "fetch", "--quiet", "--no-write-fetch-head", "origin", f"+refs/heads/main:{MAIN}")
+    head = _git(root, "rev-parse", MAIN).decode().strip()
     if seen.is_file() and seen.read_text().strip() == head:
         return None
     with tempfile.TemporaryDirectory(prefix=".chief-main-") as tmp:
