@@ -306,9 +306,16 @@ def ask_decision(decisions: Sequence[Any], ask: Any) -> Any | None:
         linked = _ask_link(row, decisions)
         matches = linked == ask.id if linked is not None else identity(row) == ("ask", ask.question, f"ask-{ask.id}")
         if (matches and row.question == ask.question and prior.get("context", "") == ask.context
-                and tuple(prior.get("options") or ()) == tuple(ask.options)):
+                and tuple(prior.get("options") or ()) in (tuple(ask.options), _consulted_options(ask))):
             return row
     return None
+
+
+def _consulted_options(ask: Any) -> tuple[str, ...]:
+    """The engine consults a permission ask raised before #874, which carries no options, as allow/deny."""
+    if not ask.options and str(ask.question).startswith("Permission requested for "):
+        return ("allow", "deny")
+    return tuple(ask.options)
 
 
 def recover_ask_link(decisions: Sequence[Any], ask: Any) -> DecisionUpdate | None:
