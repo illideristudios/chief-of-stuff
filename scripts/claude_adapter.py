@@ -139,13 +139,24 @@ def messaging(run_dir: Path) -> bool:
 
 
 @contextmanager
-def mailbox_lock(run_dir: Path):
+def mailbox_lock(run_dir: Path, *, timeout: float | None = None):
     """Serializes a handoff (claim + inbox write), intake closing and the recovery sweep's judgement.
 
     The OS drops a flock when its holder dies, so a crashed handoff never wedges the mailbox.
     """
     with (run_dir / MAILBOX / "lock").open("a") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError("mailbox lock timed out")
+                    time.sleep(min(POLL_S, max(0, deadline - time.monotonic())))
         yield
 
 
@@ -214,9 +225,9 @@ def replayed(run_dir: Path, delivery_id: str, session_id: str, body: str) -> boo
     return False
 
 
-def _close_intake(run_dir: Path) -> None:
+def _close_intake(run_dir: Path, *, timeout: float | None = None) -> None:
     box = run_dir / MAILBOX
-    with mailbox_lock(run_dir):
+    with mailbox_lock(run_dir, timeout=timeout):
         (box / "closed").touch()
     # No handoff can follow the marker; anything still untaken was never written to the session.
     for path in (box / "inbox").glob("*.json"):
@@ -285,8 +296,6 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
         _send(process, prompt, session_id)
     except OSError as exc:
         print(f"assignment stdin write failed: {exc}", file=sys.stderr)
-        _stop_after_write_failure(process)
-        _close_intake(run_dir)
         raise InputWriteError("assignment stdin write failed") from exc
     (box / "open").touch()
     while True:
@@ -335,8 +344,6 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
                     _send(process, message["body"], session_id, path.stem)
                 except OSError as exc:
                     print(f"message stdin write failed: {exc}", file=sys.stderr)
-                    _stop_after_write_failure(process)
-                    _close_intake(run_dir)
                     raise InputWriteError("message stdin write failed") from exc
                 inflight[path.stem] = time.monotonic() + ECHO_WAIT_S
         elif not closed and all(deadline <= time.monotonic() for deadline in inflight.values()):
@@ -355,7 +362,7 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
 def _messaging_worker(run_dir: Path, prepared: dict) -> None:
     final = b""
     (run_dir / "stdout").write_text("")
-    with (run_dir / "stream.jsonl").open("wb") as stream, (run_dir / "stderr").open("w") as stderr:
+    with (run_dir / "stream.jsonl").open("w+b") as stream, (run_dir / "stderr").open("w") as stderr:
         process = None
         cancelled = False
 
@@ -377,19 +384,31 @@ def _messaging_worker(run_dir: Path, prepared: dict) -> None:
                     raise _RunnerCancelled()
             except OSError as exc:
                 stderr.write(str(exc))
-                _close_intake(run_dir)
+                try:
+                    _close_intake(run_dir, timeout=1)
+                except (OSError, TimeoutError) as close_error:
+                    stderr.write(f"\nintake close failed: {close_error}")
                 code = 127
             else:
-                _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
-                                                 "session_id": prepared["session_id"]})
                 try:
+                    _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
+                                                     "session_id": prepared["session_id"]})
                     final = _serve(run_dir, process, prepared["session_id"], prepared["stdin_prompt"])
                     # Intake is closed and serving has completed. From here normal
                     # completion wins over cancellation, before the leader is reaped.
                     signal.signal(signal.SIGTERM, signal.SIG_IGN)
                     code = process.wait()
-                except InputWriteError:
-                    code = 1  # never report success for a failed or partially written input line
+                except Exception as exc:
+                    # The leader has not been reaped during serving, so its group ID
+                    # remains reserved even when it has exited. Stop once before any
+                    # potentially blocked or failing mailbox operation.
+                    _stop_after_write_failure(process)
+                    stderr.write(f"\nworker serving failed: {exc}")
+                    try:
+                        _close_intake(run_dir, timeout=1)
+                    except (OSError, TimeoutError) as close_error:
+                        stderr.write(f"\nintake close failed: {close_error}")
+                    code = 1
         except _RunnerCancelled:
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             if process is not None:
@@ -397,8 +416,13 @@ def _messaging_worker(run_dir: Path, prepared: dict) -> None:
             return
         finally:
             signal.signal(signal.SIGTERM, previous)
-    if not final:
-        final = (run_dir / "stream.jsonl").read_bytes()  # no result event: classify sees what the host printed
+        if not final:
+            # The stream path may have disappeared; the open file still holds the host's output.
+            try:
+                stream.seek(0)
+                final = stream.read()
+            except OSError as exc:
+                stderr.write(f"\nstream recovery failed: {exc}")
     # collect classifies stdout as one JSON answer, as `--output-format json` wrote it.
     temporary = run_dir / "stdout.tmp"
     temporary.write_bytes(final)

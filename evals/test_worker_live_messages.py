@@ -402,6 +402,86 @@ os._exit(23)
         self.assertEqual(runner.wait(timeout=5), 0)
         self.assertNotEqual(json.loads((self.run_dir / "exit.json").read_text())["exit_code"], 0)
 
+    def test_serve_filesystem_failures_stop_the_owned_group_and_record_failure(self):
+        # Each failure happens with a live descendant. Ack failure also leaves the
+        # handoff taken, so recovery can never send the same message again.
+        for failure in ("stream", "ack", "close"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp).resolve()
+                run_dir = root / "run"
+                run_dir.mkdir()
+                host = root / "host.py"
+                host.write_text("""
+import json, os, subprocess, sys, time
+from pathlib import Path
+root = Path(__file__).parent
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)', str(root)])
+(root / 'child.pid').write_text(str(child.pid))
+for line in sys.stdin:
+    message = json.loads(line)
+    if message.get('uuid'):
+        print(json.dumps({'type': 'user', 'isReplay': True, 'uuid': message['uuid']}), flush=True)
+    if (root / 'exit').exists():
+        os._exit(0)
+""")
+                unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+                runner = None
+                child = None
+                try:
+                    runner = claude_adapter.spawn([sys.executable, str(host)],
+                        Request("assignment", session_id=self.session, cwd=str(root)), run_dir,
+                        stdin_prompt="assignment")
+                    started = wait_for(lambda: (run_dir / "started.json").exists() and
+                                       json.loads((run_dir / "started.json").read_text()))
+                    child = int(wait_for(lambda: (root / "child.pid").read_text() if (root / "child.pid").exists() else ""))
+                    wait_for(lambda: claude_adapter.intake_open(run_dir))
+                    box = run_dir / claude_adapter.MAILBOX
+                    delivery = str(uuid.uuid4())
+                    if failure == "stream":
+                        (run_dir / "stream.jsonl").unlink()
+                    elif failure == "ack":
+                        (box / "acks").rmdir()
+                        (box / "acks").write_text("not a directory")
+                        with claude_adapter.mailbox_lock(run_dir):
+                            claude_adapter.post(run_dir, {"delivery_id": delivery, "session_id": self.session, "body": "follow up"})
+                    else:
+                        (box / "closed").symlink_to(root / "missing" / "closed")
+                        (root / "exit").touch()
+                        with claude_adapter.mailbox_lock(run_dir):
+                            claude_adapter.post(run_dir, {"delivery_id": delivery, "session_id": self.session, "body": "exit"})
+                    self.assertEqual(runner.wait(timeout=8), 0)
+                    self.assertFalse(process_status.process_exists(started["pid"]))
+                    self.assertIsNone(process_status.identity(child, str(root)))
+                    self.assertIsNone(unrelated.poll())
+                    self.assertNotEqual(json.loads((run_dir / "exit.json").read_text())["exit_code"], 0)
+                    if failure == "ack":
+                        self.assertTrue((box / "taken" / f"{delivery}.json").exists())
+                        self.assertFalse((box / "inbox" / f"{delivery}.json").exists())
+                        self.assertEqual((run_dir / "stream.jsonl").read_text().count(delivery), 1)
+                finally:
+                    if runner is not None and runner.poll() is None:
+                        runner.kill()
+                        runner.wait(timeout=5)
+                    if child:
+                        self.kill_pid(child)
+                    if runner is not None and (run_dir / "started.json").exists():
+                        self.kill_pid(json.loads((run_dir / "started.json").read_text())["pid"])
+                    unrelated.kill()
+                    unrelated.wait(timeout=5)
+
+    def test_serve_failure_does_not_wait_forever_for_mailbox_lock(self):
+        self.host.write_text(STALL_HOST)
+        runner = self.start()
+        child = int(wait_for(lambda: (self.root / "child.pid").read_text() if (self.root / "child.pid").exists() else ""))
+        self.addCleanup(self.kill_pid, child)
+        with claude_adapter.mailbox_lock(self.run_dir):
+            (self.run_dir / "stream.jsonl").unlink()
+            self.assertEqual(runner.wait(timeout=5), 0)
+            self.assertFalse(process_status.process_exists(self.host_pid))
+            self.assertIsNone(process_status.identity(child, str(self.root)))
+            self.assertNotEqual(json.loads((self.run_dir / "exit.json").read_text())["exit_code"], 0)
+        self.assertIn("mailbox lock timed out", (self.run_dir / "stderr").read_text())
+
     def test_host_crash_closes_intake_and_records_failure(self):
         self.host.write_text("import os, sys\nsys.stdin.readline()\nos._exit(23)\n")
         runner = claude_adapter.spawn([sys.executable, str(self.host)],
