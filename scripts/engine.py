@@ -4,15 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
+import plistlib
+import signal
+import subprocess
 import sys
 import threading
 import time
 from collections.abc import Callable, Collection
 from dataclasses import is_dataclass, replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import cache, partial
 from pathlib import Path
 from typing import Any
@@ -48,7 +52,7 @@ import trio_gate
 import worker
 from forge_port import ForgeError
 from reconcile import OP_DECISION_COMMENT, OP_MERGE_REFUSED, OP_STAGE_WRITE, OP_WORKER_RUN
-from workspace import worktrees_dir
+from workspace import read_engine_status, worktrees_dir, write_engine_status
 
 Launch = Callable[[str, str, int, str | None], tuple[str, str] | None]
 TRIO_PASS_BUDGET_S = 480  # #927: trio calls stop here in one pass; above TIMEOUT_S so a slow vote leaves room for two more
@@ -1027,10 +1031,42 @@ def _prepare_handoff(release: Path) -> Path | None:
 
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
     release_selection.validate_handoff(root, release, supervisor)
-    # Keep the trusted script directory on sys.path while ignoring Python environment and user site.
-    os.execve(str(python), [str(python), "-E", "-s", str(release / "scripts/engine.py"),
-                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []),
-              supervisor.python_environment())
+    argv = release_selection.isolated_release_argv(python, release / "scripts/engine.py",
+                                            "--root", str(root), "--interval", str(interval),
+                                            *(["--once"] if once else []))
+    previous_cwd = os.getcwd()
+    try:
+        os.chdir("/")
+        os.execve(str(python), argv, release_selection.python_environment())
+    finally:  # exec failures and tests that intercept exec must restore the caller's cwd
+        os.chdir(previous_cwd)
+
+
+def _pending_explicit_install(root: Path) -> bool:
+    intent = release_selection.explicit_intent(root, supervisor)
+    return bool(intent and intent["operation"] == "install" and intent["pending"])
+
+
+def _persist_launchd_handoff(root: Path, release: Path) -> bool:
+    """Reload launchd from a detached helper while this engine holds its pass lock."""
+    path = supervisor.job_path(supervisor.label("engine", root), None)
+    if "commit-handoff" not in supervisor.ACTIONS or sys.platform != "darwin" or not path.exists():
+        return False
+    job = plistlib.loads(path.read_bytes())
+    if (supervisor.current_release_from_job(job) != supervisor.RELEASE
+            and not (supervisor.state_dir(root) / getattr(supervisor, "HANDOFF_MARKER", "engine-handoff.json")).exists()
+            and not _pending_explicit_install(root)):
+        return False
+    target = f"gui/{os.getuid()}/{supervisor.label('engine', root)}"
+    if not supervisor.launchctl("print", target, missing_ok=True):
+        return False
+    child = subprocess.Popen([sys.executable, "-I", str(Path(supervisor.__file__).resolve()), "--root", str(root),
+                              "--release", str(release), "commit-handoff"],
+                             stdin=subprocess.DEVNULL, start_new_session=True, cwd="/",
+                             env=release_selection.python_environment())
+    if child.wait(timeout=1500):
+        raise supervisor.ServiceError("launchd handoff failed; see engine log")
+    return True
 
 
 def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:
@@ -1057,7 +1093,7 @@ def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> N
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run passes until stopped, or one with --once; `install`, `uninstall` and `status` manage the LaunchAgent.
+    """Run passes until stopped, or one with --once; `install`, `uninstall`, `ensure` and `status` manage the LaunchAgent.
 
     Exits 0 when stopped, 1 when a --once pass failed, 2 on startup or driver errors (including failed exec).
     A different valid install pointer, including rollback, hands off before startup or after a pass
@@ -1076,43 +1112,102 @@ def main(argv: list[str] | None = None) -> int:
     root = args.root.resolve()
     newer = None
     adopt_login_path()
+    previous_sigterm = None
+    if threading.current_thread() is threading.main_thread():
+        def _on_sigterm(_signum: int, _frame: Any) -> None:
+            raise KeyboardInterrupt
+        previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
-        if (installed := release_selection.selected_release(root, supervisor)) != supervisor.RELEASE:
-            if ((python := _prepare_handoff(installed)) is not None
-                    and release_selection.selected_release(root, supervisor) == installed):
+        installed = release_selection.selected_release(root, supervisor)
+        if ((supervisor.state_dir(root) / getattr(supervisor, "HANDOFF_MARKER", "engine-handoff.json")).exists()
+                or _pending_explicit_install(root)):
+            with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+                if _persist_launchd_handoff(root, installed):
+                    return 0
+        if installed != supervisor.RELEASE:
+            if (python := _prepare_handoff(installed)) is not None and release_selection.selected_release(root, supervisor) == installed:
+                with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+                    if _persist_launchd_handoff(root, installed):
+                        return 0
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
-            text, config, source = startup.workspace_forge(root)
-            if source is None:
-                refused = issue_gate.start(None, None, "")
-                raise ValueError(f"{refused.refused}\n{refused.setup}")
-            if config.kanban is None:
-                raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
-            policies = settings.workspace_policy(root, config.policy_overlay)
-            # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
-            unmapped = settings.unmapped_stages(config.kanban, policies)
-            if unmapped:
-                raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
-            dispatch_prompt.validate_worker_rules(root, config, policies)
-            trees = root / worktrees_dir(text)
-            trees.mkdir(parents=True, exist_ok=True)
-            db = store_access.migrated_store(root, engine_owned=True)
-            _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay, db)
-            # Match the forge repository to a configured clone; a repository workspace needs no [repos] entry.
-            repo = source.home.repo if getattr(source, "github", False) else getattr(getattr(source, "home", None), "project", "")
-            selected = config.repos.get(repo) or config.repos.get(repo.rpartition("/")[2])
-            if not selected and len(config.repos) == 1:
-                selected = next(iter(config.repos.values()))
-            if not selected and config.repos:
-                raise ValueError("no [repos] clone matches the workspace backlog")
-            launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
-                             clone=root / selected if selected else root,
-                             claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
-                             require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
-            model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
-                                    rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
-                                    launchable=_judges)
+            prior = read_engine_status(root)
+            mode = "once" if args.once else "service"
+            release = str(supervisor.RELEASE)
+            started_at = datetime.now(timezone.utc)
+            last_pass_at = prior.last_pass_at if prior is not None and prior.present else None
+            last_attempt_at = prior.last_attempt_at if prior is not None and prior.present else None
+            last_error = (
+                prior.last_error
+                if prior is not None and prior.present and prior.error_kind != "startup"
+                else None
+            )
+            error_kind = (
+                prior.error_kind
+                if prior is not None and prior.present and prior.error_kind != "startup"
+                else None
+            )
+            try:
+                text, config, source = startup.workspace_forge(root)
+                if source is None:
+                    refused = issue_gate.start(None, None, "")
+                    raise ValueError(f"{refused.refused}\n{refused.setup}")
+                if config.kanban is None:
+                    raise ValueError("no [kanban] stage labels configured; configure workspace stage labels before running the engine")
+                policies = settings.workspace_policy(root, config.policy_overlay)
+                # A stage write the map cannot express leaves pending_stage set, which hides the issue forever.
+                unmapped = settings.unmapped_stages(config.kanban, policies)
+                if unmapped:
+                    raise ValueError(f"[kanban.map] has no label for workflow stage {', '.join(unmapped)}")
+                dispatch_prompt.validate_worker_rules(root, config, policies)
+                trees = root / worktrees_dir(text)
+                trees.mkdir(parents=True, exist_ok=True)
+                db = store_access.migrated_store(root, engine_owned=True)
+                _note_policy(root, settings.workspace_policy_data(root, config.policy_overlay), config.policy_overlay, db)
+                # Match the forge repository to a configured clone; a repository workspace needs no [repos] entry.
+                repo = source.home.repo if getattr(source, "github", False) else getattr(getattr(source, "home", None), "project", "")
+                selected = config.repos.get(repo) or config.repos.get(repo.rpartition("/")[2])
+                if not selected and len(config.repos) == 1:
+                    selected = next(iter(config.repos.values()))
+                if not selected and config.repos:
+                    raise ValueError("no [repos] clone matches the workspace backlog")
+                launch = partial(worker.launch, store=db, root=root, trees=trees, policies=policies, forge=source,
+                                 clone=root / selected if selected else root,
+                                 claude_as_profile=config.workers.claude_as_profile, rules=config.workers.rules,
+                                 require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
+                model = model_port.Port(partial(_judge, claude_as_profile=config.workers.claude_as_profile),
+                                        rotation=config.models.get("trio", ()), pick=config.model_picks.get("trio", "first"),
+                                        launchable=_judges)
+            except Exception as exc:
+                failed_at = datetime.now(timezone.utc)
+                with contextlib.suppress(OSError):
+                    write_engine_status(
+                        root,
+                        started_at=started_at,
+                        last_pass_at=last_pass_at,
+                        last_attempt_at=failed_at,
+                        stopped_at=failed_at,
+                        interval=args.interval,
+                        mode=mode,
+                        last_error=str(exc).strip() or type(exc).__name__,
+                        error_kind="startup",
+                        release=release,
+                    )
+                raise
+            with contextlib.suppress(OSError):
+                write_engine_status(
+                    root,
+                    started_at=started_at,
+                    last_pass_at=last_pass_at,
+                    last_attempt_at=last_attempt_at,
+                    stopped_at=None,
+                    interval=args.interval,
+                    mode=mode,
+                    last_error=last_error,
+                    error_kind=error_kind,
+                    release=release,
+                )
             stop_pages = threading.Event()
             page_thread = None
             message_thread = None
@@ -1124,6 +1219,11 @@ def main(argv: list[str] | None = None) -> int:
                     message_thread = threading.Thread(target=_message_loop, args=(root, stop_pages), daemon=True)
                     message_thread.start()
                 while True:
+                    with contextlib.suppress(OSError):
+                        write_engine_status(root, started_at=started_at, last_pass_at=last_pass_at,
+                                            last_attempt_at=last_attempt_at, stopped_at=None,
+                                            pass_started_at=datetime.now(timezone.utc), interval=args.interval,
+                                            mode=mode, last_error=last_error, error_kind=error_kind, release=release)
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,
@@ -1131,13 +1231,36 @@ def main(argv: list[str] | None = None) -> int:
                                  require_green=config.workers.require_green_tests, teardown_command=config.workers.teardown)
                     except Exception as exc:
                         failed = True
+                        last_attempt_at = datetime.now(timezone.utc)
+                        last_error = str(exc).strip() or type(exc).__name__
+                        error_kind = "pass"
                         print(f"engine: pass failed: {exc}", file=sys.stderr, flush=True)
+                    else:
+                        done = datetime.now(timezone.utc)
+                        last_pass_at = done
+                        last_attempt_at = done
+                        last_error = None
+                        error_kind = None
                     if args.once:
                         return 1 if failed else 0
+                    with contextlib.suppress(OSError):
+                        write_engine_status(
+                            root,
+                            started_at=started_at,
+                            last_pass_at=last_pass_at,
+                            last_attempt_at=last_attempt_at,
+                            stopped_at=None,
+                            interval=args.interval,
+                            mode=mode,
+                            last_error=last_error,
+                            error_kind=error_kind,
+                            release=release,
+                        )
                     time.sleep(args.interval)
-                    if (installed := release_selection.selected_release(root, supervisor)) != supervisor.RELEASE:
-                        if ((python := _prepare_handoff(installed)) is not None
-                                and release_selection.selected_release(root, supervisor) == installed):
+                    installed = release_selection.selected_release(root, supervisor)
+                    if (installed != supervisor.RELEASE or
+                            _pending_explicit_install(root)):
+                        if (python := _prepare_handoff(installed)) is not None and release_selection.selected_release(root, supervisor) == installed:
                             newer = installed, python
                             break
                     if page_thread is not None and not page_thread.is_alive():
@@ -1153,6 +1276,21 @@ def main(argv: list[str] | None = None) -> int:
                 if page_thread is not None and page_thread.ident is not None:
                     page_thread.join()  # supervise's I/O is bounded; cancellation reaps unrecorded children before exec
                 db.engine.dispose()
+                with contextlib.suppress(OSError):
+                    write_engine_status(
+                        root,
+                        started_at=started_at,
+                        last_pass_at=last_pass_at,
+                        last_attempt_at=last_attempt_at,
+                        stopped_at=datetime.now(timezone.utc),
+                        interval=args.interval,
+                        mode=mode,
+                        last_error=last_error,
+                        error_kind=error_kind,
+                        release=release,
+                    )
+            if newer is not None and _persist_launchd_handoff(root, newer[0]):
+                return 0
         if newer is not None:  # after the lock and board thread are released, so the new release can take them
             _handoff(*newer, root, args.interval, args.once)
         return 0
@@ -1161,6 +1299,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as exc:
         print(f"engine: {exc}", file=sys.stderr)
         return 2
+    finally:
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
 
 
 if __name__ == "__main__":

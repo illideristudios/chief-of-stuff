@@ -54,26 +54,26 @@ def read(root: Path, data: Path, error) -> dict | None:
 
 
 def validate_release(root: Path, release: Path, error) -> None:
+    """Trust release trees and their ancestors, but never links or indirect pip inputs."""
     root = root.resolve()
     try:
         resolved = release.resolve(strict=True)
-        if resolved != release or resolved == root or root in resolved.parents or resolved in root.parents:
+        if (resolved != release or resolved == root or root in resolved.parents
+                or resolved in root.parents):
             raise error("engine release must be stable and outside the workspace")
         if not resolved.is_dir():
             raise error("engine release must be a directory")
-        def fail(exc):
-            raise exc
-        for directory, dirs, files in os.walk(resolved, followlinks=False, onerror=fail):
+        for directory, dirs, files in os.walk(release, followlinks=False, onerror=lambda exc: (_ for _ in ()).throw(exc)):
             for name in dirs + files:
                 path = Path(directory) / name
                 if path.is_symlink():
-                    raise error(f"engine release must not contain symlinks: {path}")
-        requirements = resolved / "requirements.txt"
+                    raise error("engine release must not contain symlinks or depend on workspace aliases")
+        requirements = release / "requirements.txt"
         if requirements.exists():
-            for line in requirements.read_text(encoding="utf-8").splitlines():
+            for line in requirements.read_text().splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and not re.fullmatch(
-                        r"[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9._+!-]*", line):
-                    raise error("engine release requirements must contain only pinned package versions")
+                        r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*", line):
+                    raise error("engine requirements must contain only pinned package versions")
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise error(f"invalid engine release: {exc}") from exc

@@ -29,8 +29,8 @@ from task_forge import (EXHAUSTED_CHIP, current_tasks, drifts, effective_stage, 
                         task_changes, went_held, worker_names)
 from backlog_ref import route_identity, store_label  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
-from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
-                       with_decision_deadlines, with_workspace_decision_deadlines)
+from workspace import (Config, ConfigError, EngineStatus, daily_trackers, engine_health, looked_before,  # noqa: E402
+                       read_config, read_engine_status, with_decision_deadlines, with_workspace_decision_deadlines)
 import board_sources  # noqa: E402
 import columns  # noqa: E402
 import decision_page  # noqa: E402
@@ -355,7 +355,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
            pending_refs: dict[str, datetime | None] | None = None, looked: datetime | None = None,
            look_log: list[tuple[date, str]] | None = None,
            loop_log: list[tuple[date, str]] | None = None,
-           db: PageData | None = None) -> str:
+           db: PageData | None = None,
+           engine_status: EngineStatus | None = None) -> str:
     """The board page: header, tiles, BUILD (the stage columns), and the Flow charts.
     `stage_log` is (day, tracker text) for the earlier days the Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
@@ -447,15 +448,21 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
 
     pending = decisions or []
     open_store_decisions = sum(1 for d in store_decisions if state_of(d).status in ("open", "blocked"))
-    # (#215) No render clock: pages re-render on every request, so it only ever said now. The meta keeps the
-    # sources' read times and the page's own counts; `data-rendered-at` stays for scripts.
-    meta = [f"tracker {(tracker_at or now).astimezone(zone):%H:%M}",
-            *(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in ("kanban", "merge requests", "workers") if k in sources.fetched),
-            _tasks(len(tasks))]
+    # (#215, #936) No render clock: pages re-render on request, and `.sources.json` refreshes independently of
+    # engine passes. Surface real engine liveness/pass timestamps; never fabricate `tracker HH:MM` on store workspaces.
+    health = engine_health(engine_status, now, zone) if engine_status is not None else None
+    meta = list(health.meta) if health is not None else []
+    if engine_status is None and db is None:
+        meta.append(f"tracker {(tracker_at or now).astimezone(zone):%H:%M}")
+    elif tracker_at is not None:
+        meta.append(f"tracker {tracker_at.astimezone(zone):%H:%M}")
+    source_keys = ("merge requests",) if db is not None and not tracker_text.strip() else ("kanban", "merge requests", "workers")
+    meta.extend(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in source_keys if k in sources.fetched)
+    meta.append(_tasks(len(tasks)))
     if db is not None and (latest := next((row.message for row in reversed(db.engine_logs)
                                            if row.kind == "policy_change"), "")):
         meta.append(latest)
-    warnings = []
+    warnings = [health.warning] if health is not None and health.warning else []
     for panel, reason in sources.errors.items():
         state = ("stale" if same_home and panel in sources.fetched else "unavailable") if panel in ("kanban", "merge requests") else ""
         warnings.append(f"{panel}: {state + ' — ' if state else ''}{reason}")
@@ -598,10 +605,11 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
                   sources=sources,
-                  tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone) if tracker.is_file() else now,
+                  tracker_at=datetime.fromtimestamp(tracker.stat().st_mtime, cfg.zone) if tracker.is_file() else None,
                   stage_log=stage_log,
                   slots=settings.workers.max_concurrency or 1, pending_refs=decision_page.held_refs(pending, ctx),
-                  looked=looked, look_log=look_log, loop_log=sorted(loop_log), db=db)
+                  looked=looked, look_log=look_log, loop_log=sorted(loop_log), db=db,
+                  engine_status=read_engine_status(root))
     write_if_changed(out, page)
     return out, cfg, now, tracker_text, req_texts
 

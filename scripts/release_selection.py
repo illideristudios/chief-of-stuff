@@ -1,10 +1,25 @@
 """Select the installed release or a newer plugin-cache sibling requested for a workspace."""
 
 import json
-import sys
+import os
 from pathlib import Path
 
 import engine_intent
+
+
+def python_environment() -> dict[str, str]:
+    return {key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")}
+
+
+# -I prevents Python from importing workspace startup hooks. Add the validated
+# release's script directory only after interpreter startup, for local imports.
+_RELEASE_BOOTSTRAP = ("import runpy, sys; entry = sys.argv[1]; "
+                      "sys.path.insert(0, __import__('os').path.dirname(entry)); "
+                      "sys.argv = sys.argv[1:]; runpy.run_path(entry, run_name='__main__')")
+
+
+def isolated_release_argv(python: Path, entry: Path, *args: str) -> list[str]:
+    return [str(python), "-I", "-c", _RELEASE_BOOTSTRAP, str(entry), *args]
 
 
 def _plugin_version(release: Path) -> tuple[int, ...] | None:
@@ -22,12 +37,19 @@ def _plugin_version(release: Path) -> tuple[int, ...] | None:
         return None
 
 
+def explicit_intent(root: Path, supervisor) -> dict | None:
+    # A cached supervisor may have an unsafe workspace marker parser. Read the
+    # private record directly, regardless of which supervisor was imported.
+    data_dir = getattr(supervisor, "data_dir", None)
+    if data_dir is None:
+        return None
+    return engine_intent.read(root, data_dir(), supervisor.ServiceError)
+
+
 def validate_handoff(root: Path, release: Path, supervisor) -> None:
-    """Reject workspace code, including symlinked inputs, at each handoff boundary."""
     engine_intent.validate_release(root, release, supervisor.ServiceError)
     root = root.resolve()
-    for path in (release / "scripts/pages.py", release / ".claude-plugin/plugin.json",
-                 release / "chief_of_stuff.py"):
+    for path in (release / "scripts/pages.py", release / ".claude-plugin/plugin.json", release / "chief_of_stuff.py"):
         try:
             target = path.resolve()
             if target == root or root in target.parents:
@@ -37,11 +59,10 @@ def validate_handoff(root: Path, release: Path, supervisor) -> None:
 
 
 def explicit_release(root: Path, supervisor, *, completed_only: bool = False) -> Path | None:
-    intent = engine_intent.read(root, supervisor.data_dir(), supervisor.ServiceError)
+    intent = explicit_intent(root, supervisor)
     if intent is None or intent["operation"] != "install" or (completed_only and intent["pending"]):
         return None
     chosen = Path(intent["release"])
-    # Completed installed releases follow the stable current pointer, as in the engine.
     if not intent["pending"] and chosen.parent.name == "versions":
         current = supervisor.current_release()
         if current.parent == chosen.parent:
@@ -50,27 +71,7 @@ def explicit_release(root: Path, supervisor, *, completed_only: bool = False) ->
     return chosen
 
 
-def selected_release(root: Path, supervisor) -> Path:
-    """Select from private intent or independently verified pointer and cache marker."""
-    try:
-        explicit = explicit_release(root, supervisor)
-    except supervisor.ServiceError as exc:
-        print(f"release selection: {exc}; keeping {supervisor.RELEASE}", file=sys.stderr, flush=True)
-        return supervisor.RELEASE
-    if explicit is not None:
-        return explicit
-    current = supervisor.current_release()
-    if current != supervisor.RELEASE:
-        try:
-            validate_handoff(root, current, supervisor)
-            return current
-        except supervisor.ServiceError:
-            return supervisor.RELEASE
-    return marker_release(root, current, supervisor) or current
-
-
 def marker_release(root: Path, current: Path, supervisor) -> Path | None:
-    """Return a validated newer marker selection, never the caller fallback."""
     current_version = _plugin_version(current)
     if current_version is None:
         return None
@@ -83,3 +84,15 @@ def marker_release(root: Path, current: Path, supervisor) -> Path | None:
     except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
         pass
     return None
+
+
+def selected_release(root: Path, supervisor) -> Path:
+    """Select independently of potentially older, unsafe supervisor selectors."""
+    explicit = explicit_release(root, supervisor)
+    if explicit is not None:
+        return explicit
+    current = supervisor.current_release()
+    validate_handoff(root, current, supervisor)
+    if current != supervisor.RELEASE:
+        return current
+    return marker_release(root, current, supervisor) or current
