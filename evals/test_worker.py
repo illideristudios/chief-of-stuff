@@ -389,6 +389,9 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual((record["launcher"], record["runtime"], record["thread_id"]), ("t3", "claude", "mcp:t-1"))
         self.assertEqual(record["branch_heads"], {"trunk": "d" * 40, "main": "d" * 40})
         self.assertEqual(record["pid"], 77)
+        # A heads file that is not branch -> 40-hex sha is dropped, so the run holds for want of heads (no option injection).
+        (run / "branch_heads.json").write_text(json.dumps({"main": "--output=/x"}))
+        self.assertNotIn("branch_heads", worker._existing_run(data, run, "implement", 1, self.trees, lambda: NOW))
 
     ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
                 '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')

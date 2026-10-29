@@ -124,9 +124,10 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
             return None
         record = json.loads(started.read_text())
         if (run_dir / "thread.json").is_file():
-            heads = run_dir / "branch_heads.json"
-            record.update(_thread_fields(run_dir), runtime="claude", launcher="t3",
-                          **({"branch_heads": json.loads(heads.read_text())} if heads.is_file() else {}))
+            record.update(_thread_fields(run_dir), runtime="claude", launcher="t3")
+            heads = json.loads((run_dir / "branch_heads.json").read_text()) if (run_dir / "branch_heads.json").is_file() else None
+            if isinstance(heads, dict) and all(isinstance(v, str) and re.fullmatch(r"[0-9a-f]{40}", v) for v in heads.values()):
+                record["branch_heads"] = heads
         prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
             "tree": data.get("worktree"), "branch": data.get("work_branch")}
         record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
