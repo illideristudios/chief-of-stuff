@@ -207,7 +207,7 @@ def ambiguous_gitlab_label(text: str) -> bool:
 
 
 def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool = False) -> IssueRef | None:
-    """`#N` (in the Backlog), a project shorthand on its forge, a GitHub issue URL, a GitLab issue URL on the
+    """`#N` (in the Backlog), an `owner/repo#N` GitHub shorthand, a GitHub issue URL, a GitLab issue URL on the
     Backlog's own host, a canonical store key, or a markdown link to a URL. A GitLab shorthand with three or
     more path components is ambiguous and must instead use a URL or canonical store key. Anything else is None,
     and a bare `#N` with no Backlog to resolve it against is None too.
@@ -242,8 +242,6 @@ def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool
     if not m or not (m.group(1) or home):
         return None
     if m.group(1):
-        if isinstance(home, Backlog):
-            return IssueRef(m.group(1), int(m.group(2)), home_of(home)[0])
         return IssueRef(m.group(1), int(m.group(2))) if GH_REPO.fullmatch(m.group(1)) else None
     host, repo = home_of(home)
     return IssueRef(repo, int(m.group(2)), host)

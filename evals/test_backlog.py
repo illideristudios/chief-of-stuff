@@ -755,10 +755,10 @@ class GitLabIssueRefTest(unittest.TestCase):
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", GH))
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", None))
 
-    def test_project_shorthand_uses_the_backlog_forge_and_github_urls_remain_explicit(self):
+    def test_project_shorthand_remains_github_in_gitlab_backlog(self):
         ref = bl.issue_ref("locriani/GauntletIssues#33", GL)
-        self.assertEqual(ref, bl.IssueRef(REPO, 33, "gl.example"))
-        self.assertEqual(ref.label(GL), f"gitlab:gl.example/{REPO}#33")
+        self.assertEqual(ref, bl.IssueRef(REPO, 33))
+        self.assertEqual(ref.label(GL), f"{REPO}#33")
         github = bl.issue_ref(f"https://github.com/{REPO}/issues/33", GL)
         self.assertEqual(github, bl.IssueRef(REPO, 33))
         self.assertEqual(github.label(GL), f"{REPO}#33")

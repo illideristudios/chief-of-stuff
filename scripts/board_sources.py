@@ -190,9 +190,24 @@ def _milestone_of(v: dict | None) -> Milestone | None:
     return Milestone(**{**v, "due": _due(v["due"])}) if v else None
 
 
-def _change_of(v: dict) -> Change:
-    """A cached change; a cache from an older release lacks the later fields, which keep their defaults."""
-    return Change(**{**v, "merged_at": _when(v["merged_at"]), "files": tuple(v["files"]), "issues": tuple(v["issues"]),
+def _change_of(v: dict, home=None) -> Change:
+    """Read old GitLab closing refs in the MR's forge context, never as GitHub shorthand."""
+    issues = tuple(v["issues"])
+    mr = re.fullmatch(r"https://([^/]+)/((?:[\w.-]+/)+[\w.-]+)/-/merge_requests/\d+/?", v.get("url", ""))
+    if mr or v.get("ref", "").startswith("!"):
+        host = mr.group(1) if mr else ""
+        migrated = []
+        for ref in issues:
+            path, marker, number = ref.rpartition("#")
+            if marker and number.isdecimal() and (not path or GH_REPO.fullmatch(path)):
+                if not host:
+                    continue
+                ref = backlog.IssueRef(path or mr.group(2), int(number), host).label(home)
+            elif marker and number.isdecimal() and ambiguous_gitlab_label(ref):
+                continue  # old nested project and host-qualified labels cannot be distinguished
+            migrated.append(ref)
+        issues = tuple(migrated)
+    return Change(**{**v, "merged_at": _when(v["merged_at"]), "files": tuple(v["files"]), "issues": issues,
                      "stats": tuple(FileStat(**s) for s in v.get("stats") or ()),
                      "jobs": tuple(Job(**j) for j in v.get("jobs") or ()),
                      "threads": tuple(ReviewThread(**{**t, "at": _when(t["at"])}) for t in v.get("threads") or ())})
@@ -206,14 +221,15 @@ def load(pages_dir: Path) -> Sources:
     """The cache, or EMPTY when it is absent or unreadable."""
     try:
         d = json.loads((pages_dir / CACHE).read_text())
+        home = _home_of(d.get("home"))
         return Sources({k: datetime.fromisoformat(v) for k, v in d["fetched"].items()},
                        {k: Issue(**{**v, "labels": tuple(v["labels"]), "closed_at": _when(v.get("closed_at")),
                                     "milestone": _milestone_of(v.get("milestone"))})
                         for k, v in d["issues"].items()},
-                       {k: _change_of(v) for k, v in d["changes"].items()},
+                       {k: _change_of(v, home) for k, v in d["changes"].items()},
                        tuple(Worker(**{**w, "started": _when(w["started"]), "last": _when(w["last"])})
                              for w in d["workers"]),
-                       dict(d["errors"]), _home_of(d.get("home")))
+                       dict(d["errors"]), home)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return EMPTY
 
