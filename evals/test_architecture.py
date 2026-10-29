@@ -47,6 +47,7 @@ DRAWS_NOTHING = (
     "decision_escalation",
     "decision_graph",  # Entities: decision DAG leaves, ancestors and rejected alternatives.
     "decision_history",  # Use Cases: harsh justification judgement and PrecedentSource seam.
+    "precedent_source",  # Interface Adapters: tracker and decision-graph PrecedentSource gateways.
     "performance",
     "performance_report",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
@@ -241,8 +242,10 @@ CIRCLES: dict[str, frozenset[str]] = {
         "migrations/versions/0007_engine_log",
         "migrations/versions/0008_withdraw_scope_decisions",
         "migrations/versions/0009_drop_ownership",
+        "precedent_source",
         "migrations/versions/0010_worker_messages",
         "migrations/versions/0011_rotation_records",
+        "migrations/versions/0012_decision_graph",
     }),
     "drivers": frozenset({
         "claude_adapter", "host_adapter", "git_trees", "git_view", "notify", "notify_service", "supervisor", "release_selection", "engine_intent",

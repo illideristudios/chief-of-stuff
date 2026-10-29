@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -294,6 +295,220 @@ class DecisionHistoryUseCaseTest(unittest.TestCase):
 
         ranked = self.dh.lookup_precedent(graph_source, "synchronous store.db writes")
         self.assertEqual([e.id for e in ranked], ["decision:2", "decision:3"])
+
+
+class DecisionGraphStoreAndAdapterTest(unittest.TestCase):
+    def setUp(self) -> None:
+        import decision_history as dh
+        import store
+        self.dh = dh
+        self.store_mod = store
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.db_path = Path(self.tmp.name) / "store.db"
+        store.migrate(self.db_path)
+        self.store = store.Store(self.db_path)
+        self.addCleanup(self.store.engine.dispose)
+
+    def _seed_diamond_graph(self) -> tuple[dg.DecisionLeaf, dg.DecisionLeaf, dg.DecisionLeaf, dg.DecisionLeaf]:
+        d1 = self.store.add_graph_decision(
+            "Keep decisions in markdown tables.",
+            "No database existed in early prototypes.",
+            topic="precedent",
+            decided_by="owner",
+        )
+        d2 = self.store.add_graph_decision(
+            "Store decisions in SQLite behind SQLAlchemy ORM.",
+            "Concurrent workers require transactional writes.",
+            parent_ids=(d1.id,),
+            topic="precedent-storage",
+            decided_by="owner",
+            rejected_alternatives=(
+                dg.RejectedAlternative(
+                    approach="Poll verdict in a model turn loop",
+                    reason="Burns model tokens waiting on the coordinator.",
+                ),
+                dg.RejectedAlternative(
+                    approach="Flat JSONL ledger without ORM",
+                    reason="The owner requires an ORM over store.db.",
+                ),
+            ),
+        )
+        d3 = self.store.add_graph_decision(
+            "Expose only current leaves to workers by default.",
+            "Superseded decisions in context cause decision poisoning.",
+            parent_ids=(d1.id,),
+            topic="precedent-visibility",
+            decided_by="owner",
+        )
+        d4 = self.store.add_graph_decision(
+            "Serve current decision leaves through the engine MCP tool backed by SQLAlchemy ORM.",
+            "Combines ACID storage with single-tool history gating.",
+            parent_ids=(d2.id, d3.id),
+            topic="decision-graph",
+            decided_by="owner",
+        )
+        return d1, d2, d3, d4
+
+    def test_store_persists_dag_exposes_only_leaves_and_forbids_rejected_alternatives_on_leaves(self) -> None:
+        d1, d2, d3, d4 = self._seed_diamond_graph()
+        leaves = self.store.decision_leaves()
+        self.assertEqual([leaf.id for leaf in leaves], [d4.id])
+        self.assertEqual(leaves[0].parent_ids, (d2.id, d3.id))
+        self.assertIn("SQLAlchemy ORM", leaves[0].decision)
+        self.assertIn("single-tool history gating", leaves[0].reason)
+
+        # Attaching a rejected alternative to a current leaf is refused.
+        with self.assertRaisesRegex(ValueError, "ancestors.*never in a leaf"):
+            self.store.add_rejected_alternative(d4.id, "Direct SQLite reads", "Bypasses the approved tool.")
+
+        # Creating a root leaf with rejected_alternatives (no parent ancestor) is also refused.
+        with self.assertRaisesRegex(ValueError, "ancestors.*never in a leaf"):
+            self.store.add_graph_decision(
+                "Standalone leaf",
+                "Standalone reason",
+                rejected_alternatives=[{"approach": "Bad leaf alt", "reason": "Cannot live on leaf"}],
+            )
+
+        # Attaching a rejected alternative to an ancestor (d2) succeeds.
+        added = self.store.add_rejected_alternative(
+            d2.id, "Direct SQLite reads from workers", "Workers must reach history only via the approved tool."
+        )
+        self.assertEqual(added.approach, "Direct SQLite reads from workers")
+
+    def test_free_readers_traverse_freely_while_worker_role_is_refused(self) -> None:
+        d1, d2, d3, d4 = self._seed_diamond_graph()
+        with self.assertRaises(PermissionError):
+            self.store.read_decision_graph(role="worker", leaf_id=d4.id)
+
+        for role in ("coordinator", "architect", "owner"):
+            view = self.store.read_decision_graph(role=role, leaf_id=d4.id)
+            self.assertEqual([leaf["id"] for leaf in view["leaves"]], [d4.id])
+            self.assertEqual([a["id"] for a in view["ancestors"]], [d2.id, d3.id, d1.id])
+
+    def test_approved_ancestors_grant_bounds_depth_logs_grant_and_reports_code_mismatch_to_architect(self) -> None:
+        d1, d2, d3, d4 = self._seed_diamond_graph()
+
+        # Unjustified request is refused before queueing.
+        with self.assertRaisesRegex(ValueError, "justify"):
+            self.store.submit_history_request(
+                self.dh.HistoryRequest(kind="ancestors", leaf_id=d4.id, justification="")
+            )
+
+        # Justified code-mismatch request asking for depth 1 (immediate parents only, not grandparent d1).
+        req_row = self.store.submit_history_request(
+            self.dh.HistoryRequest(
+                kind="ancestors",
+                leaf_id=d4.id,
+                requested_depth=1,
+                issue_key="github:example/repo#1181",
+                worker_id="session-abc",
+                justification=(
+                    f"Decision #{d4.id} requires serving leaves through the engine MCP tool, which does not match "
+                    "what the code shows in scripts/engine_mcp.py:20 where only report and ask are registered."
+                ),
+            ),
+            stage="implement",
+            attempt=1,
+        )
+        self.assertEqual(req_row.status, "pending")
+        # Pending queue carries only the request metadata and justification, never ancestor text.
+        pending = self.store.pending_history_requests()
+        self.assertEqual([r.id for r in pending], [req_row.id])
+        self.assertFalse(hasattr(pending[0], "ancestors"))
+
+        decided = self.store.judge_history_request(req_row.id)
+        self.assertEqual(decided.status, "approved")
+        self.assertEqual(decided.grant_case, "code_mismatch")
+        self.assertEqual(decided.approved_depth, 1)
+        self.assertTrue(decided.report_to_architect)
+
+        payload = self.store.fulfill_history_request(req_row.id)
+        self.assertEqual(payload["status"], "approved")
+        self.assertEqual(payload["approved_depth"], 1)
+        # Depth 1 returns immediate parents (d2, d3) and does NOT leak grandparent d1.
+        self.assertEqual([a["id"] for a in payload["ancestors"]], [d2.id, d3.id])
+
+        # Grant is durably logged in decision_history_grant and engine_log, plus architect mismatch logged.
+        grants = self.store.history_grants()
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0].request_id, req_row.id)
+        self.assertEqual(grants[0].returned_ids, [d2.id, d3.id])
+
+        kinds = [entry.kind for entry in self.store.engine_log()]
+        self.assertIn("decision_history_grant", kinds)
+        self.assertIn("architect_mismatch", kinds)
+
+    def test_was_rejected_grant_returns_only_matching_alternative_and_reason_never_ancestors(self) -> None:
+        self._seed_diamond_graph()
+        req_row = self.store.submit_history_request(
+            self.dh.HistoryRequest(
+                kind="was_rejected",
+                approach="poll verdict in a model turn loop",
+                issue_key="github:example/repo#1181",
+                worker_id="session-xyz",
+                justification=(
+                    "I am about to build worker waiting by polling verdict in a model turn loop; "
+                    "the answer is not obvious because the current leaf covers MCP leaf reads "
+                    "without stating how blocked history requests await verdicts."
+                ),
+            )
+        )
+        decided = self.store.judge_history_request(req_row.id)
+        self.assertEqual(decided.status, "approved")
+
+        payload = self.store.fulfill_history_request(req_row.id)
+        self.assertEqual(payload["status"], "approved")
+        self.assertTrue(payload["matched"])
+        self.assertEqual(
+            payload["rejected_alternative"],
+            {
+                "approach": "Poll verdict in a model turn loop",
+                "reason": "Burns model tokens waiting on the coordinator.",
+            },
+        )
+        self.assertNotIn("ancestors", payload)
+        # Verify neither ancestor decision text nor sibling rejected alternative leaked anywhere in payload.
+        serialized = repr(payload)
+        self.assertNotIn("Keep decisions in markdown tables", serialized)
+        self.assertNotIn("Flat JSONL ledger without ORM", serialized)
+
+        grants = self.store.history_grants()
+        self.assertEqual(len(grants), 1)
+        self.assertEqual(grants[0].returned_ids, [])
+        self.assertEqual(grants[0].matched_approach, "Poll verdict in a model turn loop")
+
+    def test_workspace_precedent_source_replaces_tracker_decisions_with_graph_leaves_behind_seam(self) -> None:
+        import precedent_source as ps
+
+        ws = Path(self.tmp.name) / "ws"
+        (ws / "days").mkdir(parents=True)
+        (ws / "CLAUDE.md").write_text(
+            "# Workspace\n\n## Coordinator\n- User: the owner\n- Daily log dir: `logs`\n- Tracker: `days/<date>.md`\n- Timezone: `UTC`\n",
+            encoding="utf-8",
+        )
+        (ws / "days" / "2026-10-29.md").write_text(
+            "# Tracker\n\n## Decisions\n"
+            "| time | item | words |\n"
+            "| --- | --- | --- |\n"
+            "| 08:00 | legacy-precedent | Read Decisions rows from the markdown tracker. |\n",
+            encoding="utf-8",
+        )
+
+        # Before any graph decisions exist, the workspace seam reads the tracker's Decisions rows.
+        before = ps.workspace_precedent_source(ws, store_path=self.db_path, date="2026-10-29")
+        ans_before = self.dh.lookup_precedent(before, "markdown tracker")
+        self.assertEqual(len(ans_before), 1)
+        self.assertIn("markdown tracker", ans_before[0].decision)
+
+        # Once the decision graph has leaves, the exact same coordinator lookup answers from current leaves only.
+        self._seed_diamond_graph()
+        after = ps.workspace_precedent_source(ws, store_path=self.db_path, date="2026-10-29")
+        ans_after = self.dh.lookup_precedent(after, "engine MCP tool")
+        self.assertEqual(len(ans_after), 1)
+        self.assertIn("SQLAlchemy ORM", ans_after[0].decision)
+        # Superseded ancestor d1 ("Keep decisions in markdown tables.") is absent from precedent.
+        self.assertEqual(self.dh.lookup_precedent(after, "early prototypes markdown tables"), ())
 
 
 if __name__ == "__main__":
