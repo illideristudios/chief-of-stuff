@@ -721,7 +721,7 @@ class AgyTest(unittest.TestCase):
     def test_the_dry_run_shows_the_agy_tab(self):
         out = run_main("--runtime", "agy", "--model", "gemini-3.8-flash-high")
         self.assertEqual(out.returncode, 0, out.stderr)
-        self.assertIn("--mode plan", out.stdout)
+        self.assertIn("--mode accept-edits", out.stdout)
 
 
 class ClaudeModelTest(unittest.TestCase):

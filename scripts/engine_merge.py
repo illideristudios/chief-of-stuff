@@ -46,6 +46,19 @@ def execute(action: Any, forge: Any, store: Any, at: str, *, policies: Policies,
             reason = (getattr(planned[0], "reason", f"{type(planned[0]).__name__.lower()} required")
                       if planned else "no eligible merge")
             raise ForgeError(f"engine policy: {reason} ({forge.mark(request.number)}: {request.verdict})")
+        # A completed review is evidence for exactly the request head it read, never a later push.
+        history = store.segments(action.issue_key)
+        review = reconcile.latest_review(history)
+        data = store.resume(action.issue_key) or {}
+        if review is not None:
+            reviewed_head = data.get("runs", {}).get(f"review-{review.attempt}", {}).get("reviewed_head")
+            if not reviewed_head or reviewed_head != request.head:
+                # Keep the run and its report, but mark its product stale so the next pass reviews again.
+                store.record_segment(action.issue_key, "review", review.attempt, review.started_at, review.ended_at, "stale")
+                raise ForgeError("reviewed head is missing or differs from the current request head; review again")
+        main = forge.branch_head("main")
+        if main.status != "passed":
+            raise ForgeError(f"main CI is not green: {main.status}")
         message = forge.merge(request.number, commit=True, issue_key=action.issue_key, approval=request.approval,
                               head=request.head, stage_mark=stage_mark)
     except (ForgeError, PolicyError) as exc:

@@ -236,38 +236,10 @@ def _policy(policies: Policies, stage: str, room: str | None) -> Policy:
     return policies.resolve(policies.stages[stage].persona, stage, room)
 
 
-def _approved(edge: Edge, policies: Policies, room: str | None, now: datetime) -> bool:
-    return any(a.gate == edge.gate and a.expires > now for a in _policy(policies, edge.source, room).approvals)
-
-
 def passed_gates(workflow: Workflow, policies: Policies, room: str | None, now: datetime,
                  waived: Sequence[str] = ()) -> set[str]:
-    """Gates the owner no longer decides: waived, or under a live standing approval on every edge."""
-    edges = [e for e in workflow.edges if e.gate]
-    return {e.gate for e in edges
-            if e.gate in waived or all(_approved(x, policies, room, now) for x in edges if x.gate == e.gate)}
-
-
-def _gate(key: str, edge: Edge, policies: Policies, room: str | None, now: datetime,
-          waived: Sequence[str] = (), decisions: Sequence[Decision] = (),
-          latest: Segment | None = None) -> Ask | Wait | None:
-    if edge.gate in waived:
-        return None
-    resolved = _policy(policies, edge.source, room)
-    if edge.gate in resolved.zach_gates and not _approved(edge, policies, room, now):
-        context = f"{latest.stage}-{latest.attempt}" if latest is not None else ""
-        row = next((d for d in reversed(decisions)
-                    if d.topic == edge.gate and d.question == "gate requires Zach's approval"), None)
-        if row is not None and not decision_escalation.is_reversed(row):
-            record = getattr(row, "record", None)
-            prior = record.get("decision") if isinstance(record, dict) and isinstance(record.get("decision"), dict) else None
-            if not decision_escalation.retryable_failure(record) and not (isinstance(record, dict) and record.get("restarted")) and (
-                    prior is None or prior.get("context", "") == context):
-                if (getattr(row, "answer", None) or "").strip() != "approve":
-                    return Wait(key, "decision pending")
-        return Ask(key, edge.gate, "gate requires Zach's approval", edge.source, context,
-                   latest.stage if latest is not None else "", latest.attempt if latest is not None else 0)
-    return None
+    """Legacy workflow gates no longer require a person or a trio consultation."""
+    return {e.gate for e in workflow.edges if e.gate} | set(waived)
 
 
 def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
@@ -277,25 +249,20 @@ def _blocking(counts: Mapping[str, int], resolved: Policy) -> bool:
 
 def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], policies: Policies, room: str | None) -> Action:
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
-    rounds = attempt - 1 - sum(s.stage == stage and s.outcome in RETRYABLE for s in history)
-    if stage == "review":
-        # Completed review rounds belong to the fix loop; failed or blocked attempts since the last completed review spend retries.
-        rounds = 0
-        for s in sorted((s for s in history if s.stage == stage), key=lambda s: s.attempt, reverse=True):
-            if s.outcome == "done":
-                break
-            rounds += s.outcome in ("failed", "blocked")
-    elif any(e.target == stage for e in workflow.next("review")):
-        review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
-                     default=None)
-        if review is not None:
-            # Attempts started at or after the first completed review are rework.
-            initial = max((s.attempt for s in history if s.stage == stage
-                           and (not s.started_at or _time(s.started_at) < review)), default=0)
-            rounds = attempt - initial - sum(s.stage == stage and s.outcome in RETRYABLE and s.started_at
-                                             and _time(s.started_at) >= review for s in history)
-    if rounds > _policy(policies, stage, room).retry_limit:
-        return Escalate(key, f"retry limit reached for {stage}", stage=stage)
+    # Failure budget belongs to the issue, across stages and workers. Quota waits are not failures.
+    if sum(s.outcome in ("failed", "human_review", "stalled") for s in history if s.ended_at) >= 2:
+        return Escalate(key, "park: two failures on this issue", stage=stage)
+    # Completed rework is separate from failed work: review each fix, then park if findings persist.
+    first_review = min((_time(s.ended_at) for s in history if s.stage == "review"
+                        and s.ended_at and s.outcome == "done"), default=None)
+    if first_review is not None and stage != "review" and any(e.target == stage for e in workflow.next("review")):
+        initial = max((s.attempt for s in history if s.stage == stage
+                       and (not s.started_at or _time(s.started_at) < first_review)), default=0)
+        completed = max((s.attempt for s in history if s.stage == stage and s.ended_at), default=initial)
+        fixes = completed - initial - sum(s.stage == stage and s.outcome in RETRYABLE
+                                          and s.started_at and _time(s.started_at) >= first_review for s in history)
+        if fixes >= 3:
+            return Escalate(key, "park: three fix rounds ended with findings still open", stage=stage)
     return Review(key, attempt) if stage == "review" else Dispatch(key, stage, policies.stages[stage].persona, attempt)
 
 
@@ -344,7 +311,7 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         return Merge(key)
     if len(edges) != 1:
         return Wait(key, "no unique incoming merge edge")
-    return _gate(key, edges[0], policies, room, now, waived, decisions, latest_segment) or Merge(key)
+    return Merge(key)
 
 
 def _next(workflow: Workflow, stage: str, blocking: bool) -> Edge | None:
@@ -433,6 +400,8 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
         return _abandoned(item, running, facts, workflow) or _stalled(item, running, facts, now)
     if item.forge_state == "closed":
         return None
+    if sum(s.outcome in ("failed", "human_review", "stalled") for s in history if s.ended_at) >= 2:
+        return Escalate(key, "park: two failures on this issue", stage=item.stage or workflow.start)
     stage = item.stage or workflow.start
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if stage not in stages:
@@ -497,7 +466,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     action = _work(key, edge.target, workflow, history, policies, room)
     if isinstance(action, Escalate):
         return action
-    return _gate(key, edge, policies, room, now, waived, decisions, latest) or action
+    return action
 
 
 HoldRecovery = Literal["restore", "drop_hold", "drop_release", "replace", "keep", "drop_owner", "drop_stage", "none"]

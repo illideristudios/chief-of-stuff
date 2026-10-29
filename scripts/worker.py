@@ -173,6 +173,13 @@ def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
     usable = tuple(entry for entry in rotation if launchable(entry.runtime))
     chosen = (((choose or random.choice)(usable) if how == "random" else usable[0]) if usable
               else ModelEntry("claude", actor.model, actor.effort or None))
+    # A failed issue retries on the next agent, even when its next stage uses another rotation.
+    history = [segment for segment in store.segments(key) if segment.ended_at]
+    failed = history[-1] if history and history[-1].outcome in ("failed", "human_review", "stalled") else None
+    if usable and failed is not None:
+        prior = ModelEntry(failed.runtime or "claude", failed.model or "", failed.effort or None)
+        if prior in usable:
+            chosen = usable[(usable.index(prior) + 1) % len(usable)]
     previous = data.get("model", {}).get(stage)
     if usable and "quota" in data and previous:
         try:
