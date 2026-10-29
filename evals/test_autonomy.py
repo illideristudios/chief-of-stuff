@@ -1,0 +1,84 @@
+"""Issue 1177: routine work advances; automated worker safeguards still apply."""
+from dataclasses import replace
+from datetime import timedelta
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+import dispatch_prompt
+import guard_commands
+import policy
+import reconcile
+import settings
+import spawn_session
+from evals.test_reconcile import Item, Segment, NOW, KEY, policies
+
+
+class AutonomyTest(unittest.TestCase):
+    def plan(self, history=(), *, stage="implement", findings=None, configured=None):
+        p = configured or policies()
+        return reconcile.plan([Item(stage=stage, merge_state="ready")], {KEY: history}, p, {}, 1, NOW,
+                              {KEY: findings or {}})
+
+    def test_legacy_stage_gates_do_not_ask_even_without_standing_approval(self):
+        p = replace(policies(), base=policy.Policy(zach_gates=("plan", "merge")))
+        self.assertEqual(self.plan([Segment("implement")], configured=p), [reconcile.Review(KEY, 1)])
+        self.assertEqual(self.plan([Segment("review")], stage="merge", configured=p), [reconcile.Merge(KEY)])
+
+    def test_two_failures_across_stages_park_the_issue(self):
+        history = [Segment("implement", outcome="failed"), Segment("review", started_at=NOW-timedelta(minutes=30), ended_at=NOW-timedelta(minutes=20), outcome="failed")]
+        action, = self.plan(history)
+        self.assertIsInstance(action, reconcile.Escalate)
+        self.assertIn("two failures", action.reason)
+
+    def test_one_failure_retries_without_parking(self):
+        action, = self.plan([Segment("implement", outcome="failed")])
+        self.assertEqual(action, reconcile.Dispatch(KEY, "implement", "builder", 2))
+
+    def test_three_completed_fix_rounds_with_findings_park_before_a_fourth(self):
+        history = []
+        for i in range(4):
+            history.append(Segment("review", i + 1, NOW - timedelta(minutes=20-i*2), NOW - timedelta(minutes=19-i*2)))
+            if i < 3:
+                history.append(Segment("implement", i + 1, NOW - timedelta(minutes=19-i*2), NOW - timedelta(minutes=18-i*2)))
+        action, = self.plan(history, stage="review", findings={"minor": 1})
+        self.assertIsInstance(action, reconcile.Escalate)
+        self.assertIn("three fix rounds", action.reason)
+
+    def test_legacy_merge_owner_modes_normalize_to_coordinator_without_an_approver(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "cos.toml"
+            for mode in (None, "user", "approval", "worker", "coordinator"):
+                with self.subTest(mode=mode):
+                    path.write_text('[workflow]\n' + (f'merge_owner = "{mode}"\n' if mode else ""))
+                    self.assertEqual(settings.load(root, path).workflow.merge_owner, "coordinator")
+
+    def test_interactive_launches_do_not_start_in_owner_plan_gates(self):
+        for runtime, template in spawn_session.TEMPLATES.items():
+            with self.subTest(runtime=runtime):
+                self.assertNotIn("plan", template)
+                self.assertNotIn("read-only", template)
+
+    def test_commit_delivery_keeps_merges_with_the_engine_without_an_owner_wait(self):
+        for mode in ("user", "approval", "worker", "coordinator"):
+            text = dispatch_prompt.commit_rule(settings.Workflow(merge_owner=mode), ROOT)
+            self.assertIn("engine", text)
+            self.assertNotIn("user approves", text)
+            self.assertNotIn("user's alone", text)
+            self.assertNotIn("asks the user", text)
+
+    def test_worker_guard_keeps_engine_merges_and_stage_writes(self):
+        for command in ("git merge topic", "git push origin HEAD:main", "gh pr merge 12", "gh issue close 12"):
+            with self.subTest(command=command):
+                self.assertIsNotNone(guard_commands.denial_reason(command, ("main", "develop")))
+
+    def test_coordinator_eval_permissions_do_not_impose_the_removed_git_ban(self):
+        from evals import run
+        self.assertEqual(run.DISALLOWED, [])
+        self.assertNotIn("--disallowedTools", run.claude_options({}))
+
