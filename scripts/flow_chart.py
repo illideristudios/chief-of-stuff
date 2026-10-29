@@ -402,4 +402,4 @@ def css() -> str:
     return gantt.css(COLOURS) + (".gantt-legend .gantt-forecast:not([data-cat]){--c:var(--stage-implement)}\n"
                                  ".gantt-legend{border-top:1px solid var(--gantt-edge);padding-top:5px}\n"
                                  "@media (max-width:520px){.gantt,.gantt-legend{--gantt-label:96px;--gantt-note:0px}"
-                                 ".gantt-note,.gantt-ref{display:none}.gantt-axis{font-size:8.5px}}\n")
+                                 ".gantt-note,.gantt-ref:not(a){display:none}.gantt-axis{font-size:8.5px}}\n")
