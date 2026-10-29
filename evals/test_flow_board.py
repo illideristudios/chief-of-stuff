@@ -51,6 +51,7 @@ SOURCES = bs.Sources(
     workers=(bs.Worker("impl-07", "one-shot", "claude", "opus", "Cut the release", "trees/cut", NOW - timedelta(minutes=42), None),
              bs.Worker("impl-04", "session", "codex", "", "Audit", "", NOW - timedelta(hours=1, minutes=23), NOW - timedelta(minutes=11))),
     errors={},
+    home=backlog.Backlog(host="https://forge", project="team/app"),
 )
 
 TRACKER = """# Tracker 2026-09-16
@@ -269,6 +270,12 @@ class Build(unittest.TestCase):
         self.assertEqual(card.marks, (columns.Mark("passed", "passed"),
                                       columns.Mark("shares file with !42", "shared"),
                                       columns.Mark("shares file with !50", "shared")))
+
+    def test_a_bare_issue_does_not_match_a_change_without_a_home(self) -> None:
+        sources = replace(SOURCES, home=None)
+        card = next(c for col in self.cols(sources) for c in col.cards if c.name == "Cut the release")
+        self.assertEqual(card.refs, (("#9", "/issues/9"),))
+        self.assertEqual(card.marks, ())
 
     def test_approval_and_a_failed_pipeline_are_marks(self) -> None:
         self.assertEqual(rb.change_marks((SOURCES.changes["!52"],)),
