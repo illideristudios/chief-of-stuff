@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import json
 import os
 import re
 import sqlite3
 import sys
 import tempfile
+import time as monotonic_time
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -402,6 +404,17 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
             errors.setdefault(panel, (_graphql_errors({"errors": problems}) or err.strip() or f"gh exited {code}")[:500])
             return None
         return data
+
+    # Search returns an indistinguishable empty result for an inaccessible repo.
+    # A named lookup against the home proves access; otherwise ask explicitly.
+    if not any(repo.casefold() == home.repo.casefold() and nums for repo, nums in wanted.items()):
+        owner, name = home.repo.split("/", 1)
+        data = ask(f"home: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ name }}", "kanban")
+        repository = data.get("home") if data else None
+        if not isinstance(repository, dict) or not isinstance(repository.get("name"), str):
+            errors.setdefault("kanban", "GitHub home repository unavailable")
+            errors.setdefault("merge requests", errors["kanban"])
+            return None, None, errors
 
     # Each named alias can be either an issue or a PR, so a failed batch makes
     # both panels incomplete. Limit aliases as well as search page sizes.
@@ -791,16 +804,21 @@ def workers(root: Path, cfg: Config, tracker: Tracker, tracker_text: str, day: d
 
 # --- refresh ---------------------------------------------------------------------------------------
 
-def _write(path: Path, sources: Sources) -> None:
+def _write(path: Path, sources: Sources, started: datetime | None = None, generation: int | None = None) -> None:
     """Atomically: the page server reads this file while the refresher writes it."""
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=".sources-", delete=False) as out:
-        out.write(json.dumps(asdict(sources), default=lambda v: v.isoformat(), indent=1))
+        data = asdict(sources)
+        if started is not None:
+            data["refresh_started"] = started.isoformat()
+            data["refresh_generation"] = generation
+        out.write(json.dumps(data, default=lambda v: v.isoformat(), indent=1))
     os.replace(out.name, path)
 
 
 def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call, *, scheduled: bool = False) -> Sources:
     """Fetch everything, write the cache, return it. Never raises: a failed source is in `errors`."""
+    generation = monotonic_time.monotonic_ns()
     try:
         cfg = read_config(root)
     except (OSError, ConfigError) as e:
@@ -808,6 +826,30 @@ def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call, *,
     local = now.astimezone(cfg.zone)
     day = local.date()
     pages = pages_dir(root, cfg, day.isoformat())
+    try:
+        pages.mkdir(parents=True, exist_ok=True)
+        with (pages / ".sources.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                raw = json.loads((pages / CACHE).read_text())
+                started = _when(raw.get("refresh_started"))
+                previous_generation = raw.get("refresh_generation")
+            except (OSError, ValueError, TypeError, AttributeError):
+                started = None
+                previous_generation = None
+            try:
+                if started is not None and (started > now or (started == now and isinstance(previous_generation, int)
+                                                             and previous_generation > generation)):
+                    return load(pages)
+            except TypeError:  # a legacy or damaged timestamp has no comparable timezone
+                pass
+            return _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
+    except OSError as e:
+        previous = load(pages)
+        return replace(previous, errors={**previous.errors, "cache": str(e)})
+
+
+def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation):
     prev = load(pages)
     fetched = dict(prev.fetched)
     try:
@@ -858,7 +900,7 @@ def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call, *,
         found, errors["workers"] = prev.workers, f"{type(e).__name__}: {e}"
     got = Sources(fetched, issues, changes, found, errors, home)
     try:
-        _write(pages / CACHE, got)
+        _write(pages / CACHE, got, now, generation)
     except OSError as e:
         got = replace(got, errors={**errors, "cache": str(e)})
     return got

@@ -171,5 +171,138 @@ class SourceStatusTests(unittest.TestCase):
         self.assertIn('merge requests: unavailable', board)
 
 
+class HomeAccessTests(unittest.TestCase):
+    def test_empty_search_cannot_prove_access_to_home(self):
+        def gh(args):
+            query = args[-1]
+            data = {'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}
+            if 'repository(' in query:
+                data['home'] = None
+            else:
+                data['merged'] = {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}
+            return 0, json.dumps({'data': data}), ''
+        issues, changes, errors = bs.github(bs.backlog.GitHubBacklog('o/app'), {}, NOW, '', gh)
+        self.assertIsNone(issues)
+        self.assertIsNone(changes)
+        self.assertEqual(set(errors), {'kanban', 'merge requests'})
+
+    def test_empty_search_for_accessible_home_is_accepted(self):
+        def gh(args):
+            query = args[-1]
+            data = {'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}
+            if 'repository(' in query:
+                data['home'] = {'name': 'app'}
+            else:
+                data['merged'] = {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}
+            return 0, json.dumps({'data': data}), ''
+        self.assertEqual(bs.github(bs.backlog.GitHubBacklog('o/app'), {}, NOW, '', gh), ({}, {}, {}))
+
+    def test_failed_home_check_preserves_last_good_panels(self):
+        from test_board_sources import DAY
+        root = workspace('GitHub issues; repo o/app')
+        first = bs.refresh(root, NOW, gh=FakeGh())
+        (root / 'daily' / f'{DAY}-tracker.md').write_text('')
+        def inaccessible(args):
+            return 0, json.dumps({'data': {'home': None, 'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
+        got = bs.refresh(root, NOW + timedelta(minutes=10), gh=inaccessible)
+        self.assertEqual((got.issues, got.changes), (first.issues, first.changes))
+        self.assertEqual(got.fetched['kanban'], NOW)
+        self.assertEqual(got.fetched['merge requests'], NOW)
+        self.assertEqual(set(got.errors), {'kanban', 'merge requests'})
+
+class RefreshConcurrencyTests(unittest.TestCase):
+    def test_older_refresh_cannot_overwrite_newer_refresh(self):
+        import threading
+        from unittest import mock
+        root = workspace('GitHub issues; repo o/app')
+        old_entered, release_old, new_entered = threading.Event(), threading.Event(), threading.Event()
+        original = bs.forge
+        def forge(root, cfg, tracker, since, gh, call):
+            if threading.current_thread().name == 'older':
+                old_entered.set()
+                if not release_old.wait(5):
+                    raise RuntimeError('old refresh timed out')
+            else:
+                new_entered.set()
+            return original(root, cfg, tracker, since, gh, call)
+        old = threading.Thread(name='older', target=bs.refresh, args=(root, NOW), kwargs={'gh': FakeGh(n118=gh_issue(118))})
+        newer_issue = {**gh_issue(118), 'title': 'newer'}
+        new = threading.Thread(name='newer', target=bs.refresh, args=(root, NOW + timedelta(minutes=1)), kwargs={'gh': FakeGh(n118=newer_issue)})
+        with mock.patch.object(bs, 'forge', side_effect=forge):
+            old.start()
+            self.assertTrue(old_entered.wait(5))
+            new.start()
+            new_entered.wait(0.3)
+            release_old.set()
+            old.join(5)
+            new.join(5)
+        self.assertFalse(old.is_alive() or new.is_alive())
+        self.assertEqual(bs.load(root / 'pages').issues['#118'].title, 'newer')
+        self.assertEqual(bs.load(root / 'pages').fetched['kanban'], NOW + timedelta(minutes=1))
+
+    def test_late_older_request_keeps_newer_snapshot(self):
+        root = workspace('GitHub issues; repo o/app')
+        newer_issue = {**gh_issue(118), 'title': 'newer'}
+        bs.refresh(root, NOW + timedelta(minutes=1), gh=FakeGh(n118=newer_issue))
+        old_gh = FakeGh()
+        result = bs.refresh(root, NOW, gh=old_gh)
+        self.assertFalse(old_gh.calls)
+        self.assertEqual(result.issues['#118'].title, 'newer')
+
+    def test_same_timestamp_older_invocation_cannot_replace_newer(self):
+        import threading
+        from unittest import mock
+        root = workspace('GitHub issues; repo o/app')
+        old_entered, release_old = threading.Event(), threading.Event()
+        original = bs.read_config
+        def config(path):
+            if threading.current_thread().name == 'older':
+                old_entered.set()
+                if not release_old.wait(5):
+                    raise RuntimeError('old refresh timed out')
+            return original(path)
+        old = threading.Thread(name='older', target=bs.refresh, args=(root, NOW), kwargs={'gh': FakeGh()})
+        newer_issue = {**gh_issue(118), 'title': 'newer'}
+        with mock.patch.object(bs, 'read_config', side_effect=config):
+            old.start()
+            self.assertTrue(old_entered.wait(5))
+            bs.refresh(root, NOW, gh=FakeGh(n118=newer_issue))
+            release_old.set()
+            old.join(5)
+        self.assertFalse(old.is_alive())
+        self.assertEqual(bs.load(root / 'pages').issues['#118'].title, 'newer')
+
+    def test_refreshes_in_separate_processes_serialize(self):
+        import multiprocessing
+        ctx = multiprocessing.get_context('fork')
+        root = workspace('GitHub issues; repo o/app')
+        old_entered, release_old, new_entered = ctx.Event(), ctx.Event(), ctx.Event()
+        def run_old():
+            gh = FakeGh()
+            def blocked(args):
+                if not old_entered.is_set():
+                    old_entered.set()
+                    if not release_old.wait(5):
+                        raise RuntimeError('old refresh timed out')
+                return gh(args)
+            bs.refresh(root, NOW, gh=blocked)
+        def run_new():
+            gh = FakeGh(n118={**gh_issue(118), 'title': 'newer'})
+            def observed(args):
+                new_entered.set()
+                return gh(args)
+            bs.refresh(root, NOW + timedelta(minutes=1), gh=observed)
+        old, new = ctx.Process(target=run_old), ctx.Process(target=run_new)
+        old.start()
+        self.assertTrue(old_entered.wait(5))
+        new.start()
+        new_entered.wait(0.3)
+        release_old.set()
+        old.join(5)
+        new.join(5)
+        self.assertEqual((old.exitcode, new.exitcode), (0, 0))
+        self.assertEqual(bs.load(root / 'pages').issues['#118'].title, 'newer')
+
+
 if __name__ == '__main__':
     unittest.main()
