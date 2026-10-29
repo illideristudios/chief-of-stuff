@@ -177,7 +177,8 @@ def _store_rows(db: PageData, seen_running: set[str | tuple[str, str, int]], now
     for s in all_segs:
         segs_by_key.setdefault(s.issue_key, []).append(s)
     exhausted_keys = {key for key, segs in segs_by_key.items()
-                      if retry_exhaustion(db.resume(key), segs, db.log(key))}
+                      if (item := db.item(key)) is not None and item.forge_state != "closed"
+                      and retry_exhaustion(db.resume(key), segs, db.log(key))}
     need += len(exhausted_keys)
     for seg in all_segs:
         item = db.item(seg.issue_key)
