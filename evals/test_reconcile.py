@@ -14,6 +14,7 @@ import readiness
 
 NOW = datetime(2000, 1, 1, tzinfo=timezone.utc)
 KEY = "github:example/project#1"
+HEAD = "a" * 40
 
 
 @dataclass(frozen=True)
@@ -402,7 +403,7 @@ class ReconcileTest(unittest.TestCase):
         review = Segment("review", started_at=NOW - timedelta(hours=1), ended_at=NOW)
         self.assertNotIn(reconcile.Merge(KEY), self.plan(item, [implement, review], {}))
 
-    def test_required_architect_consultation_must_be_done_for_the_current_work(self):
+    def test_an_architect_segment_without_head_approval_never_counts(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
         item = replace(Item(), stage="merge", merge_state="ready")
         implement = Segment("implement", started_at=NOW - timedelta(hours=3))
@@ -418,7 +419,45 @@ class ReconcileTest(unittest.TestCase):
         for started_at in (NOW - timedelta(hours=1), NOW):
             with self.subTest(started_at=started_at):
                 architect = Segment("architect", started_at=started_at, ended_at=NOW)
-                self.assertEqual(self.plan(item, [implement, review, architect], {}), [reconcile.Merge(KEY)])
+                self.assertEqual(self.plan(item, [implement, review, architect], {}),
+                                 [reconcile.Wait(KEY, "architect consultation is required")])
+
+    def test_architect_approval_must_name_the_current_forge_head(self):
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        item = replace(Item(), stage="merge", merge_state="ready")
+        for reply in (f"Architect: APPROVED {'b' * 40}", "Architect: APPROVED", "APPROVED " + HEAD,
+                      f"Architect: approved {HEAD}", f"Architect: APPROVED {HEAD} maybe",
+                      f"> Architect: APPROVED {HEAD}", f"Example:\nArchitect: APPROVED {HEAD}"):
+            with self.subTest(reply=reply):
+                self.assertEqual(self.plan(item, [Segment("review"), Segment("architect")], {},
+                    architect_reviews={KEY: reconcile.ArchitectReview(HEAD, (reply,))}),
+                    [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(self.plan(item, [Segment("review")], {},
+            architect_reviews={KEY: reconcile.ArchitectReview(HEAD, (f"Architect: APPROVED {HEAD}",))}),
+            [reconcile.Merge(KEY)])
+
+    def test_new_head_voids_approval_without_new_work_segments(self):
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        item = replace(Item(), stage="merge", merge_state="ready")
+        reply = f"Architect: APPROVED {HEAD}"
+        for head, expected in ((HEAD, reconcile.Merge(KEY)), ("b" * 40, reconcile.Wait(KEY, "architect consultation is required"))):
+            with self.subTest(head=head):
+                self.assertEqual(self.plan(item, [Segment("review")], {},
+                    architect_reviews={KEY: reconcile.ArchitectReview(head, (reply,))}), [expected])
+
+    def test_architect_changes_route_to_the_workflows_fix_stage(self):
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        self.p.stages["repair"] = policy.Place("repair", "builder")
+        self.p.workflows["standard"] = policy.Workflow("standard", "implement", (
+            policy.Edge("implement", "review"), policy.Edge("review", "repair"),
+            policy.Edge("repair", "review"), policy.Edge("review", "merge")))
+        item = replace(Item(), stage="merge", merge_state="ready")
+        for replies, expected in (((f"Architect: CHANGES {HEAD}\nfix: parser state",), reconcile.Dispatch(KEY, "repair", "builder", 1)),
+                                 ((f"Architect: APPROVED {HEAD}", f"Architect: CHANGES {HEAD}"), reconcile.Dispatch(KEY, "repair", "builder", 1)),
+                                 ((f"Architect: CHANGES {'b' * 40}",), reconcile.Wait(KEY, "architect consultation is required"))):
+            with self.subTest(replies=replies):
+                self.assertEqual(self.plan(item, [Segment("review")], {},
+                    architect_reviews={KEY: reconcile.ArchitectReview(HEAD, replies)}), [expected])
 
     def test_implement_stage_architect_policy_requires_consultation(self):
         self.p.stages["implement"] = policy.Place("implement", "builder", {"architect": True})
@@ -431,7 +470,9 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(self.plan(item, history, {}),
                                  [reconcile.Wait(KEY, "architect consultation is required")])
                 self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
-                                 [reconcile.Merge(KEY)])
+                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                self.assertEqual(self.plan(item, history, {}, architect_reviews={KEY: reconcile.ArchitectReview(
+                    HEAD, (f"Architect: APPROVED {HEAD}",))}), [reconcile.Merge(KEY)])
 
     def test_implementer_persona_architect_policy_requires_consultation(self):
         self.p.personas["builder"] = replace(self.p.personas["builder"], policy={"architect": True})
@@ -444,7 +485,9 @@ class ReconcileTest(unittest.TestCase):
                 self.assertEqual(self.plan(item, history, {}),
                                  [reconcile.Wait(KEY, "architect consultation is required")])
                 self.assertEqual(self.plan(item, [*history, Segment("architect", started_at=NOW, ended_at=NOW)], {}),
-                                 [reconcile.Merge(KEY)])
+                                 [reconcile.Wait(KEY, "architect consultation is required")])
+                self.assertEqual(self.plan(item, history, {}, architect_reviews={KEY: reconcile.ArchitectReview(
+                    HEAD, (f"Architect: APPROVED {HEAD}",))}), [reconcile.Merge(KEY)])
 
     def test_an_architect_workflow_stage_follows_its_edge_after_a_done_segment(self):
         self.p = policy.parse({

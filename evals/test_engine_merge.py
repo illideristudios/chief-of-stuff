@@ -104,12 +104,44 @@ class ExecutorTest(unittest.TestCase):
 
     def test_required_architect_and_answered_decision_allow_merge(self):
         self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
-        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
         self.db.add_decision(self.key, "design", "Split the parser?", answer="yes", decided_by="trio")
-        self.planned()
+        self.architect_reply(f"Architect: APPROVED {tma.HEAD}")
         self.assertTrue(self.execute())
         self.assertEqual(len(self.gh.merges), 1)
         self.assertIn("merged", self.message())
+
+    def architect_reply(self, body):
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        return self.enterContext(mock.patch.object(backlog, "comments", return_value=backlog.Notes(
+            notes=(backlog.Note("architect", body=body),))))
+
+    def test_architect_approval_of_an_older_head_refuses_even_after_a_done_consult(self):
+        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
+        self.architect_reply(f"Architect: APPROVED {'b' * 40}")
+        self.refused("architect")
+
+    def test_a_new_forge_head_voids_architect_approval_even_with_a_fresh_review(self):
+        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
+        self.architect_reply(f"Architect: APPROVED {tma.HEAD}")
+        self.gh.prs[0]["headRefOid"] = "b" * 40
+        self.db.update_resume(self.key, lambda data: data["runs"]["review-1"].update(reviewed_head="b" * 40))
+        self.refused("architect")
+
+    def test_architect_changes_for_current_head_refuse_merge(self):
+        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
+        self.architect_reply(f"Architect: CHANGES {tma.HEAD}\nfix: preserve the parser state")
+        self.refused("dispatch required")
+
+    def test_malformed_architect_reply_is_not_approval(self):
+        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
+        self.architect_reply(f"Architect: APPROVED {tma.HEAD} probably")
+        self.refused("architect")
+
+    def test_failed_architect_comment_read_cannot_use_a_cached_approval(self):
+        self.db.record_segment(self.key, "architect", 1, self.at, self.at, "done")
+        read = self.architect_reply(f"Architect: APPROVED {tma.HEAD}")
+        read.return_value = backlog.Notes(error="comments unavailable")
+        self.refused("comments unavailable")
 
     def test_a_successful_merge_records_its_commit_structurally(self):
         # §13 (c): a non-Claude run's check excuses only commits the engine recorded merging, never log prose.
