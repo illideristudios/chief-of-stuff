@@ -150,6 +150,11 @@ def _kill_and_drain(process: subprocess.Popen) -> tuple[str, str]:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
+    except PermissionError:
+        # macOS can report EPERM for a process group whose leader already exited.
+        # Do not hide a failure to stop a leader that is still running.
+        if process.poll() is None:
+            raise
     try:
         return process.communicate(timeout=1)
     except subprocess.TimeoutExpired as exc:
