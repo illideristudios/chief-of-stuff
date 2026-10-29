@@ -350,8 +350,8 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
     def test_needs_input_and_the_decisions_tab_link_to_the_decisions_page(self) -> None:
         """#1122: the NEEDS INPUT tile and the Decisions tab both open /decisions."""
         html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
-        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions"><span class="panels-label">NEEDS INPUT')
-        self.assertRegex(html, r'<a href="/decisions"[^>]*>Decisions')
+        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions#pending-decisions"><span class="panels-label">NEEDS INPUT')
+        self.assertRegex(html, r'<a href="/decisions#pending-decisions"[^>]*>Decisions')
 
     def test_needs_input_and_the_decisions_badge_count_open_and_blocked_decisions(self) -> None:
         """#1124: a blocked row is a failed intent a person's newer answer clears, so it still needs input."""
