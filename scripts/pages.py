@@ -43,6 +43,7 @@ import json
 import os
 import re
 import signal
+import string
 import subprocess
 import sys
 import tempfile
@@ -72,7 +73,6 @@ RETRY_MIN = 1
 RETRY_MAX = 60
 RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
-ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./:-]+#\d+|\d+)(/source)?")
 WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 WORKER_MESSAGE = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})/messages")
 MAX_WORKER_MESSAGE = 8 * 1024
@@ -88,6 +88,25 @@ STATIC_FREE_RESERVE = 256 * 1024 * 1024
 STATIC_SNAPSHOT_SLOTS = 0
 STATIC_RESERVED_BYTES = 0
 STATIC_SNAPSHOT_GUARD = threading.Lock()
+
+
+def issue_route(path: str) -> tuple[str, bool] | None:
+    """Parse an issue route in linear time, retaining the full forge identity and source suffix."""
+    if not path.startswith("/issues/"):
+        return None
+    key = path[len("/issues/"):]
+    source = key.endswith("/source")
+    if source:
+        key = key[:-len("/source")]
+    if key.isdecimal():
+        return key, source
+    namespace, colon, rest = key.partition(":")
+    repo, hashmark, number = rest.partition("#")
+    if (colon and namespace and all(c in string.ascii_lowercase + string.digits + "_.-" for c in namespace)
+            and hashmark and repo and all(c in string.ascii_letters + string.digits + "_./:-" for c in repo)
+            and number.isdecimal()):
+        return key, source
+    return None
 
 
 def _static_free_bytes(file):
@@ -661,11 +680,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return False
             self.path = f"/decision-{m[1]}.html"
         elif decoded.startswith("/issues/"):
-            m = ISSUE.fullmatch(decoded)
-            if not m:
+            route = issue_route(decoded)
+            if route is None:
                 self._refusal(404, "No such issue. Check the address or return to the board.")
                 return False
-            self.path = "/" + fragment.issue_page_name(m[1], bool(m[2]))
+            self.path = "/" + fragment.issue_page_name(*route)
         elif RENDERED.fullmatch(Path(self.translate_path(path)).name.casefold()):
             # A rendered page is a route only. casefold: long s and a case-insensitive disk reach it too (#335).
             self.send_error(404)

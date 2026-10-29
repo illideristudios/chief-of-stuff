@@ -132,4 +132,22 @@ class BoardIssueRoutes(unittest.TestCase):
         import pages
         from urllib.parse import unquote
         key = 'gitlab:foreign.example:8443/team/nested/other#109'
-        self.assertIsNotNone(pages.ISSUE.fullmatch(unquote(fragment.issue_href(key))))
+        self.assertEqual(pages.issue_route(unquote(fragment.issue_href(key))), (key, False))
+
+    def test_issue_route_parser_preserves_routes_and_rejects_malformed_input(self):
+        import pages
+        cases = {
+            '/issues/7': ('7', False),
+            '/issues/7/source': ('7', True),
+            '/issues/github:o/app#109': ('github:o/app#109', False),
+            '/issues/gitlab:foreign.example:8443/team/nested/other#109/source':
+                ('gitlab:foreign.example:8443/team/nested/other#109', True),
+            '/issues/github:o/app#109/source/extra': None,
+            '/issues/github:o/app#109#110': None,
+            '/issues/github:#109': None,
+            '/issues/': None,
+            '/issues/' + '-:' * 30000: None,
+        }
+        for path, expected in cases.items():
+            with self.subTest(path=path[:80]):
+                self.assertEqual(pages.issue_route(path), expected)
