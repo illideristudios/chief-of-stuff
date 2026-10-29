@@ -26,7 +26,7 @@ from settings import Kanban, SettingsError, load as load_settings  # noqa: E402
 from task_forge import (EXHAUSTED_CHIP, current_tasks, drifts, effective_stage, epic_risk, forge_ends,  # noqa: E402
                         held_names, hold_began, hold_causes, looping, retry_exhaustion, tab_counts,
                         task_changes, went_held, worker_names)
-from backlog_ref import store_label  # noqa: E402
+from backlog_ref import route_identity, store_label  # noqa: E402
 from tracker import TRAILING_NUMBER, Task, change_keys, issue_key, issue_number, parse_tracker  # noqa: E402
 from workspace import (Config, ConfigError, daily_trackers, looked_before, read_config,  # noqa: E402
                        with_decision_deadlines, with_workspace_decision_deadlines)
@@ -165,27 +165,39 @@ def merged_today(sources: board_sources.Sources, now: datetime) -> list[board_so
                    and c.merged_at.astimezone(now.tzinfo).date() == now.date()), key=lambda c: c.merged_at, reverse=True)
 
 
+def ambiguous_issue_numbers(tasks: list[Task], home) -> set[int]:
+    """Bare refs without a home cannot select one of several same-number identities."""
+    identities: dict[int, set[str]] = {}
+    for task in tasks:
+        if task.workflow or (number := issue_number(task.issue)) is None:
+            continue
+        identity = route_identity(task.issue, home) or task.issue.strip()
+        identities.setdefault(number, set()).add(identity)
+    return {number for number, keys in identities.items() if len(keys) > 1}
+
+
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
                   held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset(),
-                  live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset()) -> list[columns.Column]:
+                  live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset(),
+                  ambiguous_numbers: set[int] | None = None) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
     held = hold_causes(tasks, kanban, sources, lanes, frozenset()) if held is None else held
     gates = {g for lane in lanes.values() for g in lane.gates}
+    ambiguous_numbers = ambiguous_issue_numbers(tasks, sources.home) if ambiguous_numbers is None else ambiguous_numbers
 
     def issue_url(ref: str, cell: str = "") -> str:
         known = sources.issues.get(ref)
         return known.url if known else cell.strip() if cell.strip().startswith(("https://", "http://")) else ""
 
     def page(cell: str, other: str) -> str:
-        """A card name's link: its task page when the issue ends in a number, as Flow rows link, else `other` (#194)."""
-        raw = cell.strip()
-        if ":" in raw and "#" in raw and not raw.startswith(("http://", "https://")):
-            return issue_href(raw)
-        m = TRAILING_NUMBER.search(raw)
-        return f"/issues/{int(m[1])}" if m else other
+        """Link verified identities to their task page; retain the original fallback otherwise."""
+        identity = route_identity(cell, sources.home)
+        if identity is not None and identity.isdecimal() and int(identity) in ambiguous_numbers:
+            return ""
+        return issue_href(identity) if identity is not None else other
 
     def change_href(c: board_sources.Change) -> str:
         """A change's own page: the task page of its own first named issue, or its forge link when it names
@@ -203,11 +215,13 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
 
     def card(task: Task, stage: str | None = None) -> columns.Card:
         changes = task_changes(task, sources)
-        url = issue_url(issue_key(task.issue, sources.home), task.issue)
+        url = (issue_url(issue_key(task.issue, sources.home), task.issue)
+               if route_identity(task.issue, sources.home) is not None
+               else task.issue.strip() if task.issue.strip().startswith(("https://", "http://")) else "")
         raw_issue = task.issue.strip()
         full_key = ":" in raw_issue and "#" in raw_issue and not raw_issue.startswith(("http://", "https://"))
         issue = store_label(raw_issue, sources.home) if full_key else (issue_key(task.issue, sources.home) if changes or url else raw_issue)
-        refs = ((issue, page(raw_issue if full_key else issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
+        refs = ((issue, page(raw_issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
         lane = lanes.get(task.lane.strip())
         finished = task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1])
         marks = (change_marks(changes, queue, shared)
@@ -387,12 +401,14 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     earlier = list(rows.items())
     loops = looping(tasks, [m for ms in moves.values() for m in ms], lanes or {}, sources.home, earlier) | store_loops
     live_keys = frozenset(s.issue_key for s in db.segments() if s.ended_at is None) if db is not None else frozenset()
-    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys, source_worker_tasks(sources, tasks))
+    known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
+    ambiguous_numbers = ambiguous_issue_numbers(known, sources.home)
+    build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys,
+                               source_worker_tasks(sources, tasks), ambiguous_numbers)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
                   '</section>\n')
-    known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     if db is not None:
@@ -408,14 +424,17 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
                                      frozenset(t.name.strip() for t in tasks
                                                if t.name.strip() and any(c.state == "open" and c.approved for c in task_changes(t, sources))),
                                      ended=forge_ends(tasks, sources, zone), home=sources.home)
-    # An issue's row links to its page, pages.py's /issues/<n>.
+    # Route each issue row by its full identity; only an unresolved bare ref uses the legacy route.
     issue_cells = {issue_key(t.issue, sources.home): t.issue.strip() for t in known if t.issue.strip() and not t.workflow}
 
     def flow_ref(row):
-        if row.href.startswith("/issues/") and (db is not None or ":" in row.href):
+        if row.href.startswith("/issues/"):
             return row
         if (number := issue_number(row.ref)) is not None:
-            return replace(row, ref=f"#{number}", href=f"/issues/{number}", ref_title=issue_cells.get(row.ref, row.ref))
+            identity = route_identity(row.ref, sources.home)
+            url = issue_href(identity) if identity is not None and not (identity.isdecimal() and number in ambiguous_numbers) else ""
+            return replace(row, ref=f"#{number}", href=url,
+                           ref_title=issue_cells.get(row.ref, row.ref))
         if change := change_keys(row.ref)[1]:
             return replace(row, ref=f"!{int(change.rstrip('/').rsplit('/', 1)[1])}")
         return row

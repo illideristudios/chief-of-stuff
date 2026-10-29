@@ -780,6 +780,17 @@ class RouteTest(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(get(self.port, path).status, 404)
 
+    def test_encoded_foreign_gitlab_identity_and_source_routes(self):
+        from urllib.parse import quote
+        key = "gitlab:foreign.example:8443/team/nested/other#109"
+        tracker = next((self.root / "daily").glob("*-tracker.md"))
+        tracker.write_text(tracker.read_text().replace("#109", key))
+        path = "/issues/" + quote(key, safe="")
+        response = get(self.port, path)
+        self.assertEqual(response.status, 200)
+        self.assertIn(b"Upload size limit", response.body)
+        self.assertEqual(get(self.port, path + "/source").status, 200)
+
     def test_the_rendered_file_is_not_served_by_name(self):
         # Route: pages are routes only (as /decisions/<slug>); an `.html` name is a 404.
         self.assertEqual(get(self.port, "/issues/109").status, 200)

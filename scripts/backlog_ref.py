@@ -168,6 +168,13 @@ class IssueRef:
             return f"https://github.com/{self.repo}/issues/{self.number}"
         return f"https://{self.host}/{self.repo}/-/issues/{self.number}"
 
+    @property
+    def store_key(self) -> str:
+        """The full forge identity used by the store and issue routes."""
+        if self.host == GITHUB:
+            return f"github:{self.repo}#{self.number}"
+        return f"gitlab:{self.host}/{self.repo}#{self.number}"
+
     def label(self, home: Backlog | GitHubBacklog | None) -> str:
         """`#N` in the Backlog, `owner/repo#N` on GitHub, `gitlab:host/project#N` on any other GitLab: the key an issue is
         filed and read under, so a project path on two hosts is two keys."""
@@ -245,6 +252,16 @@ def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool
         return IssueRef(m.group(1), int(m.group(2))) if GH_REPO.fullmatch(m.group(1)) else None
     host, repo = home_of(home)
     return IssueRef(repo, int(m.group(2)), host)
+
+
+def route_identity(cell: str, home: Backlog | GitHubBacklog | None) -> str | None:
+    """Use a verified full identity, retaining the legacy numeric route for an unresolved bare ref."""
+    text = cell.strip()
+    if ref := issue_ref(text, home, any_host=True):
+        return ref.store_key
+    if re.fullmatch(r"#\d+", text):
+        return str(int(text[1:]))
+    return None
 
 
 def parse_issue_arg(arg: str, home: Backlog | GitHubBacklog | None) -> IssueRef | None:
