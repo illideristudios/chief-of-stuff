@@ -208,6 +208,48 @@ class DecisionHistoryUseCaseTest(unittest.TestCase):
         self.assertTrue(m_verdict.report_to_architect)
         self.assertEqual(m_verdict.approved_depth, 1)
 
+    def test_approved_depth_does_not_exceed_what_the_justification_requires(self) -> None:
+        # requested_depth may be larger than the justification names; the grant stops at the named depth.
+        two_hops = self.dh.HistoryRequest(
+            kind="ancestors",
+            leaf_id=2,
+            other_leaf_id=3,
+            requested_depth=10,
+            justification=(
+                "Decision #2 requires synchronous store.db writes inside every tool call, whereas "
+                "decision #3 forbids synchronous disk writes inside async MCP handlers; both cannot hold. "
+                "Need two hops of parents to see who introduced the split."
+            ),
+        )
+        verdict = self.dh.judge_justification(two_hops, self.leaves)
+        self.assertTrue(verdict.approved, verdict.reason)
+        self.assertEqual(verdict.approved_depth, 2)
+
+        grandparent = self.dh.HistoryRequest(
+            kind="ancestors",
+            leaf_id=2,
+            other_leaf_id=3,
+            requested_depth=5,
+            justification=(
+                "Decision #2 requires synchronous store.db writes, whereas decision #3 forbids them; "
+                "both cannot hold. Need the grandparent that set the earlier rule."
+            ),
+        )
+        self.assertEqual(self.dh.judge_justification(grandparent, self.leaves).approved_depth, 2)
+
+        # Without multi-hop language, a large requested_depth still collapses to the immediate parents.
+        shallow = self.dh.HistoryRequest(
+            kind="ancestors",
+            leaf_id=2,
+            other_leaf_id=3,
+            requested_depth=7,
+            justification=(
+                "Decision #2 requires synchronous store.db writes inside every tool call, whereas "
+                "decision #3 forbids synchronous disk writes inside async MCP handlers; both cannot hold."
+            ),
+        )
+        self.assertEqual(self.dh.judge_justification(shallow, self.leaves).approved_depth, 1)
+
     def test_coordinator_harshly_denies_banned_and_uncovered_rationales(self) -> None:
         denied_texts = (
             "A reviewer finding contradicts decision #2 on scripts/engine_mcp.py:67.",
