@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import email.utils
 import functools
 import hashlib
 import http.server
@@ -44,7 +45,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from pathlib import Path
 from stat import S_ISREG
 from html import escape
@@ -71,7 +72,6 @@ WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 MAX_RESPONSE = 16 * 1024 * 1024  # bound the snapshot held while preparing a response
-MAX_STATIC = MAX_RESPONSE - 64 * 1024  # leave room for HTTP headers
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
 PAGE_LOCKS: dict[str, threading.Lock] = {}
@@ -664,10 +664,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         self._send_worker_session(int(match[1]), body)
                     elif self._is_html():
                         self._send_html(body)
-                    elif body:
-                        super(Handler, self).do_GET()
+                    elif self.path == "/":  # /all is the bounded directory listing
+                        if body:
+                            super(Handler, self).do_GET()
+                        else:
+                            super(Handler, self).do_HEAD()
                     else:
-                        super(Handler, self).do_HEAD()
+                        return self._send_static(body)
         self._snapshot_response(prepare)
 
     def _snapshot_response(self, prepare):
@@ -675,9 +678,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         socket_output = self.wfile
         snapshot = ResponseSnapshot()
         self.wfile = snapshot
+        stream = None
         try:
             try:
-                prepare()
+                stream = prepare()
             except ResponseTooLarge:
                 snapshot = ResponseSnapshot()
                 self.wfile = snapshot
@@ -685,19 +689,79 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(413, f"a response is at most {MAX_RESPONSE} bytes")
         finally:
             self.wfile = socket_output
-        socket_output.write(snapshot.getvalue())
-
-    def send_head(self):
-        # HEAD and GET reject the same oversized static file before the standard handler opens it.
-        path = Path(self.translate_path(self.path))
         try:
-            stat = path.stat()
-            if S_ISREG(stat.st_mode) and stat.st_size > MAX_STATIC:
-                self.send_error(413, f"a static file is at most {MAX_STATIC} bytes")
-                return None
+            socket_output.write(snapshot.getvalue())
+            if stream is not None:
+                file, remaining = stream
+                while remaining:
+                    chunk = file.read(min(64 * 1024, remaining))
+                    if not chunk:
+                        break
+                    socket_output.write(chunk)
+                    remaining -= len(chunk)
+        finally:
+            if stream is not None:
+                stream[0].close()
+
+    def _open_static(self, path):
+        """Open a resolved in-tree file without following a changed symlink during traversal."""
+        base = Path(self.directory).resolve()
+        resolved = inside(base, os.path.relpath(path, base))
+        if resolved is None:
+            raise OSError("outside pages directory")
+        parts = resolved.relative_to(base).parts
+        if not parts or any(part.startswith(".") for part in parts):
+            raise OSError("hidden path")
+        directory = os.open(base, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            for part in parts[:-1]:
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        finally:
+            os.close(directory)
+        return os.fdopen(fd, "rb")
+
+    def _send_static(self, body):
+        path = self.translate_path(self.path)
+        file = None
+        try:
+            file = self._open_static(path)
+            stat = os.fstat(file.fileno())
+            if not S_ISREG(stat.st_mode):
+                raise OSError("not a regular file")
         except OSError:
-            pass  # The standard handler reports missing or unreadable files.
-        return super().send_head()
+            if file is not None:
+                file.close()
+            self.send_error(404, "File not found")
+            return None
+        try:
+            if "If-Modified-Since" in self.headers and "If-None-Match" not in self.headers:
+                try:
+                    modified_since = email.utils.parsedate_to_datetime(self.headers["If-Modified-Since"])
+                    if modified_since.tzinfo is None:
+                        modified_since = modified_since.replace(tzinfo=timezone.utc)
+                    last_modified = datetime.fromtimestamp(stat.st_mtime, timezone.utc).replace(microsecond=0)
+                    if modified_since.tzinfo is timezone.utc and last_modified <= modified_since:
+                        self.send_response(304)
+                        self.end_headers()
+                        file.close()
+                        return None
+                except (TypeError, IndexError, OverflowError, ValueError):
+                    pass
+            self.send_response(200)
+            self.send_header("Content-Type", self.guess_type(path))
+            self.send_header("Content-Length", str(stat.st_size))
+            self.send_header("Last-Modified", self.date_time_string(stat.st_mtime))
+            self.end_headers()
+            if body:
+                return file, stat.st_size
+            file.close()
+            return None
+        except BaseException:
+            file.close()
+            raise
 
     def do_GET(self):
         self._serve(True)

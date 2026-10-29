@@ -1896,7 +1896,7 @@ server.serve_forever()
         self.assertIn(b'first', results[-1].body)
 
     def test_stalled_static_download_does_not_block_board_cli(self):
-        (self.pages / 'large.bin').write_bytes(b'x' * (12 * 1024 * 1024))
+        (self.pages / 'large.bin').write_bytes(b'x' * (20 * 1024 * 1024))
         client = socket.socket()
         self.addCleanup(client.close)
         self.server.handle_error = lambda *args: None
@@ -1935,12 +1935,81 @@ server.serve_forever()
         self.assertEqual(seen, [(board_day, [('Board task', 'implement')])])
         self.assertIn(b'<span class="st">implement</span>', response.body)
 
-    def test_oversized_static_file_is_refused_for_get_and_head(self):
-        with (self.pages / 'huge.bin').open('wb') as stream:
-            stream.truncate(pg.MAX_STATIC + 1)
-        for method in ('GET', 'HEAD'):
-            with self.subTest(method=method):
-                self.assertEqual(get(self.port, '/huge.bin', method=method).status, 413)
+    def test_large_static_downloads_and_head(self):
+        payload = b"PDF-video-data\x00" * (2 * 1024 * 1024 + 1)
+        for name in ("large.pdf", "large.mp4"):
+            (self.pages / name).write_bytes(payload)
+            for method in ("GET", "HEAD"):
+                with self.subTest(name=name, method=method):
+                    response = get(self.port, "/" + name, method=method)
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.getheader("Content-Length"), str(len(payload)))
+                    self.assertEqual(response.body, payload if method == "GET" else b"")
+
+    def test_static_paths_cannot_escape_or_follow_external_symlinks(self):
+        outside = self.root / "secret.bin"
+        outside.write_bytes(b"secret")
+        (self.pages / "escape.bin").symlink_to(outside)
+        (self.pages / "escape-dir").symlink_to(self.root, target_is_directory=True)
+        (self.pages / ".hidden").write_bytes(b"hidden")
+        (self.pages / "hidden-link.bin").symlink_to(self.pages / ".hidden")
+        (self.pages / "visible.bin").write_bytes(b"visible")
+        (self.pages / "inside-link.bin").symlink_to(self.pages / "visible.bin")
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.pages / "pipe.bin")
+        for method in ("GET", "HEAD"):
+            for path in ("/escape.bin", "/escape-dir/secret.bin", "/%2e%2e/secret.bin", "/.hidden", "/hidden-link.bin", "/pipe.bin"):
+                with self.subTest(method=method, path=path):
+                    self.assertEqual(get(self.port, path, method=method).status, 404)
+            self.assertEqual(get(self.port, "/escape.bin", method=method, host="evil.test").status, 403)
+            self.assertEqual(get(self.port, "/inside-link.bin", method=method).status, 200)
+
+    def test_static_directory_swap_cannot_escape_during_open(self):
+        safe = self.pages / "safe"
+        safe.mkdir()
+        (safe / "asset.bin").write_bytes(b"safe")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "asset.bin").write_bytes(b"secret")
+        real_open = os.open
+        swapped = threading.Event()
+        def swap_before_open(path, flags, *args, **kwargs):
+            if path == "safe" and kwargs.get("dir_fd") is not None and not swapped.is_set():
+                safe.rename(self.pages / "moved")
+                safe.symlink_to(outside, target_is_directory=True)
+                swapped.set()
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch.object(pg.os, "open", side_effect=swap_before_open):
+            response = get(self.port, "/safe/asset.bin")
+        self.assertTrue(swapped.is_set())
+        self.assertEqual(response.status, 404)
+        self.assertNotIn(b"secret", response.body)
+
+    def test_static_conditional_request_uses_open_file_timestamp(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        response = get(self.port, "/asset.bin")
+        for method in ("GET", "HEAD"):
+            cached = get(self.port, "/asset.bin", method=method, headers={"If-Modified-Since": response.getheader("Last-Modified")})
+            self.assertEqual(cached.status, 304)
+            self.assertEqual(cached.body, b"")
+
+    def test_static_open_file_survives_atomic_replacement(self):
+        path = self.pages / "asset.bin"
+        original = b"old contents"
+        path.write_bytes(original)
+        real_open = pg.Handler._open_static
+        def replace_after_open(handler, name):
+            stream = real_open(handler, name)
+            replacement = path.with_suffix(".new")
+            replacement.write_bytes(b"replacement has a different length")
+            replacement.replace(path)
+            return stream
+        with mock.patch.object(pg.Handler, "_open_static", replace_after_open):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Length"), str(len(original)))
+        self.assertEqual(response.body, original)
+
 
 
 if __name__ == "__main__":
