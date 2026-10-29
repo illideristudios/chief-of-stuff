@@ -52,6 +52,7 @@ COMMANDS = {
     "review-threads": "scripts/review_threads.py",
     "sources": "scripts/board_sources.py",
     "tick": "scripts/flow.py",
+    "architect-signals": "scripts/architect_signals_cli.py",
 }
 # Commands whose scripts import store (SQLAlchemy/Alembic).
 STORE_BACKED = frozenset({"adopt", "board", "decision", "engine", "limits", "notify", "pages", "performance", "tick", "work", "worker"})

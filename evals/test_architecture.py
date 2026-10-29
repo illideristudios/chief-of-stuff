@@ -43,6 +43,9 @@ DRAWS_NOTHING = (
     "forge_port",
     "engine_merge",
     "issue_gate",
+    "architect_signals",
+    "architect_signal_store",
+    "architect_signals_cli",
     "trio_gate",
     "decision_actions",
     "decision_escalation",
@@ -217,7 +220,7 @@ CIRCLES: dict[str, frozenset[str]] = {
     }),
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
-        "task_forge", "model_port", "issue_gate", "trio_gate", "decision_actions", "decision_escalation", "engine_merge",
+        "task_forge", "model_port", "issue_gate", "architect_signals", "trio_gate", "decision_actions", "decision_escalation", "engine_merge",
         "forge_port",
         "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance",
     }),
@@ -226,6 +229,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "issue_page", "source_page", "module_graph", "workers_page", "page_reload", "store", "forge", "private_state",
         "backlog", "backlog_ref", "board_sources", "workspace", "settings", "tracker_read",
         "tracker_write", "forge_review", "one_shot_report", "tree_claims", "slots", "limits_history", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
+        "architect_signal_store",
         # §4: store's migrations/ — path keys, not top-level stems.
         "migrations/env",
         "migrations/versions/0001_initial",
@@ -248,7 +252,7 @@ CIRCLES: dict[str, frozenset[str]] = {
         "init_workspace", "install_model_guidance", "make_worktree", "migrate_backlog",
         "one_shot_result", "shell_setup", "cleanup", "engine", "engine_facts", "work", "worker", "worker_guard",
         "guard_binding", "engine_mcp", "adopt_one_shots", "sync_page_theme", "performance_report",
-        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli",
+        "audit_tasks", "inbox", "flow", "limits_probe", "limits_cli", "architect_signals_cli",
         "hooks/hooks.json", "guard/hooks/hooks.json",
     }),
 }

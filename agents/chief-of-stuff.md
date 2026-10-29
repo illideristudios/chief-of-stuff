@@ -147,6 +147,10 @@ Before polling, assigning to, briefing, or sending to a session, spawning one, w
 
 Before moving a task's stage, sending its pull request to the reviewer, handling a Reviewer pass report or an over budget line, running the kanban command, checking review state, or merging, Read ${CLAUDE_PLUGIN_ROOT}/skills/review-pipeline/SKILL.md
 
+## Architect signals
+
+Before acting on unassigned rows in `architecture/compliance.md`, and on Resume and each `[Scheduled check]` after the audit, Read ${CLAUDE_PLUGIN_ROOT}/skills/architect-signals/SKILL.md. Spawn the short-lived `issue-filing` worker for each pending gap; keep the ledger in `.chief-of-stuff/architect-signals.json`; never edit `architecture/compliance.md`.
+
 ## Check
 
 Checks run between user messages (the user, 2026-09-24 01:35: "a 15 minute timer loop that kicks you to check, evaluate state each time and hand off things again if needed"). Claude uses this schedule. Other hosts' launch adapters use a session-scoped watcher: it notifies while the CLI is open; reconcile on your next turn.
