@@ -9,6 +9,7 @@ import http.server
 import os
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -1678,6 +1679,118 @@ class StandaloneBoardTest(unittest.TestCase):
             pid = int((self.pages / ".pid").read_text())
             self.assertNotEqual(pid, stale)
             self.assertTrue(pg.is_pages_serve(pid, self.port))
+
+    def test_standalone_follows_an_upgrade_and_restarts_the_server_from_the_new_release(self):
+        self.addCleanup(self.stop_server)
+        install = self.root.parent / "install"
+        versions = install / "versions"
+        source = Path(pg.__file__).resolve().parent.parent
+        for name, version in (("old", "1.0.0"), ("new", "2.0.0")):
+            release = versions / name
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": version}))
+            (release / "chief_of_stuff.py").touch()
+            (release / "requirements.txt").write_text("")
+        current = install / "current"
+        current.symlink_to(versions / "old")
+        # Exercise a real supervisor process and real servers; stub only venv preparation to avoid pip.
+        code = (
+            "import sys; from pathlib import Path; "
+            f"sys.path.insert(0, {str(versions / 'old' / 'scripts')!r}); "
+            "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+            "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+            f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))"
+        )
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+
+        def wait_for(predicate):
+            deadline = time.monotonic() + WAIT + 10
+            while time.monotonic() < deadline:
+                if predicate():
+                    return True
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            return False
+
+        self.assertTrue(wait_for(lambda: (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0")))
+        current.unlink()
+        current.symlink_to(versions / "new")
+        self.assertTrue(wait_for(lambda: (pg._who(self.port) or "").startswith(pg.SERVER + "/2.0.0")),
+                        "standalone supervisor did not upgrade the server")
+        def server_pid():
+            try:
+                return int((self.pages / ".pid").read_text())
+            except (OSError, ValueError):
+                return None
+        self.assertTrue(wait_for(lambda: server_pid() is not None and pg.is_pages_serve(server_pid(), self.port)))
+        first_pid = server_pid()
+        os.kill(first_pid, signal.SIGTERM)
+        self.assertTrue(wait_for(lambda: server_pid() is not None and server_pid() != first_pid and
+                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/2.0.0")),
+                        "the upgraded supervisor did not restart the upgraded server")
+        self.assertIsNone(proc.poll())
+
+    def test_failed_upgrade_keeps_supervising_and_shutdown_releases_the_lock(self):
+        release = self.root.parent / "new"
+        (release / "scripts").mkdir(parents=True)
+        (release / "scripts" / "pages.py").touch()
+        stop, failed, serving = threading.Event(), threading.Event(), threading.Event()
+        def prepare(*args, **kwargs):
+            failed.set()
+            raise pg.supervisor.ServiceError("pip offline")
+        def ensure(*args, **kwargs):
+            serving.set()
+            return "pages: serving"
+        with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+             mock.patch.object(pg.supervisor, "ensure_venv", side_effect=prepare), \
+             mock.patch.object(pg, "ensure", side_effect=ensure), \
+             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.os, "execv") as execv:
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+            thread.start()
+            try:
+                self.assertTrue(failed.wait(2))
+                self.assertTrue(serving.wait(2))
+                self.assertTrue(thread.is_alive())
+                execv.assert_not_called()
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+            with pg.supervisor.lock(pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"):
+                pass
+
+    def test_failed_exec_resumes_supervision(self):
+        release = self.root.parent / "new"
+        (release / "scripts").mkdir(parents=True)
+        (release / "scripts" / "pages.py").touch()
+        stop, attempted, resumed = threading.Event(), threading.Event(), threading.Event()
+        def ensure(*args, **kwargs):
+            if attempted.is_set():
+                resumed.set()
+            return "pages: serving"
+        def fail_exec(*args):
+            attempted.set()
+            raise OSError("exec failed")
+        with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+             mock.patch.object(pg.supervisor, "ensure_venv", return_value=Path(sys.executable)), \
+             mock.patch.object(pg, "ensure", side_effect=ensure), \
+             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.os, "execv", side_effect=fail_exec):
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+            thread.start()
+            try:
+                self.assertTrue(attempted.wait(2))
+                self.assertTrue(resumed.wait(2))
+            finally:
+                stop.set()
+                thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
 
     def test_a_stale_pid_goes_even_when_the_start_fails(self):
         (self.pages / ".pid").write_text(str(dead_pid()))

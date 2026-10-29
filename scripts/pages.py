@@ -985,6 +985,59 @@ def supervise_with_retry(root: Path, stop: threading.Event) -> None:
         stop.wait(RETRY_MAX)
 
 
+def supervise_standalone(root: Path, stop: threading.Event) -> None:
+    """Keep supervising during failed upgrades; release the board lock before replacing this process."""
+    retry_at, delay, failed_release = 0.0, 30.0, None
+    while not stop.is_set():
+        board_stop = threading.Event()
+        thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop), daemon=True)
+        thread.start()
+        handoff = None
+        try:
+            while not stop.is_set():
+                if not thread.is_alive():
+                    thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop), daemon=True)
+                    thread.start()
+                release = supervisor.current_release()
+                if release != supervisor.RELEASE:
+                    if release != failed_release:
+                        retry_at, delay, failed_release = 0.0, 30.0, release
+                    if time.monotonic() >= retry_at:
+                        acquired = False
+                        try:
+                            with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+                                acquired = True
+                                entry = release / "scripts/pages.py"
+                                if not entry.is_file():
+                                    raise supervisor.ServiceError(f"missing board entry file: {entry}")
+                                python = supervisor.ensure_venv(supervisor.data_dir(), release=release, timeout=60)
+                            if not stop.is_set() and supervisor.current_release() == release:
+                                handoff = (python, entry)
+                                break
+                        except Exception as exc:
+                            if acquired or not isinstance(exc, supervisor.ServiceError):
+                                delay = min(delay * 2, 3600)
+                                retry_at = time.monotonic() + delay
+                                print(f"pages: cannot prepare release {release}: {exc}; keeping {supervisor.RELEASE}",
+                                      file=sys.stderr, flush=True)
+                            # A busy global lock is retried on the next poll.
+                else:
+                    retry_at, delay, failed_release = 0.0, 30.0, None
+                stop.wait(POLL)
+        finally:
+            board_stop.set()
+            thread.join()
+        if handoff is not None and not stop.is_set() and supervisor.current_release() == release:
+            python, entry = handoff
+            try:
+                os.execv(str(python), [str(python), str(entry), "--root", str(root), "supervise"])
+            except OSError as exc:
+                delay = min(delay * 2, 3600)
+                retry_at = time.monotonic() + delay
+                print(f"pages: cannot start release {release}: {exc}; keeping {supervisor.RELEASE}",
+                      file=sys.stderr, flush=True)
+
+
 def _held(path: Path) -> bool:
     """True while another process holds the lock file at `path`."""
     if not path.exists():
@@ -1006,8 +1059,6 @@ def install(root: Path, jobs_dir: Path | None = None) -> str:
     log.parent.mkdir(parents=True, exist_ok=True)
     desired = {"Label": supervisor.label("pages", root),
                # Not resolved: `chief-of-stuff pages` runs under the venv's stable link, which later repairs keep.
-               # shortcut: runs the release it was installed from (a newer `--ensure` still replaces an older server);
-               # follow `current` like the engine if the supervise loop itself starts changing between releases.
                "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--root", str(root), "supervise"],
                "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
                "EnvironmentVariables": supervisor.launch_env(),
@@ -1069,7 +1120,7 @@ def main(argv: list[str] | None = None) -> int:
         stop = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
-        supervise_with_retry(root, stop)
+        supervise_standalone(root, stop)
         return 0
     if args.command in ("install", "uninstall", "status"):
         try:
