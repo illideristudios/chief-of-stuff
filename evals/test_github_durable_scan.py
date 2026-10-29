@@ -322,6 +322,167 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         self.assertEqual(recovered.errors, {})
         self.assertEqual(recovered.fetched['kanban'], newer_at + timedelta(minutes=2))
 
+    def test_moved_merged_pr_from_first_sweep_survives_second_cursor(self):
+        self.gh = Forge(0)
+        self.wanted = {}
+        for n in range(1001, 1151):
+            self.gh.nodes[n] = {**gh_pr(n, NOW.isoformat(), 'MERGED'),
+                                'updatedAt': NOW.isoformat()}
+        original = self.gh
+        merged_starts = 0
+        def moved(args):
+            nonlocal merged_starts
+            query = args[-1]
+            if 'states: [MERGED]' in query and 'after:' not in query:
+                merged_starts += 1
+            code, out, err = original(args)
+            if 'states: [MERGED]' in query and 'after:' in query and merged_starts == 2:
+                body = json.loads(out)
+                page = body['data']['inventory']['pullRequests']
+                page['nodes'] = [p for p in page['nodes'] if p['number'] != 1001]
+                original.nodes[1001]['updatedAt'] = '2026-09-26T08:00:00Z'
+                out = json.dumps(body)
+            return code, out, err
+        self.gh = moved
+        _, changes, errors, _ = self.until_done()
+        self.assertEqual(errors, {})
+        self.assertEqual(len(changes), 150)
+        self.assertIn('#1001', changes)
+
+    def test_out_of_order_merged_page_cannot_publish(self):
+        self.gh = Forge(0)
+        self.wanted = {}
+        for n in range(1001, 1102):
+            self.gh.nodes[n] = {**gh_pr(n, NOW.isoformat(), 'MERGED'), 'updatedAt': NOW.isoformat()}
+        original = self.gh
+        def disordered(args):
+            code, out, err = original(args)
+            if 'states: [MERGED]' in args[-1] and 'after:' in args[-1]:
+                body = json.loads(out)
+                body['data']['inventory']['pullRequests']['nodes'][0]['updatedAt'] = (NOW + timedelta(hours=1)).isoformat()
+                out = json.dumps(body)
+            return code, out, err
+        self.gh = disordered
+        result = self.run_scan(budget=40)
+        self.assertIsNone(result[1])
+        self.assertIn('order shifted', result[2]['merge requests'])
+        self.gh = original
+        self.assertEqual(len(self.until_done()[1]), 101)
+
+    def test_named_pr_closed_at_detail_replaces_open_observation(self):
+        self.gh = Forge(1)
+        self.wanted = {'o/app': {1001}}
+        original = self.gh
+        def closing(args):
+            if 'issueOrPullRequest' in args[-1]:
+                data = {'r0': {'n1001': dict(original.nodes[1001])},
+                        'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}
+                return 0, json.dumps({'data': data}), ''
+            if 'pullRequest(number:' in args[-1]:
+                original.nodes[1001]['state'] = 'CLOSED'
+                original.nodes[1001]['updatedAt'] = '2026-09-26T08:00:00Z'
+            return original(args)
+        self.gh = closing
+        _, changes, errors, _ = self.until_done()
+        self.assertEqual(errors, {})
+        self.assertEqual(changes['#1001'].state, 'closed')
+
+    def test_non_store_skips_irrelevant_open_inventory(self):
+        self.gh = Forge(20050)
+        self.gh.nodes[30001] = {**gh_pr(30001, NOW.isoformat(), 'MERGED'), 'updatedAt': NOW.isoformat()}
+        self.wanted = {'o/app': {1001}}
+        original = self.gh
+        def named_pr(args):
+            if 'issueOrPullRequest' in args[-1]:
+                original.calls.append(args[-1])
+                return 0, json.dumps({'data': {'r0': {'n1001': original.nodes[1001]},
+                    'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
+            return original(args)
+        self.gh = named_pr
+        _, changes, errors, _ = self.run_scan(budget=40, every_open=False)
+        self.assertEqual(errors, {})
+        self.assertIn('#1001', changes)
+        self.assertIn('#30001', changes)
+        self.assertTrue(all('states: [OPEN]' not in q for q in original.calls))
+
+    def test_rollover_retains_named_and_completed_open_details(self):
+        self.gh = Forge(12)
+        self.wanted = {'o/app': {1, 2}}
+        self.run_scan(budget=6)
+        before = json.loads(self.path.read_text())
+        self.assertEqual(before['sweep'], 2)
+        self.assertTrue(before['details'])
+        named = before['named'].copy()
+        first_details = set(before['details'])
+        day = NOW + timedelta(days=1)
+        self.now = day
+        self.gh.nodes[30001] = {**gh_pr(30001, day.isoformat(), 'MERGED'), 'updatedAt': day.isoformat()}
+        result = self.run_scan(budget=1, since=day)
+        self.assertIsNone(result[1])
+        after = json.loads(self.path.read_text())
+        self.assertEqual(after['named'], named)
+        self.assertTrue(first_details <= set(after['details']) or first_details <= set(after['seed_details']))
+        for _ in range(20):
+            result = self.run_scan(budget=2, since=day)
+            if result[1] is not None:
+                break
+        self.assertEqual(result[2], {})
+        self.assertEqual(len(result[1]), 13)
+        self.assertIn('#30001', result[1])
+        self.assertEqual(sum('states: [OPEN]' in q for q in self.gh.calls), 2)
+
+    def test_rollover_during_sweep_requires_fresh_merged_pass(self):
+        self.gh = Forge(0)
+        self.wanted = {}
+        self.run_scan(budget=3)
+        day = NOW + timedelta(days=1)
+        self.now = day
+        self.gh.nodes[30001] = {**gh_pr(30001, day.isoformat(), 'MERGED'), 'updatedAt': day.isoformat()}
+        result = self.run_scan(budget=1, since=day)
+        self.assertIsNone(result[1])
+        for _ in range(10):
+            result = self.run_scan(budget=2, since=day)
+            if result[1] is not None:
+                break
+        self.assertIn('#30001', result[1])
+        self.assertEqual(result[2], {})
+
+    def test_daily_rollover_does_not_starve_detail_batches(self):
+        self.gh = Forge(25)
+        self.wanted = {}
+        self.run_scan(budget=4)
+        for day_offset in range(1, 20):
+            day = NOW + timedelta(days=day_offset)
+            self.now = day
+            result = self.run_scan(budget=1, since=day)
+            if result[1] is not None:
+                break
+        self.assertIsNotNone(result[1])
+        self.assertEqual(len(result[1]), 25)
+        self.assertEqual(result[2], {})
+        self.assertLess(day_offset, 19)
+
+    def test_malformed_inventory_checkpoint_timestamps_recover(self):
+        for collection, field, invalid in (('inventory', 'updatedAt', 'garbage'),
+                                            ('inventory', 'mergedAt', '2026-99-99'),
+                                            ('selected', 'updatedAt', '2026-01-01T00:00:00'),
+                                            ('selected', 'mergedAt', 'bad'),
+                                            ('first', 'updatedAt', 'bad'),
+                                            ('details', 'updatedAt', 'bad')):
+            with self.subTest(collection=collection, field=field):
+                self.path.unlink(missing_ok=True)
+                self.gh = Forge(1)
+                self.wanted = {}
+                budget = {'inventory': 1, 'first': 2, 'selected': 4, 'details': 5}[collection]
+                self.run_scan(budget=budget)
+                state = json.loads(self.path.read_text())
+                entry = state[collection]['1001'] if collection == 'details' else state[collection][0]
+                entry[field] = invalid
+                self.path.write_text(json.dumps(state))
+                result = self.until_done()
+                self.assertEqual(result[2], {})
+                self.assertIn('#1001', result[1])
+
     def test_bounded_targets_and_disk(self):
         self.wanted = {'o/app': set(range(scan.MAX_TARGETS + 1))}
         self.assertIsNone(self.run_scan()[0])

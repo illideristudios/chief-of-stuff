@@ -116,13 +116,13 @@ class GitHubTest(unittest.TestCase):
         self.got = bs.refresh(self.root, NOW, gh=self.gh)
 
     def test_named_and_merged_are_separate_bounded_queries(self):
-        self.assertEqual(len(self.gh.calls), 6)
+        self.assertEqual(len(self.gh.calls), 4)
         queries = [args[args.index("-f") + 1] for args in self.gh.calls]
         for asked in ("n118: issueOrPullRequest(number: 118)", "n115:", "n58:"):
             self.assertIn(asked, queries[0])
         self.assertIn("pullRequests(first: 100", queries[1])
         self.assertIn("pullRequests(first: 100", queries[2])
-        self.assertIn("pullRequest(number: 41)", queries[5])
+        self.assertIn("pullRequest(number: 41)", queries[3])
 
     def test_issues_and_changes_by_ref(self):
         self.assertEqual(self.got.issues["#118"].labels, ("stage:2-implement",))

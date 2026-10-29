@@ -1,7 +1,9 @@
 """Crash-resumable GitHub source scan. The caller serializes access to the checkpoint.
 
-Two bounded sweeps mitigate pagination shifts. GitHub does not offer an atomic
-snapshot: results combine observations made over an interval, not a transaction.
+Two bounded sweeps retain their combined evidence and revalidate selected items.
+Detected pagination inconsistencies prevent publication. GitHub does not offer an
+atomic snapshot: movement unseen by both sweeps, and changes after revalidation,
+can still escape detection; observations span an interval, not a transaction.
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from pathlib import Path
 
 import backlog
 
-VERSION = 4
+VERSION = 5
 CHECKPOINT = '.github-scan.json'
 MAX_BYTES = 24 * 1024 * 1024
 MAX_ITEMS = 20000
@@ -113,8 +115,30 @@ def _save(path, state):
             os.unlink(name)
 
 
+def _timestamp(value):
+    if not isinstance(value, str):
+        raise ValueError('invalid timestamp')
+    parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    if parsed.utcoffset() is None:
+        raise ValueError('timestamp has no timezone')
+    return parsed
+
+
 def _inventory_reset(state):
-    state.update(sweep=0, phase='open', cursor='', cursors=[], inventory=[], first=[], details={}, selected=[], observed=None)
+    state.update(sweep=0, phase='open', cursor='', cursors=[], page_numbers=[], last_updated=None,
+                 inventory=[], first=[], details={}, selected=[], observed=None,
+                 merged_observed=None, merged_only=False, seed_details={})
+
+
+def _refresh_merged(state):
+    # Retain the open inventory and completed details while re-scanning the
+    # time-sensitive merged inventory; completed details can be reused when
+    # their inventory fields still match.
+    candidates = [p for p in state['selected'] if p['state'] == 'OPEN']
+    state.update(sweep=0, phase='merged', cursor='', cursors=[], page_numbers=[], last_updated=None,
+                 first=[], inventory=candidates, selected=[], seed_details=state['details'], details={},
+                 merged_observed=None, merged_only=True)
+
 
 
 def scan(path: Path, home, wanted, since, approver, every_open, admission, now, bs):
@@ -123,7 +147,7 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
     if len(targets) > MAX_TARGETS:
         msg = 'GitHub named target limit exceeded; data unavailable or stale'
         return None, None, dict.fromkeys(('kanban', 'merge requests'), msg), None
-    identity = [VERSION, home.repo.casefold(), since.isoformat(), approver, every_open,
+    identity = [VERSION, home.repo.casefold(), approver, every_open,
                 bs.GH_ISSUE, bs.GH_CHANGE, INVENTORY_PAGE]
     fingerprint = hashlib.sha256(json.dumps(identity, separators=(',', ':')).encode()).hexdigest()
     try:
@@ -133,7 +157,7 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
         if not isinstance(state, dict) or state.get('fingerprint') != fingerprint:
             raise ValueError('different scan')
         # A malformed or old checkpoint must never be interpreted as complete.
-        for key in ('named_index', 'named', 'sweep', 'cursor', 'cursors', 'inventory', 'first', 'details', 'selected', 'observed', 'named_observed', 'named_times', 'phase', 'turn', 'home_verified'):
+        for key in ('named_index', 'named', 'sweep', 'cursor', 'cursors', 'inventory', 'first', 'details', 'selected', 'observed', 'named_observed', 'named_times', 'phase', 'turn', 'home_verified', 'since', 'merged_observed', 'merged_only', 'seed_details', 'page_numbers', 'last_updated'):
             if key not in state:
                 raise ValueError('incomplete checkpoint')
         index = state['named_index']
@@ -144,7 +168,9 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
             state['turn'] not in ('named', 'inventory') or not isinstance(state['cursor'], str) or
             not isinstance(state['cursors'], list) or not all(isinstance(c, str) for c in state['cursors']) or
             not all(isinstance(state[k], list) and len(state[k]) <= MAX_ITEMS for k in ('inventory', 'first', 'selected')) or
-            not isinstance(state['details'], dict)):
+            not isinstance(state['details'], dict) or not isinstance(state['seed_details'], dict) or
+            type(state['merged_only']) is not bool or not isinstance(state['page_numbers'], list) or
+            len(state['page_numbers']) > MAX_ITEMS or any(type(n) is not int for n in state['page_numbers'])):
             raise ValueError('invalid checkpoint')
         for key in ('inventory', 'first', 'selected'):
             entries = state[key]
@@ -152,8 +178,19 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                    n.get('state') not in ('OPEN', 'MERGED', 'CLOSED') or not isinstance(n.get('updatedAt'), str) or
                    'mergedAt' not in n for n in entries) or len({n['number'] for n in entries}) != len(entries):
                 raise ValueError('invalid inventory checkpoint')
+            for n in entries:
+                _timestamp(n['updatedAt'])
+                if n['mergedAt'] is not None:
+                    _timestamp(n['mergedAt'])
+                if n['state'] == 'MERGED' and n['mergedAt'] is None:
+                    raise ValueError('missing merged timestamp')
+        _timestamp(state['since'])
+        for key in ('merged_observed', 'last_updated'):
+            if state[key] is not None:
+                _timestamp(state[key])
         if (not set(state['details']) <= {str(n['number']) for n in state['selected']} or
-            (state['sweep'] == 2 and not isinstance(state['observed'], str))):
+            (state['sweep'] == 2 and (not isinstance(state['observed'], str) or
+                                      not isinstance(state['merged_observed'], str)))):
             raise ValueError('invalid detail checkpoint')
         for target, node in state['named'].items():
             repo, _, number = target.rpartition('#')
@@ -168,15 +205,30 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                 node.get('number') != int(number) or any(node.get(k) != selected[number][k]
                                                         for k in ('state', 'updatedAt', 'mergedAt'))):
                 raise ValueError('invalid detail checkpoint')
+            _timestamp(node.get('updatedAt'))
         for key in ('observed', 'named_observed'):
-            if state[key] is not None and datetime.fromisoformat(state[key]).utcoffset() is None:
-                raise ValueError('invalid checkpoint time')
+            if state[key] is not None:
+                _timestamp(state[key])
         for value in state['named_times'].values():
-            if datetime.fromisoformat(value).utcoffset() is None:
-                raise ValueError('invalid named time')
+            _timestamp(value)
+        for number, node in state['seed_details'].items():
+            if (not number.isdigit() or not isinstance(node, dict) or node.get('number') != int(number) or
+                not _complete_node(node, 'PullRequest')):
+                raise ValueError('invalid retained detail')
+            _timestamp(node.get('updatedAt'))
     except (OSError, ValueError, TypeError, AttributeError):
-        state = {'fingerprint': fingerprint, 'named_index': 0, 'named': {}, 'named_times': {}, 'turn': 'named', 'home_verified': False, 'named_observed': None}
+        state = {'fingerprint': fingerprint, 'named_index': 0, 'named': {}, 'named_times': {}, 'turn': 'named', 'home_verified': False, 'named_observed': None, 'since': since.isoformat()}
         _inventory_reset(state)
+
+    old_since = _timestamp(state['since'])
+    if since < old_since:
+        # Earlier cutoffs require history that may not have been retained.
+        _inventory_reset(state)
+        state['since'] = since.isoformat()
+    elif (since > old_since and state['sweep'] == 2 and
+          len(state['details']) == len(state['selected'])):
+        _refresh_merged(state)
+        state['since'] = since.isoformat()
 
     # Named targets change independently of repository inventory. Keep completed
     # observations for the intersection and fetch only newly requested targets.
@@ -231,6 +283,10 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
     def inventory_step():
         owner, name = home.repo.split('/', 1)
         if state['sweep'] < 2:
+            if not every_open and state['phase'] == 'open':
+                state.update(phase='merged', cursor='', cursors=[], page_numbers=[], last_updated=None)
+            if state['phase'] == 'merged' and state['sweep'] == 1 and not state['cursor']:
+                state['merged_observed'] = now.isoformat()
             after = f', after: {json.dumps(state["cursor"])}' if state['cursor'] else ''
             data = admission.read(f'inventory: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) '
                                   f'{{ pullRequests(first: {INVENTORY_PAGE}, states: [{state["phase"].upper()}], '
@@ -242,7 +298,7 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
             nodes = page.get('nodes') if isinstance(page, dict) else None
             if not isinstance(nodes, list) or not isinstance(info, dict) or type(info.get('hasNextPage')) is not bool:
                 raise ReadError('GitHub pull request inventory unavailable')
-            prior = {v['number'] for v in state['inventory']}
+            prior = set(state['page_numbers'])
             unique = []
             for node in nodes:
                 if (not isinstance(node, dict) or type(node.get('number')) is not int or node['number'] <= 0 or
@@ -259,9 +315,21 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                     _inventory_reset(state)
                     checkpoint()
                     raise ReadError('GitHub inventory returned an invalid timestamp; retrying sweep')
-                if node['number'] not in prior:
-                    unique.append(node)
-                    prior.add(node['number'])
+                if node['number'] in prior:
+                    _inventory_reset(state)
+                    checkpoint()
+                    raise ReadError('GitHub inventory pagination repeated an item; retrying sweep')
+                if state['phase'] == 'merged' and state['last_updated'] is not None and _timestamp(node['updatedAt']) > _timestamp(state['last_updated']):
+                    _inventory_reset(state)
+                    checkpoint()
+                    raise ReadError('GitHub inventory order shifted; retrying sweep')
+                if state['phase'] == 'merged':
+                    state['last_updated'] = node['updatedAt']
+                unique.append(node)
+                prior.add(node['number'])
+            if len(prior) > MAX_ITEMS:
+                raise ReadError('GitHub inventory exceeds storage limit')
+            state['page_numbers'] = list(prior)
             cursor = info.get('endCursor')
             if info['hasNextPage'] and (not nodes or not isinstance(cursor, str) or not cursor or cursor in state['cursors']):
                 _inventory_reset(state)
@@ -275,12 +343,14 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
             if state['phase'] == 'merged':
                 # Updated-at bounds merged-at, so older updates cannot contain
                 # today's merges. Keep the 50 most recently updated as well.
-                merged_seen = sum(p['state'] == 'MERGED' for p in state['inventory'])
+                merged_seen = len(state['page_numbers']) - len(unique)
                 useful = [p for i, p in enumerate(unique) if
                           (every_open and merged_seen + i < 50) or
-                          datetime.fromisoformat(p['mergedAt'].replace('Z', '+00:00')) >= since]
-                state['inventory'].extend(useful)
-                old = bool(nodes) and datetime.fromisoformat(nodes[-1]['updatedAt'].replace('Z', '+00:00')) < since
+                          _timestamp(p['mergedAt']) >= _timestamp(state['since'])]
+                combined = {p['number']: p for p in state['inventory']}
+                combined.update({p['number']: p for p in useful})
+                state['inventory'] = list(combined.values())
+                old = bool(nodes) and _timestamp(nodes[-1]['updatedAt']) < _timestamp(state['since'])
                 if old and (not every_open or merged_seen + len(unique) >= 50):
                     info = {**info, 'hasNextPage': False}
             else:
@@ -292,22 +362,36 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                 state['cursors'].append(cursor)
                 return
             if state['phase'] == 'open':
-                state.update(phase='merged', cursor='', cursors=[])
+                state.update(phase='merged', cursor='', cursors=[], page_numbers=[], last_updated=None)
                 return
             if state['sweep'] == 0:
                 state['first'] = state['inventory']
-                state.update(sweep=1, phase='open', cursor='', cursors=[], inventory=[])
+                state.update(sweep=1, phase='merged' if state['merged_only'] or not every_open else 'open',
+                             cursor='', cursors=[], page_numbers=[], last_updated=None, inventory=[])
                 return
-            # A second sweep is bounded even under continuous updates. Its
-            # membership is an observation, not an atomic or stable snapshot.
-            entries = state['inventory']
-            merged = [p for p in entries if p['state'] == 'MERGED']
-            if every_open:
-                merged = sorted(merged, key=lambda p: (p['updatedAt'], p['number']), reverse=True)
-                selected = [p for p in entries if p['state'] == 'OPEN'] + [p for i, p in enumerate(merged) if i < 50 or datetime.fromisoformat(p['mergedAt'].replace('Z', '+00:00')) >= since]
-            else:
-                selected = [p for p in merged if datetime.fromisoformat(p['mergedAt'].replace('Z', '+00:00')) >= since]
-            state.update(sweep=2, selected=selected, details={}, first=[], inventory=[], cursor='', cursors=[])
+            # Union the observations: updated-at ordering can move a persistent
+            # PR ahead of a later cursor, so the second sweep alone is insufficient.
+            entries = {p['number']: p for p in state['first']}
+            entries.update({p['number']: p for p in state['inventory']})
+            if len(entries) > MAX_ITEMS:
+                raise ReadError('GitHub inventory exceeds storage limit')
+            if state['merged_observed'] is None or _timestamp(state['merged_observed']) < since:
+                state.update(sweep=0, phase='merged', cursor='', cursors=[], page_numbers=[], last_updated=None,
+                             inventory=[p for p in entries.values() if p['state'] == 'OPEN'], first=[],
+                             merged_only=True, merged_observed=None,
+                             since=since.isoformat())
+                return
+            merged = sorted((p for p in entries.values() if p['state'] == 'MERGED'),
+                            key=lambda p: (_timestamp(p['updatedAt']), p['number']), reverse=True)
+            selected = ([p for p in entries.values() if p['state'] == 'OPEN'] if every_open else [])
+            selected += [p for i, p in enumerate(merged) if
+                         (every_open and i < 50) or _timestamp(p['mergedAt']) >= since]
+            retained = {str(p['number']): state['seed_details'][str(p['number'])] for p in selected
+                        if str(p['number']) in state['seed_details'] and
+                        all(state['seed_details'][str(p['number'])].get(k) == p[k]
+                            for k in ('state', 'updatedAt', 'mergedAt'))}
+            state.update(sweep=2, selected=selected, details=retained, seed_details={}, first=[], inventory=[],
+                         cursor='', cursors=[], page_numbers=[], last_updated=None, since=since.isoformat())
             return
         remaining = [p for p in state['selected'] if str(p['number']) not in state['details']]
         batch = remaining[:bs.GH_PAGE]
@@ -322,6 +406,7 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                 not isinstance(node.get('updatedAt'), str) or not _complete_node(node, 'PullRequest')):
                 raise ReadError('GitHub pull request detail incomplete; retrying detail')
             try:
+                _timestamp(node['updatedAt'])
                 bs._gh_change(f'#{p["number"]}', node, approver, home.repo)
             except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
                 raise ReadError(f'GitHub pull request detail incomplete: {exc}')
@@ -341,6 +426,17 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
             checkpoint_failed = True
             raise
         while True:
+            # Finish already selected detail batches before a rollover refresh.
+            # Otherwise daily restarts can starve a scan with a small budget.
+            if (state['sweep'] == 2 and len(state['details']) == len(state['selected']) and
+                since > _timestamp(state['since'])):
+                _refresh_merged(state)
+                state['since'] = since.isoformat()
+                try:
+                    checkpoint()
+                except (ReadError, OSError):
+                    checkpoint_failed = True
+                    raise
             named_pending = state['named_index'] < len(targets)
             inventory_pending = state['sweep'] < 2 or len(state['details']) < len(state['selected'])
             if not named_pending and not inventory_pending:
@@ -389,9 +485,10 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
         if not inventory_done:
             return issues, None, errors, None
         for node in state['details'].values():
-            if node['state'] == 'CLOSED':
-                continue
             key = f'#{node["number"]}'
+            if key not in changes and (node['state'] == 'CLOSED' or
+                (not every_open and node['state'] == 'MERGED' and _timestamp(node['mergedAt']) < since)):
+                continue
             changes[key] = bs._gh_change(key, node, approver, home.repo)
         return issues, changes, errors, datetime.fromisoformat(state['observed'])
     except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
