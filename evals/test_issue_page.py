@@ -503,6 +503,104 @@ class AcceptanceTest(unittest.TestCase):
                     self.assertIn(f'href="{base}/issues/10"', part)
                     self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
 
+    def test_multiline_comments_in_complete_items_do_not_leak_or_count(self):
+        body = """## Acceptance
+- [x] Visible before <!-- secret
+  hidden continuation --> and after
+- [ ] <!-- hidden only
+  secret detail -->
+- [ ] <!-- secret starts
+  hidden --> Visible on continuation
+- [x] Visible criterion
+  continues here <!-- concealed -->
+"""
+        got = page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance")
+        self.assertIn("2 of 3 met", text(got))
+        for visible in ("Visible before", "and after", "Visible on continuation", "continues here"):
+            self.assertIn(visible, text(got))
+        for hidden in ("secret", "hidden", "concealed"):
+            self.assertNotIn(hidden, got)
+
+    def test_comment_only_items_are_not_criteria(self):
+        body = "## Acceptance\n- [x] <!-- hidden\n  details -->\n- <!-- second -->\n"
+        got = text(page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance"))
+        self.assertIn("No acceptance criteria", got)
+        self.assertNotIn("hidden", got)
+
+    def test_distinct_same_number_refs_do_not_resolve_to_a_numeric_page(self):
+        cases = (
+            ("GitHub issues; repo example/repo", "other/repo#109", "https://github.com/example/repo/issues/109"),
+            ("GitLab issues; host https://labs.example.test; project team/app", "https://labs.example.test/team/other/-/issues/109", "https://elsewhere.example.test/team/other/-/issues/109"),
+        )
+        for spec, first, second in cases:
+            with self.subTest(spec=spec):
+                cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Backlog: " + spec + "\n", TODAY)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| One | Item one | Robin | open | {TODAY} | | M | build | implement | {first} | |\n| Two | Item two | Robin | open | {TODAY} | | M | build | implement | {second} | |\n"
+                self.assertIsNone(ip.render(109, [(TODAY, tracker)], bs.Sources({}, {}, {}, (), {}, home=cfg.backlog), NOW, LANES, cfg=cfg))
+
+    def test_equivalent_tracker_refs_choose_the_issue_repository_for_links(self):
+        cases = (
+            ("GitHub issues; repo example/repo", "other/repo#109", "https://github.com/other/repo/issues/109", "https://github.com/other/repo"),
+            ("GitLab issues; host https://labs.example.test; project team/app", "gitlab:labs.example.test/team/other#109", "https://labs.example.test/team/other/-/issues/109", "https://labs.example.test/team/other/-"),
+        )
+        for spec, first, second, base in cases:
+            with self.subTest(spec=spec):
+                cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Backlog: " + spec + "\n", TODAY)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | {first} | |\n| Task two | Item two | Robin | open | {TODAY} | | M | build | implement | {second} | |\n"
+                issue = replace(ISSUE, body="See #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4")
+                key = task_forge.source_key(first, cfg.backlog)
+                src = bs.Sources({"kanban": NOW}, {key: issue}, {}, (), {}, home=cfg.backlog)
+                html = ip.render(109, [(TODAY, tracker)], src, NOW, LANES, cfg=cfg)
+                self.assertIsNotNone(html)
+                for name in ("Issue", "Acceptance"):
+                    part = page_section(html, name)
+                    self.assertIn(f'href="{base}/issues/10"', part)
+                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+
+    def test_issue_body_hides_comments_but_preserves_fenced_examples_even_when_stale(self):
+        body = """Before <!-- hidden inline
+secret --> after.
+
+````markdown
+<!-- literal four ticks -->
+```
+<!-- still literal -->
+````
+
+~~~md
+<!-- literal tilde -->
+~~~
+
+`<!-- literal inline -->`
+
+<!-- hidden block -->
+
+Before <!-- hidden fake fence
+```
+secret in fake fence
+```
+--> after.
+
+    <!-- literal indented -->
+
+<script>unsafe</script>
+"""
+        for stale in ("", "cached read failed"):
+            with self.subTest(stale=stale):
+                got = ip._issue_section(replace(ISSUE, body=body), ip.Linker(), stale=stale)
+                for hidden in ("hidden inline", "secret", "hidden block"):
+                    self.assertNotIn(hidden, got)
+                for kept in ("literal four ticks", "still literal", "literal tilde", "literal inline", "literal indented"):
+                    self.assertIn(kept, got)
+                self.assertIn("&lt;script&gt;", got)
+                self.assertNotIn("<script>", got)
+
+    def test_escaped_comment_opener_is_literal_in_issue_body(self):
+        issue = replace(ISSUE, body=r"See \<!-- literal escaped marker --> and <!-- hidden --> done.")
+        got = ip._issue_section(issue, ip.Linker())
+        self.assertIn("literal escaped marker", got)
+        self.assertNotIn("hidden", got)
+
     def test_no_acceptance_heading_says_the_issue_states_none(self):
         issue = replace(ISSUE, body="## Context\n\n- [ ] something\n")
         got = text(section(page(src=sources(MR, OTHER, issue=issue)), "Acceptance"))

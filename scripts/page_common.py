@@ -109,18 +109,51 @@ _MARKDOWN.renderer.rules['strong_close'] = lambda *args: '</b>'
 # The threaded page server shares this parser, whose ruler caches compile lazily.
 _MARKDOWN_LOCK = RLock()
 
-# Fences before inline code, so a ``` fence is not consumed as a double-backtick span.
-# shortcut: an unclosed comment stays and a four-space indented block loses its comment, upgrade when a review shows the marker there.
-_HTML_COMMENT = re.compile(
-    r"(?P<code>^[ ]{0,3}```.*?^[ ]{0,3}```|^[ ]{0,3}~~~.*?^[ ]{0,3}~~~|``.+?``|`[^`\n]+`)"
-    r"|(?P<comment><!--.*?-->)",
-    re.DOTALL | re.MULTILINE,
+# Code spans use a matching run of backticks; code blocks are protected using the block parser below.
+_COMMENT_OR_CODE = re.compile(
+    r"(?P<code>(?<!`)(?P<ticks>`+)(?!`).*?(?<!`)\2(?!`))|(?P<comment><!--.*?-->)",
+    re.DOTALL,
 )
 
 
 def drop_html_comments(text: str) -> str:
-    """Drop HTML comments the forge hides. A comment inside a code span or fence stays."""
-    return _HTML_COMMENT.sub(lambda m: m.group(0) if m.group("code") else "", text)
+    """Drop complete forge-hidden comments, preserving literal comments in Markdown code."""
+    def code_blocks(source: str) -> list[tuple[int, int]]:
+        offsets = [0]
+        for line in source.splitlines(keepends=True):
+            offsets.append(offsets[-1] + len(line))
+        blocks = MarkdownIt('commonmark', {'html': True}).parse(source)
+        return [(offsets[t.map[0]], offsets[t.map[1]]) for t in blocks
+                if t.type in ('fence', 'code_block') and t.map]
+
+    protected = code_blocks(text)
+    pos = 0
+    while pos < len(text):
+        block = next(((start, end) for start, end in protected if end > pos), None)
+        if block and block[0] <= pos:
+            pos = block[1]
+            continue
+        match = _COMMENT_OR_CODE.search(text, pos)
+        if block and (match is None or block[0] <= match.start() or
+                      (match.group('code') and block[0] < match.end())):
+            # An inline code span cannot cross a block boundary.
+            match = _COMMENT_OR_CODE.search(text, pos, block[0])
+            if match is None:
+                pos = block[1]
+                continue
+        if match is None:
+            break
+        backslashes = len(text[:match.start()]) - len(text[:match.start()].rstrip('\\'))
+        if backslashes % 2:
+            pos = match.start() + 1
+            continue
+        if match.group('comment'):
+            # Keep offsets and line boundaries stable; reparse because hidden text can contain fake fences.
+            masked = re.sub(r'[^\r\n]', ' ', match.group(0))
+            text = text[:match.start()] + masked + text[match.end():]
+            protected = code_blocks(text)
+        pos = match.end()
+    return text
 
 
 def identify(page: bytes, label: str) -> bytes:

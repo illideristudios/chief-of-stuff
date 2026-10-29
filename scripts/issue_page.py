@@ -59,7 +59,6 @@ header .chip.needs-input,header .chip.retries-exhausted{color:var(--dl);border-c
 .rv+.rv{border-top:1px dotted var(--line)} .rv>.prose{grid-column:2;margin:0}
 </style>
 """
-BULLET = re.compile(r"^\s*[-*+]\s+(?:\[([ xX])\]\s*)?(.*\S)")
 
 
 def _clock(at: datetime, now: datetime) -> str:
@@ -186,7 +185,8 @@ def _canonical_key(raw: str, home: Backlog | GitHubBacklog | None) -> str:
 
 def _issue_linker(raw_refs: tuple[str, ...], cfg: Config, root: Path | None) -> Linker:
     """Resolve bare `#N`/`!N` and file references inside an issue against that issue's own repository or project."""
-    if len(raw_refs) == 1 and (ref := issue_ref(raw_refs[0], cfg.backlog)):
+    refs = [issue_ref(raw, cfg.backlog) for raw in raw_refs]
+    if refs and all(ref is not None and ref == refs[0] for ref in refs) and (ref := refs[0]):
         if ref.host == "github.com" and isinstance(cfg.backlog, GitHubBacklog):
             return Linker(GitHubBacklog(ref.repo), root if ref.repo == cfg.backlog.repo else None)
         if isinstance(cfg.backlog, Backlog) and ref.host == home_of(cfg.backlog)[0]:
@@ -236,11 +236,12 @@ def _issue_section(issue: board_sources.Issue | None, linker: Linker, *,
     if issue is None:
         why = unread or "the issue has not been read from the forge yet"
         return _section("Issue", f'    <div class="card unread"><p class="why">Issue body not read: {escape(why)}.</p></div>')
+    body_text = drop_html_comments(issue.body)
     if stale:
-        body = markdown_blocks(issue.body, linker.resolve) if issue.body else "<p>No description in the issue.</p>"
+        body = markdown_blocks(body_text, linker.resolve) if issue.body else "<p>No description in the issue.</p>"
         return _section("Issue", f'    <div class="card prose unread"><p class="meta why">{escape(stale)}</p>{body}</div>')
     if issue.body:
-        return _section("Issue", f'<div class="card prose">{markdown_blocks(issue.body, linker.resolve)}</div>')
+        return _section("Issue", f'<div class="card prose">{markdown_blocks(body_text, linker.resolve)}</div>')
     return ""
 
 
@@ -251,9 +252,9 @@ def _acceptance(issue: board_sources.Issue | None, linker: Linker = Linker(), *,
         why = unread or "the issue has not been read from the forge yet"
         return _section("Acceptance",
                         f'    <div class="card unread"><p class="why">Acceptance criteria not read: {escape(why)}.</p></div>')
-    # Parse blocks before looking for headings and bullets: comments and code are not prose.
-    tokens = MarkdownIt("commonmark", {"html": True}).parse(issue.body)
-    lines = issue.body.splitlines()
+    # Remove complete comments before parsing, then collect each item's own paragraphs (not nested items).
+    body = drop_html_comments(issue.body)
+    tokens = MarkdownIt("commonmark", {"html": True}).parse(body)
     met, in_acceptance = [], False
     for i, token in enumerate(tokens):
         if token.type == "heading_open":
@@ -261,10 +262,19 @@ def _acceptance(issue: board_sources.Issue | None, linker: Linker = Linker(), *,
                 break
             heading = tokens[i + 1].content
             in_acceptance = bool(re.match(r"(?i)^acceptance\b", heading))
-        elif in_acceptance and token.type == "list_item_open" and token.map:
-            line = drop_html_comments(lines[token.map[0]])
-            if b := BULLET.match(line):
-                met.append((b[1] in ("x", "X"), b[2]))
+        elif in_acceptance and token.type == "list_item_open" and token.markup in ("-", "*", "+"):
+            parts = []
+            for child in tokens[i + 1:]:
+                if child.type == "list_item_close" and child.level == token.level:
+                    break
+                if child.type == "inline" and child.level == token.level + 2:
+                    parts.append(child.content)
+            criterion = "\n".join(parts).strip()
+            check = re.match(r"^\[([ xX])\](?:\s+|$)", criterion)
+            if check:
+                criterion = criterion[check.end():].strip()
+            if criterion:
+                met.append((bool(check and check[1] in ("x", "X")), criterion))
     card_cls = "card unread" if stale else "card"
     note = f'      <p class="meta why">{escape(stale)}</p>\n' if stale else ""
     if not met:
