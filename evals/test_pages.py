@@ -601,6 +601,30 @@ class EnsureTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "rollback selected"):
                     pg.ensure(self.dir, self.port, self.log, root)
 
+    def test_stale_newer_caller_preserves_selected_legacy_server_without_identity(self):
+        root = self.dir.parent / "workspace"
+        with tempfile.TemporaryDirectory() as tmp:
+            versions = Path(tmp) / "versions"
+            old, new = versions / "old", versions / "new"
+            for release in (old, new):
+                release.mkdir(parents=True)
+                (release / "chief_of_stuff.py").touch()
+            (versions.parent / "current").symlink_to(old)
+            with mock.patch.object(pg.supervisor, "RELEASE", new), \
+                 mock.patch.object(pg, "VERSION", "2.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("selected server stopped")):
+                self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+
+    def test_explicit_selection_protects_legacy_server_from_stale_newer_caller(self):
+        root = self.dir.parent / "workspace"
+        selected = root / "selected-old"
+        with mock.patch.object(pg.supervisor, "_explicit_install", return_value={"release": str(selected)}, create=True), \
+             mock.patch.object(pg, "VERSION", "2.0.0"), \
+             mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.0.0"), \
+             mock.patch.object(pg, "_stop", side_effect=AssertionError("selected server stopped")):
+            self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+
     def test_explicit_rollback_replaces_newer_server_only_for_selected_release(self):
         root = self.dir.parent / "workspace"
         for selected, should_stop in ((pg.supervisor.RELEASE, True), (root / "other", False)):
@@ -1761,6 +1785,65 @@ class StandaloneBoardTest(unittest.TestCase):
         deadline = time.monotonic() + WAIT
         while time.monotonic() < deadline and pg._who(self.port) is None:
             time.sleep(0.05)
+
+    def test_pre_handoff_rollback_is_reported_and_current_supervisor_recovers(self):
+        self.addCleanup(self.stop_server)
+        source = Path(pg.__file__).resolve().parent.parent
+        versions = self.root.parent / "install/versions"
+        old, new = versions / "old", versions / "new"
+        for release, version in ((old, "1.0.0"), (new, "2.0.0")):
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+            (release / "chief_of_stuff.py").touch()
+            (release / "requirements.txt").touch()
+        # Both files are the unmodified 62b1a067 pre-readiness release, not simulated current code.
+        for name in ("pages", "supervisor"):
+            shutil.copyfile(source / f"evals/fixtures/legacy_{name}.py", old / f"scripts/{name}.py")
+        legacy = subprocess.run([sys.executable, str(old / "scripts/pages.py"), "--root", str(self.root),
+                                 "--handoff-ready-fd=4", "supervise"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(legacy.returncode, 2)
+        self.assertIn("unrecognized arguments: --handoff-ready-fd=4", legacy.stderr)
+        current = versions.parent / "current"
+        current.symlink_to(new)
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(new / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        log = self.root / "supervisor-test.log"
+        with log.open("w") as output:
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=output, stderr=output)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+        def wait_for(predicate):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if predicate():
+                        return True
+                except (OSError, ValueError):
+                    pass
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            return False
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and pg._who(self.port)))
+        current.unlink()
+        current.symlink_to(old)
+        self.assertTrue(wait_for(lambda: "does not declare board handoff support" in log.read_text()), log.read_text())
+        self.assertIsNone(proc.poll())
+        pid = int((self.pages / ".pid").read_text())
+        os.kill(pid, signal.SIGTERM)
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                 int((self.pages / ".pid").read_text()) != pid and pg._who(self.port)),
+                        "current supervisor did not recover the board")
+        time.sleep(0.5)
+        self.assertEqual(log.read_text().count("does not declare board handoff support"), 1)
+        self.assertNotIn("release " + str(old) + " exited", log.read_text())
 
     def test_after_a_restart_the_board_agent_serves_the_configured_port_over_a_dead_pid(self):
         self.addCleanup(self.stop_server)

@@ -31,6 +31,7 @@ name to 127.0.0.1, but that page still sends its own name as the Host.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import functools
 import hashlib
@@ -898,26 +899,33 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in value.split("."))
 
 
-def _selected_for_rollback(root: Path | None) -> bool:
-    """A fallback to this release is not an explicit selection of it."""
+def _authoritative_release(root: Path | None) -> Path | None:
+    """Return only an explicit selection, never the selector's fallback to this release."""
     release = supervisor.RELEASE.resolve()
     explicit = getattr(supervisor, "_explicit_install", None)
     if root is not None and explicit is not None:
         pending = explicit(root)
         if pending is not None:
-            return Path(pending["release"]).resolve() == release
+            return Path(pending["release"]).resolve()
     pointer = release.parent.parent / "current"
     try:
         if release.parent.name == "versions":
-            return (pointer.is_symlink() and pointer.resolve(strict=True) == release
-                    and (release / "chief_of_stuff.py").is_file())
+            if pointer.is_symlink():
+                selected = pointer.resolve(strict=True)
+                if (selected / "chief_of_stuff.py").is_file():
+                    return selected
         if root is not None and release_selection._plugin_version(release) is not None:
             marker = supervisor.state_dir(root) / "engine-plugin-release"
-            return (Path(marker.read_text()).resolve(strict=True) == release
-                    and _selected_release(root).resolve() == release)
+            selected = Path(marker.read_text()).resolve(strict=True)
+            if _selected_release(root).resolve() == selected:
+                return selected
     except (OSError, RuntimeError, ValueError):
-        return False
-    return False
+        pass
+    return None
+
+
+def _selected_for_rollback(root: Path | None) -> bool:
+    return _authoritative_release(root) == supervisor.RELEASE.resolve()
 
 
 def _server_not_older(who: str) -> bool:
@@ -943,6 +951,9 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
     else:
         if not who.startswith(SERVER):
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
+        selected = _authoritative_release(root)
+        if selected is not None and selected != supervisor.RELEASE.resolve():
+            return "pages: serving"
         identity = re.search(r"\brelease-([0-9a-f]{24})\b", who)
         if identity and identity[1] == RELEASE_ID:
             return "pages: serving"
@@ -1043,6 +1054,19 @@ def supervise_with_retry(root: Path, stop: threading.Event, startup=None) -> Non
         stop.wait(min(POLL, RETRY_MAX))
 
 
+def _pre_handoff_cli(entry: Path) -> bool:
+    """Recognize the old argparse CLI, which cannot participate in the readiness protocol."""
+    try:
+        tree = ast.parse(entry.read_bytes(), filename=str(entry))
+    except (OSError, SyntaxError, ValueError):
+        return False  # Let the normal candidate startup report other failures.
+    options = {arg.value for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr == "add_argument"
+               for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)}
+    return {"--ensure", "--root"} <= options and "--handoff-ready-fd" not in options
+
+
 def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> None:
     """Monitor the successor and resume supervision if its startup or later execution fails."""
     retry_at, delay, failed_release = 0.0, 30.0, None
@@ -1068,6 +1092,12 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                                 entry = release / "scripts/pages.py"
                                 if not entry.is_file():
                                     raise supervisor.ServiceError(f"missing board entry file: {entry}")
+                                if _pre_handoff_cli(entry):
+                                    retry_at = float("inf")
+                                    print(f"pages: release {release} does not declare board handoff support; "
+                                          f"keeping {supervisor.RELEASE} supervising; rollback requires manual intervention",
+                                          file=sys.stderr, flush=True)
+                                    continue
                                 python = supervisor.ensure_venv(supervisor.data_dir(), release=release, timeout=60)
                             if not stop.is_set() and _selected_release(root) == release:
                                 handoff = (python, entry)
