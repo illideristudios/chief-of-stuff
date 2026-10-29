@@ -919,21 +919,27 @@ def _selected_for_rollback(root: Path | None) -> bool:
             return Path(intent["release"]).resolve() == release
     pointer = release.parent.parent / "current"
     try:
-        return (release.parent.name == "versions" and pointer.is_symlink()
-                and pointer.resolve(strict=True) == release
-                and (release / "chief_of_stuff.py").is_file())
-    except (OSError, RuntimeError):
+        if release.parent.name == "versions":
+            return (pointer.is_symlink() and pointer.resolve(strict=True) == release
+                    and (release / "chief_of_stuff.py").is_file())
+        if root is not None and release_selection._plugin_version(release) is not None:
+            marker = supervisor.state_dir(root) / "engine-plugin-release"
+            return (Path(marker.read_text()).resolve(strict=True) == release
+                    and _selected_release(root).resolve() == release)
+    except (OSError, RuntimeError, ValueError):
         return False
+    return False
 
 
-def _newer_server(who: str) -> bool:
+def _server_not_older(who: str) -> bool:
+    """Without a proven older version, a different build may be the newer one."""
     match = re.match(rf"^{re.escape(SERVER)}/([0-9]+(?:\.[0-9]+)*)(?:\s|$)", who)
     running = _version_tuple(match[1]) if match else None
     ours = _version_tuple(VERSION)
     if running is None or ours is None:
-        return False
+        return True
     width = max(len(running), len(ours))
-    return running + (0,) * (width - len(running)) > ours + (0,) * (width - len(ours))
+    return running + (0,) * (width - len(running)) >= ours + (0,) * (width - len(ours))
 
 
 def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
@@ -953,7 +959,7 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
             return "pages: serving"
         if identity and root is not None and identity[1] == _release_id(_selected_release(root)):
             return "pages: serving"
-        if _newer_server(who) and not _selected_for_rollback(root):
+        if _server_not_older(who) and not _selected_for_rollback(root):
             return "pages: serving"
         _stop(pages_dir, port, stop)
         restart = True
