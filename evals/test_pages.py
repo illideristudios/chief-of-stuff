@@ -1916,15 +1916,10 @@ class StandaloneBoardTest(unittest.TestCase):
             (release / ".claude-plugin").mkdir()
             (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
             (release / "requirements.txt").touch()
-            # Exercise the #1174 selector when present, and its interface on this PR's base.
-            supervisor_file = release / "scripts/supervisor.py"
-            if "def selected_release(" not in supervisor_file.read_text():
-                with supervisor_file.open("a") as f:
-                    f.write("\ndef selected_release(root):\n"
-                            "    try:\n"
-                            "        candidate = Path((state_dir(root) / 'engine-plugin-release').read_text()).resolve()\n"
-                            "        return candidate if candidate.parent == RELEASE.parent and candidate.name > RELEASE.name else RELEASE\n"
-                            "    except OSError:\n        return RELEASE\n")
+            if release == old:
+                # This is the actual pre-selector module, not a stubbed selector.
+                shutil.copyfile(source / "evals/fixtures/legacy_supervisor.py", release / "scripts/supervisor.py")
+                self.assertNotIn("def selected_release(", (release / "scripts/supervisor.py").read_text())
             page_file = release / "scripts/pages.py"
             page_file.write_text(page_file.read_text().replace(
                 'POLL = 5  # seconds between healthy server checks',

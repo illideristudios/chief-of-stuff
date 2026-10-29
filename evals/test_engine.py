@@ -3582,7 +3582,7 @@ class MainTest(unittest.TestCase):
         python = self.root / "data/venv-new/bin/python"
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
-             mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer, newer]), \
              mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
              mock.patch.object(supervisor, "ensure_venv", return_value=python) as preflight, \
              mock.patch.object(engine.os, "execv") as execv, \
@@ -3593,6 +3593,46 @@ class MainTest(unittest.TestCase):
         preflight.assert_called_once_with(self.root / "data", release=newer, timeout=60)
         execv.assert_called_once_with(str(python), [
             str(python), str(newer / "scripts/engine.py"), "--root", str(self.root), "--interval", "5.0"])
+
+    def test_running_plugin_engine_follows_newer_marker_after_a_pass(self):
+        cache = self.root / "plugins/cache/market/chief"
+        old, newer = cache / "1.0.0", cache / "2.0.0"
+        for release, version in ((old, "1.0.0"), (newer, "2.0.0")):
+            (release / "scripts").mkdir(parents=True)
+            (release / "scripts/engine.py").touch()
+            (release / "requirements.txt").touch()
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+        marker = supervisor.state_dir(self.root) / "engine-plugin-release"
+        marker.parent.mkdir(parents=True)
+        python = self.root / "data/venv/bin/python"
+        def advance(_interval):
+            if marker.exists():
+                raise RuntimeError("update ignored")
+            marker.write_text(str(newer))
+        with mock.patch.object(supervisor, "RELEASE", old), \
+             mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
+             mock.patch.object(supervisor, "ensure_venv", return_value=python), \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed, \
+             mock.patch.object(engine.time, "sleep", side_effect=advance), \
+             mock.patch.object(engine.os, "execv") as execv:
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        passed.assert_called_once()
+        execv.assert_called_once_with(str(python), [str(python), str(newer / "scripts/engine.py"),
+                                                   "--root", str(self.root), "--interval", "60"])
+
+    def test_startup_rechecks_selection_after_preparing_the_release(self):
+        first, second = self.root / "first", self.root / "second"
+        python = self.root / "data/venv/bin/python"
+        with mock.patch.object(engine.release_selection, "selected_release", side_effect=[first, second]), \
+             mock.patch.object(engine, "_prepare_handoff", return_value=python), \
+             mock.patch.object(engine, "_handoff") as handoff, \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass") as passed:
+            self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
+        handoff.assert_not_called()
+        passed.assert_called_once()
 
     def test_stale_launch_hands_off_before_opening_the_workspace_or_migrating(self):
         import pages
@@ -3661,7 +3701,7 @@ class MainTest(unittest.TestCase):
 
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass", side_effect=passed), \
-             mock.patch.object(supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(supervisor, "current_release", side_effect=[supervisor.RELEASE, newer, newer]), \
              mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
              mock.patch.object(supervisor, "ensure_venv", return_value=Path(sys.executable)), \
              mock.patch.object(pages, "read_config", return_value=SimpleNamespace(pages_dir=str(board), board_url="http://127.0.0.1:1/")), \

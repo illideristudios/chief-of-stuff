@@ -36,6 +36,7 @@ import notify
 import policy
 import readiness
 import reconcile
+import release_selection
 import runtimes
 import settings
 import shell_setup
@@ -1049,8 +1050,9 @@ def main(argv: list[str] | None = None) -> int:
     newer = None
     adopt_login_path()
     try:
-        if (installed := supervisor.current_release()) != supervisor.RELEASE:
-            if (python := _prepare_handoff(installed)) is not None:
+        if (installed := release_selection.selected_release(root, supervisor)) != supervisor.RELEASE:
+            if ((python := _prepare_handoff(installed)) is not None
+                    and release_selection.selected_release(root, supervisor) == installed):
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
@@ -1103,8 +1105,9 @@ def main(argv: list[str] | None = None) -> int:
                     if args.once:
                         return 1 if failed else 0
                     time.sleep(args.interval)
-                    if (installed := supervisor.current_release()) != supervisor.RELEASE:
-                        if (python := _prepare_handoff(installed)) is not None:
+                    if (installed := release_selection.selected_release(root, supervisor)) != supervisor.RELEASE:
+                        if ((python := _prepare_handoff(installed)) is not None
+                                and release_selection.selected_release(root, supervisor) == installed):
                             newer = installed, python
                             break
                     if page_thread is not None and not page_thread.is_alive():

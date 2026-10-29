@@ -55,6 +55,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import forge
 import page_reload
+import release_selection
 import supervisor
 from backlog_ref import GitHubBacklog
 from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
@@ -884,9 +885,7 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, s
 
 
 def _selected_release(root: Path) -> Path:
-    # #1174 selects a validated newer plugin-cache sibling as well as installed `current`.
-    select_release = getattr(supervisor, "selected_release", None)
-    return select_release(root) if select_release is not None else supervisor.current_release()
+    return release_selection.selected_release(root, supervisor)
 
 
 def _release_id(release: Path) -> str:
