@@ -394,7 +394,26 @@ Mc ∧ Pc           [call, T3 design §4: the meta and project coordinators map 
 
 Engine workers can run on Claude, Codex, Cursor and Antigravity (owner, 2026-10-17, pulling #700 and #701 forward). Each host is an adapter behind the model port, as design decision 7 intended.
 - **One contract.** Every host adapter implements the same start, cancel and classify contract as `claude_adapter.py`, and writes the same run evidence in the run directory: `command.json`, the spawn record, `started.json` and `exit.json`. The engine, `worker.py` and recovery see no difference between hosts.
-- **The launcher is configurable.** How a worker starts is set per workspace (owner, 2026-10-29, T3 design §9): a local CLI process, as today, or T3. Both are adapters behind this one contract, and the launcher is how a worker starts while the runtime is which agent it is. T3 launches claude, codex, cursor and agy workers with the provider and model of their rotation entry (call). Under T3, the T3 thread id is the worker's identity in the run evidence and the session registration, beside the engine's session id. Liveness and activity come from the thread's state (status, settled, item count, pending request count, update time), never from a PID, the process table or a transcript, and the board, the issue pages and the workers page link to the thread. The assignment text, the engine's report and ask channel, the store's segments and the forge post-checks are the same under either launcher. Every other bullet of this section holds for a T3 worker as for a CLI one, so how a T3 worker reaches the channel, which runtime mode it runs under, and how T3's worktrees reconcile with the engine's are open (section 19), not waived.
+- **The launcher is configurable.** How a worker starts is set per workspace (owner, 2026-10-29, T3 design §9): a local CLI process, as today, or T3. Both are adapters behind this one contract, and the launcher is how a worker starts while the runtime is which agent it is. T3 launches claude, codex, cursor and agy workers with the provider and model of their rotation entry (call). Under T3, the T3 thread id is the worker's identity in the run evidence and the session registration, beside the engine's session id. Liveness and activity come from the thread's state (status, settled, item count, pending request count, update time), never from a PID, the process table or a transcript, and the board, the issue pages and the workers page link to the thread. The assignment text, the engine's report and ask channel, the store's segments and the forge post-checks are the same under either launcher. Every other bullet of this section holds for a T3 worker as for a CLI one; the next bullet says how.
+- **A T3 launch is configured in the tree** (#1178; the spike notes of pull request 1188, run against T3 0.1.3). `t3 thread start` takes no environment, argv or MCP flags, and T3 cannot restrict a session to the user's own settings (`--setting-sources user --strict-mcp-config`).
+  - **A tree with its own Claude config is refused.** A worker tree that already has a `.mcp.json` or a `.claude/` entry of any kind would run that config as this user, so `t3_adapter.py` refuses to launch it, fail closed.
+  - **The channel and the guard are written in-tree.** The launcher writes `.mcp.json` with the engine's `report` and `ask` server and its `CHIEF_*` binding, and `.claude/settings.local.json` with the named agent and the guard plugin's hooks, each hook command carrying its own binding because a thread inherits no `CHIEF_*` environment. Both files are created exclusively (never over a file the engine did not write, never through a link) and git-excluded. The in-tree paths are named once, in the T3 launcher, because T3 is not a runtime and has no `runtimes.py` entry; for a host, its entry names them (next bullet).
+  - **The in-tree hooks are a guard rail, not the boundary.** The worker can write them. A T3 run is therefore held to what a host without the guard plugin is held to: branch protection on the default and request-target branches before launch, and the post-run check on every protected branch after it. A T3 run adopted with no recorded branch heads is held.
+  - **Launch parity holds without a T3 patch.** The `agent` setting in the tree's `.claude/settings.local.json` applies the named agent's prompt and tools, and the thread's `--model` wins over the agent file's `model:`, so the model comes from the rotation entry as on the CLI path. Threads run in T3's default `auto` mode, non-interactive, with no permission prompt for the project's server.
+  - **Every worker tree becomes a T3 project.** The engine keeps cutting its own worktrees and registers each one as a T3 project (`t3 project add`), so the thread runs in that exact tree and T3 creates none. Removing such a project needs `--force`, which deletes its threads, so the launcher leaves them registered and the board's links keep working. The cost is a T3 project per worker tree.
+
+```
+Lt := the worker is launched through T3      Cf := the tree has its own .mcp.json or .claude/      Ln := the launch proceeds
+Ch := the engine's channel and the guard hooks are written in-tree, exclusively and git-excluded
+Pb := branch protection and the post-run check apply      Pj := the tree is registered as a T3 project      Rm := the project is removed      Th := its threads are deleted
+
+1.  Lt ∧ Cf → ¬Ln          [spike 2, #1178: T3 cannot restrict a session to the user's settings]
+2.  Lt ∧ Ln → Ch           [spike 2: a thread takes no environment, argv or MCP flags]
+3.  Lt → Pb                [the in-tree hooks are writable by the worker, so they are a rail; this section's check is the boundary]
+4.  Lt ∧ Ln → Pj           [spike 3: thread start takes only a registered project]
+5.  Rm → Th                [spike 3: project removal needs --force, which deletes its threads]
+∴   a T3 worker runs only in a tree with no config of its own, carries the same channel and checks as any worker, and its tree's project is kept so its thread stays linked
+```
 - **The registry builds the command.** Each host's argv, prompt bootstrap and environment come from its `runtimes.py` entry (Entities). No adapter imports the one-shot launcher, which retires (#830). Process plumbing shared by the adapters lives in one place (DRY). Each host's argv and error classification stay in its own entry or adapter (SOLID).
 - **Outcomes reach the engine through the report tool.** The engine's `report` and `ask` MCP server is registered for every host at launch, with the same binding, and its configuration lives outside the worker tree, except on a host that reads it only from the tree (Zach, 2026-10-25). Cursor is that host: the 2026-10-17 spike found it reads only `.cursor/mcp.json` in the tree. The in-tree path is named in that host's `runtimes.py` entry. The engine writes the file at launch and keeps it out of git through the tree's `info/exclude`. It never replaces a file there that it did not write, and cleanup treats a `.cursor/` holding only that file as clean. It is callable without an approval prompt on every host. A host mode that drops plugin servers (Claude's `--strict-mcp-config`) is given it explicitly, and a host that refuses calls needing approval (Codex's `-a never`) approves the engine's server and no other (#952). A worker that stops without a report is "stopped without reporting an outcome", whatever the host.
 - **The guard holds on every host.** The Claude plugin's PreToolUse gate does not load on other hosts, so a non-Claude worker gets a host-neutral guard with the same judgements:
@@ -414,7 +433,8 @@ Ct := the engine's MCP config is in the worker tree      Hc := the host reads it
 Nr := the in-tree path is named in the host's runtimes.py entry      X := the file is git-excluded and replaces no file the engine did not write
 
 H ∧ R            [design decision 7; #830 retires the one-shot argv]
-Ct → Hc ∧ Nr ∧ X [the owner, 2026-10-25: option A; Hc holds for Cursor alone, 2026-10-17 spike]
+Ct → ((Hc ∧ Nr) ∨ Lt3) ∧ X [the owner, 2026-10-25: option A; Hc holds for Cursor alone among hosts, 2026-10-17 spike]
+Lt3 := the worker is launched through T3, whose launcher names the in-tree paths   [#1178: T3 is no runtime, so it has no runtimes.py entry]
 N → G ∧ B        [the guard holds on every host; an unprotected branch means the next entry]
 Lt := the worker is launched through T3      Ln := the worker is launched as a local CLI process
 (Lt ∨ Ln) ∧ N → G ∧ B      [owner, 2026-10-29: both launchers sit behind this contract; call, T3 design §11: B is a launch precondition and stays]
@@ -589,9 +609,24 @@ These are unsettled. Nothing in this document settles them, and work that depend
 - The names of modes beyond auto, deferred until the system is tried (section 9).
 - The view for traversing the decision graph (section 17).
 - Deep-link behaviour in the real app, which needs a click in the desktop app (section 18).
-- Named-agent launch parity: whether the agent's model, tools and initial prompt apply under T3's own session options (section 13).
-- Renaming a thread from outside T3, which needs an outside-agent login and an MCP client in the engine (section 18, heartbeat A).
+- Interrupting and renaming a thread from outside T3. The `t3` CLI has neither; both are MCP tools that need an outside-agent login and an MCP client in the engine (section 18, heartbeat A; and cancel, section 13). That client is a new dependency, so it is adopted only on the owner's approval.
 - A cross-project meta dashboard, deferred (section 12).
 - Dependencies between issues in different projects, which section 12 leaves uncovered (`compliance.md` row C29).
-- How a T3 worker reaches the engine's report and ask server, and which runtime mode it runs under (section 13).
-- How T3's worktrees and the engine's worktrees reconcile (section 13).
+
+Answered by the spike notes of pull request 1188 (#1178, T3 0.1.3) and now stated in section 13: named-agent launch parity (the agent's prompt and tools apply, the rotation entry's model wins); how a T3 worker reaches the engine's report and ask server and which runtime mode it runs under (in-tree `.mcp.json`, T3's default `auto` mode); and how T3's worktrees and the engine's reconcile (each engine worktree is registered as a T3 project). Two spike points stay untested: a plugin-qualified agent name in the tree's `agent` setting, and an agent whose `tools:` list must also admit the engine's MCP tools.
+
+Decided but not built yet, after #1178. Each is required by the section named, and the code does not meet it yet:
+- Live messages to a T3 worker: `worker.deliver_messages` fails them as "started without live messaging"; `t3 thread send` would carry them (section 13).
+- Thread links on the issue pages and the workers page; only the board links the thread (sections 13 and 18).
+- Mapping the engine's `[workers] claude_as_profile` to a T3 provider instance; every T3 worker runs under T3's default `claudeAgent` (sections 10 and 13).
+- Liveness and stalls from the thread's state; they still come from the runner process (sections 13 and 18).
+- Codex, Cursor and Antigravity under T3; only Claude entries launch through it, since each other runtime needs its own channel file there (section 13, call).
+- Cancelling the thread itself; cancel stops the runner, not the thread, until the MCP client above is approved (section 13).
+
+```
+Mc := an MCP client is added to the engine      Ap := the owner approved it as a new dependency
+In := a thread can be interrupted from the engine      Rn := a thread can be renamed from the engine
+1.  Mc → Ap          [the owner's rule: every new library, package or tool is confirmed before adoption]
+2.  In ∨ Rn → Mc     [#1178: the t3 CLI has no interrupt or rename; both are MCP tools]
+∴   In ∨ Rn → Ap: neither the thread cancel nor heartbeat A's rename is built before the owner approves the client
+```
