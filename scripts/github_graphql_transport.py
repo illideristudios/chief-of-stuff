@@ -137,7 +137,7 @@ class GitHubGraphQL:
         def attempt():
             if time.monotonic() >= deadline:
                 raise TransportError('timeout')
-            code, output = _process([sys.executable, '-I', str(Path(__file__).resolve())], payload,
+            code, output = _process([sys.executable, '-I', '-S', str(Path(__file__).resolve())], payload,
                                     worker_env, deadline, self.max_output * 2 + 65536)
             if code:
                 raise TransportError('request failed')

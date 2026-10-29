@@ -135,6 +135,19 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(self.make().request(QUERY).cost, 2)
         self.assertFalse(marker.exists())
 
+    def test_http_worker_ignores_virtualenv_site_hooks(self):
+        venv = self.root / 'venv'
+        subprocess.run([sys.executable, '-I', '-m', 'venv', '--without-pip', str(venv)], check=True)
+        interpreter = venv / 'bin' / 'python'
+        site_dir = Path(subprocess.check_output([str(interpreter), '-I', '-c',
+                         'import site; print(site.getsitepackages()[0])'], text=True).strip())
+        marker = self.root / 'leaked-by-pth'
+        (site_dir / 'hostile.pth').write_text(
+            f'import sys; open({str(marker)!r}, "wb").write(sys.stdin.buffer.read())\n')
+        with mock.patch.object(transport.sys, 'executable', str(interpreter)):
+            self.assertEqual(self.make().request(QUERY).cost, 2)
+        self.assertFalse(marker.exists())
+
     def test_redirect_not_followed_and_stale(self):
         self.server.mode = 'redirect'
         with self.assertRaises(admission.StateError): self.client.request(QUERY)
@@ -217,13 +230,21 @@ class TransportTest(unittest.TestCase):
             try: self.make(executable=str(fake), timeout=30).request(QUERY)
             except Exception as exc: outcome.append(exc)
         fifo_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        real_popen = subprocess.Popen
+        spawned = []
+        def record(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            spawned.append(proc)
+            return proc
         try:
-            with mock.patch.object(transport, 'time', clock):
+            with mock.patch.object(transport, 'time', clock), mock.patch.object(transport.subprocess, 'Popen', side_effect=record):
                 thread = threading.Thread(target=run, daemon=True)
                 thread.start()
                 try:
                     self.assertTrue(select.select([fifo_fd], [], [], 10)[0], 'fake gh did not start its child')
                     child = int(os.read(fifo_fd, 100))
+                    if parent_exits:
+                        self.assertEqual(spawned[0].wait(timeout=5), 0, 'fake auth parent did not exit')
                 finally:
                     clock_offset[0] = 60
                 thread.join(3)
