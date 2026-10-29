@@ -134,7 +134,7 @@ class AgentRulesTest(unittest.TestCase):
 
     def test_architect_never_files_forge_issues(self):
         text = self.architect.read_text()
-        self.assertRegex(text, r"(?i)never files? (forge )?issues?")
+        self.assertRegex(text, r"(?i)never file(?:s)? (forge )?issues?")
         self.assertNotRegex(text, r"(?i)gh issue create")
 
     def test_architect_grades_after_merge_and_on_mismatch(self):
