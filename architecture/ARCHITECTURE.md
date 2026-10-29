@@ -59,10 +59,25 @@ The engine runs the review panel.
 - `reconcile.py` (Use Cases) plans one review launch for each persona the policy names for the stage, and they run in parallel.
 - It plans a fix for every open finding, so review burns down to none.
 - It routes findings to the architect when the policy says to: the engine posts a request and waits, and the architect disposes of each finding as fix, file, keep or discard.
-- It pings after three fix rounds.
+- After three fix rounds that end with findings still open, it parks the issue with those findings and a recommendation (section 15). The old ping after three rounds becomes this park (call, T3 design §5).
 - `engine.py` executes the plan through the model port.
 
 A review is bound to the head it reviewed: the segment records the reviewed commit, and a merge happens only when that commit is the change's current head.
+
+The default is motion (owner, 2026-10-29, T3 design §5). The review panel, the fix loop and the merge gate stay, because they are automated checks and not stops. The merge gate merges with no wait on the owner once the review matches the change's current head and main's CI is green, and, where the policy requires the architect's approval, once the architect has given it for that head. The engine executes the merge (`engine_merge.py`); this is the T3 design's "the coordinator merges". A change surfaces for human review only on a contradiction (two current decisions, or a decision and the code) or after three fix rounds with findings still open. Human review stays possible at any time.
+
+```
+M := the merge gate merges the change      Rv := the review matches the change's current head      Ci := main's CI is green
+Rq := the policy requires the architect's approval      Ap := the architect approved the current head
+X := a contradiction exists      Fx := three fix rounds ended with findings still open
+Hr := the change surfaces for human review      Pk := the issue is parked (section 15)      Wo := the merge waits on the owner
+
+1.  Rv ∧ Ci ∧ (Rq → Ap) ∧ ¬X ∧ ¬Fx → M      [owner, 2026-10-29: "the default should be to try to make motion"]
+2.  X ∨ Fx → Hr                              [owner, 2026-10-29]
+3.  Fx → Pk                                  [call, T3 design §5: the three-round ping becomes a park]
+4.  ¬Wo                                      [owner, 2026-10-29: merges waiting on the owner are removed]
+∴   a merge waits on the architect only where the policy requires it, never on the owner, and the owner sees a change only when something is wrong
+```
 
 The reviewer personas are the 22 personas of the `extras` plugin's code-review skill (1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (owner, 2026-10-16).
 
@@ -82,13 +97,37 @@ The architect and the architecture reviewers are different roles, and nothing tr
 
 In policy, the name `architect` is reserved for the agent: `[personas.architect]`, with `agent = "frank-lloyd-aight"`, is what the consult and dispositions point at. Reviewer personas never use that name; they are `senior-architect` and `uncle-bob`. A finding from an architecture reviewer goes to the architect for disposition like any other finding.
 
-The engine never starts an architect run on its own (owner, 2026-10-17). The architect is a standing session that keeps its context across consults.
+The engine never starts an architect run on its own (owner, 2026-10-17). The architect is a standing session, exactly one per project (owner, 2026-10-29, T3 design §4), that keeps its context across consults. Its three core responsibilities are keeping the documentation canonical, which on a new project means writing it first, planning, and drift checking. The canonical set is every file in the project's architecture directory, and nothing outside it. Subagents the architect spins off are its internal matter: they are not the coordinator's workers, not in the worker rotation, and not in the records of section 9 (call).
 - **A consult is a request.** The engine posts it where the architect watches, on the change or its issue, in the form `Architect review requested: <sha>`, with the findings to dispose of. It then waits for the architect's reply on the same thread, and treats the issue as waiting on the architect until the reply comes.
 - **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding.
 - **The head is the forge's.** "The current head" is the change's head as the forge adapter reports it, never a worker's local `HEAD`.
 - **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request.
 - **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
-- **A new architect run happens only when the owner asks for one,** naming the architect in the request. Nothing in the policy, the planner or the trio launches the `frank-lloyd-aight` agent unprompted.
+- **The architect grades and signals unprompted** (owner, 2026-10-29, T3 design §11). This replaces the rule that a new architect run happened only when the owner asked for one. The architect grades compliance after each merge to main and whenever a worker or the coordinator reports a mismatch between a decision and the code (call), records each gap as a row in `compliance.md`, and signals the coordinator as section 16 sets out. The policy, the planner and the trio never start a second architect session beside the standing one, and how the standing session is started and kept alive is the builder's.
+
+```
+Sa := the architect is one standing session per project      Mg := a change merged to main
+Mm := a worker or the coordinator reported a mismatch      Gr := the architect grades compliance unprompted
+Ow := an architect run waits for the owner to ask for it
+
+1.  Sa                  [owner, 2026-10-29: T3 design §4]
+2.  Mg ∨ Mm → Gr        [call, T3 design §6]
+3.  ¬Ow                 [owner, 2026-10-29: T3 design §11 replaces the on-request rule]
+∴   drift is graded when it can arise, with no prompt from the owner
+```
+
+Every question has one answerer (owner, 2026-10-29, T3 design §5). The owner and the architect decide architectural questions, under their own rules. The coordinator owns scheduling, priority and dispatch, and answers the questions in that scope. The decision trio answers the non-architectural decisions outside the coordinator's scope, and stays as this section describes it: three independent models, read-only, each question asked once. An agent that cannot tell whether a decision is architectural asks the architect.
+
+```
+D := the decision is architectural      Co := it is about scheduling, priority or dispatch      Q := the asker cannot tell whether D
+Ar := the owner and the architect decide it      Ac := the coordinator answers it      Tr := the decision trio answers it      A := the asker asks the architect
+
+1.  D → Ar              [owner, 2026-10-29]
+2.  ¬D ∧ Co → Ac        [owner, 2026-10-29: "the coordinator owns scheduling and priority and dispatch"]
+3.  ¬D ∧ ¬Co → Tr       [owner, 2026-10-29: "trio for decisions outside the coordinator's scope"]
+4.  Q → A               [owner, 2026-10-29]
+∴   D, ¬D ∧ Co and ¬D ∧ ¬Co partition the questions, so each has exactly one answerer
+```
 
 The decision trio's models are not fixed (owner, 2026-10-18; issue #879). Its three personas keep their roles and judgement lenses from the policy, but each consult draws its models the way workers do.
 - **A rotation class.** The workspace's `[models.trio]` rotation, with its `pick` (`first` or `random`), supplies the model for each trio member. A persona's own `model` is only the fallback when no rotation is set.
@@ -184,7 +223,7 @@ On the engine path, the engine has no authorized files (Zach, 2026-10-23, issue 
 - **No declared scope.** An issue names no paths, and nothing holds an issue for lacking them. Intake files an issue without a scope section, and the issue forms ask for none.
 - **No scope decisions.** A plan proposes no scope, and the engine raises no `scope` decision and no file-ownership ask, so no issue waits on the trio or the owner for a scope.
 - **No write gates.** No worker is refused a write for being outside a list, and no run is judged against a declared scope.
-- **Overlap surfaces at merge.** Each worker runs in its own worktree, so two issues that edit one file meet as a merge conflict. The merge gate already requires a review of the current head, then main's CI, so the later branch rebases and is reviewed again on its new head. A conflict the rebase cannot settle goes back to the fix stage like any other finding, and a person is involved only through the existing three-round ping.
+- **Overlap surfaces at merge.** Each worker runs in its own worktree, so two issues that edit one file meet as a merge conflict. The merge gate already requires a review of the current head, then main's CI, so the later branch rebases and is reviewed again on its new head. A conflict the rebase cannot settle goes back to the fix stage like any other finding, and a person is involved only when three fix rounds end with findings still open, which parks the issue (sections 6 and 15).
 - **Worktree claims stay** only where they lock a tree for its own task. A claim never gates a write.
 
 ```
@@ -281,7 +320,7 @@ Limits belong to an account, not a workspace, so readings are account-wide: two 
 
 chief-of-stuff is independent of any deployment technology, hosting provider, container runtime, infrastructure tool and application stack. Its code, its agent rules, its skills and its eval fixtures name none of them, and no behaviour depends on one being installed.
 
-What a workspace builds, deploys or runs, and how, reaches chief-of-stuff only through that workspace's own configuration: the `## Coordinator` block (its human-only actions, `Health:` lines and the rest) and the Settings TOML (such as `[workers] teardown` and `teardown_list`). chief-of-stuff runs those commands as given and never interprets them. A rule or a fixture that needs an example of a workspace-specific action uses an invented name, never a real product.
+What a workspace builds, deploys or runs, and how, reaches chief-of-stuff only through that workspace's own configuration: the `## Coordinator` block (its `Health:` lines and the rest; its human-only action list is removed, section 15) and the Settings TOML (such as `[workers] teardown` and `teardown_list`). chief-of-stuff runs those commands as given and never interprets them. A rule or a fixture that needs an example of a workspace-specific action uses an invented name, never a real product.
 
 Two things are chief-of-stuff's subject, not a stack, and stay named: the host CLIs it coordinates (claude, codex, cursor and agy, in `runtimes.py`), and the forges it integrates with (GitHub and GitLab, behind `forge.py`). The repository's own CI tooling under `.github/` is how this project is tested, not something chief-of-stuff runs, and is outside this section.
 
@@ -359,4 +398,65 @@ I → Pc            [chief_of_stuff.install]
 M ∧ Pc ∧ U → Pl   [this section]
 ¬Pl → F           [this section; owner, 2026-10-21]
 ∴ I → Pl ∨ F: no install leaves the plugin silently behind the engines
+```
+
+## 15. Autonomy
+
+The owner hands a project over, walks away, and returns to significant progress with no surprise stalls (owner, 2026-10-29, T3 design §1). The default is to proceed.
+- **The hard stops are removed entirely** (owner, 2026-10-29). These are the coordinator's human-only action list, the lane gates and the yes-gates between pipeline stages, merges waiting on the owner (including the legacy `merge_owner` modes `approval` and `user`), and every guard hook and command rule whose job is to enforce one of them. Commit, push, merge and deploy proceed unattended unless the decision is architectural.
+- **What stays is automation, not a stop.** The review panel, the fix loop and the merge gate of section 6 stay. The worker guard of section 13 and the Claude plugin's worker hooks stay: they keep merges, protected pushes and stage writes with the engine's merge gate and wait on no person, so they enforce none of the removed stops (architect, reading T3 design §5). Branch protection for non-Claude entries stays as a launch precondition (section 13). Rules set in a user's or host's own settings, outside chief-of-stuff, are unaffected (T3 design §3).
+- **Waiting for an architectural decision is not a hard stop** and stays. Such a decision belongs to the owner and the architect (section 6).
+
+```
+D := the decision is architectural      U := the work waits for the owner or the architect      H := one of the old hard stops applies
+Wg := the worker guard and branch protection apply      P := a person is waited on
+
+1.  D → U            [owner, 2026-10-29]
+2.  ¬D → ¬U          [owner, 2026-10-29: the default is autonomy]
+3.  ¬H               [owner, 2026-10-29: kill the existing hard stops entirely]
+4.  Wg → ¬P          [section 13: the guard confines merges to the engine; branch protection is a launch precondition]
+5.  H → P            [a hard stop is a wait on a person]
+6.  ¬P → ¬H          [5, contrapositive]
+∴   commit, push, merge and deploy proceed unattended unless D, and removing H leaves Wg standing (4, 6)
+```
+
+Every piece of unattended work ends in one of three outcomes (owner, 2026-10-29, T3 design §5).
+- **Do:** no decision is needed. Finish it.
+- **Do on a default:** a decision is needed, a sensible default exists, and undoing it is cheap. Take the default on separable work and log the assumption.
+- **Park:** the decision is architectural, or the work failed twice. Park it with its preparation done (research, options and a recommendation), so the owner's decision is one answer. Two failures park an issue even when a default exists (call).
+- **Failed twice** is counted per issue, across agents, and a relaunch after a stall counts as a failure (call).
+- **A retry goes to the next agent** in the rotation (owner, 2026-10-29). The failure counts against the first agent's record and the success against the second's (section 9).
+
+```
+Pk := the item is parked      Df := proceed on a default      Do := just do it
+D := the decision is architectural      F := the work failed twice, per issue, across agents, a stall relaunch included
+E := a decision is needed, a sensible default exists, and undoing it is cheap
+
+1.  D ∨ F → Pk          [owner, 2026-10-29: parking limited to architectural or two failures]
+2.  E ∧ ¬D ∧ ¬F → Df    [owner, 2026-10-29: do on a default; call: F parks even when E]
+3.  ¬(D ∨ F ∨ E) → Do   [owner, 2026-10-29]
+∴   a stall is justified only by D or F; every other stall is a bug
+```
+
+## 16. Roles and handoffs
+
+Every role is a T3 thread the owner can open, read and message (owner, 2026-10-29, T3 design §4). The standing roles are the meta coordinator (section 12), one project coordinator per project, and one architect per project (section 6). The short-lived roles are the issue-filing worker, the implementation worker and the reviewer and other workers of today. The owner talks to the coordinator about coordination and to the architect about architecture, and can step into any worker. Handoffs between the standing roles are automatic; the owner sometimes directs one by hand.
+
+The architect plans; the coordinator prioritizes and executes. Whether a fix changes the code or the architecture is the architect's call, and the coordinator only schedules the work. The architect never files issues (owner, 2026-10-29). Both handoffs below use the same short-lived issue-filing worker, which files forge issues and ends.
+- **Drift.** The architect detects drift and writes a drift document. The coordinator spawns an issue-filing worker, which files the issue and ends. The issue joins the coordinator's queue, and a later worker picks it up under the coordinator's rules.
+- **New architecture.** The architect marks the architecture, or a section of it, settled, at a granularity of its choosing. The coordinator spawns an issue-filing worker for what was marked.
+- **The channel is new.** No channel from the architect to the coordinator exists today, and its mechanism (files, thread messages, or both) is the builder's. The intake is the architect's `unassigned` gap rows in `compliance.md` (call).
+- **Only the architect writes `compliance.md`.** The coordinator keeps its own ledger of the row ids it has turned into issues and never edits the rows (call).
+- **A signal files nothing twice** (call). Each settled marker and drift document names the commit it was written against, and the issue-filing worker checks the forge for an existing issue with the same key before it files.
+
+```
+Dr := the architect records drift      Se := the architect marks documents settled
+Fw := an issue-filing worker is spawned, files, and ends      Iq := the issue is in the coordinator's queue      Wk := a later worker implements it
+K := an issue with the signal's key already exists on the forge      Fi := the filing worker files a new issue
+
+1.  Dr → Fw ∧ Iq     [owner, 2026-10-29]
+2.  Se → Fw          [owner, 2026-10-29: granularity is the architect's]
+3.  Iq → Wk          [owner, 2026-10-29: under the coordinator's rules]
+4.  K → ¬Fi          [call, T3 design §6]
+∴   no human step lies between recorded drift or a settled architecture and a fix, and a repeated signal files nothing twice
 ```
