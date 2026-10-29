@@ -1182,6 +1182,13 @@ class StandingWorkerRulesTest(unittest.TestCase):
         with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):
             self.compose()
 
+    def test_a_decision_is_taken_on_a_default_and_only_an_architectural_one_stops_the_run(self):
+        # A human_review stop spends the issue's failure budget (two park it), so a routine decision must not cause one.
+        body = self.compose()
+        self.assertNotIn("If a decision, missing access", body)
+        self.assertIn("sensible default", body)
+        self.assertIn("architectural decision", body)
+
     def test_rules_over_the_total_cap_refuse_dispatch(self):
         self.settings.write_text('[workers]\nrules = ' + json.dumps(['x' * 2000] * 9) + '\n')
         with self.assertRaisesRegex(dp.RefusedError, r"cannot read workspace settings:.*\[workers\] rules"):

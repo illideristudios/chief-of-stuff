@@ -495,7 +495,8 @@ def compose(root: Path, day: str | None, task: str, worktree: Path | None = None
             "# One-shot assignment" + standing_rules(settings.workers.rules),
             f"You are {name or 'a worker'} in a single, noninteractive {runtime} run. Complete only this task, then exit.",
             "Do not register, poll a mailbox, schedule checks, start another agent, or send messages.",
-            "Do not wait for a plan approval or for a reply. If a decision, missing access, or another blocker prevents completion, stop and report human_review.",
+            "Do not wait for a plan approval or for a reply. When a decision is needed and a sensible default exists that is cheap to undo, take it and record the assumption in your result. "
+            "Stop and report human_review only for an architectural decision, missing access, or another blocker you cannot work around.",
             board_rule,
             WRITING_RULE,
             REVIEW_RULE,
