@@ -1096,8 +1096,8 @@ class FullIssueMergeKeyTest(unittest.TestCase):
         built = fc.build(fc.moves(text, TODAY, CT), rb.parse_tracker(text).tasks, LANES, {}, {}, NOW)
         self.assertEqual(len(built), 2)
         self.assertEqual([(r.ref, r.name) for _, r in built], [
-            ("forge.example/group/project#7", "Build parser"),
-            ("forge.example/group/other#7", "Build formatter"),
+            ("gitlab:forge.example/group/project#7", "Build parser"),
+            ("gitlab:forge.example/group/other#7", "Build formatter"),
         ])
         self.assertEqual([[(g.start, g.end, g.title) for g in r.segments] for _, r in built], [
             [(at(TODAY, "00:10"), NOW, "worker-1"), (at(TODAY, "00:40"), NOW, "worker-2")],
@@ -1209,7 +1209,7 @@ class ChangeBridgeReviewTest(unittest.TestCase):
                 self.assertEqual(len(got), 1, "a change URL alone must use the unique issue bridge")
                 status, row = got[0]
                 self.assertEqual((status, row.name), ("running", "Build parser"))
-                self.assertEqual(row.ref, "forge.example/group/project#7")
+                self.assertEqual(row.ref, "gitlab:forge.example/group/project#7")
                 self.assertEqual([(g.start, g.end, g.title) for g in row.segments], [
                     (at(TODAY, "00:10"), NOW, "w1"), (at(TODAY, "00:40"), NOW, "w2"),
                     (at(TODAY, "01:10"), NOW, "w3")])
@@ -1286,7 +1286,7 @@ class HomeFlowReviewTest(unittest.TestCase):
         text = self.tracker()
         got = fc.build(fc.moves(text, TODAY, CT), rb.parse_tracker(text).tasks, LANES, {}, {}, NOW)
         self.assertEqual([(r.name, r.ref) for _, r in got], [
-            ("Build parser", "#7"), ("Review parser", "forge.example/group/project#7")])
+            ("Build parser", "#7"), ("Review parser", "gitlab:forge.example/group/project#7")])
 
 
 class WorkflowKeyReviewTest(unittest.TestCase):
@@ -1312,7 +1312,7 @@ class WorkflowKeyReviewTest(unittest.TestCase):
         got = self.build(self.context_tracker(ISSUE_URL))
         self.assertEqual(len(got), 2, "a context issue is not this change's closing issue")
         self.assertEqual([(r.name, r.ref) for _, r in got], [
-            ("Build parser", "forge.example/group/project#7"),
+            ("Build parser", "gitlab:forge.example/group/project#7"),
             ("Review formatter", self.OTHER_CHANGE)])
         self.assertEqual([[(g.start, g.end, g.title) for g in r.segments] for _, r in got], [
             [(at(TODAY, "00:10"), NOW, "w1")], [(at(TODAY, "00:40"), NOW, "w2")]])
@@ -1341,8 +1341,8 @@ class WorkflowKeyReviewTest(unittest.TestCase):
         got = self.build(text)
         self.assertEqual(len(got), 2)
         self.assertEqual({r.ref: [(g.start, g.end, g.title) for g in r.segments] for _, r in got}, {
-            "forge.example/group/project#7": [(at(TODAY, "00:10"), NOW, "w1")],
-            "forge.example/group/project#8": [(at(TODAY, "00:20"), NOW, "w2"),
+            "gitlab:forge.example/group/project#7": [(at(TODAY, "00:10"), NOW, "w1")],
+            "gitlab:forge.example/group/project#8": [(at(TODAY, "00:20"), NOW, "w2"),
                                                (at(TODAY, "00:40"), NOW, "w3")]})
 
     def test_a_later_context_change_url_leaves_the_workflow_row_unkeyed(self):
@@ -1383,8 +1383,8 @@ class WorkflowKeyReviewTest(unittest.TestCase):
             [(prompts[0], "w1", "00:10"), (prompts[1], "w2", "00:40")])
         got = self.build(text)
         self.assertEqual([(r.name, r.ref) for _, r in got], [
-            ("Review parser", "forge.example/group/project#7"),
-            ("Review formatter", "forge.example/other/project#7")])
+            ("Review parser", "gitlab:forge.example/group/project#7"),
+            ("Review formatter", "gitlab:forge.example/other/project#7")])
 
 
 # #204: a launch names its task by the text before ":"; that name outranks a later row that merely shares,
