@@ -77,7 +77,7 @@ REFRESH = 60  # seconds between forge reads
 POLL = 5  # seconds between healthy server checks
 RETRY_MIN = 1
 RETRY_MAX = 60
-RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
+RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|report\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 WORKER_MESSAGE = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})/messages")
@@ -478,6 +478,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
     where it is."""
     # The renderers are imported here, not at the top, to keep `pages.py --ensure` light.
     import decision_page
+    import heartbeat_page
     import issue_page
     import render_board
     import source_page
@@ -500,7 +501,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                 return ""
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
             day = today if (root / "store.db").is_file() or today in days or not days else days[-1]
-        elif store_decision or name.startswith("issue-") or name == "workers.html":
+        elif store_decision or name.startswith("issue-") or name in ("workers.html", "report.html"):
             day = today
         elif name == "decisions.html":
             days = [d.isoformat() for d, _ in daily_trackers(root, cfg)]
@@ -525,7 +526,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                 engine_token = repr(engine_health(status, now_min, cfg.zone))
             digest = _digest(sources, extra=engine_token)
             record = RENDERED_AT.get(key)
-            if record and identity is not None and record[1] == identity and record[0] >= newest and name != "workers.html":
+            if record and identity is not None and record[1] == identity and record[0] >= newest and name not in ("workers.html", "report.html"):
                 # The filesystem's mtime clock reads behind the wall clock by more than a render takes under load
                 # here, so a source saved after that render began can carry an mtime from before it. Where the
                 # The digest includes engine liveness, which can change without a file write.
@@ -534,7 +535,9 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             started = time.time_ns()
             with slots:
                 data = _page_data(root)
-                if name.startswith("decision-") and not store_decision:
+                if name == "report.html":
+                    heartbeat_page.write(root, pages_dir)
+                elif name.startswith("decision-") and not store_decision:
                     decision_page.write(root, pages_dir, name[len("decision-"):-5], day,
                                         navigation=_navigation(root, pages_dir, data))
                 elif name == "workers.html" or name.startswith(("issue-", "decision-")):
@@ -678,7 +681,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return False
-        elif path in ("/workers", "/decisions"):
+        elif path in ("/workers", "/decisions", "/report"):
             self.path = f"{path}.html"
         elif path.startswith("/decisions/"):
             m = ROUTE.fullmatch(path)
@@ -790,7 +793,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _serve(self, body: bool):
         # Classify before _allowed, which may render and publish dynamic pages.
         path = unquote(urlsplit(self.path).path)
-        dynamic = (path in ("/", "/all", "/workers", "/workers/", "/decisions", "/decisions/")
+        dynamic = (path in ("/", "/all", "/workers", "/workers/", "/decisions", "/decisions/", "/report")
                    or path.startswith(("/workers/sessions/", "/decisions/", "/issues/"))
                    or path.lower().endswith(".html"))
 
