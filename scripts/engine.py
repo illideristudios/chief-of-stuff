@@ -36,6 +36,7 @@ import notify
 import policy
 import readiness
 import reconcile
+import release_selection
 import runtimes
 import settings
 import shell_setup
@@ -1025,8 +1026,11 @@ def _prepare_handoff(release: Path) -> Path | None:
 
 
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
-    os.execv(str(python), [str(python), str(release / "scripts/engine.py"),
-                              "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
+    release_selection.validate_handoff(root, release, supervisor)
+    # Keep the trusted script directory on sys.path while ignoring Python environment and user site.
+    os.execve(str(python), [str(python), "-E", "-s", str(release / "scripts/engine.py"),
+                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []),
+              supervisor.python_environment())
 
 
 def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:
@@ -1073,8 +1077,9 @@ def main(argv: list[str] | None = None) -> int:
     newer = None
     adopt_login_path()
     try:
-        if (installed := supervisor.current_release()) != supervisor.RELEASE:
-            if (python := _prepare_handoff(installed)) is not None:
+        if (installed := release_selection.selected_release(root, supervisor)) != supervisor.RELEASE:
+            if ((python := _prepare_handoff(installed)) is not None
+                    and release_selection.selected_release(root, supervisor) == installed):
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
@@ -1114,7 +1119,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if not args.once:
                     import pages  # deferred: --once never serves the board
-                    page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                    page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                     page_thread.start()
                     message_thread = threading.Thread(target=_message_loop, args=(root, stop_pages), daemon=True)
                     message_thread.start()
@@ -1130,15 +1135,16 @@ def main(argv: list[str] | None = None) -> int:
                     if args.once:
                         return 1 if failed else 0
                     time.sleep(args.interval)
-                    if (installed := supervisor.current_release()) != supervisor.RELEASE:
-                        if (python := _prepare_handoff(installed)) is not None:
+                    if (installed := release_selection.selected_release(root, supervisor)) != supervisor.RELEASE:
+                        if ((python := _prepare_handoff(installed)) is not None
+                                and release_selection.selected_release(root, supervisor) == installed):
                             newer = installed, python
                             break
                     if page_thread is not None and not page_thread.is_alive():
                         # A temporary supervisor-lock conflict or unexpected thread exit must not
                         # disable board recovery for the remainder of this engine process.
                         print("engine: page supervisor exited; restarting it", file=sys.stderr, flush=True)
-                        page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                        page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                         page_thread.start()
             finally:
                 stop_pages.set()
