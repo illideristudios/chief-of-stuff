@@ -1821,6 +1821,199 @@ class StandaloneBoardTest(unittest.TestCase):
                 marker.unlink()
                 time.sleep(0.3)
 
+    def test_live_waiting_successor_that_cannot_recover_falls_back(self):
+        self.addCleanup(self.stop_server)
+        versions = self.root.parent / "install/versions"
+        old, broken = versions / "old", versions / "broken"
+        source = Path(pg.__file__).resolve().parent.parent
+        for release in (old, broken):
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text('{"version":"1.0.0"}')
+            (release / "chief_of_stuff.py").touch()
+            (release / "requirements.txt").touch()
+        candidate = broken / "scripts/pages.py"
+        marker = self.root / "candidate-failed"
+        launched = self.root / "candidate-running"
+        candidate.write_text(candidate.read_text().replace(
+            'if __name__ == "__main__":',
+            f'def ensure(*args, **kwargs):\n    Path({str(marker)!r}).touch()\n'
+            f'    raise RuntimeError("cannot recover board")\n\nif __name__ == "__main__":\n    Path({str(launched)!r}).touch()').replace(
+            'POLL = 5  # seconds between healthy server checks',
+            'POLL = 0.1  # seconds between healthy server checks'))
+        current = versions.parent / "current"
+        current.symlink_to(old)
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(old / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        def wait_for(predicate, timeout=10):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                if predicate():
+                    return True
+                time.sleep(0.05)
+            return False
+        self.assertEqual(pg.ensure(self.pages, self.port, self.root / "pages.log", self.root), "pages: started")
+        old_pid = int((self.pages / ".pid").read_text())
+        lock_path = pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"
+        with pg.supervisor.lock(lock_path):
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            def cleanup():
+                if proc.poll() is None:
+                    proc.terminate()
+                    proc.wait(timeout=10)
+            self.addCleanup(cleanup)
+            current.unlink()
+            current.symlink_to(broken)
+            # The candidate is alive but cannot run ensure until this owner releases the lock.
+            self.assertTrue(wait_for(launched.exists), "candidate was not launched")
+            self.assertFalse(marker.exists())
+            self.assertIsNone(proc.poll())
+            os.kill(old_pid, signal.SIGTERM)
+            self.assertTrue(wait_for(lambda: pg._who(self.port) is None))
+        self.assertTrue(wait_for(marker.exists), "candidate never tried to recover")
+        self.assertTrue(wait_for(lambda: pg._who(self.port) is not None), "parent did not restore the board")
+        self.assertIsNone(proc.poll())
+
+    def test_waiting_successor_reports_failure_after_lock_owner_exits(self):
+        stop = threading.Event()
+        reports = []
+        attempted, failed = threading.Event(), threading.Event()
+        def report(value):
+            reports.append(value)
+            if value is False:
+                failed.set()
+        lock_path = pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"
+
+        def fail(*args, **kwargs):
+            attempted.set()
+            raise pg.PagesError("candidate cannot recover board")
+
+        with mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg, "RETRY_MAX", 0.05), \
+             mock.patch.object(pg, "ensure", side_effect=fail):
+            with pg.supervisor.lock(lock_path):
+                thread = threading.Thread(target=pg.supervise_with_retry, args=(self.root, stop, report))
+                thread.start()
+                self.assertTrue(threading.Event().wait(0.15) is False)
+                self.assertNotIn(True, reports, "lock contention is not readiness")
+            try:
+                self.assertTrue(attempted.wait(2))
+                self.assertTrue(failed.wait(2), "failed recovery must reach the parent")
+            finally:
+                stop.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_plugin_selected_update_survives_old_supervisor_and_server_failover(self):
+        self.addCleanup(self.stop_server)
+        cache = self.root.parent / "plugins/cache/market/chief"
+        old, new = cache / "1.0.0", cache / "2.0.0"
+        source = Path(pg.__file__).resolve().parent.parent
+        for release, version in ((old, "1.0.0"), (new, "2.0.0")):
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+            (release / "requirements.txt").touch()
+            # Exercise the #1174 selector when present, and its interface on this PR's base.
+            supervisor_file = release / "scripts/supervisor.py"
+            if "def selected_release(" not in supervisor_file.read_text():
+                with supervisor_file.open("a") as f:
+                    f.write("\ndef selected_release(root):\n"
+                            "    try:\n"
+                            "        candidate = Path((state_dir(root) / 'engine-plugin-release').read_text()).resolve()\n"
+                            "        return candidate if candidate.parent == RELEASE.parent and candidate.name > RELEASE.name else RELEASE\n"
+                            "    except OSError:\n        return RELEASE\n")
+            page_file = release / "scripts/pages.py"
+            page_file.write_text(page_file.read_text().replace(
+                'POLL = 5  # seconds between healthy server checks',
+                'POLL = 0.1  # seconds between healthy server checks'))
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(old / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        log = self.root / "supervisor-test.log"
+        with log.open("w") as output:
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=output, stderr=output)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+        def wait_for(predicate):
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                try:
+                    if predicate():
+                        return True
+                except (OSError, ValueError):
+                    pass
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            return False
+        def server_id(release):
+            return f"release-{hashlib.sha256(os.fsencode(release.resolve())).hexdigest()[:24]}"
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and server_id(old) in (pg._who(self.port) or "")))
+        initial_pid = int((self.pages / ".pid").read_text())
+        marker = pg.supervisor.state_dir(self.root) / "engine-plugin-release"
+        marker.write_text(str(new))
+        def new_server_recorded():
+            try:
+                pid = int((self.pages / ".pid").read_text())
+                return (pid != initial_pid and server_id(new) in (pg._who(self.port) or "")
+                        and pg.is_pages_serve(pid, self.port))
+            except (OSError, ValueError):
+                return False
+        self.assertTrue(wait_for(new_server_recorded), f"selected release did not start: {log.read_text()}")
+        upgraded_pid = int((self.pages / ".pid").read_text())
+        # The old engine's board thread must not replace the selected server.
+        code_ensure = (f"import sys; sys.path.insert(0, {str(old / 'scripts')!r}); "
+                       "import pages; from pathlib import Path; "
+                       f"pages.ensure(Path({str(self.pages)!r}), {self.port}, Path({str(self.root / 'pages.log')!r}), Path({str(self.root)!r}))")
+        subprocess.run([sys.executable, "-c", code_ensure], check=True, timeout=10)
+        self.assertEqual(int((self.pages / ".pid").read_text()), upgraded_pid)
+        os.kill(upgraded_pid, signal.SIGTERM)
+        self.assertTrue(wait_for(lambda: server_id(new) in (pg._who(self.port) or "") and
+                                 int((self.pages / ".pid").read_text()) != upgraded_pid),
+                        "selected release did not restore the server")
+        self.assertIsNone(proc.poll())
+
+    def test_old_supervisor_keeps_the_selected_newer_server(self):
+        selected = self.root.parent / "newer"
+        selected_id = hashlib.sha256(os.fsencode(selected.resolve())).hexdigest()[:24]
+        with mock.patch.object(pg.supervisor, "selected_release", return_value=selected, create=True), \
+             mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0 release-{selected_id}"), \
+             mock.patch.object(pg, "_stop") as stopped, \
+             mock.patch.object(pg.subprocess, "Popen", side_effect=AssertionError("unexpected server start")):
+            self.assertEqual(pg.ensure(self.pages, self.port, self.root / "pages.log", self.root), "pages: serving")
+        stopped.assert_not_called()
+
+    def test_standalone_follows_plugin_selected_release(self):
+        release = self.root.parent / "new"
+        (release / "scripts").mkdir(parents=True)
+        (release / "scripts/pages.py").touch()
+        stop, attempted = threading.Event(), threading.Event()
+        def prepare(*args, **kwargs):
+            attempted.set()
+            stop.set()
+            return Path(sys.executable)
+        with mock.patch.object(pg.supervisor, "selected_release", return_value=release, create=True), \
+             mock.patch.object(pg.supervisor, "current_release", return_value=pg.supervisor.RELEASE), \
+             mock.patch.object(pg.supervisor, "ensure_venv", side_effect=prepare), \
+             mock.patch.object(pg, "ensure", return_value="pages: serving"), \
+             mock.patch.object(pg, "POLL", 0.05):
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+            thread.start()
+            try:
+                self.assertTrue(attempted.wait(2), "plugin-selected upgrade was not prepared")
+            finally:
+                stop.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
     def test_failed_upgrade_keeps_supervising_and_shutdown_releases_the_lock(self):
         release = self.root.parent / "new"
         (release / "scripts").mkdir(parents=True)

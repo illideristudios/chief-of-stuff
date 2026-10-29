@@ -883,6 +883,16 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, s
         return _ensure(pages_dir, port, log, root, stop)
 
 
+def _selected_release(root: Path) -> Path:
+    # #1174 selects a validated newer plugin-cache sibling as well as installed `current`.
+    select_release = getattr(supervisor, "selected_release", None)
+    return select_release(root) if select_release is not None else supervisor.current_release()
+
+
+def _release_id(release: Path) -> str:
+    return hashlib.sha256(os.fsencode(release.resolve())).hexdigest()[:24]
+
+
 def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
     """Probe, replace and start under the same lock, including concurrent CLI ensures.
 
@@ -897,6 +907,8 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
         identity = re.search(r"\brelease-([0-9a-f]{24})\b", who)
         if identity and identity[1] == RELEASE_ID:
+            return "pages: serving"
+        if identity and root is not None and identity[1] == _release_id(_selected_release(root)):
             return "pages: serving"
         _stop(pages_dir, port, stop)
         restart = True
@@ -966,9 +978,8 @@ def supervise(root: Path, stop: threading.Event, startup=None) -> None:
                     if str(exc) != last_error:
                         print(f"pages: {exc}", file=sys.stderr, flush=True)
                         last_error = str(exc)
-                if startup is not None:
+                if startup is not None and not stop.is_set():
                     startup(status is not None and status != "pages: stopped")
-                    startup = None
                 if status == "pages: serving":
                     delay, retry = POLL, RETRY_MIN
                 else:
@@ -978,7 +989,7 @@ def supervise(root: Path, stop: threading.Event, startup=None) -> None:
                     return
     except supervisor.ServiceError:
         if startup is not None:
-            startup(True)  # another supervisor already owns recovery
+            startup(None)  # waiting for the lock is not proof of recovery
         print("pages: another supervisor already holds pages-supervisor.lock", file=sys.stderr, flush=True)
 
 
@@ -989,7 +1000,6 @@ def supervise_with_retry(root: Path, stop: threading.Event, startup=None) -> Non
             supervise(root, stop)
         else:
             supervise(root, stop, startup)
-            startup = None
         stop.wait(min(POLL, RETRY_MAX))
 
 
@@ -1000,14 +1010,13 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
         board_stop = threading.Event()
         thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
         thread.start()
-        startup = None
         handoff = None
         try:
             while not stop.is_set():
                 if not thread.is_alive():
-                    thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop), daemon=True)
+                    thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
                     thread.start()
-                release = supervisor.current_release()
+                release = _selected_release(root)
                 if release != supervisor.RELEASE:
                     if release != failed_release:
                         retry_at, delay, failed_release = 0.0, 30.0, release
@@ -1020,7 +1029,7 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                                 if not entry.is_file():
                                     raise supervisor.ServiceError(f"missing board entry file: {entry}")
                                 python = supervisor.ensure_venv(supervisor.data_dir(), release=release, timeout=60)
-                            if not stop.is_set() and supervisor.current_release() == release:
+                            if not stop.is_set() and _selected_release(root) == release:
                                 handoff = (python, entry)
                                 break
                         except Exception as exc:
@@ -1036,7 +1045,7 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
         finally:
             board_stop.set()
             thread.join()
-        if handoff is not None and not stop.is_set() and supervisor.current_release() == release:
+        if handoff is not None and not stop.is_set() and _selected_release(root) == release:
             child = None
             try:
                 python, entry = handoff
@@ -1051,19 +1060,22 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                 finally:
                     os.close(write_fd)
                 try:
+                    # A waiting successor sends W while another supervisor owns the lock; it must
+                    # keep reporting and report failure if it later cannot take over the board.
                     deadline = time.monotonic() + 15
-                    ready = False
-                    while not stop.is_set() and child.poll() is None and time.monotonic() < deadline:
-                        if select.select([read_fd], [], [], 0.1)[0]:
-                            ready = os.read(read_fd, 1) == b"1"
-                            break
+                    while (not stop.is_set() and child.poll() is None and
+                           _selected_release(root) == release):
+                        if select.select([read_fd], [], [], min(POLL, 0.1))[0]:
+                            report = os.read(read_fd, 4096)
+                            if not report or b"0" in report or any(c not in b"1W" for c in report):
+                                raise supervisor.ServiceError("candidate failed board supervision")
+                            if startup is not None:
+                                startup(None if report[-1:] == b"W" else True)
+                            deadline = time.monotonic() + 75
+                        if time.monotonic() >= deadline:
+                            raise supervisor.ServiceError("candidate stopped reporting board health")
                 finally:
                     os.close(read_fd)
-                if not ready or supervisor.current_release() != release:
-                    raise supervisor.ServiceError("candidate did not complete startup")
-                while (not stop.is_set() and child.poll() is None and
-                       supervisor.current_release() == release):
-                    stop.wait(POLL)
             except (OSError, supervisor.ServiceError) as exc:
                 print(f"pages: cannot start release {release}: {exc}; keeping {supervisor.RELEASE}",
                       file=sys.stderr, flush=True)
@@ -1166,8 +1178,8 @@ def main(argv: list[str] | None = None) -> int:
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
         def startup(ready):
-            os.write(args.handoff_ready_fd, b"1" if ready else b"0")
-            os.close(args.handoff_ready_fd)
+            with contextlib.suppress(OSError):
+                os.write(args.handoff_ready_fd, b"W" if ready is None else b"1" if ready else b"0")
         supervise_standalone(root, stop, startup if args.handoff_ready_fd is not None else None)
         return 0
     if args.command in ("install", "uninstall", "status"):
