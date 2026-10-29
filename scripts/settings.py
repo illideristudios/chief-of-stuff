@@ -219,7 +219,7 @@ class Settings:
     pages: Pages = field(default_factory=Pages)
     # #111: task class -> rotation; the first entry is the suggested model, the rest the fallback order.
     models: dict[str, tuple[ModelEntry, ...]] = field(default_factory=dict)
-    # #877: task class -> "first" or "random", how a fresh start chooses among the launchable entries.
+    # Task class -> strategy for a fresh launch; retries follow the previous entry regardless of strategy.
     model_picks: dict[str, str] = field(default_factory=dict)
     graph: Graph | None = None
     # #54: repository name -> path (relative to the workspace root) that `chief-of-stuff worktree --clone <name>` cuts from.
@@ -274,14 +274,17 @@ def _entry(where: str, text) -> ModelEntry:
     return ModelEntry(runtime, model, effort)
 
 
-PICKS = ("first", "random")  # #877: how a fresh start chooses among a class's launchable entries
+PICKS = ("first", "random", "round_robin")
 
 
 def _picks(table) -> dict[str, str]:
-    """Each class's `pick`, "first" when absent; Zach, 2026-10-18: "can we make it so they randomly select"."""
+    """The owner's worker strategy defaults to round robin; the trio retains its independent draw."""
     picks = {}
     for name, t in table.items():
-        value = t.get("pick", "first") if isinstance(t, dict) else "first"
+        default = "first" if name == "trio" else "round_robin"
+        value = t.get("pick", default) if isinstance(t, dict) else default
+        if name == "trio" and value == "round_robin":
+            raise SettingsError("[models.trio]: pick must be first or random; round_robin is a worker strategy")
         if value not in PICKS:
             raise SettingsError(f"[models.{name}]: pick must be one of {', '.join(PICKS)}")
         picks[name] = value

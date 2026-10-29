@@ -92,11 +92,18 @@ class AutonomyTest(unittest.TestCase):
     def test_retry_moves_to_the_next_agent_after_a_failure(self):
         first = settings.ModelEntry("claude", "first")
         second = settings.ModelEntry("claude", "second")
-        db = SimpleNamespace(segments=lambda key: [SimpleNamespace(
-            stage="implement", outcome="failed", ended_at=NOW, runtime="claude", model="first", effort="")])
-        chosen = worker._model(db, KEY, "implement", {}, SimpleNamespace(model="default", effort=""),
-                               {"implement": (first, second)}, NOW.isoformat())
-        self.assertEqual(chosen, second)
+        import store
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            self.addCleanup(db.engine.dispose)
+            db.upsert_item(KEY, stage="implement")
+            db.record_segment(KEY, "implement", 1, NOW.isoformat(), NOW.isoformat(), "failed",
+                              runtime="claude", model="first")
+            chosen = worker._model(db, KEY, "implement", {}, SimpleNamespace(model="default", effort=""),
+                                   {"implement": (first, second)}, NOW.isoformat(), attempt=2)
+            self.assertEqual(chosen, second)
 
     def test_merge_approved_lists_all_legacy_modes_without_owner_approval(self):
         import merge_approved
