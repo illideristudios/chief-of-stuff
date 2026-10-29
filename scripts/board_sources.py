@@ -512,13 +512,28 @@ def change_states(home, numbers, gh, call) -> tuple[dict[str, ChangeState], str]
         owner, name = home.repo.split("/", 1)
         pulls = " ".join(f"n{n}: pullRequest(number: {n}) {{ number state baseRefName mergeCommit {{ oid }} }}"
                          for n in sorted(numbers))
-        code, out, err = gh(["api", "graphql", "-f", f"query=query {{ repository(owner: {json.dumps(owner)}, "
-                             f"name: {json.dumps(name)}) {{ {pulls} }} }}"])
-        try:
-            body = json.loads(out)
-            nodes = body["data"]["repository"] or {}
-        except (ValueError, KeyError, TypeError):
-            return {}, err.strip() or f"gh exited {code}"
+        if gh is backlog.run_gh:
+            import github_scan
+            try:
+                gate = github_scan.Admission(gh, GH_MAX_REQUESTS, GH_POINT_BUDGET, GH_RESERVE,
+                                             transport=_github_transport(home))
+                data = gate.read(f"r0: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ {pulls} }}")
+                nodes = data.get("r0")
+                if not isinstance(nodes, dict):
+                    return {}, "GitHub repository unavailable"
+                if gate.warning:
+                    return {}, gate.warning
+                body = {}
+            except Exception as exc:
+                return {}, str(exc) if isinstance(exc, github_scan.ReadError) else "GitHub transport unavailable"
+        else:
+            code, out, err = gh(["api", "graphql", "-f", f"query=query {{ repository(owner: {json.dumps(owner)}, "
+                                 f"name: {json.dumps(name)}) {{ {pulls} }} }}"])
+            try:
+                body = json.loads(out)
+                nodes = body["data"]["repository"] or {}
+            except (ValueError, KeyError, TypeError):
+                return {}, err.strip() or f"gh exited {code}"
         for p in filter(None, nodes.values()):
             ref = change_ref(home, p["number"])
             states[ref] = ChangeState(ref, p["state"].lower(), p.get("baseRefName") or "", (p.get("mergeCommit") or {}).get("oid") or "")
@@ -588,6 +603,16 @@ def _store_targets(db_path: Path, home: backlog.Backlog | backlog.GitHubBacklog)
     return wanted, changes
 
 
+def _github_transport(home):
+    """Coordinate board GraphQL attempts with participating local processes."""
+    import github_admission
+    import github_graphql_transport
+    host = backlog.home_of(home)[0]
+    policy = github_admission.Policy(60, GH_MAX_REQUESTS, GH_POINT_BUDGET, 20)
+    gate = github_admission.GitHubAdmission(None, host, policy)
+    return github_graphql_transport.GitHubGraphQL(gate, host)
+
+
 def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
     """What the tracker's tasks and `store.db` name, from the Backlog's forge: (issues, changes, errors), each side None
     when it failed, `errors` mapping a panel ("kanban", "merge requests") to its error."""
@@ -628,7 +653,9 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
             wanted.setdefault(home.repo, set()).update(changes)
         import github_scan
         pages = pages_dir(root, cfg, since.date().isoformat())
-        admission = github_scan.Admission(gh, GH_MAX_REQUESTS, GH_POINT_BUDGET, GH_RESERVE)
+        # The configured identity is github.com; GH_HOST cannot redirect this scan.
+        transport = _github_transport(home) if gh is backlog.run_gh else None
+        admission = github_scan.Admission(gh, GH_MAX_REQUESTS, GH_POINT_BUDGET, GH_RESERVE, transport=transport)
         issues, changes, errors, _ = github_scan.scan(
             pages / github_scan.CHECKPOINT, home, wanted, since, approver, every_open, admission,
             _SCAN_NOW.get() or datetime.now().astimezone(), sys.modules[__name__])
@@ -812,25 +839,27 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
             checkpoint = json.loads(checkpoint_path.read_text())
             named_at = _when(checkpoint.get('named_observed'))
             inventory_at = _when(checkpoint.get('observed'))
+            def complete(panel):
+                return errors.get(panel) in (None, github_scan.BUDGET_STALE, github_scan.BUDGET_UNAVAILABLE)
             named_old = bool(named_at and any(
-                panel not in errors and prev.fetched.get(panel) and named_at < prev.fetched[panel]
+                complete(panel) and prev.fetched.get(panel) and named_at < prev.fetched[panel]
                 for panel in ('kanban', 'merge requests')))
-            inventory_old = bool(inventory_at and 'merge requests' not in errors and
+            inventory_old = bool(inventory_at and complete('merge requests') and
                                  prev.fetched.get('merge requests') and inventory_at < prev.fetched['merge requests'])
             if named_old:
-                checkpoint.update(named={}, named_times={}, named_index=0, named_observed=None)
-                if 'kanban' not in errors and prev.fetched.get('kanban') and named_at < prev.fetched['kanban']:
+                checkpoint.update(named={}, named_times={}, named_order={}, named_index=0, named_observed=None)
+                if complete('kanban') and prev.fetched.get('kanban') and named_at < prev.fetched['kanban']:
                     issues, fetched['kanban'] = prev.issues, prev.fetched['kanban']
-                    errors['kanban'] = 'GitHub named observations older than cache; revalidating'
+                    errors['kanban'] = 'GitHub named observations older than cache; revalidating' + ('; ' + errors['kanban'] if errors.get('kanban') else '')
             if inventory_old:
                 github_scan._inventory_reset(checkpoint)
-            if (named_old or inventory_old) and 'merge requests' not in errors:
+            if (named_old or inventory_old) and complete('merge requests'):
                 changes, fetched['merge requests'] = prev.changes, prev.fetched['merge requests']
                 if 'github sweep' in prev.fetched:
                     fetched['github sweep'] = prev.fetched['github sweep']
                 else:
                     fetched.pop('github sweep', None)
-                errors['merge requests'] = 'GitHub observations older than cache; revalidating'
+                errors['merge requests'] = 'GitHub observations older than cache; revalidating' + ('; ' + errors['merge requests'] if errors.get('merge requests') else '')
             if named_old or inventory_old:
                 github_scan._save(checkpoint_path, checkpoint)
         except (OSError, ValueError, TypeError, AttributeError, KeyError):
@@ -843,13 +872,17 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
     got = Sources(fetched, issues, changes, found, errors, home)
     try:
         _write(pages / CACHE, got, now, generation)
-        if isinstance(cfg.backlog, backlog.GitHubBacklog) and not skip and not any(
-                key in errors for key in ("kanban", "merge requests")):
+        if isinstance(cfg.backlog, backlog.GitHubBacklog) and not skip:
             import github_scan
-            try:
-                (pages / github_scan.CHECKPOINT).unlink(missing_ok=True)
-            except OSError:
-                pass  # A completed checkpoint may be safely replayed after a crash.
+            # Budget uncertainty is a warning, not an incomplete scan. Discard
+            # a completed checkpoint so the next refresh makes fresh reads.
+            complete = all(errors.get(key) in (None, github_scan.BUDGET_STALE, github_scan.BUDGET_UNAVAILABLE)
+                           for key in ("kanban", "merge requests"))
+            if complete:
+                try:
+                    (pages / github_scan.CHECKPOINT).unlink(missing_ok=True)
+                except OSError:
+                    pass  # A completed checkpoint may be safely replayed after a crash.
     except OSError as e:
         got = replace(got, errors={**errors, "cache": str(e)})
     return got

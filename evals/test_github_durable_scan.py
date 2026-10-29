@@ -387,6 +387,55 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         self.assertEqual(errors, {})
         self.assertEqual(changes['#1001'].state, 'closed')
 
+    def test_newer_named_closed_pr_wins_over_checkpointed_open_detail(self):
+        self.gh = Forge(6)
+        self.wanted = {}
+        self.run_scan(budget=5)
+        state = json.loads(self.path.read_text())
+        self.assertIn('1001', state['details'])
+        self.gh.nodes[1001]['state'] = 'CLOSED'
+        self.gh.nodes[1001]['updatedAt'] = '2026-09-26T08:00:00Z'
+        original = self.gh
+        def named_pr(args):
+            if 'issueOrPullRequest' in args[-1]:
+                node = {**original.nodes[1001], '__typename': 'PullRequest'}
+                return 0, json.dumps({'data': {'r0': {'n1001': node},
+                    'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
+            return original(args)
+        self.gh = named_pr
+        self.wanted = {'o/app': {1001}}
+        _, changes, errors, _ = self.until_done()
+        self.assertEqual(errors, {})
+        self.assertEqual(changes['#1001'].state, 'closed')
+
+    def test_recurring_offset_shifts_advance_but_do_not_publish_incomplete_inventory(self):
+        self.gh = Forge(250)
+        self.wanted = {}
+        original = self.gh
+        shifts = 0
+        def shifting(args):
+            nonlocal shifts
+            result = original(args)
+            q = args[-1]
+            if 'states: [OPEN]' in q and 'after:' not in q:
+                shifts += 1
+                original.nodes[1000 - shifts] = {**gh_pr(1000 - shifts), 'updatedAt': UPDATED}
+            return result
+        self.gh = shifting
+        progress = []
+        for _ in range(12):
+            result = self.run_scan(budget=1)
+            state = json.loads(self.path.read_text())
+            progress.append((state['sweep'], len(state['details'])))
+            self.assertIsNone(result[1])
+            self.assertIn('merge requests', result[2])
+        self.assertTrue(any(sweep == 2 and details for sweep, details in progress))
+        self.assertTrue(json.loads(self.path.read_text())['shifted'])
+        self.gh = original
+        result = self.until_done()
+        self.assertEqual(result[2], {})
+        self.assertEqual(len(result[1]), len(original.nodes))
+
     def test_non_store_skips_irrelevant_open_inventory(self):
         self.gh = Forge(20050)
         self.gh.nodes[30001] = {**gh_pr(30001, NOW.isoformat(), 'MERGED'), 'updatedAt': NOW.isoformat()}

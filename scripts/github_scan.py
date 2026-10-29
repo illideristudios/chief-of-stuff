@@ -16,11 +16,13 @@ from pathlib import Path
 
 import backlog
 
-VERSION = 5
+VERSION = 6
 CHECKPOINT = '.github-scan.json'
 MAX_BYTES = 24 * 1024 * 1024
 MAX_ITEMS = 20000
 MAX_TARGETS = 5000
+BUDGET_STALE = 'GitHub shared budget is stale after an unknown outcome; coordination is best effort'
+BUDGET_UNAVAILABLE = 'GitHub shared budget status unavailable; coordination is best effort'
 INVENTORY_PAGE = 100
 ISSUE_FIELDS = frozenset(('number', 'url', 'title', 'state', 'body', 'labels', 'closedAt', 'milestone'))
 CHANGE_FIELDS = frozenset(('number', 'url', 'title', 'state', 'isDraft', 'mergedAt', 'baseRefName', 'body',
@@ -59,16 +61,32 @@ class ReadError(Exception):
 
 class Admission:
     """Per-refresh admission boundary; a shared ledger can supply the same interface."""
-    def __init__(self, gh, requests, points, reserve):
+    def __init__(self, gh, requests, points, reserve, *, transport=None):
         self.gh, self.requests, self.points, self.reserve = gh, requests, points, reserve
+        self.transport = transport
         self.calls = self.cost = 0
+        self.warning = None
 
     def read(self, selection):
         if self.calls >= self.requests or self.cost >= self.points:
             raise ReadError('GitHub refresh budget exhausted; scan will resume')
         self.calls += 1
-        code, out, err = self.gh(['api', 'graphql', '-f', 'query=query { ' + selection +
-                                  ' rateLimit { cost remaining limit } }'])
+        query = 'query { ' + selection + ' rateLimit { cost remaining limit } }'
+        if self.transport is None:
+            code, out, err = self.gh(['api', 'graphql', '-f', 'query=' + query])
+        else:
+            try:
+                result = self.transport.request(query)
+                if result.admission['stale']:
+                    self.warning = BUDGET_STALE
+                code, out, err = 0, json.dumps(result.body), ''
+            except Exception as exc:
+                # Transport and admission exceptions are sanitized; do not expose arbitrary errors.
+                import github_admission
+                import github_graphql_transport
+                if isinstance(exc, (github_admission.StateError, github_admission.BudgetExhausted, github_graphql_transport.TransportError)):
+                    raise ReadError(str(exc)) from None
+                raise ReadError('GitHub transport unavailable') from None
         try:
             body = json.loads(out)
             data = body['data']
@@ -84,6 +102,8 @@ class Admission:
             isinstance(e, dict) and e.get('type') == 'NOT_FOUND' and
             len(e.get('path') or ()) == 2 and str(e['path'][0]).startswith('r') and
             str(e['path'][1]).startswith('n'))]
+        if problems and self.transport is not None:
+            raise ReadError('GitHub GraphQL returned errors; scan will resume')
         if problems or (code and not body.get('errors')):
             raise ReadError(('; '.join(str(e.get('message', e)) for e in problems if isinstance(e, dict))
                              or err.strip() or f'gh exited {code}')[:500])
@@ -127,7 +147,7 @@ def _timestamp(value):
 def _inventory_reset(state):
     state.update(sweep=0, phase='open', cursor='', cursors=[], page_numbers=[], last_updated=None,
                  inventory=[], first=[], details={}, selected=[], observed=None,
-                 merged_observed=None, merged_only=False, seed_details={})
+                 merged_observed=None, merged_only=False, seed_details={}, detail_order={}, seed_order={}, shifted=False)
 
 
 def _refresh_merged(state):
@@ -136,7 +156,7 @@ def _refresh_merged(state):
     # their inventory fields still match.
     candidates = [p for p in state['selected'] if p['state'] == 'OPEN']
     state.update(sweep=0, phase='merged', cursor='', cursors=[], page_numbers=[], last_updated=None,
-                 first=[], inventory=candidates, selected=[], seed_details=state['details'], details={},
+                 first=[], inventory=candidates, selected=[], seed_details=state['details'], seed_order=state['detail_order'], details={}, detail_order={}, shifted=False,
                  merged_observed=None, merged_only=True)
 
 
@@ -157,7 +177,7 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
         if not isinstance(state, dict) or state.get('fingerprint') != fingerprint:
             raise ValueError('different scan')
         # A malformed or old checkpoint must never be interpreted as complete.
-        for key in ('named_index', 'named', 'sweep', 'cursor', 'cursors', 'inventory', 'first', 'details', 'selected', 'observed', 'named_observed', 'named_times', 'phase', 'turn', 'home_verified', 'since', 'merged_observed', 'merged_only', 'seed_details', 'page_numbers', 'last_updated'):
+        for key in ('named_index', 'named', 'sweep', 'cursor', 'cursors', 'inventory', 'first', 'details', 'selected', 'observed', 'named_observed', 'named_times', 'phase', 'turn', 'home_verified', 'since', 'merged_observed', 'merged_only', 'seed_details', 'page_numbers', 'last_updated', 'detail_order', 'seed_order', 'named_order', 'sequence', 'shifted'):
             if key not in state:
                 raise ValueError('incomplete checkpoint')
         index = state['named_index']
@@ -169,7 +189,10 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
             not isinstance(state['cursors'], list) or not all(isinstance(c, str) for c in state['cursors']) or
             not all(isinstance(state[k], list) and len(state[k]) <= MAX_ITEMS for k in ('inventory', 'first', 'selected')) or
             not isinstance(state['details'], dict) or not isinstance(state['seed_details'], dict) or
-            type(state['merged_only']) is not bool or not isinstance(state['page_numbers'], list) or
+            type(state['merged_only']) is not bool or type(state['shifted']) is not bool or
+            type(state['sequence']) is not int or state['sequence'] < 0 or
+            any(not isinstance(state[k], dict) or any(type(v) is not int or not 0 < v <= state['sequence'] for v in state[k].values()) for k in ('named_order', 'detail_order', 'seed_order')) or
+            set(state['named_order']) != set(state['named']) or set(state['detail_order']) != set(state['details']) or set(state['seed_order']) != set(state['seed_details']) or not isinstance(state['page_numbers'], list) or
             len(state['page_numbers']) > MAX_ITEMS or any(type(n) is not int for n in state['page_numbers'])):
             raise ValueError('invalid checkpoint')
         for key in ('inventory', 'first', 'selected'):
@@ -217,9 +240,13 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                 raise ValueError('invalid retained detail')
             _timestamp(node.get('updatedAt'))
     except (OSError, ValueError, TypeError, AttributeError):
-        state = {'fingerprint': fingerprint, 'named_index': 0, 'named': {}, 'named_times': {}, 'turn': 'named', 'home_verified': False, 'named_observed': None, 'since': since.isoformat()}
+        state = {'fingerprint': fingerprint, 'named_index': 0, 'named': {}, 'named_times': {}, 'named_order': {}, 'sequence': 0, 'turn': 'named', 'home_verified': False, 'named_observed': None, 'since': since.isoformat()}
         _inventory_reset(state)
 
+    # A shifted sweep can never establish completeness. Keep its progress until
+    # finished, then retry on the next refresh while retaining named observations.
+    if state['shifted'] and state['sweep'] == 2 and len(state['details']) == len(state['selected']):
+        _inventory_reset(state)
     old_since = _timestamp(state['since'])
     if since < old_since:
         # Earlier cutoffs require history that may not have been retained.
@@ -235,6 +262,7 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
     keys = {f'{repo}#{n}' for repo, n in targets}
     state['named'] = {k: v for k, v in state['named'].items() if k in keys}
     state['named_times'] = {k: v for k, v in state['named_times'].items() if k in keys}
+    state['named_order'] = {k: v for k, v in state['named_order'].items() if k in keys}
     pending = [target for target in targets if f'{target[0]}#{target[1]}' not in state['named']]
     state['named_index'] = len(targets) - len(pending)
     state['named_observed'] = min(state['named_times'].values(), key=datetime.fromisoformat, default=None)
@@ -271,7 +299,9 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                             bs.Milestone(m['title'], m['url'], bs._due(m.get('dueOn')), m['state'].lower(), int((m.get('issues') or {}).get('totalCount') or 0))
                 except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
                     raise ReadError(f'GitHub named item incomplete: {exc}')
+        state['sequence'] += 1
         for n in batch:
+            state['named_order'][f'{repo}#{n}'] = state['sequence']
             state['named'][f'{repo}#{n}'] = nodes[f'n{n}']
             state['named_times'][f'{repo}#{n}'] = now.isoformat()
         del pending[:len(batch)]
@@ -316,9 +346,10 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                     checkpoint()
                     raise ReadError('GitHub inventory returned an invalid timestamp; retrying sweep')
                 if node['number'] in prior:
-                    _inventory_reset(state)
-                    checkpoint()
-                    raise ReadError('GitHub inventory pagination repeated an item; retrying sweep')
+                    # Keep the cursor and accumulated evidence, but never publish
+                    # this sweep as complete: a shift can also have skipped items.
+                    state['shifted'] = True
+                    continue
                 if state['phase'] == 'merged' and state['last_updated'] is not None and _timestamp(node['updatedAt']) > _timestamp(state['last_updated']):
                     _inventory_reset(state)
                     checkpoint()
@@ -390,7 +421,8 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                         if str(p['number']) in state['seed_details'] and
                         all(state['seed_details'][str(p['number'])].get(k) == p[k]
                             for k in ('state', 'updatedAt', 'mergedAt'))}
-            state.update(sweep=2, selected=selected, details=retained, seed_details={}, first=[], inventory=[],
+            retained_order = {n: state['seed_order'][n] for n in retained}
+            state.update(sweep=2, selected=selected, details=retained, detail_order=retained_order, seed_details={}, seed_order={}, first=[], inventory=[],
                          cursor='', cursors=[], page_numbers=[], last_updated=None, since=since.isoformat())
             return
         remaining = [p for p in state['selected'] if str(p['number']) not in state['details']]
@@ -410,8 +442,10 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                 bs._gh_change(f'#{p["number"]}', node, approver, home.repo)
             except (ValueError, KeyError, TypeError, AttributeError, IndexError) as exc:
                 raise ReadError(f'GitHub pull request detail incomplete: {exc}')
+        state['sequence'] += 1
         for p in batch:
             node = nodes[f'n{p["number"]}']
+            state['detail_order'][str(p['number'])] = state['sequence']
             # Revalidate each changed item in place; a closed PR no longer
             # contributes to the open inventory. Preserve completed siblings.
             p.update({k: node[k] for k in ('state', 'updatedAt', 'mergedAt')})
@@ -462,8 +496,17 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
     errors = {}
     if not named_done:
         errors['kanban'] = error or 'GitHub named scan in progress'
-    if not named_done or not inventory_done:
-        errors['merge requests'] = error or 'GitHub inventory scan in progress'
+    if not named_done or not inventory_done or state['shifted']:
+        errors['merge requests'] = error or ('GitHub inventory pagination shifted; incomplete scan will retry' if state['shifted'] else 'GitHub inventory scan in progress')
+    if getattr(admission, "transport", None) is not None:
+        try:
+            if admission.transport.status()['stale']:
+                admission.warning = BUDGET_STALE
+        except Exception:
+            admission.warning = BUDGET_UNAVAILABLE
+        if admission.warning:
+            for panel in ('kanban', 'merge requests'):
+                errors[panel] = (errors[panel] + '; ' if panel in errors else '') + admission.warning
     if not named_done:
         return None, None, errors, None
     try:
@@ -482,10 +525,14 @@ def scan(path: Path, home, wanted, since, approver, every_open, admission, now, 
                                        node.get('body') or '', bs._when(node.get('closedAt')),
                                        bs.Milestone(m['title'], m['url'], bs._due(m.get('dueOn')), m['state'].lower(),
                                                     int((m.get('issues') or {}).get('totalCount') or 0)) if m else None)
-        if not inventory_done:
+        if not inventory_done or state['shifted']:
             return issues, None, errors, None
+        home_named = {target.casefold(): target for target in state['named']}
         for node in state['details'].values():
             key = f'#{node["number"]}'
+            named_key = home_named.get(f'{home.repo}#{node["number"]}'.casefold())
+            if named_key and state['named_order'][named_key] > state['detail_order'][str(node['number'])]:
+                continue
             if key not in changes and (node['state'] == 'CLOSED' or
                 (not every_open and node['state'] == 'MERGED' and _timestamp(node['mergedAt']) < since)):
                 continue
