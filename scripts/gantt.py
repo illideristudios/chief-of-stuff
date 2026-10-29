@@ -92,11 +92,15 @@ def ticks(start: datetime, end: datetime, step: timedelta | None = None, fmt: st
 _ticks = ticks  # `render` takes a `ticks` argument of its own
 
 
-def _bar(g: Segment, win: Window) -> str:
+def _segment_label(g: Segment, win: Window) -> str:
     def clock(at: datetime) -> str:
         return at.strftime("%a %H:%M" if win.end - win.start > DAY or at.date() != win.now.date() else "%H:%M")
 
-    label = _esc(" · ".join(p for p in (f"{g.category} {clock(g.start)}–{clock(g.end)}", g.title, "needs input" if g.kind == "hold" else g.kind) if p))
+    return " · ".join(p for p in (f"{g.category} {clock(g.start)}–{clock(g.end)}", g.title, "needs input" if g.kind == "hold" else g.kind) if p)
+
+
+def _bar(g: Segment, win: Window) -> str:
+    label = _esc(_segment_label(g, win))
     return (f'<span class="gantt-bar gantt-{_kind(g.kind)}" data-cat="{_esc(g.category)}" role="img" '
             f'aria-label="{label}" title="{label}" style="{place(g.start, g.end, win.start, win.end)}"></span>')
 
@@ -126,7 +130,18 @@ def render(rows: list[Row], win: Window, ticks: list[tuple[datetime, str]] | Non
         out.append(f'<div class="gantt-row"><span class="gantt-label">{ref}{name}</span>'
                    f'<span class="gantt-track">{segs}</span>'
                    f'<span class="gantt-note">{_esc(r.note)}</span></div>')
-    out.append("</div></figure>")
+    out.append('</div><details class="gantt-details"><summary>Show segment details</summary><dl>')
+    for r in rows:
+        visible = [g for g in r.segments if g.end > win.start and g.start < win.end]
+        out.append(f'<dt>{_esc(r.label)}</dt><dd>')
+        if r.note:
+            out.append(f'<p>{_esc(r.note)}</p>')
+        if visible:
+            out.append('<ul>' + ''.join(f'<li>{_esc(_segment_label(g, win))}</li>' for g in visible) + '</ul>')
+        else:
+            out.append('<p>No segments in this window.</p>')
+        out.append('</dd>')
+    out.append("</dl></details></figure>")
     return "\n".join(out)
 
 
@@ -155,6 +170,7 @@ BASE_CSS = """\
 .gantt-ref{font:11px ui-monospace,monospace;color:var(--gantt-muted)}
 .gantt-name{font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
 .gantt a:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
+.gantt summary:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
 .gantt-track{position:relative;flex-grow:1;height:14px;border-left:1px solid var(--gantt-edge)}
 .gantt-note{width:var(--gantt-note);flex:none;padding-left:10px;box-sizing:border-box;font-size:11px;color:var(--gantt-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gantt-bar{--c:var(--gantt-muted);--e:var(--c);position:absolute;top:0;height:14px;border-radius:2px;box-sizing:border-box}
@@ -162,6 +178,13 @@ BASE_CSS = """\
 .gantt-bar.gantt-forecast{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--c) 40%,transparent) 0 3px,transparent 3px 6px);box-shadow:inset 0 0 0 1px var(--c)}
 .gantt-bar.gantt-hold{background:repeating-linear-gradient(135deg,var(--gantt-hold) 0 2px,var(--gantt-bg) 2px 5px);box-shadow:inset 0 0 0 1px var(--gantt-hold)}
 .gantt-bar.gantt-failed{background:var(--gantt-bg);box-shadow:inset 0 0 0 2px var(--gantt-hold)}
+.gantt-details{margin-top:8px;border-top:1px solid var(--gantt-rule);padding-top:6px;font-size:12px;overflow-wrap:anywhere}
+.gantt-details summary{cursor:pointer;color:var(--gantt-muted);width:fit-content}
+.gantt-details dl{margin:8px 0}
+.gantt-details dt{font-weight:600;margin-top:8px}
+.gantt-details dd{margin:2px 0 0}
+.gantt-details p{margin:2px 0;color:var(--gantt-muted)}
+.gantt-details ul{margin:2px 0;padding-left:20px}
 .gantt-legend{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:11px;color:var(--gantt-muted)}
 .gantt-key{display:inline-flex;align-items:center;gap:5px}
 .gantt-legend .gantt-bar{position:static;width:18px;height:10px}

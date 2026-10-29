@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from html import unescape
 from html.parser import HTMLParser
 import re
 import sys
@@ -261,7 +262,7 @@ class Accessibility(unittest.TestCase):
         legend_html = gantt.legend()
         self.assertNotIn("tabindex", html)
         self.assertNotIn("tabindex", legend_html)
-        self.assertEqual(inspect_a11y(html).tab_stops, [])
+        self.assertEqual([(tag, text) for tag, _, text in inspect_a11y(html).tab_stops], [("summary", "Show segment details")])
         self.assertEqual(inspect_a11y(legend_html).tab_stops, [])
 
     def test_tab_stops_match_actual_links_and_do_not_grow_with_attempts(self) -> None:
@@ -285,10 +286,12 @@ class Accessibility(unittest.TestCase):
         self.assertEqual([(tag, attrs.get("href"), text) for tag, attrs, text in stops_one], [
             ("a", "/issues/98", "#98"),
             ("a", "/issues/109", "#109"),
+            ("summary", None, "Show segment details"),
         ])
         self.assertEqual([(tag, attrs.get("href"), text) for tag, attrs, text in stops_many], [
             ("a", "/issues/98", "#98"),
             ("a", "/issues/109", "#109"),
+            ("summary", None, "Show segment details"),
         ])
 
     def test_a_linked_row_without_a_ref_links_its_name_so_every_tab_stop_is_named(self) -> None:
@@ -296,7 +299,34 @@ class Accessibility(unittest.TestCase):
         stops = inspect_a11y(html).tab_stops
         self.assertEqual([(tag, attrs.get("href"), text) for tag, attrs, text in stops], [
             ("a", "/tasks/locale", "Locale fallback"),
+            ("summary", None, "Show segment details"),
         ])
+
+    def test_disclosure_groups_visible_segments_by_row_with_full_details(self) -> None:
+        html = gantt.render([
+            row(seg(-9, -7, title="outside"), seg(-9, -3, "fix", "failed", 'worker <one>'),
+                seg(0, 1, "triage", "hold", "Robin"), ref="#105", name="Audit & review", note="waiting"),
+            row(seg(18, 20, title="outside too"), ref="#106", name="Empty"),
+        ], DAY)
+        details = re.search(r'<details class="gantt-details">(.*?)</details>', html, re.S).group(1)
+        self.assertIn('<summary>Show segment details</summary>', details)
+        self.assertIn('<dt>#105 Audit &amp; review</dt>', details)
+        self.assertIn('<p>waiting</p>', details)
+        self.assertIn('<li>fix Fri 17:10–Fri 23:10 · worker &lt;one&gt; · failed</li>', details)
+        self.assertIn('<li>triage 02:10–03:10 · Robin · needs input</li>', details)
+        self.assertIn('<dt>#106 Empty</dt>', details)
+        self.assertIn('No segments in this window', details)
+        self.assertNotIn('outside', details)
+        self.assertNotIn('tabindex', details)
+        labels = [unescape(label) for label in re.findall(r'<span class="gantt-bar[^"]*"[^>]*aria-label="([^"]*)"', html)]
+        items = [unescape(item) for item in re.findall(r'<li>(.*?)</li>', details)]
+        self.assertEqual(items, labels)
+
+    def test_disclosure_text_can_wrap_and_summary_has_visible_focus(self) -> None:
+        sheet = gantt.css()
+        self.assertIn('.gantt-details', sheet)
+        self.assertIn('overflow-wrap:anywhere', sheet)
+        self.assertIn('.gantt summary:focus-visible', sheet)
 
     def test_css_styles_focus_on_interactive_links_not_non_interactive_bars(self) -> None:
         sheet = gantt.css()
@@ -390,7 +420,8 @@ class Accessibility(unittest.TestCase):
         flow_many = inspect_a11y(board_many[board_many.index("<h2>Flow \u00b7"):])
         self.assertEqual(
             [(tag, attrs.get("href"), text) for tag, attrs, text in flow_base.tab_stops],
-            [("a", "/issues/98", "#98"), ("a", "/issues/109", "#109"), ("a", "/issues/111", "#111")] * 2,
+            [("a", "/issues/98", "#98"), ("a", "/issues/109", "#109"), ("a", "/issues/111", "#111"),
+             ("summary", None, "Show segment details")] * 2,
         )
         self.assertEqual(flow_many.tab_stops, flow_base.tab_stops)
         self.assertGreater(len(flow_many.labelled), len(flow_base.labelled) + 30)
