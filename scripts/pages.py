@@ -44,7 +44,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from stat import S_ISREG
 from html import escape
@@ -137,6 +137,15 @@ def today_board(root: Path) -> str | None:
     return f"{day}-board.html" if (root / cfg.tracker_path(day)).is_file() or (root / "store.db").is_file() else None
 
 
+def board_name(root: Path, pages_dir: Path) -> str | None:
+    """The board `/` serves: today's if available, otherwise the latest rendered board."""
+    name = today_board(root)
+    if name is not None:
+        return name
+    boards = sorted(pages_dir.glob("*-board.html"))
+    return boards[-1].name if boards else None
+
+
 def workspace_label(root: Path) -> str:
     """The name a served page carries: the Backlog repository or project the workspace's config names, else the root
     folder's name marked as such (no Backlog line, or a config that does not read) so it is not taken for a project."""
@@ -191,7 +200,7 @@ def _navigation(root: Path, pages_dir: Path, data):
 
 
 def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
-    """Coordinator lead counts from today's tracker, or the latest available tracker.
+    """Coordinator lead counts from the tracker behind the board served at `/`.
 
     No tracker or settings: every count is unavailable.
 
@@ -207,13 +216,20 @@ def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
     except (ConfigError, OSError):
         return {}
     now = datetime.now(cfg.zone).replace(second=0, microsecond=0)
-    tracker_day = now.date()
-    tracker = root / cfg.tracker_path(tracker_day.isoformat())
     trackers = daily_trackers(root, cfg)
-    if not tracker.is_file():
-        if not trackers:
+    name = board_name(root, pages_dir)
+    if name is not None:
+        try:
+            tracker_day = date.fromisoformat(name[:10])
+        except ValueError:
             return {}
+        tracker = root / cfg.tracker_path(tracker_day.isoformat())
+        if not tracker.is_file():
+            return {}
+    elif trackers:
         tracker_day, tracker = trackers[-1]
+    else:
+        return {}
     tracker_text = tracker.read_text()
     cfg = with_workspace_decision_deadlines(root, cfg, tracker_text, tracker_day)
     try:
@@ -330,7 +346,12 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
         with page_lock(key):  # checked under the lock: a request that waited finds the page already rendered
+            board = board_name(root, pages_dir) if not name.endswith("-board.html") else None
+            if name == "decisions.html" and board:
+                day = board[:10]
             sources = [*_sources(root, cfg, pages_dir, day), pages_dir / LOOKED_BEFORE, fragment.THEME_PATH]
+            if board:
+                sources.append(pages_dir / board)
             newest = max(RENDERER_MTIME_NS, max((p.stat().st_mtime_ns for p in sources if p.is_file()), default=0))
             mtime = target.stat().st_mtime_ns if target.is_file() else 0
             digest = _digest(sources)
@@ -364,7 +385,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                     else:
                         issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
                 else:
-                    render_board.write(root, day, db=data)
+                    render_board.write(root, day, db=data, target="decisions" if name == "decisions.html" else "board")
             RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
         return ""
     except Exception as e:  # any renderer failure: the server keeps serving the last good page
@@ -462,7 +483,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             name = None
             if root is not None:
                 try:
-                    name = today_board(root)
+                    name = board_name(root, Path(self.directory))
                 except Exception:  # an unreadable CLAUDE.md: fall back to the newest board on disk
                     pass
             boards = sorted(Path(self.directory).glob("*-board.html"))

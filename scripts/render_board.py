@@ -495,9 +495,12 @@ figure{{margin:0;padding:0;background:none;border:0}}
 # --- cli -----------------------------------------------------------------------------------------
 
 
-def write(root: Path, day: str | None = None, *, now: datetime | None = None, db: PageData | None = None) -> tuple[Path, Config, datetime, str, dict]:
-    """Write `<day>-board.html` and `decisions.html` into the pages dir. The page server calls this in
-    process; a missing CLAUDE.md, tracker or setting raises ConfigError."""
+def write(root: Path, day: str | None = None, *, now: datetime | None = None, db: PageData | None = None,
+          target: str = "all") -> tuple[Path, Config, datetime, str, dict]:
+    """Write the board and decisions, or only the requested server page under its own lock.
+
+    A missing CLAUDE.md, tracker or setting raises ConfigError.
+    """
     if not (root / "CLAUDE.md").is_file():
         raise ConfigError(f"no CLAUDE.md at {root}")
     cfg = read_config(root)
@@ -555,7 +558,14 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
                                 decision_page.held_refs(pending_preview, ctx), looked,
                                 [*look_log, *stage_log], settings.workers.max_concurrency or 1,
                                 tracker_day=tracker_day)
-    pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
+    if target == "all":
+        pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
+    else:
+        pending = decision_page.entries(out.parent, ctx)
+        if target == "decisions":
+            html, pending = decision_page.index(out.parent, ctx, day, pending, db=db, navigation=navigation)
+            write_if_changed(out.parent / "decisions.html", html)
+            return out, cfg, now, tracker_text, req_texts
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
                   sources=sources,

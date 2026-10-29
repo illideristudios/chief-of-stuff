@@ -660,6 +660,7 @@ class RenderOnRequestTest(unittest.TestCase):
         self.assertIn(b"Security audit", get(self.port, "/").body)
         self.tracker.write_text(TRACKER.format(day=self.day, task="Draft release notes"))
         self.assertIn(b"Draft release notes", get(self.port, "/").body)
+        self.assertEqual(get(self.port, "/decisions").status, 200)
         self.assertTrue((self.pages / "decisions.html").is_file())
 
     def test_decisions_route_lists_store_decisions_and_matches_board_badge(self):
@@ -971,6 +972,73 @@ class LastLookedTest(unittest.TestCase):
                 self.assertEqual(response.status, 200)
                 self.assertNotIn(b"went needs input since", response.body)
 
+
+    def test_direct_routes_use_the_tracker_of_the_board_served_at_root(self):
+        from datetime import timedelta
+        import render_board
+        today = datetime.fromisoformat(self.day).date()
+        older = (today - timedelta(days=2)).isoformat()
+        newer = (today - timedelta(days=1)).isoformat()
+        self.tracker.unlink()
+        (self.root / "daily" / f"{older}-tracker.md").write_text(ISSUE_TRACKER.format(day=older, task="Security audit") + "\n- 10:00 one-shot audit: HUMAN REVIEW NEEDED\n")
+        (self.root / "daily" / f"{newer}-tracker.md").write_text(TRACKER.format(day=newer, task="Other task"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        render_board.write(self.root, older)
+        for page in ("decisions.html", "decision-cache-ttl.html"):
+            (self.pages / page).unlink()
+        nav = re.compile(r'<nav class="tabs"[^>]*>.*?</nav>')
+        board_nav = nav.search(get(self.port, "/").body.decode()).group()
+        self.assertIn('title="1 need input">1', board_nav)
+        for route in ("/decisions", "/decisions/cache-ttl", "/workers", "/issues/7", "/issues/7/source"):
+            with self.subTest(route=route):
+                response = get(self.port, route)
+                self.assertEqual(response.status, 200)
+                self.assertIn('title="1 need input">1', nav.search(response.body.decode()).group())
+        render_board.write(self.root, newer, target="board")
+        self.assertNotIn('title="1 need input">1', nav.search(get(self.port, "/").body.decode()).group())
+        for route in ("/decisions", "/decisions/cache-ttl", "/workers", "/issues/7", "/issues/7/source"):
+            with self.subTest(route=route, board="newer"):
+                self.assertNotIn('title="1 need input">1', nav.search(get(self.port, route).body.decode()).group())
+
+    def test_concurrent_board_render_cannot_overwrite_a_fresh_decision_badge(self):
+        import render_board
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        entered, resume = threading.Event(), threading.Event()
+        original = render_board.tab_counts
+        calls = []
+
+        def paused(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if threading.current_thread().name == "paused-board" and not calls:
+                calls.append(True)
+                entered.set()
+                if not resume.wait(10):
+                    raise TimeoutError("board render did not resume")
+            return result
+
+        result = []
+        def render_board_request():
+            result.append(pg.fresh(self.root, self.pages, f"{self.day}-board.html"))
+        with mock.patch.object(render_board, "tab_counts", paused):
+            thread = threading.Thread(target=render_board_request, name="paused-board")
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                marker.write_text(datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+                self.assertNotIn(b"went needs input since", get(self.port, "/decisions/cache-ttl").body)
+                self.assertNotIn(b"went needs input since", get(self.port, "/decisions").body)
+            finally:
+                resume.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result, [""])
+        for route in ("/decisions/cache-ttl", "/decisions"):
+            with self.subTest(route=route):
+                body = get(self.port, route).body.decode()
+                self.assertNotIn("went needs input since", body[body.index('<nav class="tabs"'):body.index('</nav>')])
 
     def test_a_changed_look_refreshes_an_authored_decision_without_a_board_render(self):
         self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
