@@ -5,7 +5,7 @@ them, who the workers are and whether a stage holds. The board and the task page
 
 from __future__ import annotations
 
-from collections.abc import Container, Mapping
+from collections.abc import Container, Iterable, Mapping
 from datetime import date, datetime, time
 from dataclasses import dataclass
 from typing import Any
@@ -29,11 +29,29 @@ def source_key(key: str, home) -> str:
     namespace, sep, number = key.rpartition("#")
     if sep and number.isdecimal():
         if namespace.startswith("github:"):
-            return issue_key(f"https://github.com/{namespace[len("github:"):]}/issues/{number}", home)
+            return issue_key(f"https://github.com/{namespace[len('github:'):]}/issues/{number}", home)
         if namespace.startswith("gitlab:"):
             host, _, project = namespace[len("gitlab:"):].partition("/")
             return issue_key(f"https://{host}/{project}/-/issues/{number}", home)
+        if namespace and ":" not in namespace and namespace.count("/") >= 2:
+            if home is not None and hasattr(home, "host") and hasattr(home, "project"):
+                host = home.host.split("://", 1)[-1].split("/", 1)[0]
+                return f"#{number}" if namespace == home.project else f"{host}/{namespace}#{number}"
+            return key.strip()
     return issue_key(key, home)
+
+
+def lookup_keys(refs: Iterable[str], home) -> tuple[str, ...]:
+    """Cache lookup keys for `refs` under `home`, preserving namespace so cross-repo tasks never match bare `#N`."""
+    out: list[str] = []
+    for raw in refs:
+        text = raw.strip()
+        if not text or text == tracker.WORKFLOW:
+            continue
+        for candidate in (text, source_key(text, home)):
+            if candidate and candidate not in out:
+                out.append(candidate)
+    return tuple(out)
 
 
 def hold_cause(task: Task, kanban: Kanban | None, stage: str | None, *, workers: set[str], pending_refs: Container[str],
@@ -94,8 +112,8 @@ def live_worker_keys(sources: board_sources.Sources, segments) -> set[str | tupl
 
 def task_changes(task: Task, sources: board_sources.Sources) -> tuple[board_sources.Change, ...]:
     """The changes naming the task's issue: the open ones, or else the merged ones."""
-    key = source_key(task.issue, sources.home) if task.issue.strip() else None
-    named = [c for c in sources.changes.values() if key and (key in c.issues or task.issue in c.issues) and c.state != "closed"]
+    keys = set(lookup_keys((task.issue,), sources.home))
+    named = [c for c in sources.changes.values() if keys and (keys & set(c.issues)) and c.state != "closed"]
     return tuple(c for c in named if c.state == "open") or tuple(named)
 
 

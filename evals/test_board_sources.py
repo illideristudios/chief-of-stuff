@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import tempfile
 import time
@@ -71,8 +72,8 @@ def gh_pr(number, merged_at=None, state="OPEN"):
             "title": f"PR {number}", "state": state, "isDraft": False, "mergedAt": merged_at,
             "baseRefName": "main", "body": "Closes #118", "headRefOid": HEAD, "reviewDecision": "APPROVED",
             "files": {"nodes": [{"path": "src/a.py"}]},
-            "latestReviews": {"nodes": [{"author": {"login": "robin"}, "state": "APPROVED",
-                                         "submittedAt": "2026-09-26T06:00:00Z", "commit": {"oid": HEAD}}]},
+            "latestReviews": {"nodes": [{"author": {"login": "robin"}}, {"author": {"login": "robin"}, "state": "APPROVED",
+                                         "submittedAt": "2026-09-26T06:00:00Z", "commit": {"oid": HEAD}}][1:]},
             "commits": {"nodes": [{"commit": {"statusCheckRollup": {"contexts": {"nodes": [
                 {"__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS"}]}}}}]}}
 
@@ -1220,6 +1221,174 @@ class IssueKeyTest(unittest.TestCase):
 
     def test_a_short_ref_with_no_project_keeps_its_short_key(self):
         self.assertEqual(issue_key("#8"), "#8")  # the Backlog's own project: how the sources file has always keyed it
+
+
+class StoreWorkspaceSourcesTest(unittest.TestCase):
+    """#996: store-backed workspaces fetch their store issues, recorded and historical merged change requests,
+    linked closing issues (Development links and full URLs), and verified live branch URLs."""
+
+    def make_store(self, root: Path):
+        from store import Store, migrate
+
+        (root / "daily" / f"{DAY}-tracker.md").write_text("")
+        migrate(root / "store.db")
+        db = Store(root / "store.db")
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        return db
+
+    def test_github_store_fetches_store_issues_recorded_merges_closing_refs_and_branches(self):
+        root = workspace("GitHub issues; repo o/app")
+        db = self.make_store(root)
+        db.upsert_item("github:o/app#92", title="Open store task", stage="review")
+        db.upsert_item("github:o/app#5", title="Merged days ago", stage="merge", forge_state="closed")
+        db.set_resume("github:o/app#5", {"merges": [{"request": 33, "commit": MERGE}]})
+        db.upsert_item("github:o/app#6", title="Merged yesterday without resume", stage="merge", forge_state="closed")
+        db.upsert_item("github:acme/other#7", title="Cross-repo GitHub task", stage="implement")
+        db.upsert_item("gitlab:labs.example.test/team/app#8", title="Foreign forge task", stage="implement")
+
+        open_pr = {
+            **gh_pr(140, state="OPEN"),
+            "body": "Linked through GitHub Development sidebar only.",
+            "headRefName": "feat/upload-limit",
+            "headRef": {"name": "feat/upload-limit"},
+            "headRepository": {"url": "https://github.com/o/app"},
+            "closingIssuesReferences": {"nodes": [{"number": 92, "repository": {"name": "app", "owner": {"login": "o"}}}]},
+        }
+        recorded_merged = {
+            **gh_pr(33, merged_at="2026-09-20T18:00:00Z", state="MERGED"),
+            "body": "Closes https://github.com/o/app/issues/5",
+            "headRefName": "feat/deleted-five",
+            "headRef": None,  # deleted after merge: must never fabricate a /tree/ URL
+            "headRepository": {"url": "https://github.com/o/app"},
+        }
+        recent_merged = {
+            **gh_pr(34, merged_at="2026-09-25T15:00:00Z", state="MERGED"),
+            "body": "Fixes #6",
+            "headRefName": "feat/fork#6",
+            "headRef": {"name": "feat/fork#6"},
+            "headRepository": {"url": "https://github.com/forker/app"},
+        }
+        queries = []
+
+        def gh(args, input_text=None):
+            query = args[args.index("-f") + 1]
+            queries.append(query)
+            # Repos sorted alphabetically: r0 is acme/other, r1 is o/app.
+            data = {
+                "r0": {"n7": {**gh_issue(7), "url": "https://github.com/acme/other/issues/7"}},
+                "r1": {
+                    "n92": gh_issue(92),
+                    "n5": {**gh_issue(5, ()), "state": "CLOSED", "closedAt": "2026-09-20T18:00:00Z"},
+                    "n6": {**gh_issue(6, ()), "state": "CLOSED", "closedAt": "2026-09-25T15:00:00Z"},
+                    "n33": recorded_merged,
+                },
+                "merged": {"nodes": [recent_merged]},
+                "open": {"nodes": [open_pr]},
+            }
+            return 0, json.dumps({"data": data}), ""
+
+        got = bs.refresh(root, NOW, gh=gh)
+        self.assertEqual(got.errors, {})
+        self.assertEqual(len(queries), 1)
+        self.assertNotIn("team/app", queries[0])
+        self.assertNotIn("n8:", queries[0])
+        self.assertEqual(bs.load(root / "pages"), got)
+
+        self.assertEqual(got.issues["#92"].url, "https://github.com/o/app/issues/92")
+        self.assertEqual(got.issues["#5"].state, "closed")
+        self.assertEqual(got.issues["acme/other#7"].url, "https://github.com/acme/other/issues/7")
+
+        self.assertEqual(got.changes["#140"].issues, ("#92",))
+        self.assertEqual(got.changes["#140"].branch, "feat/upload-limit")
+        self.assertEqual(got.changes["#140"].branch_url, "https://github.com/o/app/tree/feat/upload-limit")
+
+        self.assertEqual(got.changes["#33"].issues, ("#5",))
+        self.assertEqual(got.changes["#33"].branch, "feat/deleted-five")
+        self.assertEqual(got.changes["#33"].branch_url, "")
+
+        self.assertEqual(got.changes["#34"].issues, ("#6",))
+        self.assertEqual(got.changes["#34"].branch, "feat/fork#6")
+        self.assertEqual(got.changes["#34"].branch_url, "https://github.com/forker/app/tree/feat/fork%236")
+
+    def test_gitlab_store_fetches_store_issues_recorded_merges_closing_forms_and_branches(self):
+        root = workspace("GitLab issues; host https://labs.example.test; project team/app")
+        db = self.make_store(root)
+        db.upsert_item("gitlab:labs.example.test/team/app#92", title="Open GitLab task", stage="review")
+        db.upsert_item("gitlab:labs.example.test/team/app#5", title="Merged days ago", stage="merge", forge_state="closed")
+        db.set_resume("gitlab:labs.example.test/team/app#5", {"merges": [{"request": 12, "commit": MERGE}]})
+        db.upsert_item("gitlab:labs.example.test/team/app#6", title="Merged yesterday", stage="merge", forge_state="closed")
+        db.upsert_item("gitlab:other.example.org/team/app#99", title="Other GitLab host", stage="implement")
+        db.set_resume("gitlab:other.example.org/team/app#99", {"merges": [{"request": 999}]})
+
+        open_mr = {
+            **gl_mr(88),
+            "description": "Implements #92",
+            "sourceBranch": "feat/gl-limit",
+            "sourceBranchExists": True,
+            "sourceProject": {"webUrl": "https://labs.example.test/team/app"},
+        }
+        recorded_merged = {
+            **gl_mr(12, merged_at="2026-09-20T18:00:00+00:00"),
+            "description": "Closing https://labs.example.test/team/app/-/issues/5",
+            "sourceBranch": "feat/gl-deleted",
+            "sourceBranchExists": False,  # deleted branch must not link
+            "sourceProject": {"webUrl": "https://labs.example.test/team/app"},
+        }
+        recent_merged = {
+            **gl_mr(13, merged_at="2026-09-25T15:00:00+00:00"),
+            "description": "Fixes #6",
+            "sourceBranch": "feat/gl-six",
+            "sourceBranchExists": True,
+            "sourceProject": None,  # deleted source fork must not link
+        }
+        fake = FakeGitLab(
+            issues=[gl_issue(92), {**gl_issue(5), "state": "closed"}, {**gl_issue(6), "state": "closed"}],
+            mrs=[open_mr, recorded_merged, recent_merged],
+        )
+        got = refresh_gitlab(root, NOW, fake)
+        self.assertEqual(got.errors, {})
+        for q in fake.queries:
+            self.assertLessEqual(gl_score(q), GL_CAP, q)
+            self.assertNotIn("other.example.org", q)
+            self.assertNotIn('"999"', q)
+
+        self.assertEqual(got.issues["#92"].url, "https://labs.example.test/team/app/-/issues/92")
+        self.assertEqual(got.issues["#5"].state, "closed")
+        self.assertNotIn("#99", got.issues)
+
+        self.assertEqual(got.changes["!88"].issues, ("#92",))
+        self.assertEqual(got.changes["!88"].branch, "feat/gl-limit")
+        self.assertEqual(got.changes["!88"].branch_url, "https://labs.example.test/team/app/-/tree/feat/gl-limit")
+
+        self.assertEqual(got.changes["!12"].issues, ("#5",))
+        self.assertEqual(got.changes["!12"].branch, "feat/gl-deleted")
+        self.assertEqual(got.changes["!12"].branch_url, "")
+
+        self.assertEqual(got.changes["!13"].issues, ("#6",))
+        self.assertEqual(got.changes["!13"].branch, "feat/gl-six")
+        self.assertEqual(got.changes["!13"].branch_url, "")
+
+    def test_unreliable_or_hostile_branch_inputs_produce_no_branch_url(self):
+        for repo_url, branch in (
+            ("javascript:alert(1)", "feat/x"),
+            ("https://github.com/o/app", ""),
+            ("https://github.com/o/app", "../settings"),
+            ("https://github.com/o/app", "feat/../admin"),
+            ("https://github.com/o/app", "feat//double"),
+            ("https://github.com/o/app", "feat space"),
+            ("https://github.com/o/app", "/leading"),
+            ("https://github.com/o/app", "trailing.lock"),
+        ):
+            with self.subTest(repo_url=repo_url, branch=branch):
+                pr = {
+                    **gh_pr(58),
+                    "headRefName": branch,
+                    "headRef": {"name": branch} if branch else None,
+                    "headRepository": {"url": repo_url},
+                }
+                got = bs._gh_change("#58", pr, "robin", "o/app")
+                self.assertEqual(got.branch_url, "")
 
 
 if __name__ == "__main__":

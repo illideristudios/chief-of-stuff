@@ -18,11 +18,11 @@ from pathlib import Path
 import board_sources
 import flow_chart
 from clock import parse_stamp
-from task_forge import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, source_key, source_worker_tasks
+from task_forge import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, lookup_keys, source_worker_tasks
 import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
-from fragment import href, tab_bar, issue_href, issue_page_name
+from fragment import external_url, href, tab_bar, issue_href, issue_page_name
 from page_common import drop_html_comments, markdown_blocks, markdown_inline
 from module_graph import section as _graph
 from clock import dur as _dur
@@ -38,6 +38,7 @@ CSS = """<style>
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]) :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}}
 :root[data-theme="dark"] :is(.gantt,.gantt-legend){--gantt-ink:var(--fg);--gantt-muted:var(--muted);--gantt-bg:var(--bg);--gantt-rule:var(--line);--gantt-edge:var(--line);--gantt-grid:var(--line);--gantt-past:var(--surface);--gantt-now:var(--dl);--gantt-hold:var(--dl)}
 .meta{color:var(--muted);font-size:12px}
+.mono{font-family:ui-monospace,monospace;font-size:12px}
 header .chip.running{color:var(--surface);background:var(--stage-implement);border-color:var(--stage-implement)}
 header .chip.needs-input,header .chip.retries-exhausted{color:var(--dl);border-color:var(--dl)}
 .chk,.wk{display:grid;grid-template-columns:96px 74px minmax(0,1fr);gap:0 10px;align-items:baseline;padding:6px 0;font-size:13px}
@@ -120,9 +121,15 @@ def _change(c: board_sources.Change, changes, now: datetime) -> str:
     rows.append(("threads", f"{len(c.threads) - resolved} open", "", f"{resolved} resolved"))
     body = "\n".join(f'      <div class="chk"><span class="cap">{cap}</span><span class="mk {escape(cls)}">{escape(mark)}</span>'
                      f"<span>{note}</span></div>" for cap, mark, cls, note in rows)
-    return (f'  <section>\n    <h2>{word} · <a class="ref" data-k="{kind}" {href(c.url)}>{escape(c.ref)}</a></h2>\n'
+    c_url = external_url(c.url)
+    ref_html = (f'<a class="ref" data-k="{kind}" {href(c_url)}>{escape(c.ref)}</a>' if c_url
+                else f'<span class="ref" data-k="{kind}">{escape(c.ref)}</span>')
+    b_url = external_url(c.branch_url)
+    branch_html = (f'<a class="mono" {href(b_url)}>{escape(c.branch)}</a> → ' if c.branch and b_url
+                   else f'<span class="mono">{escape(c.branch)}</span> → ' if c.branch else "→ ")
+    return (f'  <section>\n    <h2>{word} · {ref_html}</h2>\n'
             f'    <div class="card mr">\n      <strong>{escape(c.title)}</strong> <span class="chip">{escape(state.upper())}{merged}</span>'
-            f' <span class="meta">→ {escape(c.base)}</span>\n{body}\n    </div>\n  </section>\n')
+            f' <span class="meta">{branch_html}{escape(c.base)}</span>\n{body}\n    </div>\n  </section>\n')
 
 
 def span_s(seconds: int) -> str:
@@ -134,15 +141,16 @@ def anchor(path: str) -> str:
     return "f-" + re.sub(r"[^A-Za-z0-9_.-]", "-", path)
 
 
-def _files(c: board_sources.Change, changes, number: int) -> str:
+def _files(c: board_sources.Change, changes, number: int | str) -> str:
     """FILES CHANGED: a link to the source page; each file, linked to its diff there, its +additions −deletions when
     known, "also !N" for another open change on it."""
+    source_url = str(number) if str(number).startswith("/") else f"/issues/{number}/source"
     stats, shared = {f.path: f for f in c.stats}, _shared(c, changes)
-    rows = [f'      <div class="fl"><span class="cap">files changed</span><a href="/issues/{number}/source">open source &amp; diff</a>'
+    rows = [f'      <div class="fl"><span class="cap">files changed</span><a {href(source_url)}>open source &amp; diff</a>'
             "<span></span></div>"]
     for p in _paths(c):
         f = stats.get(p)
-        rows.append(f'      <div class="fl"><a class="path" href="/issues/{number}/source#{escape(anchor(p))}">{escape(p)}</a>'
+        rows.append(f'      <div class="fl"><a class="path" {href(f"{source_url}#{anchor(p)}")}>{escape(p)}</a>'
                     f'<span class="d">{f"+{f.additions} −{f.deletions}" if f else ""}</span>'
                     f'<span class="meta">{"also " + escape(", ".join(shared[p])) if p in shared else ""}</span></div>')
     if c.stats:
@@ -159,7 +167,8 @@ def _review(c: board_sources.Change, now: datetime, linker: Linker = Linker()) -
     rows = []
     for t in sorted(newest, key=lambda t: t.resolved):
         when = f" · {_clock(t.at.astimezone(now.tzinfo), now)}" if t.at else ""
-        link = f' · <a {href(t.url)}>thread</a>' if t.url else ""
+        t_url = external_url(t.url)
+        link = f' · <a {href(t_url)}>thread</a>' if t_url else ""
         rows.append(f'      <div class="rv"><span class="mk{" passed" if t.resolved else ""}">{"Resolved" if t.resolved else "Open"}</span>'
                     f"<span><b>{escape(t.author)}</b>{when}{link}</span><div class=\"prose\">{markdown_blocks(drop_html_comments(t.body), linker.resolve)}</div></div>")
     resolved = sum(t.resolved for t in c.threads)
@@ -237,7 +246,9 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
         if not full_key and len(matches) > 1:
             return None
         if item is not None:
-            title = item.title or (sources.issues[ref].title if ref in sources.issues else ref)
+            item_issue = next((sources.issues[k] for k in lookup_keys((item.issue_key,), sources.home)
+                               if k in sources.issues), None)
+            title = item.title or (item_issue.title if item_issue else ref)
             task = Task(item=title, owner="",
                         state="waiting" if item.human_review else "open",
                         since=now.date().isoformat(), due="", checklist="",
@@ -268,8 +279,12 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
         if issue_number(r.ref) == numeric
     ]
     log = [m for m in log if m.name.strip().casefold() in keys]
-    issue_keys = {full_key, source_key(full_key, sources.home)} if full_key else {ref, *(t.issue for t in mine if t.issue)}
-    issue = next((sources.issues[k] for k in issue_keys if k in sources.issues), None)
+    raw_refs = ((full_key,) if full_key
+                else (item.issue_key,) if item is not None
+                else tuple(t.issue for t in mine if t.issue.strip()) or (ref,))
+    lookup = lookup_keys(raw_refs, sources.home)
+    issue_keys = set(lookup)
+    issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
     latest = {k: t for t in known for k in names(t)}  # later trackers win
     exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
     if exhausted is not None:
@@ -294,8 +309,9 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     current = {t.name.strip().casefold(): t for t in mine}.values()
     why_not = ("the issue is closed" if issue and issue.state == "closed" else
                "the task is done" if status == "merged" or all(t.kind == "done" for t in current) else "")
+    source_url = f"{issue_href(identity)}/source"
     ahead = (_next(rows, change, every, why_not, now, exhaustion=exhausted)
-             + (_files(change, every, issue_href(identity)[len("/issues/"):]) if change and _paths(change) else ""))
+             + (_files(change, every, source_url) if change and _paths(change) else ""))
     ahead += _graph(change, graph, pages, root, "Architecture", f"No change names {ref} to graph.")
 
     task_of = lambda m: (t.name.strip() if (t := latest.get(m.name.strip().casefold())) else m.name).casefold()  # noqa: E731
@@ -369,19 +385,45 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                              '    <div class="card">\n' + "\n".join(x for _, x in lines) + "\n    </div>") if lines else
                     _section("Workers", '    <div class="card"><p>No workers launched.</p></div>'))
 
-    refs = [("issue", f'<a {href(issue.url)}>{ref} {escape(issue.title)}</a>' if issue else f"{ref} {escape(name)}",
+    issue_url = external_url(issue.url) if issue else ""
+    issue_label = f"{escape(ref)} {escape(issue.title if issue else name)}"
+    refs = [("issue", f"<a {href(issue_url)}>{issue_label}</a>" if issue_url else issue_label,
              issue.state if issue else "")]
-    refs += [("MR" if c.ref.startswith("!") else "PR", f'<a {href(c.url)}>{escape(c.ref)} {escape(c.title)}</a>',
-              " · ".join(filter(None, (c.state, c.pipeline)))) for c in changes]
+    for c in changes:
+        c_url = external_url(c.url)
+        c_label = f"{escape(c.ref)} {escape(c.title)}"
+        refs.append(("MR" if c.ref.startswith("!") else "PR",
+                     f"<a {href(c_url)}>{c_label}</a>" if c_url else c_label,
+                     " · ".join(filter(None, (c.state, c.pipeline)))))
+    seen_branches: set[str] = set()
+    for c in changes:
+        if not c.branch or c.branch in seen_branches:
+            continue
+        seen_branches.add(c.branch)
+        b_url = external_url(c.branch_url)
+        b_html = (f'<a class="mono" {href(b_url)}>{escape(c.branch)}</a>' if b_url
+                  else f'<span class="mono">{escape(c.branch)}</span>')
+        refs.append(("branch", b_html, f"@ {c.head[:7]}" if c.head else ""))
+    if not seen_branches and item is not None and db is not None:
+        resume = db.resume(item.issue_key)
+        work_branch = resume.get("work_branch") if isinstance(resume, dict) else ""
+        if isinstance(work_branch, str) and work_branch.strip():
+            refs.append(("branch", f'<span class="mono">{escape(work_branch.strip())}</span>', "worktree"))
+    paths = _paths(change) if change else ()
+    source_st = f"{len(paths)} file{'s' * (len(paths) != 1)}" if paths else (change.ref if change else "")
+    refs.append(("source", f'<a {href(source_url)}>source &amp; diff</a>', source_st))
     refs_html = "\n".join(f'      <span class="cap">{cap}</span><span>{what}</span><span class="st">{escape(st)}</span>' for cap, what, st in refs)
 
     lane = next((t.lane.strip() for t in reversed(mine) if t.lane.strip()), "")
-    eyebrow = " · ".join(["Task", f'<a class="ref" data-k="issue" {href(issue.url)}>{ref}</a>' if issue else ref,
-                          *([f"lane {escape(lane)}"] if lane else []), '<a href="/">board</a>'])  # (#215) no render clock
+    eyebrow = " · ".join(["Task",
+                          f'<a class="ref" data-k="issue" {href(issue_url)}>{escape(ref)}</a>' if issue_url else escape(ref),
+                          *([f"lane {escape(lane)}"] if lane else []),
+                          f'<a {href(source_url)}>source</a>',
+                          '<a href="/">board</a>'])  # (#215) no render clock
     flow = flow_chart.section(rows, now)
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{ref} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
+            f"<title>{escape(ref)} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
             f'<body>\n<main class="issue">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
             f'    <div><span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>'

@@ -5,8 +5,9 @@
 
 Only what today's tracker names is fetched: its tasks' issues, the pull or merge requests their rows
 mention (`!58` on GitLab, `PR #58` on GitHub, or the request's URL), and the requests merged today, in
-one GraphQL call per forge. An engine workspace (one with a `store.db`) names its changes in no row, so there every open
-request is fetched too (#896). Workers are the registered sessions process_status finds running, live
+one GraphQL call per forge. An engine workspace (one with a `store.db`) names its tasks in `work_item`
+rather than tracker rows, so there the store's issues, recorded merge requests, open requests and recent
+merged requests are fetched too (#896, #996). Workers are the registered sessions process_status finds running, live
 one-shot workers under the Worktrees dir, and the tracker's Sessions rows. The cache is
 `<pages dir>/.sources.json`. A source that cannot be read keeps its last good facts, and `errors` says why.
 `change_states` is the audit's read of the changes its rows name, neither drawn nor cached.
@@ -15,20 +16,30 @@ one-shot workers under the Worktrees dir, and the tracker's Sessions rows. The c
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
+import sqlite3
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, time
 from pathlib import Path
+from urllib.parse import quote, urlsplit
 
 import backlog
 import process_status
 from _vendor.toon_format import encode as toon_encode
+from backlog_ref import GH_REPO, store_label
 from clock import leading
-from forge_review import GITLAB_PIPELINE, closes as _closes, github_approval as _github_approval, github_pipeline as _github_pipeline
+from forge_review import (
+    GITLAB_PIPELINE,
+    closes as _closes,
+    github_approval as _github_approval,
+    github_closes as _github_closes,
+    github_pipeline as _github_pipeline,
+)
 from md import section as _section
 from settings import SettingsError, load as load_settings
 from tracker import Tracker, bare_name as _bare_name, launcher, parse_tracker
@@ -40,11 +51,15 @@ GH_PR = re.compile(r"(?i)\bPR\s*#(\d+)\b")
 GL_MR = re.compile(r"(?<![\w&])!(\d+)\b")
 GL_STATE = {"opened": "open", "locked": "closed"}
 GL_WAITING = {"pending", "created", "waiting_for_resource", "preparing", "scheduled", "manual"}
+_GITLAB_PROJECT = re.compile(r"^[\w.-]+(?:/[\w.-]+)+$")
+_BAD_BRANCH_CHARS = frozenset("~^:?*[\\")
 
 GH_ISSUE = ("number url title state body labels(first: 50) { nodes { name } } closedAt "
             "milestone { title url dueOn state issues(states: OPEN) { totalCount } }")
 # A review thread is its first comment, as review_threads.QUERY reads them; one comment keeps the node count low.
 GH_CHANGE = ("number url title state isDraft mergedAt baseRefName body headRefOid reviewDecision mergeable "
+             "headRefName headRef { name } headRepository { url } "
+             "closingIssuesReferences(first: 25) { nodes { number repository { name owner { login } } } } "
              "files(first: 100) { nodes { path additions deletions } } "
              "latestReviews(first: 50) { nodes { author { login } state submittedAt commit { oid } } } "
              "reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } body createdAt url } } } } "
@@ -54,7 +69,8 @@ GL_PAGE = 100  # the most nodes GitLab answers for one connection
 GL_ISSUE = ("iid webUrl title state description labels { nodes { title } } closedAt "
             "milestone { title webPath dueDate state stats { totalIssuesCount closedIssuesCount } }")
 GL_CHANGE = ("iid webUrl title state draft mergedAt targetBranch description approved conflicts "
-             "approvedBy { nodes { username } } headPipeline { status } diffStats { path additions deletions } diffHeadSha")
+             "approvedBy { nodes { username } } headPipeline { status } diffStats { path additions deletions } diffHeadSha "
+             "sourceBranch sourceBranchExists sourceProject { webUrl }")
 # Jobs and discussions only for open changes, in a second query: in GL_CHANGE they took it past GitLab's complexity cap of 250.
 GL_DETAIL = ("iid headPipeline { jobs { nodes { name status duration } } } "
              "discussions { nodes { resolvable resolved notes(first: 1) { nodes { author { username } body createdAt url } } } }")
@@ -102,6 +118,8 @@ class Change:          # a PR or MR
     jobs: tuple[Job, ...] = ()
     conflicts: bool = False
     threads: tuple[ReviewThread, ...] = ()
+    branch: str = ""          # source branch name when known
+    branch_url: str = ""      # verified forge tree URL only while the branch and source repo exist
 
 
 @dataclass(frozen=True)
@@ -214,9 +232,31 @@ def _stats(files: list[dict]) -> tuple[FileStat, ...]:
                  for f in files if "additions" in f)
 
 
+def _valid_branch(branch: str) -> bool:
+    """Git ref-format rules for a branch name that can safely sit in a forge `/tree/<branch>` URL."""
+    if not branch or branch != branch.strip() or branch.startswith("/") or branch.endswith(("/", ".")):
+        return False
+    if ".." in branch or "//" in branch or "@{" in branch:
+        return False
+    if any(not c.isprintable() or c.isspace() or c in _BAD_BRANCH_CHARS for c in branch):
+        return False
+    return all(part and not part.startswith(".") and not part.endswith(".lock") for part in branch.split("/"))
+
+
+def _branch_url(repo_url: str | None, branch: str, *, gitlab: bool = False) -> str:
+    clean_repo = (repo_url or "").strip().rstrip("/")
+    if not clean_repo or any(ord(c) <= 32 or ord(c) == 127 for c in clean_repo) or not _valid_branch(branch):
+        return ""
+    parts = urlsplit(clean_repo)
+    if parts.scheme.lower() not in ("http", "https") or not parts.netloc:
+        return ""
+    tree = "-/tree" if gitlab else "tree"
+    return f"{clean_repo}/{tree}/{quote(branch, safe='/')}"
+
+
 # --- GitHub ----------------------------------------------------------------------------------------
 
-def _gh_change(key: str, p: dict, approver: str) -> Change:
+def _gh_change(key: str, p: dict, approver: str, repo: str = "") -> Change:
     reviews = (p.get("latestReviews") or {}).get("nodes") or []
     commit = (((p.get("commits") or {}).get("nodes") or [{}])[0] or {}).get("commit") or {}
     checks = ((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes") or []
@@ -232,16 +272,24 @@ def _gh_change(key: str, p: dict, approver: str) -> Change:
     files = (p.get("files") or {}).get("nodes") or []
     approved = (_github_approval(reviews, approver, p.get("headRefOid", "")) == "approved" if approver
                 else p.get("reviewDecision") == "APPROVED")
+    closing = p.get("closingIssuesReferences")
+    closing_nodes = (closing.get("nodes") if isinstance(closing, dict) else closing) or []
+    issues = _github_closes({**p, "closingIssuesReferences": [x for x in closing_nodes if isinstance(x, dict)]}, repo)
+    head_ref = p.get("headRef") if isinstance(p.get("headRef"), dict) else None
+    branch = (head_ref or {}).get("name") or p.get("headRefName") or ""
+    head_repo = p.get("headRepository") if isinstance(p.get("headRepository"), dict) else None
+    branch_url = _branch_url((head_repo or {}).get("url") if head_ref else "", branch)
     return Change(key, p["url"], p["title"], p["state"].lower(), bool(p.get("isDraft")),
                   None if pipeline == "none" else pipeline, approved,
                   sum(r.get("state") == "APPROVED" for r in reviews), _when(p.get("mergedAt")),
-                  p.get("baseRefName") or "", tuple(f["path"] for f in files), _closes(p.get("body")),
-                  p.get("headRefOid") or "", _stats(files), jobs, p.get("mergeable") == "CONFLICTING", threads)
+                  p.get("baseRefName") or "", tuple(f["path"] for f in files), issues,
+                  p.get("headRefOid") or "", _stats(files), jobs, p.get("mergeable") == "CONFLICTING", threads,
+                  branch, branch_url)
 
 
 def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: datetime, approver: str, gh, every_open: bool = False):
     """(issues, changes, error) from one `gh api graphql` call; issues and changes are None when it failed.
-    `every_open` adds the home repo's open pull requests to the named ones."""
+    `every_open` adds the home repo's open and recent merged pull requests to the named ones."""
     repos = sorted(wanted)
     parts = []
     for i, repo in enumerate(repos):
@@ -249,7 +297,10 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
         items = " ".join(f"n{n}: issueOrPullRequest(number: {n}) {{ __typename ... on Issue {{ {GH_ISSUE} }} "
                          f"... on PullRequest {{ {GH_CHANGE} }} }}" for n in sorted(wanted[repo]))
         parts.append(f"r{i}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ {items} }}")
-    search = f"repo:{home.repo} is:pr is:merged merged:>={since.replace(microsecond=0).isoformat()}"
+    if every_open:
+        search = f"repo:{home.repo} is:pr is:merged sort:updated-desc"
+    else:
+        search = f"repo:{home.repo} is:pr is:merged merged:>={since.replace(microsecond=0).isoformat()}"
     parts.append(f"merged: search(query: {json.dumps(search)}, type: ISSUE, first: 50) "
                  f"{{ nodes {{ ... on PullRequest {{ {GH_CHANGE} }} }} }}")
     if every_open:
@@ -269,7 +320,7 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
                 continue
             key = backlog.IssueRef(repo, int(node["number"])).label(home)
             if node.get("__typename") == "PullRequest":
-                changes[key] = _gh_change(key, node, approver)
+                changes[key] = _gh_change(key, node, approver, home.repo)
             else:
                 m = node.get("milestone")
                 issues[key] = Issue(key, node["url"], node["title"], node["state"].lower(),
@@ -278,10 +329,11 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
                                     Milestone(m["title"], m["url"], _due(m.get("dueOn")), m["state"].lower(),
                                               int((m.get("issues") or {}).get("totalCount") or 0)) if m else None)
     for node in ((data.get("merged") or {}).get("nodes") or []):
-        if node and _when(node.get("mergedAt")) and _when(node["mergedAt"]) >= since:
-            changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver))
+        merged_at = _when(node.get("mergedAt")) if node else None
+        if merged_at and (every_open or merged_at >= since):
+            changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
     for node in filter(None, (data.get("open") or {}).get("nodes") or []):
-        changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver))
+        changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
     return issues, changes, _graphql_errors(body) or (err.strip() if code else "")
 
 
@@ -306,22 +358,26 @@ def _gl_detail(m: dict) -> tuple[tuple[Job, ...], tuple[ReviewThread, ...]]:
     return jobs, threads
 
 
-def _gl_change(m: dict, approver: str) -> Change:
+def _gl_change(m: dict, approver: str, home: backlog.Backlog | None = None) -> Change:
     by = {(u or {}).get("username") for u in (m.get("approvedBy") or {}).get("nodes") or []}
     state = GL_STATE.get(m["state"], m["state"])
     pipe = m.get("headPipeline") or {}
+    issues = _closes(m.get("description"), gitlab=True, project=home.project if home else "", host=home.host if home else "")
+    branch = m.get("sourceBranch") or ""
+    src_project = m.get("sourceProject") if isinstance(m.get("sourceProject"), dict) else None
+    branch_url = _branch_url((src_project or {}).get("webUrl") if m.get("sourceBranchExists") else "", branch, gitlab=True)
     return Change(f"!{m['iid']}", m["webUrl"], m["title"], state, bool(m.get("draft")), _gl_pipeline(pipe.get("status")),
                   approver in by if approver else bool(m.get("approved")), len(by), _when(m.get("mergedAt")),
                   m.get("targetBranch") or "", tuple(d["path"] for d in m.get("diffStats") or []),
-                  _closes(m.get("description")), m.get("diffHeadSha") or "", _stats(m.get("diffStats") or []), (),
-                  bool(m.get("conflicts")))
+                  issues, m.get("diffHeadSha") or "", _stats(m.get("diffStats") or []), (),
+                  bool(m.get("conflicts")), (), branch, branch_url)
 
 
 def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], since: datetime, approver: str, call,
            every_open: bool = False):
     """(issues, changes, errors) from the host's /api/graphql, with the Backlog's token: one POST per connection (a project's issues,
-    the named merge requests, the merged page, and with `every_open` the open page), each under GitLab's complexity cap, then one
-    for open changes' jobs and threads.
+    the named merge requests, the merged page, and with `every_open` the open and recent-merged pages), each under GitLab's complexity
+    cap, then one for open changes' jobs and threads.
     A connection answers at most GL_PAGE nodes, so past that it goes again for the next GL_PAGE iids or the next merged page.
     `errors` maps a panel ("kanban": the issues; "merge requests": the rest) to its first error. A panel whose issues or changes
     failed is None, so the board keeps its last good cards; a failed jobs-and-threads request keeps the changes without them.
@@ -368,7 +424,7 @@ def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], si
                                           int(stats.get("totalIssuesCount") or 0) - int(stats.get("closedIssuesCount") or 0))
                                 if m else None)
     for node in pages(home.project, "mergeRequests", sorted(mrs), GL_CHANGE, "merge requests"):
-        changes.setdefault(f"!{node['iid']}", _gl_change(node, approver))
+        changes.setdefault(f"!{node['iid']}", _gl_change(node, approver, home))
     listed = {"merged": f"state: merged, mergedAfter: {json.dumps(since.isoformat())}", **({"open": "state: opened"} if every_open else {})}
     for alias, args in listed.items():
         cursor = ""  # the page to ask for next, None once the last one is in
@@ -379,9 +435,14 @@ def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], si
             if got is None:
                 break
             for node in (got.get(alias) or {}).get("nodes") or []:
-                changes.setdefault(f"!{node['iid']}", _gl_change(node, approver))  # a named change wins over the same one here
+                changes.setdefault(f"!{node['iid']}", _gl_change(node, approver, home))  # a named change wins over the same one here
             info = (got.get(alias) or {}).get("pageInfo") or {}
             cursor = info.get("endCursor") if info.get("hasNextPage") else None
+    if every_open:
+        got = ask(home.project, f"recent: mergeRequests(state: merged, first: {GL_PAGE}) {{ nodes {{ {GL_CHANGE} }} }}",
+                  "merge requests")
+        for node in ((got or {}).get("recent") or {}).get("nodes") or []:
+            changes.setdefault(f"!{node['iid']}", _gl_change(node, approver, home))
     for node in pages(home.project, "mergeRequests", sorted(int(k[1:]) for k, c in changes.items() if c.state == "open"),
                       GL_DETAIL, "merge requests", lose=False):
         if (key := f"!{node['iid']}") in changes:
@@ -450,9 +511,58 @@ def change_states(home, numbers, gh, call) -> tuple[dict[str, ChangeState], str]
     return states, _graphql_errors(body)
 
 
+def _request_ids(raw: object) -> set[int]:
+    if not isinstance(raw, (str, bytes)):
+        return set()
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    entries = [*(data.get("merges") if isinstance(data.get("merges"), list) else ()), data.get("merge_pending")]
+    return {req for entry in entries if isinstance(entry, dict)
+            and isinstance(req := entry.get("request"), int) and not isinstance(req, bool) and req > 0}
+
+
+def _store_targets(db_path: Path, home: backlog.Backlog | backlog.GitHubBacklog) -> tuple[dict[str, set[int]], set[int]]:
+    """Issues and home-repo change numbers recorded in `store.db` for `home`'s forge (read-only)."""
+    wanted: dict[str, set[int]] = {}
+    changes: set[int] = set()
+    github_home = isinstance(home, backlog.GitHubBacklog)
+    own_host = backlog.home_of(home)[0]
+    try:
+        with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+            item_rows = conn.execute("SELECT issue_key FROM work_item").fetchall()
+            try:
+                resume_rows = conn.execute("SELECT issue_key, data FROM resume").fetchall()
+            except sqlite3.Error:
+                resume_rows = []
+    except (sqlite3.Error, OSError, ValueError):
+        return wanted, changes
+    for (raw_key,) in item_rows:
+        if not isinstance(raw_key, str):
+            continue
+        namespace, sep, num = raw_key.rpartition("#")
+        if not (sep and num.isdecimal()):
+            continue
+        if github_home and namespace.startswith("github:"):
+            repo = namespace[len("github:"):]
+            if GH_REPO.match(repo):
+                wanted.setdefault(repo, set()).add(int(num))
+        elif not github_home and namespace.startswith("gitlab:"):
+            host, slash, project = namespace[len("gitlab:"):].partition("/")
+            if slash and host == own_host and _GITLAB_PROJECT.match(project):
+                wanted.setdefault(project, set()).add(int(num))
+    for raw_key, raw_data in resume_rows:
+        if isinstance(raw_key, str) and store_label(raw_key, home).startswith("#"):
+            changes |= _request_ids(raw_data)
+    return wanted, changes
+
+
 def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
-    """What the tracker's tasks name, from the Backlog's forge: (issues, changes, errors), each side None when it failed,
-    `errors` mapping a panel ("kanban", "merge requests") to its error."""
+    """What the tracker's tasks and `store.db` name, from the Backlog's forge: (issues, changes, errors), each side None
+    when it failed, `errors` mapping a panel ("kanban", "merge requests") to its error."""
     home = cfg.backlog
     if home is None:
         return {}, {}, {}
@@ -463,7 +573,8 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
     wanted: dict[str, set[int]] = {}
     changes: set[int] = set()
     github_home = isinstance(home, backlog.GitHubBacklog)
-    every_open = (root / "store.db").is_file()  # the store board's cards are store items, which no tracker row names
+    store_db = root / "store.db"
+    every_open = store_db.is_file()  # the store board's cards are store items, which no tracker row names
     for task in tracker.tasks:
         if task.standing:
             continue
@@ -471,6 +582,11 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
         if ref and (ref.host == backlog.GITHUB) == github_home:
             wanted.setdefault(ref.repo, set()).add(ref.number)
         changes |= change_numbers(task, home)
+    if every_open:
+        store_wanted, store_changes = _store_targets(store_db, home)
+        for repo, nums in store_wanted.items():
+            wanted.setdefault(repo, set()).update(nums)
+        changes |= store_changes
     if github_home:
         if changes:
             wanted.setdefault(home.repo, set()).update(changes)

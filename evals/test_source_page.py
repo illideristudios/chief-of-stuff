@@ -43,6 +43,7 @@ import board_sources as bs  # noqa: E402
 import issue_page as ip  # noqa: E402
 import make_repo  # noqa: E402
 import pages as pg  # noqa: E402
+import task_forge  # noqa: E402
 from settings import Graph  # noqa: E402
 from test_flow_chart import LANES, NOW, TODAY, YESTERDAY  # noqa: E402
 from test_issue_page import ISSUE, OTHER, ROUTE_TRACKER, TODAY_START, YESTERDAY_TRACKER, ZONE  # noqa: E402
@@ -354,6 +355,73 @@ class RouteTest(unittest.TestCase):
         self.assertEqual(get(self.port, "/issues/109/source").status, 200)
         self.assertTrue((self.pages / "issue-109-source.html").is_file(), "the route did not write issue-109-source.html")
         self.assertEqual(get(self.port, "/issue-109-source.html").status, 404)
+
+
+class StoreAndCrossRepoSourcePageTest(unittest.TestCase):
+    """#996: store-backed source pages resolve their own merged/open change without cross-repo bare-#N collisions
+    and refuse unsafe thread URL schemes."""
+
+    def make_db(self):
+        from test_m6_store_board import make_store_workspace
+
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        return db
+
+    def test_store_task_finds_its_merged_change_on_numeric_and_qualified_routes(self):
+        db = self.make_db()
+        key = "gitlab:labs.example.test/team/app#5"
+        db.upsert_item(key, title="Merged GitLab task", stage="merge", forge_state="closed")
+        src = bs.Sources(
+            {},
+            {"#5": bs.Issue("#5", "https://labs.example.test/team/app/-/issues/5", "Merged GitLab task", "closed", ())},
+            {"!12": bs.Change("!12", "https://labs.example.test/team/app/-/merge_requests/12", "Ship feature 5",
+                              "merged", False, "passed", True, 1, NOW, "main", ("src/feature.py",), ("#5",))},
+            (),
+            {},
+            home=bs.backlog.Backlog("https://labs.example.test", "team/app"),
+        )
+        pdata = task_forge.page_data(db)
+        for route in (5, key):
+            with self.subTest(route=route):
+                html = sp.render(route, [], src, NOW, db=pdata)
+                self.assertIsNotNone(html)
+                self.assertIn("!12", text(header(html)))
+                self.assertIn("src/feature.py", text(html))
+                self.assertNotIn("Nothing to diff", text(html))
+
+    def test_cross_repo_numeric_route_does_not_steal_home_repo_issue_or_change(self):
+        db = self.make_db()
+        db.upsert_item("github:example/other#12", title="Other-repo task", stage="implement")
+        src = bs.Sources(
+            {},
+            {"#12": bs.Issue("#12", "https://github.com/example/repo/issues/12", "Wrong home issue", "open", (), "Wrong home body")},
+            {"#55": bs.Change("#55", "https://github.com/example/repo/pull/55", "Wrong home PR", "open", False,
+                              "passed", True, 1, None, "main", ("src/wrong.py",), ("#12",))},
+            (),
+            {},
+            home=bs.backlog.GitHubBacklog("example/repo"),
+        )
+        html = sp.render(12, [], src, NOW, db=task_forge.page_data(db))
+        self.assertIsNotNone(html)
+        self.assertIn("Nothing to diff", text(html))
+        for wrong in ("#55", "Wrong home issue", "Wrong home body", "Wrong home PR", "src/wrong.py"):
+            self.assertNotIn(wrong, html)
+
+    def test_unsafe_thread_url_is_not_linked(self):
+        note = sp.Note(
+            path="src/a.py",
+            line=None,
+            side="new",
+            thread=bs.ReviewThread(False, "reviewer", "Check bounds", NOW, "javascript:alert(1)"),
+        )
+        mr = bs.Change("!48", "https://forge.example/grp/app/-/merge_requests/48", "Cap uploads", "open",
+                       False, "passed", False, 0, None, "main", ("src/a.py",), ("#109",))
+        html = sp.render(109, TRACKERS, bs.Sources({}, {"#109": ISSUE}, {"!48": mr}, (), {}), NOW, notes=[note])
+        self.assertNotRegex(html, r'(?i)href="\s*javascript:')
+        self.assertNotIn('href=""', html)
+        self.assertIn("Check bounds", text(html))
 
 
 if __name__ == "__main__":

@@ -8,6 +8,7 @@ from __future__ import annotations
 import html
 import re
 from pathlib import Path
+from urllib.parse import urlsplit
 
 KIND = re.compile(r"[a-z][a-z0-9-]*")
 COLOUR = re.compile(r"[#\w(),.%/ -]+")  # a colour, var() or border shorthand; nothing that ends a declaration or a rule
@@ -17,10 +18,22 @@ def esc(text: str) -> str:
     return html.escape(text, quote=True)
 
 
+def external_url(url: str) -> str:
+    """`url` stripped when it is a clean http(s) URL with a host, else `""`."""
+    clean = (url or "").strip()
+    if not clean or any(ord(c) <= 32 or ord(c) == 127 for c in clean):
+        return ""
+    parts = urlsplit(clean)
+    return clean if parts.scheme.lower() in ("http", "https") and bool(parts.netloc) else ""
+
+
 def href(url: str) -> str:
     """`href="url"`, opening in a new tab when `url` is external (http/https); in-app routes stay in the tab."""
-    blank = ' target="_blank" rel="noopener"' if url.lower().startswith(("http://", "https://")) else ""
-    return f'href="{esc(url)}"{blank}'
+    if ext := external_url(url):
+        return f'href="{esc(ext)}" target="_blank" rel="noopener"'
+    scheme = urlsplit((url or "").strip()).scheme.lower()
+    safe = "#" if scheme in ("javascript", "data", "vbscript") else url
+    return f'href="{esc(safe)}"'
 
 
 def kind(name: str) -> str:

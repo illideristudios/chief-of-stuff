@@ -20,10 +20,9 @@ import backlog
 import board_sources
 import decision_page
 import module_graph
-from task_forge import PageData, source_key
-from fragment import issue_href, issue_page_name
+from task_forge import PageData, lookup_keys
+from fragment import external_url, href, issue_href, issue_page_name, tab_bar
 from decision_page import HEAD
-from fragment import href, tab_bar
 from page_common import drop_html_comments, markdown_blocks
 from issue_page import _paths, _shared, anchor, inputs, put
 from tracker import TRAILING_NUMBER, parse_tracker
@@ -131,8 +130,10 @@ def notes(change: board_sources.Change, home, gh=backlog.run_gh, call=backlog._c
 def _note(n: Note, now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> str:
     t = n.thread
     when = f" · {t.at.astimezone(now.tzinfo):%H:%M}" if t.at else ""
+    t_url = external_url(t.url)
+    link = f' · <a {href(t_url)}>thread</a>' if t_url else ""
     return (f'<div class="nt{" resolved" if t.resolved else ""}"><span><b>{"Resolved" if t.resolved else "Open"} thread · '
-            f'{escape(t.author)}{when}</b> · <a {href(t.url)}>thread</a></span><div class="prose">{markdown_blocks(drop_html_comments(t.body), linker.resolve)}</div></div>')
+            f'{escape(t.author)}{when}</b>{link}</span><div class="prose">{markdown_blocks(drop_html_comments(t.body), linker.resolve)}</div></div>')
 
 
 class File:
@@ -210,10 +211,16 @@ def _rows(f: File, mine: list[Note], now: datetime, linker: decision_page.Linker
     return "\n".join(out), left
 
 
-def _change(ref: str, sources: board_sources.Sources) -> board_sources.Change | None:
+def _change_for(keys: tuple[str, ...], sources: board_sources.Sources) -> board_sources.Change | None:
     """The change naming the issue: an open one first, then a merged one."""
     order = {"open": 0, "merged": 1}
-    return min((c for c in sources.changes.values() if ref in c.issues), key=lambda c: order.get(c.state, 2), default=None)
+    wanted = set(keys)
+    return min((c for c in sources.changes.values() if wanted & set(c.issues)),
+               key=lambda c: order.get(c.state, 2), default=None)
+
+
+def _change(ref: str, sources: board_sources.Sources) -> board_sources.Change | None:
+    return _change_for((ref,), sources)
 
 
 def _split(f: File, mine: list[Note], now: datetime, linker: decision_page.Linker = decision_page.Linker()) -> str:
@@ -284,12 +291,14 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
         return None
     if store_item is not None:
         mine = []
-    issue = (sources.issues.get(full_key) or sources.issues.get(source_key(full_key, sources.home))) if full_key else sources.issues.get(ref)
-    if issue is None and store_item is not None:
-        issue = sources.issues.get(store_item.issue_key)
+    raw_refs = ((full_key,) if full_key
+                else (store_item.issue_key,) if store_item is not None
+                else tuple(t.issue for t in mine if t.issue.strip()) or (ref,))
+    lookup = lookup_keys(raw_refs, sources.home)
+    issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
     name = issue.title if issue else (mine[0].label if mine else (store_item.title or ref))
-    change = _change(full_key, sources) or _change(source_key(full_key, sources.home), sources) if full_key else _change(ref, sources)
-    crumb = f"Source · {escape(change.ref) + ' · ' if change else ''}{ref} {escape(name)}"
+    change = _change_for(lookup, sources)
+    crumb = f"Source · {escape(change.ref) + ' · ' if change else ''}{escape(ref)} {escape(name)}"
     title = f"{escape(change.ref)} · {escape(change.title)}" if change else escape(name)
     compare = note = ""
     files: list[File] = []
@@ -298,7 +307,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             try:
                 base, text = diff(change, root / graph.clone, pages)
                 files = parse(text)
-                compare = f"{escape(change.base)}@{base[:7]} → {change.head[:7]}"
+                compare = f"{escape(change.base)}@{escape(base[:7])} → {escape(change.head[:7])}"
             except (OSError, ValueError) as e:
                 note = f"The diff is unavailable: {escape(str(e))}"
         else:
@@ -332,7 +341,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     if notes_error:
         tables.insert(0, f'    <p class="card">Review notes unavailable: {escape(notes_error)}</p>')
     if not change:
-        body = f'  <p class="card">Nothing to diff: no change names {ref} yet.</p>\n'
+        body = f'  <p class="card">Nothing to diff: no change names {escape(ref)} yet.</p>\n'
         if issue and issue.body:
             body += f'  <div class="card"><pre>{escape(issue.body)}</pre></div>\n'
     else:
@@ -344,7 +353,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     cmp = f'    <div class="card cmp"><span class="cap">compare</span><div>{compare}</div></div>\n' if compare else ""
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>Source {escape(change.ref) if change else ref}</title>\n{HEAD}{CSS}</head>\n"
+            f"<title>Source {escape(change.ref) if change else escape(ref)}</title>\n{HEAD}{CSS}</head>\n"
             f'<body>\n<main class="source">\n{tab_bar("Board", pending, True, **(navigation or {}))}  <header class="top">\n    <div>\n      <span class="eyebrow">{crumb} · '
             f'<a href="{issue_href(number)}">task</a> · <a href="/">board</a></span>\n'
             f"      <h1>{title}</h1>\n    </div>\n{cmp}  </header>\n{body}</main>\n</body>\n</html>\n")
@@ -354,7 +363,18 @@ def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None
     """Render `issue-<number>-source.html`; with no page, remove the file and return None."""
     cfg, now, trackers, settings = inputs(root)
     sources = board_sources.load(pages_dir)
-    change = _change(source_key(str(number), sources.home) if "#" in str(number) else f"#{number}", sources)
+    identity = str(number)
+    full_key = identity if "#" in identity else None
+    numeric = int(identity.rpartition("#")[2]) if full_key else int(identity)
+    if full_key:
+        raw_refs: tuple[str, ...] = (full_key,)
+    elif db is not None and len(matches := [i for i in db.items() if (m := TRAILING_NUMBER.search(i.issue_key)) and int(m[1]) == numeric]) == 1:
+        raw_refs = (matches[0].issue_key,)
+    else:
+        mine = [t.issue for _, text in trackers for t in parse_tracker(text).tasks
+                if (m := TRAILING_NUMBER.search(t.issue)) and int(m[1]) == numeric and t.issue.strip()]
+        raw_refs = tuple(mine) or (f"#{numeric}",)
+    change = _change_for(lookup_keys(raw_refs, sources.home), sources)
     # ponytail: one small forge query per render (about once a minute while the page is open); cache by head if it bites.
     found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")
     ctx = decision_page.context(root, now.date().isoformat())

@@ -966,5 +966,229 @@ class HistoryDayTest(unittest.TestCase):
         self.assertEqual(history_whens(html), ["Mon 23:51", "Tue 01:10", "Tue 02:51"])
 
 
+class TaskPageLinksAndSafetyTest(unittest.TestCase):
+    """#996: task pages link to their verified forge issue, available change requests, reliable branches,
+    and source view; never fabricate links or infer cross-repo relationships; escape hostile inputs."""
+
+    def make_db(self):
+        import shutil
+        from test_m6_store_board import make_store_workspace
+
+        root, db = make_store_workspace()
+        self.addCleanup(db.engine.dispose)
+        self.addCleanup(shutil.rmtree, root, True)
+        return db
+
+    def test_github_and_gitlab_store_pages_link_verified_issue_changes_live_branch_and_source(self):
+        from test_external_links import check_links
+
+        cases = (
+            (
+                "github",
+                bs.backlog.GitHubBacklog("o/app"),
+                "github:o/app#92",
+                "github:o/app#5",
+                "github:o/app#77",
+                "https://github.com/o/app/issues/92",
+                "https://github.com/o/app/issues/5",
+                "https://github.com/o/app/issues/77",
+                "#140",
+                "https://github.com/o/app/pull/140",
+                "feat/upload-limit",
+                "https://github.com/o/app/tree/feat/upload-limit",
+                "#33",
+                "https://github.com/o/app/pull/33",
+                "feat/deleted-five",
+            ),
+            (
+                "gitlab",
+                bs.backlog.Backlog("https://labs.example.test", "team/app"),
+                "gitlab:labs.example.test/team/app#92",
+                "gitlab:labs.example.test/team/app#5",
+                "gitlab:labs.example.test/team/app#77",
+                "https://labs.example.test/team/app/-/issues/92",
+                "https://labs.example.test/team/app/-/issues/5",
+                "https://labs.example.test/team/app/-/issues/77",
+                "!88",
+                "https://labs.example.test/team/app/-/merge_requests/88",
+                "feat/gl-limit",
+                "https://labs.example.test/team/app/-/tree/feat/gl-limit",
+                "!12",
+                "https://labs.example.test/team/app/-/merge_requests/12",
+                "feat/gl-deleted",
+            ),
+        )
+        for (
+            forge_name,
+            home,
+            open_key,
+            merged_key,
+            early_key,
+            open_issue_url,
+            merged_issue_url,
+            early_issue_url,
+            open_ref,
+            open_change_url,
+            live_branch,
+            live_branch_url,
+            merged_ref,
+            merged_change_url,
+            deleted_branch,
+        ) in cases:
+            with self.subTest(forge=forge_name):
+                db = self.make_db()
+                db.upsert_item(open_key, title="Open task", stage="review")
+                db.upsert_item(merged_key, title="Merged task", stage="merge", forge_state="closed")
+                db.upsert_item(early_key, title="In-flight task", stage="implement")
+                db.set_resume(early_key, {"work_branch": "work/77"})
+
+                src = bs.Sources(
+                    {},
+                    {
+                        "#92": bs.Issue("#92", open_issue_url, "Open task", "open", (), "### Acceptance\n- [x] linked\n"),
+                        "#5": bs.Issue("#5", merged_issue_url, "Merged task", "closed", ()),
+                        "#77": bs.Issue("#77", early_issue_url, "In-flight task", "open", ()),
+                    },
+                    {
+                        open_ref: bs.Change(
+                            open_ref, open_change_url, "Open change", "open", False, "passed", True, 1, None, "main",
+                            ("src/app.py",), ("#92",), head="a7f03d1" + "0" * 33, branch=live_branch, branch_url=live_branch_url,
+                        ),
+                        merged_ref: bs.Change(
+                            merged_ref, merged_change_url, "Merged change", "merged", False, "passed", True, 1, NOW, "main",
+                            (), ("#5",), head="b8e14c2" + "0" * 33, branch=deleted_branch, branch_url="",
+                        ),
+                    },
+                    (),
+                    {},
+                    home=home,
+                )
+                pdata = task_forge.page_data(db)
+
+                # 1. Open task with open change and verified live branch:
+                open_html = ip.render(open_key, [], src, NOW, LANES, db=pdata)
+                check_links(self, open_html)
+                open_source = f"{ip.issue_href(open_key)}/source"
+                self.assertIn(f'href="{open_issue_url}"', re.search(r"<header\b.*?</header>", open_html, re.S)[0])
+                self.assertIn(f'href="{open_source}"', re.search(r"<header\b.*?</header>", open_html, re.S)[0])
+                self.assertIn(f'href="{open_change_url}"', card(open_html))
+                self.assertIn(f'href="{live_branch_url}"', card(open_html))
+                open_refs = section(open_html, "References")
+                self.assertIn(f'href="{open_issue_url}"', open_refs)
+                self.assertIn(f'href="{open_change_url}"', open_refs)
+                self.assertIn(f'href="{live_branch_url}"', open_refs)
+                self.assertIn("@ a7f03d1", text(open_refs))
+                self.assertIn(f'href="{open_source}"', open_refs)
+
+                # 2. Merged task with merged change, no changed-file list, and deleted branch:
+                merged_html = ip.render(merged_key, [], src, NOW, LANES, db=pdata)
+                check_links(self, merged_html)
+                merged_source = f"{ip.issue_href(merged_key)}/source"
+                self.assertNotIn("No change names #5 yet", merged_html)
+                self.assertIn(f'href="{merged_issue_url}"', merged_html)
+                self.assertIn(f'href="{merged_change_url}"', card(merged_html))
+                merged_refs = section(merged_html, "References")
+                self.assertIn(f'href="{merged_change_url}"', merged_refs)
+                self.assertIn(deleted_branch, text(merged_refs))
+                self.assertNotIn("/tree/", merged_html)
+                self.assertIn(f'href="{merged_source}"', merged_refs)
+
+                # 3. Task with no change yet, only a local worktree branch in resume:
+                early_html = ip.render(early_key, [], src, NOW, LANES, db=pdata)
+                check_links(self, early_html)
+                early_source = f"{ip.issue_href(early_key)}/source"
+                early_refs = section(early_html, "References")
+                self.assertIn(f'href="{early_issue_url}"', early_refs)
+                self.assertIn(f'href="{early_source}"', early_refs)
+                self.assertIn("work/77", text(early_refs))
+                self.assertIn("worktree", text(early_refs))
+                self.assertNotIn("/tree/", early_html)
+
+    def test_missing_forge_data_never_fabricates_issue_change_or_branch_links(self):
+        db = self.make_db()
+        key = "github:o/app#92"
+        db.upsert_item(key, title="Offline task", stage="implement")
+        html = ip.render(key, [], bs.EMPTY, NOW, LANES, db=task_forge.page_data(db))
+        self.assertIsNotNone(html)
+        self.assertNotIn("https://github.com/", html)
+        self.assertNotIn("http://", html)
+        # Only the stylesheet font link in HEAD is https://; main body has zero external hrefs.
+        main = re.search(r"<main\b.*?</main>", html, re.S)[0]
+        self.assertEqual(re.findall(r'href="https?://[^"]*"', main), [])
+        self.assertIn("#92", text(main))
+        self.assertIn(f'href="{ip.issue_href(key)}/source"', main)
+
+    def test_numeric_route_does_not_infer_home_repo_issue_or_change_for_cross_repo_task(self):
+        db = self.make_db()
+        db.upsert_item("github:example/other#12", title="Right other-repo task", stage="implement")
+        src = bs.Sources(
+            {},
+            {"#12": bs.Issue("#12", "https://github.com/example/repo/issues/12", "Wrong home issue", "open", ())},
+            {"#55": bs.Change("#55", "https://github.com/example/repo/pull/55", "Wrong home PR", "open", False,
+                              "passed", True, 1, None, "main", ("src/a.py",), ("#12",),
+                              branch="feat/wrong", branch_url="https://github.com/example/repo/tree/feat/wrong")},
+            (),
+            {},
+            home=bs.backlog.GitHubBacklog("example/repo"),
+        )
+        html = ip.render(12, [], src, NOW, LANES, db=task_forge.page_data(db))
+        self.assertIsNotNone(html)
+        self.assertIn("Right other-repo task", text(html))
+        for wrong in ("example/repo/issues/12", "example/repo/pull/55", "example/repo/tree/feat/wrong",
+                      "Wrong home issue", "Wrong home PR", "#55"):
+            self.assertNotIn(wrong, html)
+
+        # Same non-inference for a tracker task naming `example/other#12` on numeric route `/issues/12`:
+        cross_tracker = ROUTE_TRACKER.format(day=TODAY.isoformat()).replace("| #109 |", "| example/other#12 |").replace(
+            "Upload size limit", "Cross tracker task"
+        )
+        tracker_html = ip.render(12, [(TODAY, cross_tracker)], src, NOW, LANES)
+        self.assertIsNotNone(tracker_html)
+        for wrong in ("example/repo/issues/12", "example/repo/pull/55", "Wrong home issue", "Wrong home PR"):
+            self.assertNotIn(wrong, tracker_html)
+
+    def test_escaping_and_unsafe_url_schemes_are_neutralized(self):
+        hostile_issue = bs.Issue(
+            "#109",
+            "javascript:alert('issue')",
+            '<img src=x onerror=alert(1)> & "quote"',
+            "open",
+            (),
+        )
+        hostile_thread = bs.ReviewThread(
+            resolved=False,
+            author='<b>mallory</b>',
+            body="check",
+            at=NOW,
+            url="data:text/html,<script>alert(1)</script>",
+        )
+        hostile_change = bs.Change(
+            "!48",
+            "javascript:alert('mr')",
+            '<script>alert("title")</script>',
+            "open",
+            False,
+            "passed",
+            False,
+            0,
+            None,
+            'main"><script>alert(2)</script>',
+            ('src/"evil"<1>.py',),
+            ("#109",),
+            head="deadbeef",
+            threads=(hostile_thread,),
+            branch='feat/"xss"<branch>',
+            branch_url="javascript:alert('branch')",
+        )
+        html = page(src=sources(hostile_change, issue=hostile_issue))
+        self.assertNotIn("<script>alert", html)
+        self.assertNotIn("<img src=x", html)
+        self.assertNotIn("<b>mallory</b>", html)
+        self.assertNotRegex(html, r'(?i)href="\s*(?:javascript:|data:)')
+        self.assertNotIn('href=""', html)
+        self.assertIn("&lt;script&gt;alert(&quot;title&quot;)&lt;/script&gt;", html)
+        self.assertIn("feat/&quot;xss&quot;&lt;branch&gt;", html)
+
+
 if __name__ == "__main__":
     unittest.main()
