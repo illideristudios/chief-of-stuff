@@ -127,6 +127,14 @@ class TransportTest(unittest.TestCase):
         self.assertFalse(result.admission['stale'])
         self.assertEqual(self.server.calls, [('/api/graphql', 'Bearer ' + TOKEN, {'query': QUERY})])
         self.assertNotIn(TOKEN, self.gate.path.read_text())
+    def test_http_worker_ignores_workspace_python_startup_hooks(self):
+        marker = self.root / 'leaked'
+        (self.root / 'sitecustomize.py').write_text(
+            f'import sys\nopen({str(marker)!r}, "wb").write(sys.stdin.buffer.read())\n')
+        self.env['PYTHONPATH'] = str(self.root)
+        self.assertEqual(self.make().request(QUERY).cost, 2)
+        self.assertFalse(marker.exists())
+
     def test_redirect_not_followed_and_stale(self):
         self.server.mode = 'redirect'
         with self.assertRaises(admission.StateError): self.client.request(QUERY)
@@ -191,22 +199,53 @@ class TransportTest(unittest.TestCase):
         self.assertEqual(self.make(executable=str(fake)).request(QUERY).cost, 2)
         self.assertEqual(self.server.calls[0][1], 'Bearer ' + TOKEN)
         self.assertEqual(calls.read_text(), "['auth', 'token', '--hostname', 'localhost', '--no-refresh']")
-    def test_auth_timeout_kills_process_group(self):
-        fake = self.root / 'gh'; pid = self.root / 'pid'
-        fake.write_text(f'#!{sys.executable}\nimport subprocess, sys, time\np=subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])\nopen({str(pid)!r}, "w").write(str(p.pid))\ntime.sleep(30)\n'); fake.chmod(0o700)
+    def _auth_timeout_after_child_starts(self, *, parent_exits):
+        import select
+        from types import SimpleNamespace
+
+        fake, fifo = self.root / 'gh', self.root / 'pid-fifo'
+        os.mkfifo(fifo)
+        child_code = 'import sys,time\nwhile True:\n sys.stderr.write("x"); sys.stderr.flush(); time.sleep(.05)'
+        tail = f'print({TOKEN!r}, flush=True)\n' if parent_exits else 'import time\ntime.sleep(30)\n'
+        fake.write_text(f'#!{sys.executable}\nimport subprocess, sys\np=subprocess.Popen([sys.executable, "-c", {child_code!r}])\nopen({str(fifo)!r}, "w").write(str(p.pid))\n' + tail)
+        fake.chmod(0o700)
         self.env.pop('GH_ENTERPRISE_TOKEN')
-        with self.assertRaises(transport.TransportError) as e: self.make(executable=str(fake), timeout=.3).request(QUERY)
-        self.assertEqual(e.exception.kind, 'timeout')
-        child = int(pid.read_text())
-        for _ in range(100):
-            try:
-                os.kill(child, 0)
-                stat = Path(f'/proc/{child}/stat')
-                if stat.exists() and stat.read_text().rsplit(')', 1)[1].split()[0] == 'Z': break
-            except ProcessLookupError: break
-            time.sleep(.01)
-        else: self.fail('auth descendant survived')
-        self.assertFalse(self.gate.path.exists())
+        clock_offset = [0.0]
+        clock = SimpleNamespace(monotonic=lambda: time.monotonic() + clock_offset[0])
+        outcome = []
+        def run():
+            try: self.make(executable=str(fake), timeout=30).request(QUERY)
+            except Exception as exc: outcome.append(exc)
+        fifo_fd = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            with mock.patch.object(transport, 'time', clock):
+                thread = threading.Thread(target=run, daemon=True)
+                thread.start()
+                try:
+                    self.assertTrue(select.select([fifo_fd], [], [], 10)[0], 'fake gh did not start its child')
+                    child = int(os.read(fifo_fd, 100))
+                finally:
+                    clock_offset[0] = 60
+                thread.join(3)
+                self.assertFalse(thread.is_alive(), 'timed-out auth did not finish')
+            self.assertEqual(len(outcome), 1)
+            self.assertIsInstance(outcome[0], transport.TransportError)
+            self.assertEqual(outcome[0].kind, 'timeout')
+            for _ in range(100):
+                try:
+                    os.kill(child, 0)
+                    stat = Path(f'/proc/{child}/stat')
+                    if stat.exists() and stat.read_text().rsplit(')', 1)[1].split()[0] == 'Z': break
+                except ProcessLookupError: break
+                time.sleep(.01)
+            else: self.fail('auth descendant survived')
+            self.assertFalse(self.gate.path.exists())
+        finally:
+            os.close(fifo_fd)
+
+    def test_auth_timeout_kills_process_group(self):
+        self._auth_timeout_after_child_starts(parent_exits=False)
+
     def test_deadline_includes_waiting_for_admission_lock(self):
         entered = threading.Event(); release = threading.Event()
         def holder():
@@ -224,20 +263,7 @@ class TransportTest(unittest.TestCase):
         self.assertFalse(self.client.status()['stale'])
 
     def test_auth_parent_exit_with_pipe_held_kills_descendant(self):
-        fake = self.root / 'gh'; pid = self.root / 'held-pid'
-        fake.write_text(f'#!{sys.executable}\nimport subprocess, sys\np=subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])\nopen({str(pid)!r}, "w").write(str(p.pid))\nprint({TOKEN!r})\n'); fake.chmod(0o700)
-        self.env.pop('GH_ENTERPRISE_TOKEN')
-        with self.assertRaises(transport.TransportError) as e: self.make(executable=str(fake), timeout=.3).request(QUERY)
-        self.assertEqual(e.exception.kind, 'timeout')
-        child = int(pid.read_text())
-        for _ in range(100):
-            try:
-                os.kill(child, 0)
-                stat = Path(f'/proc/{child}/stat')
-                if stat.exists() and stat.read_text().rsplit(')', 1)[1].split()[0] == 'Z': break
-            except ProcessLookupError: break
-            time.sleep(.01)
-        else: self.fail('pipe-holding auth descendant survived')
+        self._auth_timeout_after_child_starts(parent_exits=True)
         self.assertEqual(self.server.calls, [])
 
     def test_proxy_connect_and_enterprise_path(self):

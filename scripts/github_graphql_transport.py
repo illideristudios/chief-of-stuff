@@ -45,7 +45,16 @@ import sys
 import time
 from urllib.parse import urlsplit
 
-import github_admission as admission
+if __name__ == '__main__':
+    # Isolated startup omits the script directory. Load only the trusted sibling
+    # by filename without adding workspace-controlled paths to sys.path.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('github_admission', Path(__file__).resolve().with_name('github_admission.py'))
+    admission = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = admission
+    spec.loader.exec_module(admission)
+else:
+    import github_admission as admission
 
 
 class TransportError(RuntimeError):
@@ -122,13 +131,13 @@ class GitHubGraphQL:
             raise ValueError('invalid GraphQL query')
         deadline = time.monotonic() + self.timeout
         token = self._token(deadline)
-        worker_env = {k: v for k, v in self.env.items() if k not in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN')}
+        worker_env = {k: v for k, v in self.env.items() if not k.upper().startswith('PYTHON') and k not in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN')}
         payload = json.dumps({'query': query, 'token': token, 'endpoint': self.endpoint, 'max_output': self.max_output}).encode()
 
         def attempt():
             if time.monotonic() >= deadline:
                 raise TransportError('timeout')
-            code, output = _process([sys.executable, str(Path(__file__).resolve())], payload,
+            code, output = _process([sys.executable, '-I', str(Path(__file__).resolve())], payload,
                                     worker_env, deadline, self.max_output * 2 + 65536)
             if code:
                 raise TransportError('request failed')
