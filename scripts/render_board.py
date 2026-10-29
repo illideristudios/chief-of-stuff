@@ -521,9 +521,6 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     except SettingsError as e:
         raise ConfigError(str(e)) from None
     ctx = decision_page.decision_context(root, tracker_day, now)
-    navigation = (store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
-                  if db is not None else None)
-    pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
     sources = board_sources.load(out.parent)
@@ -549,6 +546,16 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
             logs.append((d, text))
     stage_log = sorted((d, text) for d, text in logs if reach <= d)
     look_log = sorted((d, text) for d, text in logs if since_day <= d < reach)
+    # Same lead counts the board draws (#965): store rows (with resumes for exhaustion), or the tracker.
+    if db is not None:
+        navigation = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+    else:
+        pending_preview = decision_page.entries(out.parent, ctx)
+        navigation = tab_counts(tracker_text, cfg, now, settings.lanes, settings.kanban, sources,
+                                decision_page.held_refs(pending_preview, ctx), looked,
+                                [*look_log, *stage_log], settings.workers.max_concurrency or 1,
+                                tracker_day=tracker_day)
+    pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
                   sources=sources,

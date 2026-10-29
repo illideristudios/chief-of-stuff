@@ -689,6 +689,29 @@ class RenderOnRequestTest(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIn(text, decisions)
 
+    def test_decisions_pages_match_board_navigation_counts(self):
+        # #965: Decisions list and a JSON decision page show the same Workers/Dispatch/Decisions badges as `/`.
+        import store
+        (self.pages / "decision-nav-check.json").write_text(decision("nav-check"))
+        db_path = self.root / "store.db"
+        store.migrate(db_path)
+        db = store.Store(db_path)
+        try:
+            db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
+            db.upsert_item("github:example/repo#43", title="Needs a person", human_review=True)
+            db.add_decision("github:example/repo#43", "scope", "Store ask on the hold")
+        finally:
+            db.engine.dispose()
+        nav = re.compile(r'<nav class="tabs"[^>]*>.*?</nav>')
+        board_nav = nav.search(get(self.port, "/").body.decode()).group(0)
+        for route in ("/decisions", "/decisions/nav-check"):
+            with self.subTest(route=route):
+                page_nav = nav.search(get(self.port, route).body.decode()).group(0)
+                for badge in ('title="1 need input">1', 'title="1 ready to dispatch">1',
+                              'title="1 pending">1'):
+                    self.assertIn(badge, board_nav)
+                    self.assertIn(badge, page_nav)
+
     def test_an_unchanged_page_is_served_as_written(self):
         get(self.port, "/")
         before = self.board().stat().st_mtime_ns

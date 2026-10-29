@@ -292,8 +292,8 @@ class LeadCountsTest(unittest.TestCase):
         cls.pages = served(2, 0, lead_counts=True)
 
     def test_counts_are_present_on_every_page_including_unbuilt_tabs(self):
-        # M6 changes board/issue/source/workers; separate legacy decision pages are retiring.
-        for page in ("board", "task", "source", "workers"):
+        # #965: Decisions list and each decision page carry the same lead counts as the board.
+        for page in ("board", "task", "source", "workers", "decisions index", "decision"):
             html = self.pages[page]
             with self.subTest(page=page):
                 got = tabs(html)
@@ -343,11 +343,115 @@ class LeadCountsTest(unittest.TestCase):
                     self.assertEqual([n for n in t.walk() if "href" in n.attrs or n.tag == "a"], [], f"{page}: {label}")
                 for label in BUILT:
                     self.assertNotEqual(page_tabs[label].attrs.get("title"), "not available yet", f"{page}: {label}")
-        for page in ("board", "task", "source", "workers"):
+        for page in ("board", "task", "source", "workers", "decisions index", "decision"):
             with self.subTest(lead_page=page):
                 dispatch_tab = tabs(self.pages[page])["Dispatch"]
                 self.assertEqual([b.all_text() for b in badges(dispatch_tab)], ["1"])
                 self.assertNotIn("data-tone", dispatch_tab.attrs)
+
+    def test_store_decision_page_matches_board_lead_counts(self):
+        # #965: /decisions/<store-id> keeps Workers/Dispatch/Decisions badges; store nav omits since/epics.
+        import store
+        root = Path(tempfile.mkdtemp())
+        try:
+            day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
+            (root / "CLAUDE.md").write_text(
+                "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+                f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n")
+            (root / "daily").mkdir()
+            (root / "daily" / f"{day}-tracker.md").write_text(ROUTE_TRACKER.format(day=day))
+            pages = root / "pages"
+            pages.mkdir()
+            path = root / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            try:
+                db.upsert_item("github:example/repo#109", title="Uploads", stage="implement")
+                db.upsert_item("github:example/repo#110", title="Await choice", human_review=True)
+                db.add_decision("github:example/repo#110", "scope", "First choice")
+                db.add_decision("github:example/repo#110", "design", "Second choice")
+                row_id = next(r.id for r in db.decisions())
+            finally:
+                db.engine.dispose()
+            server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                port = server.server_address[1]
+                board, decision = (get(port, r).body.decode() for r in ("/", f"/decisions/{row_id}"))
+                for page, html in (("board", board), ("decision", decision)):
+                    with self.subTest(page=page):
+                        got = tabs(html)
+                        self.assertEqual([b.all_text() for b in badges(got["Workers"])], ["1"])
+                        self.assertEqual([b.all_text() for b in badges(got["Dispatch"])], ["1"])
+                        self.assertEqual([b.all_text() for b in badges(got["Decisions"])], ["2"])
+                        self.assertEqual(badges(got["Since you last looked"]), [])
+                        self.assertEqual(badges(got["Epics"]), [])
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            shutil.rmtree(root, True)
+
+    def test_coordinator_decisions_pages_match_board_dispatch_count(self):
+        # #965: without store.db the Decisions list and JSON decision page still share the board's Dispatch badge.
+        root = Path(tempfile.mkdtemp())
+        try:
+            day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
+            (root / "CLAUDE.md").write_text(
+                "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+                f"- Timezone: {ZONE}\n- Board: self-hosted; URL http://127.0.0.1:8765/; dir `pages/`\n"
+                "- Settings: `cos.toml`\n")
+            (root / "cos.toml").write_text('[lanes.build]\nstages = ["implement", "review", "merge"]\n')
+            (root / "daily").mkdir()
+            (root / "daily" / f"{day}-tracker.md").write_text(
+                f"# Tracker\n\n## Tasks\n\n"
+                f"| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+                f"|---|---|---|---|---|---|---|---|---|---|---|\n"
+                f"| Ready task | Ship it | unassigned | open | {day} |  | S | build | implement | #111 | c |\n\n"
+                f"## Log\n\n- 00:01 opened the day\n- 00:02 stage: Ready task → implement\n")
+            pages = root / "pages"
+            pages.mkdir()
+            (pages / "decision-alpha.json").write_text(decision("alpha"))
+            server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                port = server.server_address[1]
+                for route in ("/", "/decisions", "/decisions/alpha"):
+                    with self.subTest(route=route):
+                        got = tabs(get(port, route).body.decode())
+                        self.assertEqual([b.all_text() for b in badges(got["Dispatch"])], ["1"])
+                        self.assertIn("ready", badges(got["Dispatch"])[0].attrs["title"])
+            finally:
+                server.shutdown()
+                server.server_close()
+        finally:
+            shutil.rmtree(root, True)
+
+    def test_navigation_omits_unavailable_counts_and_keeps_known_zeros(self):
+        # Unavailable keys are absent from the nav dict; a known zero is present as 0 and still draws no badge.
+        import fragment
+        import store
+        import task_forge
+        root = Path(tempfile.mkdtemp())
+        try:
+            self.assertEqual(pg._navigation(root, root / "pages", None), {})
+            path = root / "store.db"
+            store.migrate(path)
+            db = store.Store(path)
+            try:
+                db.upsert_item("github:example/repo#1", title="Only item", stage="implement", forge_state="closed")
+                counts = pg._navigation(root, root / "pages", task_forge.page_data(db))
+            finally:
+                db.engine.dispose()
+            self.assertEqual(counts.get("workers"), 0)
+            self.assertEqual(counts.get("dispatch"), 0)
+            self.assertEqual(counts.get("decisions"), 0)
+            self.assertNotIn("since", counts)
+            self.assertNotIn("epics", counts)
+            html = fragment.tab_bar("Board", 0, **counts)
+            self.assertTrue(all(not badges(t) for t in tabs(html).values()))
+        finally:
+            shutil.rmtree(root, True)
 
     def test_badge_colours_distinguish_attention_ready_pending_and_risk(self):
         import fragment

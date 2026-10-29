@@ -54,7 +54,8 @@ import forge
 import page_reload
 import supervisor
 from backlog_ref import GitHubBacklog
-from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
+from workspace import (LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, looked_before, pages_address,
+                       read_config, record_look, unrecord_look)
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
@@ -169,10 +170,55 @@ def write_board(root: Path, day: str | None = None, *, now: datetime | None = No
 
 
 def _navigation(root: Path, pages_dir: Path, data):
+    """Shared tab lead counts. Store rows when present; otherwise the tracker's counts. An unavailable source
+    omits its keys (do not invent zeros); a known zero stays in the dict and draws no badge (#965)."""
     import decision_actions
-    if data is None:
+    if data is not None:
+        # Resumes keep exhausted retries in Workers, not Dispatch (#963 / #965).
+        return decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+    return _tracker_navigation(root, pages_dir)
+
+
+def _tracker_navigation(root: Path, pages_dir: Path) -> dict:
+    """Coordinator lead counts from today's tracker. No tracker or settings: every count is unavailable.
+
+    Loads the same since/flow lookback window the board uses so Since/Epics match when the store is absent.
+    """
+    import board_sources
+    import decision_page
+    import flow_chart
+    import task_forge
+    from settings import SettingsError, load as load_settings
+    try:
+        cfg = read_config(root)
+    except (ConfigError, OSError):
         return {}
-    return decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+    now = datetime.now(cfg.zone)
+    tracker_day = now.date()
+    tracker = root / cfg.tracker_path(tracker_day.isoformat())
+    if not tracker.is_file():
+        return {}
+    try:
+        settings = load_settings(root, cfg.settings_path)
+    except (SettingsError, OSError):
+        return {}
+    looked = looked_before(pages_dir)
+    since_day = looked.astimezone(cfg.zone).date() if looked else tracker_day
+    reach = (now - flow_chart.WINDOWS[-1][1]).date()
+    bound = min(reach, since_day)
+    earlier = []
+    for d, path in reversed(daily_trackers(root, cfg)):
+        if d >= tracker_day:
+            continue
+        if d < bound:
+            break
+        earlier.append((d, path.read_text()))
+    earlier.reverse()
+    ctx = decision_page.decision_context(root, tracker_day, now)
+    pending_refs = decision_page.held_refs(decision_page.entries(pages_dir, ctx), ctx)
+    return task_forge.tab_counts(
+        tracker.read_text(), cfg, now, settings.lanes, settings.kanban, board_sources.load(pages_dir),
+        pending_refs, looked, earlier, slots=settings.workers.max_concurrency or 1, tracker_day=tracker_day)
 
 
 def _issue_identity(name: str, source: bool = False):
@@ -283,24 +329,24 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                     return ""
             started = time.time_ns()
             with slots:
+                data = _page_data(root)
                 if name.startswith("decision-") and not store_decision:
-                    decision_page.write(root, pages_dir, name[len("decision-"):-5], day)
-                else:
-                    data = _page_data(root)
-                    if name == "workers.html" or name.startswith(("issue-", "decision-")):
-                        navigation = _navigation(root, pages_dir, data)
-                        if store_decision:
-                            decision_page.write_store(root, pages_dir, int(name[len("decision-"):-5]), day,
-                                                      db=data, navigation=navigation)
-                        elif name == "workers.html":
-                            workers_page.write(root, pages_dir, db=data, navigation=navigation)
-                        elif name.endswith("-source.html"):
-                            source_page.write(root, pages_dir, _issue_identity(name, source=True),
-                                              db=data, navigation=navigation)
-                        else:
-                            issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
+                    decision_page.write(root, pages_dir, name[len("decision-"):-5], day,
+                                        navigation=_navigation(root, pages_dir, data))
+                elif name == "workers.html" or name.startswith(("issue-", "decision-")):
+                    navigation = _navigation(root, pages_dir, data)
+                    if store_decision:
+                        decision_page.write_store(root, pages_dir, int(name[len("decision-"):-5]), day,
+                                                  db=data, navigation=navigation)
+                    elif name == "workers.html":
+                        workers_page.write(root, pages_dir, db=data, navigation=navigation)
+                    elif name.endswith("-source.html"):
+                        source_page.write(root, pages_dir, _issue_identity(name, source=True),
+                                          db=data, navigation=navigation)
                     else:
-                        render_board.write(root, day, db=data)
+                        issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
+                else:
+                    render_board.write(root, day, db=data)
             RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
         return ""
     except Exception as e:  # any renderer failure: the server keeps serving the last good page
@@ -721,10 +767,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
                                      answer=draft, words_name="words", link=f"/decisions/{m[1]}")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
+                root = getattr(self.server, "root", None)
+                pages_dir = Path(self.directory)
+                navigation = _navigation(root, pages_dir, _page_data(root)) if root is not None else None
                 page = decision_page.render(d, datetime.now().astimezone().date().isoformat(), slug=m[1],
                                             refusal="Your answer was not saved. Choose one of the options or write an answer.",
                                             draft=draft, selected=key if key in [o["key"] for o in d["options"]] else "",
-                                            back="/decisions" if form.get("back") == ["/decisions"] else "")
+                                            back="/decisions" if form.get("back") == ["/decisions"] else "",
+                                            navigation=navigation)
                 return self._send_transient(400, page.encode("utf-8"))
             d["answer"] = {"key": key or None, "words": words, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
             stat = source.stat()

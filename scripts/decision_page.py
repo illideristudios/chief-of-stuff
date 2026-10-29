@@ -340,9 +340,10 @@ def _answer_form(slug: str, cls: str, opts: str, back: str = "") -> str:
 
 def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root: Path | None = None,
            ctx: Context | None = None, slug: str = "", mtime: float | None = None, pending: int = 0,
-           refusal: str = "", draft: str = "", selected: str = "", back: str = "") -> str:
+           refusal: str = "", draft: str = "", selected: str = "", back: str = "",
+           navigation: dict | None = None) -> str:
     """The page. With a context, what the JSON leaves out is read from it: when it was asked, the answer and the
-    chip, and each reference's status."""
+    chip, and each reference's status. `navigation` is the shared tab lead counts (#965)."""
     link = Linker(forge, root)
 
     def md(text: str) -> str:
@@ -416,7 +417,7 @@ def render(d: dict, day: str, forge: Backlog | GitHubBacklog | None = None, root
     alert = f'<div class="card ask" role="alert">{escape(refusal)}</div>' if refusal else ""
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True)}{alert}"
+            f"<title>{escape(d['headline'])}</title>\n{HEAD_OPEN}{theme()}{PAGE_CSS}</head>\n<body>\n<main class=\"decision\">\n{tab_bar('Decisions', pending, True, **(navigation or {}))}{alert}"
             f'  <header class="top">\n    <div>\n      <span class="eyebrow">{eyebrow}</span>\n'
             f"      <h1>{escape(d['headline'])}</h1>\n    </div>\n"
             f'    <span class="chip{" answered" if answered else ""}">{chip}</span>\n  </header>\n\n'
@@ -498,12 +499,13 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def write(root: Path, pages_dir: Path, name: str, day: str, source: Path | None = None) -> Path:
+def write(root: Path, pages_dir: Path, name: str, day: str, source: Path | None = None,
+          navigation: dict | None = None) -> Path:
     """Render `decision-<name>.json` (or `source`) to `decision-<name>.html`; the page server calls this in process."""
     source = source or pages_dir / f"decision-{name}.json"
     ctx = context(root, day)
     page = render(parse(json.loads(source.read_text())), day, forge(root), root, ctx, name, source.stat().st_mtime,
-                  pending_count(pages_dir, ctx))
+                  pending_count(pages_dir, ctx), navigation=navigation)
     pages_dir.mkdir(parents=True, exist_ok=True)
     out = pages_dir / f"decision-{name}.html"
     write_if_changed(out, page)
@@ -963,7 +965,7 @@ def write_all(pages_dir: Path, ctx: Context, day: str, root: Path | None = None,
     for source in pages_dir.glob("decision-*.json"):
         try:
             page = render(parse(json.loads(source.read_text())), day, ctx.forge, root, ctx, source.stem.removeprefix("decision-"),
-                          source.stat().st_mtime, count)
+                          source.stat().st_mtime, count, navigation=navigation)
         except BAD:
             continue
         write_if_changed(source.with_suffix(".html"), page)
