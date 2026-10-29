@@ -97,7 +97,7 @@ def _bar(g: Segment, win: Window) -> str:
         return at.strftime("%a %H:%M" if win.end - win.start > DAY or at.date() != win.now.date() else "%H:%M")
 
     label = _esc(" · ".join(p for p in (f"{g.category} {clock(g.start)}–{clock(g.end)}", g.title, "needs input" if g.kind == "hold" else g.kind) if p))
-    return (f'<span class="gantt-bar gantt-{_kind(g.kind)}" data-cat="{_esc(g.category)}" tabindex="0" role="img" '
+    return (f'<span class="gantt-bar gantt-{_kind(g.kind)}" data-cat="{_esc(g.category)}" role="img" '
             f'aria-label="{label}" title="{label}" style="{place(g.start, g.end, win.start, win.end)}"></span>')
 
 
@@ -119,9 +119,12 @@ def render(rows: list[Row], win: Window, ticks: list[tuple[datetime, str]] | Non
     for r in rows:
         segs = "".join(_bar(g, win) for g in r.segments if g.end > win.start and g.start < win.end)
         title = f' title="{_esc(r.ref_title)}"' if r.ref_title else ""
-        ref = f'<a {_href(r.href)} class="gantt-ref"{title}>{_esc(r.ref)}</a>' if r.href else f'<span class="gantt-ref"{title}>{_esc(r.ref)}</span>'
-        out.append(f'<div class="gantt-row"><span class="gantt-label">{ref}'
-                   f'<span class="gantt-name">{_esc(r.name)}</span></span><span class="gantt-track">{segs}</span>'
+        ref = (f'<a {_href(r.href)} class="gantt-ref"{title}>{_esc(r.ref)}</a>' if r.href and r.ref
+               else f'<span class="gantt-ref"{"" if r.href else title}>{_esc(r.ref)}</span>')
+        name = (f'<a {_href(r.href)} class="gantt-name"{title}>{_esc(r.name)}</a>' if r.href and not r.ref
+                else f'<span class="gantt-name">{_esc(r.name)}</span>')
+        out.append(f'<div class="gantt-row"><span class="gantt-label">{ref}{name}</span>'
+                   f'<span class="gantt-track">{segs}</span>'
                    f'<span class="gantt-note">{_esc(r.note)}</span></div>')
     out.append("</div></figure>")
     return "\n".join(out)
@@ -130,8 +133,8 @@ def render(rows: list[Row], win: Window, ticks: list[tuple[datetime, str]] | Non
 def legend(colors: dict[str, str | tuple[str, str]] = PALETTE,
            kinds: tuple[str, ...] = ("forecast", "hold", "failed")) -> str:
     """One swatch per category, then one per kind other than solid; `hold` displays as `needs input`."""
-    keys = [f'<span class="gantt-bar gantt-done" data-cat="{_esc(c)}"></span>{_esc(c)}' for c in colors]
-    keys += [f'<span class="gantt-bar gantt-{_kind(k)}"></span>{_esc("needs input" if k == "hold" else k)}' for k in kinds]
+    keys = [f'<span class="gantt-bar gantt-done" data-cat="{_esc(c)}" aria-hidden="true"></span>{_esc(c)}' for c in colors]
+    keys += [f'<span class="gantt-bar gantt-{_kind(k)}" aria-hidden="true"></span>{_esc("needs input" if k == "hold" else k)}' for k in kinds]
     return '<div class="gantt-legend">' + "".join(f'<span class="gantt-key">{k}</span>' for k in keys) + "</div>"
 
 
@@ -150,11 +153,11 @@ BASE_CSS = """\
 .gantt-row{display:flex;align-items:center;height:22px;border-top:1px solid var(--gantt-rule)}
 .gantt-label{width:var(--gantt-label);flex:none;padding-right:10px;box-sizing:border-box;display:flex;gap:6px;align-items:baseline;overflow:hidden;white-space:nowrap}
 .gantt-ref{font:11px ui-monospace,monospace;color:var(--gantt-muted)}
-.gantt-name{font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis}
+.gantt-name{font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
+.gantt a:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
 .gantt-track{position:relative;flex-grow:1;height:14px;border-left:1px solid var(--gantt-edge)}
 .gantt-note{width:var(--gantt-note);flex:none;padding-left:10px;box-sizing:border-box;font-size:11px;color:var(--gantt-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gantt-bar{--c:var(--gantt-muted);--e:var(--c);position:absolute;top:0;height:14px;border-radius:2px;box-sizing:border-box}
-.gantt-bar:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
 .gantt-bar.gantt-done{background:var(--c);box-shadow:inset 0 0 0 1px var(--e)}
 .gantt-bar.gantt-forecast{background:repeating-linear-gradient(135deg,color-mix(in srgb,var(--c) 40%,transparent) 0 3px,transparent 3px 6px);box-shadow:inset 0 0 0 1px var(--c)}
 .gantt-bar.gantt-hold{background:repeating-linear-gradient(135deg,var(--gantt-hold) 0 2px,var(--gantt-bg) 2px 5px);box-shadow:inset 0 0 0 1px var(--gantt-hold)}
