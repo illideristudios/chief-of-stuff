@@ -432,10 +432,10 @@ class BoardTest(unittest.TestCase):
     def test_an_open_approved_change_labels_its_task_approved(self):
         change = bs.Change("!48", "u", "Cap uploads", "open", False, "passed", True, 1, None, "main", (), ("#109",))
         html = rb.render(TODAY_TRACKER, self.cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
-                         sources=bs.Sources({}, {}, {"!48": change}, (), {}))
+                         sources=bs.Sources({}, {}, {"!48": change}, (), {}, bs.backlog.Backlog('https://forge.example', 'grp/app')))
         self.assertIn(">approved · merge Sun<", html[html.index("Flow · 24 hours"):])
         html = rb.render(TODAY_TRACKER, self.cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
-                         sources=bs.Sources({}, {}, {"!48": replace(change, approved=False)}, (), {}))
+                         sources=bs.Sources({}, {}, {"!48": replace(change, approved=False)}, (), {}, bs.backlog.Backlog('https://forge.example', 'grp/app')))
         self.assertNotIn(">approved", html[html.index("Flow · 24 hours"):])
 
     def test_no_stage_line_no_flow_and_no_chart_css(self):
@@ -1609,7 +1609,8 @@ def board(tracker: str, changes: list[bs.Change], stage_log: tuple = ((YESTERDAY
     seen, real = [], fc.section
     with mock.patch.object(rb.flow_chart, "section", lambda rows, now: seen.append(rows) or real(rows, now)):
         html = rb.render(tracker, BoardTest().cfg(), NOW, lanes=LANES, tracker_day=TODAY, kanban=KANBAN,
-                         stage_log=list(stage_log), sources=bs.Sources({}, {}, {c.ref: c for c in changes}, (), {}))
+                         stage_log=list(stage_log), sources=bs.Sources({}, {}, {c.ref: c for c in changes}, (), {},
+                                                                      bs.backlog.Backlog('https://forge.example', 'grp/app')))
     return html, {row.name: (status, row) for status, row in seen[0]}
 
 
