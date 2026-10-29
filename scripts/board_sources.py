@@ -3,9 +3,9 @@
 
     chief-of-stuff sources --root R [--refresh]    # print what the cache holds; --refresh reads it all first
 
-Only what today's tracker names is fetched: its tasks' issues, the pull or merge requests their rows
+Today's tracker names its tasks' issues and the pull or merge requests their rows
 mention (`!58` on GitLab, `PR #58` on GitHub, or the request's URL), and the requests merged today,
-using bounded GraphQL reads. An engine workspace (one with a `store.db`) names its tasks in `work_item`
+using bounded GraphQL reads and a resumable GitHub inventory. An engine workspace (one with a `store.db`) names its tasks in `work_item`
 rather than tracker rows, so there the store's issues, recorded merge requests, open requests and recent
 merged requests are fetched too (#896, #996). Workers are the registered sessions process_status finds running, live
 one-shot workers under the Worktrees dir, and the tracker's Sessions rows. The cache is
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import contextvars
 import fcntl
 import json
 import os
@@ -49,6 +50,7 @@ from tracker_log import STARTED_DETAIL
 from workspace import Config, ConfigError, read_config, worktrees_dir
 
 CACHE = ".sources.json"
+_SCAN_NOW = contextvars.ContextVar("github_scan_now", default=None)
 GH_PR = re.compile(r"(?i)\bPR\s*#(\d+)\b")
 GL_MR = re.compile(r"(?<![\w&])!(\d+)\b")
 GL_STATE = {"opened": "open", "locked": "closed"}
@@ -359,144 +361,6 @@ def _gh_change(key: str, p: dict, approver: str, repo: str = "", origin: str = "
                   branch, branch_url)
 
 
-def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: datetime, approver: str, gh, every_open: bool = False):
-    """Read bounded named batches and paged searches. Incomplete panels are never cached as complete."""
-    issues, changes, errors = {}, {}, {}
-    calls, cost, stopped = 0, 0, False
-
-    def ask(selection, panel):
-        nonlocal calls, cost, stopped
-        if stopped:
-            errors.setdefault(panel, "GitHub read stopped after an earlier failure")
-            return None
-        if calls >= GH_MAX_REQUESTS or cost >= GH_POINT_BUDGET:
-            errors.setdefault(panel, "GitHub refresh budget exhausted; data unavailable or stale")
-            return None
-        calls += 1
-        code, out, err = gh(["api", "graphql", "-f", "query=query { " + selection +
-                             " rateLimit { cost remaining limit } }"])
-        try:
-            body = json.loads(out)
-            data = body["data"]
-            if not isinstance(data, dict):
-                raise ValueError("missing data")
-        except (ValueError, KeyError, TypeError):
-            stopped = True
-            errors.setdefault(panel, (err.strip() or f"GitHub read failed (exit {code})")[:500])
-            return None
-        rate = data.get("rateLimit")
-        if not isinstance(rate, dict) or not all(isinstance(rate.get(k), int) for k in ("cost", "remaining", "limit")):
-            stopped = True
-            errors.setdefault(panel, "GitHub rate limit unavailable")
-            return None
-        cost += rate["cost"]
-        if rate["remaining"] < GH_RESERVE or cost > GH_POINT_BUDGET:
-            stopped = True
-            errors.setdefault(panel, "GitHub rate limit or refresh budget reached; data unavailable or stale")
-            return None
-        # A nonexistent named item is a legitimate null. Other partial errors
-        # are not proof that a panel is complete, even when data accompanies them.
-        problems = [e for e in body.get("errors") or [] if not (
-            isinstance(e, dict) and e.get("type") == "NOT_FOUND" and
-            len(e.get("path") or ()) == 2 and str(e["path"][0]).startswith("r") and
-            str(e["path"][1]).startswith("n"))]
-        if problems or (code and not body.get("errors")):
-            errors.setdefault(panel, (_graphql_errors({"errors": problems}) or err.strip() or f"gh exited {code}")[:500])
-            return None
-        return data
-
-    # Search returns an indistinguishable empty result for an inaccessible repo.
-    # A named lookup against the home proves access; otherwise ask explicitly.
-    if not any(repo.casefold() == home.repo.casefold() and nums for repo, nums in wanted.items()):
-        owner, name = home.repo.split("/", 1)
-        data = ask(f"home: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ name }}", "kanban")
-        repository = data.get("home") if data else None
-        if not isinstance(repository, dict) or not isinstance(repository.get("name"), str):
-            errors.setdefault("kanban", "GitHub home repository unavailable")
-            errors.setdefault("merge requests", errors["kanban"])
-            return None, None, errors
-
-    # Each named alias can be either an issue or a PR, so a failed batch makes
-    # both panels incomplete. Limit aliases as well as search page sizes.
-    named_failed = False
-    for i, repo in enumerate(sorted(wanted)):
-        owner, name = repo.split("/", 1)
-        nums = sorted(wanted[repo])
-        for start in range(0, len(nums), GH_PAGE):
-            batch = nums[start:start + GH_PAGE]
-            items = " ".join(f"n{n}: issueOrPullRequest(number: {n}) {{ __typename ... on Issue {{ {GH_ISSUE} }} "
-                             f"... on PullRequest {{ {GH_CHANGE} }} }}" for n in batch)
-            data = ask(f"r{i}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ {items} }}", "kanban")
-            nodes = data.get(f"r{i}") if data else None
-            if not isinstance(nodes, dict) or any(f"n{n}" not in nodes for n in batch):
-                errors.setdefault("kanban", "GitHub named items unavailable")
-                named_failed = True
-                break
-            for n in batch:
-                node = nodes[f"n{n}"]
-                if node is None:
-                    continue
-                key = backlog.IssueRef(repo, int(node["number"])).label(home)
-                if node.get("__typename") == "PullRequest":
-                    changes[key] = _gh_change(key, node, approver, home.repo, repo)
-                elif node.get("__typename") == "Issue":
-                    m = node.get("milestone")
-                    issues[key] = Issue(key, node["url"], node["title"], node["state"].lower(),
-                                        tuple(x["name"] for x in (node.get("labels") or {}).get("nodes") or []),
-                                        node.get("body") or "", _when(node.get("closedAt")),
-                                        Milestone(m["title"], m["url"], _due(m.get("dueOn")), m["state"].lower(),
-                                                  int((m.get("issues") or {}).get("totalCount") or 0)) if m else None)
-                else:
-                    errors.setdefault("kanban", "GitHub named item has unknown type")
-                    named_failed = True
-            if named_failed:
-                break
-        if named_failed:
-            break
-    if named_failed:
-        errors.setdefault("merge requests", errors["kanban"])
-
-    searches = [("merged", f"repo:{home.repo} is:pr is:merged " +
-                 ("sort:updated-desc" if every_open else f"merged:>={since.replace(microsecond=0).isoformat()}"))]
-    if every_open:
-        searches.append(("open", f"repo:{home.repo} is:pr is:open"))
-    search_failed = False
-    for alias, search in searches:
-        cursor, seen, count = "", set(), 0
-        while True:
-            after = f", after: {json.dumps(cursor)}" if cursor else ""
-            data = ask(f"{alias}: search(query: {json.dumps(search)}, type: ISSUE, first: {GH_PAGE}{after}) "
-                       f"{{ nodes {{ ... on PullRequest {{ {GH_CHANGE} }} }} pageInfo {{ hasNextPage endCursor }} }}", "merge requests")
-            result = data.get(alias) if data else None
-            info = result.get("pageInfo") if isinstance(result, dict) else None
-            nodes = result.get("nodes") if isinstance(result, dict) else None
-            if not isinstance(nodes, list) or not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
-                errors.setdefault("merge requests", f"GitHub {alias} search unavailable")
-                search_failed = True
-                break
-            for node in nodes:
-                if not isinstance(node, dict):
-                    errors.setdefault("merge requests", f"GitHub {alias} search returned an incomplete item")
-                    search_failed = True
-                    break
-                merged_at = _when(node.get("mergedAt"))
-                if alias == "open" or (merged_at and (every_open or merged_at >= since)):
-                    key = f"#{node['number']}"
-                    changes.setdefault(key, _gh_change(key, node, approver, home.repo))
-            count += len(nodes)
-            if search_failed or not info["hasNextPage"] or (alias == "merged" and every_open and count >= 50):
-                break
-            cursor = info.get("endCursor")
-            if not isinstance(cursor, str) or not cursor or cursor in seen:
-                errors.setdefault("merge requests", f"GitHub {alias} pagination unavailable")
-                search_failed = True
-                break
-            seen.add(cursor)
-        if search_failed:
-            break
-    return (None if named_failed else issues), (None if named_failed or search_failed else changes), errors
-
-
 # --- GitLab ----------------------------------------------------------------------------------------
 
 def _gl_pipeline(status: str | None) -> str | None:
@@ -762,7 +626,13 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
     if github_home:
         if changes:
             wanted.setdefault(home.repo, set()).update(changes)
-        return github(home, wanted, since, approver, gh, every_open)
+        import github_scan
+        pages = pages_dir(root, cfg, since.date().isoformat())
+        admission = github_scan.Admission(gh, GH_MAX_REQUESTS, GH_POINT_BUDGET, GH_RESERVE)
+        issues, changes, errors, _ = github_scan.scan(
+            pages / github_scan.CHECKPOINT, home, wanted, since, approver, every_open, admission,
+            _SCAN_NOW.get() or datetime.now().astimezone())
+        return issues, changes, errors
     return gitlab(home, wanted, changes, since, approver, call, every_open)
 
 
@@ -807,13 +677,27 @@ def workers(root: Path, cfg: Config, tracker: Tracker, tracker_text: str, day: d
 def _write(path: Path, sources: Sources, started: datetime | None = None, generation: int | None = None) -> None:
     """Atomically: the page server reads this file while the refresher writes it."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=".sources-", delete=False) as out:
-        data = asdict(sources)
-        if started is not None:
-            data["refresh_started"] = started.isoformat()
-            data["refresh_generation"] = generation
-        out.write(json.dumps(data, default=lambda v: v.isoformat(), indent=1))
-    os.replace(out.name, path)
+    name = None
+    try:
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=".sources-", delete=False) as out:
+            name = out.name
+            data = asdict(sources)
+            if started is not None:
+                data["refresh_started"] = started.isoformat()
+                data["refresh_generation"] = generation
+            out.write(json.dumps(data, default=lambda v: v.isoformat(), indent=1))
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(name, path)
+        name = None
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if name:
+            os.unlink(name)
 
 
 def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call, *, scheduled: bool = False) -> Sources:
@@ -868,7 +752,11 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
         if scheduled and isinstance(home, backlog.GitHubBacklog):
             fetched[attempt_key] = now
         try:
-            issues, changes, errors = forge(root, cfg, tracker, datetime.combine(day, time(0), cfg.zone), gh, call)
+            token = _SCAN_NOW.set(now)
+            try:
+                issues, changes, errors = forge(root, cfg, tracker, datetime.combine(day, time(0), cfg.zone), gh, call)
+            finally:
+                _SCAN_NOW.reset(token)
         except Exception as e:  # a forge answer shaped unlike its schema; the page still renders
             issues, changes, errors = None, None, dict.fromkeys(("kanban", "merge requests"), f"{type(e).__name__}: {e}")
     # Both failed panels may be carried together under their old home. When only one
@@ -877,6 +765,8 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
         prev.home is not None and home is not None and type(prev.home) is type(home)
         and backlog.home_of(prev.home) == backlog.home_of(home))
     changed_home = not same_home and (issues is not None or changes is not None)
+    if changed_home:
+        fetched.pop("github sweep", None)
     if issues is None:
         if changed_home:
             issues = {}
@@ -887,12 +777,31 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
                 home = prev.home
     elif cfg.backlog is not None:
         fetched["kanban"] = now
+        if isinstance(cfg.backlog, backlog.GitHubBacklog):
+            try:
+                import github_scan
+                checkpoint = json.loads((pages / github_scan.CHECKPOINT).read_text())
+                observed = _when(checkpoint.get("named_observed"))
+                if observed:
+                    fetched["kanban"] = observed
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
     if changes is None:
         changes = {} if changed_home else prev.changes
         if changed_home:
             fetched.pop("merge requests", None)
     elif cfg.backlog is not None:
         fetched["merge requests"] = now
+        if isinstance(cfg.backlog, backlog.GitHubBacklog):
+            try:
+                import github_scan
+                checkpoint = json.loads((pages / github_scan.CHECKPOINT).read_text())
+                observed = _when(checkpoint.get("observed"))
+                if observed:
+                    fetched["merge requests"] = observed
+                    fetched["github sweep"] = observed
+            except (OSError, ValueError, TypeError, AttributeError):
+                pass
     try:
         found = workers(root, cfg, tracker, text, day)
         fetched["workers"] = now
@@ -901,6 +810,13 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
     got = Sources(fetched, issues, changes, found, errors, home)
     try:
         _write(pages / CACHE, got, now, generation)
+        if isinstance(cfg.backlog, backlog.GitHubBacklog) and not skip and not any(
+                key in errors for key in ("kanban", "merge requests")):
+            import github_scan
+            try:
+                (pages / github_scan.CHECKPOINT).unlink(missing_ok=True)
+            except OSError:
+                pass  # A completed checkpoint may be safely replayed after a crash.
     except OSError as e:
         got = replace(got, errors={**errors, "cache": str(e)})
     return got

@@ -74,6 +74,8 @@ def workspace(backlog: str, issue: str = "#115", mr: str = "") -> Path:
 def gh_pr(number, merged_at=None, state="OPEN"):
     return {"__typename": "PullRequest", "number": number, "url": f"https://github.com/o/app/pull/{number}",
             "title": f"PR {number}", "state": state, "isDraft": False, "mergedAt": merged_at,
+            "mergeable": "UNKNOWN", "headRefName": "", "headRef": None, "headRepository": None,
+            "closingIssuesReferences": {"nodes": []}, "reviewThreads": {"nodes": []},
             "baseRefName": "main", "body": "Closes #118", "headRefOid": HEAD, "reviewDecision": "APPROVED",
             "files": {"nodes": [{"path": "src/a.py"}]},
             "latestReviews": {"nodes": [{"author": {"login": "robin"}}, {"author": {"login": "robin"}, "state": "APPROVED",
@@ -84,7 +86,7 @@ def gh_pr(number, merged_at=None, state="OPEN"):
 
 def gh_issue(number, labels=("stage:2-implement",)):
     return {"__typename": "Issue", "number": number, "url": f"https://github.com/o/app/issues/{number}",
-            "title": f"Issue {number}", "state": "OPEN", "labels": {"nodes": [{"name": x} for x in labels]}}
+            "title": f"Issue {number}", "state": "OPEN", "body": "", "closedAt": None, "milestone": None, "labels": {"nodes": [{"name": x} for x in labels]}}
 
 
 class FakeGh:
@@ -97,10 +99,13 @@ class FakeGh:
             return 1, "", "gh: not logged in"
         query = args[args.index("-f") + 1]
         repo = {"n118": gh_issue(118), "n115": gh_issue(115, ()), "n58": gh_pr(58), **self.nodes}
+        merged = {**gh_pr(41, "2026-09-26T05:41:00Z", "MERGED"), "updatedAt": "2026-09-26T05:41:00Z"}
         data = {"r0": {n: repo.get(n) for n in re.findall(r"(n\d+): issueOrPullRequest", query)},
                 "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
-                "merged": {"nodes": [gh_pr(41, "2026-09-26T05:41:00Z", "MERGED")],
-                           "pageInfo": {"hasNextPage": False, "endCursor": None}}}
+                "inventory": {"pullRequests": {"nodes": [{k: merged[k] for k in ("number", "state", "mergedAt", "updatedAt")}],
+                                                "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+        if 'pullRequest(number:' in query:
+            data['r0'] = {'n41': merged}
         return 0, json.dumps({"data": data}), ""
 
 
@@ -111,12 +116,13 @@ class GitHubTest(unittest.TestCase):
         self.got = bs.refresh(self.root, NOW, gh=self.gh)
 
     def test_named_and_merged_are_separate_bounded_queries(self):
-        self.assertEqual(len(self.gh.calls), 2)
+        self.assertEqual(len(self.gh.calls), 4)
         queries = [args[args.index("-f") + 1] for args in self.gh.calls]
         for asked in ("n118: issueOrPullRequest(number: 118)", "n115:", "n58:"):
             self.assertIn(asked, queries[0])
-        self.assertIn("is:merged", queries[1])
-        self.assertIn("first: 5", queries[1])
+        self.assertIn("pullRequests(first: 100", queries[1])
+        self.assertIn("pullRequests(first: 100", queries[2])
+        self.assertIn("pullRequest(number: 41)", queries[3])
 
     def test_issues_and_changes_by_ref(self):
         self.assertEqual(self.got.issues["#118"].labels, ("stage:2-implement",))
@@ -133,7 +139,7 @@ class GitHubTest(unittest.TestCase):
         self.assertEqual((merged.state, merged.merged_at.astimezone(ZONE).strftime("%H:%M")), ("merged", "00:41"))
 
     def test_fetched_times_and_the_cache_round_trip(self):
-        self.assertEqual(self.got.fetched, {"kanban": NOW, "merge requests": NOW, "workers": NOW})
+        self.assertEqual(self.got.fetched, {"kanban": NOW, "merge requests": NOW, "github sweep": NOW, "workers": NOW})
         self.assertEqual(bs.load(self.root / "pages"), self.got)
 
     def test_a_failed_forge_is_an_error_and_keeps_the_last_good_facts(self):
@@ -1456,24 +1462,28 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
         def gh(args, input_text=None):
             query = args[args.index("-f") + 1]
             queries.append(query)
-            # Repos sorted alphabetically: r0 is acme/other, r1 is o/app.
-            data = {
-                "r0": {"n7": {**gh_issue(7), "url": "https://github.com/acme/other/issues/7"}},
-                "r1": {
-                    "n92": gh_issue(92),
-                    "n5": {**gh_issue(5, ()), "state": "CLOSED", "closedAt": "2026-09-20T18:00:00Z"},
-                    "n6": {**gh_issue(6, ()), "state": "CLOSED", "closedAt": "2026-09-25T15:00:00Z"},
-                    "n33": recorded_merged,
-                },
-                "merged": {"nodes": [recent_merged], "pageInfo": {"hasNextPage": False, "endCursor": None}},
-                "open": {"nodes": [open_pr], "pageInfo": {"hasNextPage": False, "endCursor": None}},
-                "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
-            }
-            return 0, json.dumps({"data": data}), ""
+            updated = "2026-09-26T06:00:00Z"
+            prs = [{**open_pr, "updatedAt": updated}, {**recent_merged, "updatedAt": updated}]
+            if 'inventory: repository' in query:
+                result = {"inventory": {"pullRequests": {"nodes": [
+                    {k: p[k] for k in ("number", "state", "mergedAt", "updatedAt")} for p in prs],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None}}}}
+            elif 'issueOrPullRequest' in query:
+                if 'owner: "acme"' in query:
+                    nodes = {"n7": {**gh_issue(7), "url": "https://github.com/acme/other/issues/7"}}
+                else:
+                    nodes = {"n92": gh_issue(92), "n5": {**gh_issue(5, ()), "state": "CLOSED", "closedAt": "2026-09-20T18:00:00Z"},
+                             "n6": {**gh_issue(6, ()), "state": "CLOSED", "closedAt": "2026-09-25T15:00:00Z"}, "n33": recorded_merged,
+                             "n115": gh_issue(115), "n118": gh_issue(118), "n58": gh_pr(58)}
+                result = {"r0": {n: nodes.get(n) for n in re.findall(r"(n\d+): issueOrPullRequest", query)}}
+            else:
+                result = {"r0": {f"n{p['number']}": p for p in prs}}
+            result['rateLimit'] = {"cost": 1, "remaining": 4900, "limit": 5000}
+            return 0, json.dumps({"data": result}), ""
 
         got = bs.refresh(root, NOW, gh=gh)
         self.assertEqual(got.errors, {})
-        self.assertEqual(len(queries), 4)
+        self.assertGreaterEqual(len(queries), 5)
         self.assertNotIn("team/app", " ".join(queries))
         self.assertNotIn("n8:", " ".join(queries))
         self.assertEqual(bs.load(root / "pages"), got)

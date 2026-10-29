@@ -284,8 +284,8 @@ class SourcesWriterAndReaderAgreeTest(unittest.TestCase):
                 name = f"{owner}/{repo}"
                 data[alias] = {"n8": {"__typename": "Issue", "number": 8, "url": f"https://github.com/{name}/issues/8",
                                         "title": name, "state": "CLOSED" if name == "o/app" else "OPEN",
-                                        "closedAt": CLOSED_AT if name == "o/app" else None, "labels": {"nodes": []}}}
-            return 0, json.dumps({"data": {**data, "merged": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+                                        "closedAt": CLOSED_AT if name == "o/app" else None, "labels": {"nodes": []}, "body": "", "milestone": None}}
+            return 0, json.dumps({"data": {**data, "inventory": {"pullRequests": {"nodes": [], "pageInfo": {"hasNextPage": False, "endCursor": None}}},
                                            "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000}}}), ""
 
         self.check("GitHub issues; repo o/app", "#8", "acme/web#8", gh=gh)

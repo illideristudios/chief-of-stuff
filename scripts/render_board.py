@@ -459,6 +459,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     source_keys = ("merge requests",) if db is not None and not tracker_text.strip() else ("kanban", "merge requests", "workers")
     meta.extend(f"{k} {sources.fetched[k].astimezone(zone):%H:%M}" for k in source_keys
                 if k in sources.fetched and (same_home or k not in ("kanban", "merge requests")))
+    if same_home and "github sweep" in sources.fetched:
+        meta.append(f"GitHub inventory last observed {sources.fetched['github sweep'].astimezone(zone):%Y-%m-%d %H:%M} (non-atomic sweep)")
     meta.append(_tasks(len(tasks)))
     if db is not None and (latest := next((row.message for row in reversed(db.engine_logs)
                                            if row.kind == "policy_change"), "")):
