@@ -70,8 +70,13 @@ class RotationTest(unittest.TestCase):
         self.assertEqual(self.choose(KEY, stage="fix"), ENTRIES[1])
 
     def test_ineligible_entries_are_skipped_and_unknown_limits_remain_eligible(self):
-        self.assertEqual(self.choose(available=lambda entry: entry != ENTRIES[0]), ENTRIES[1])
-        self.assertEqual(self.choose("github:example/repo#13"), ENTRIES[2])
+        # Near-cap entries stay out; unknown-limit / otherwise eligible entries keep taking turns,
+        # including after wrap-around would otherwise land on the capped entry.
+        capped = {ENTRIES[0]}
+        available = lambda entry: entry not in capped
+        self.assertEqual(self.choose(available=available), ENTRIES[1])
+        self.assertEqual(self.choose("github:example/repo#13", available=available), ENTRIES[2])
+        self.assertEqual(self.choose("github:example/repo#14", available=available), ENTRIES[1])
 
     def test_all_entries_near_cap_refuses_instead_of_launching_persona(self):
         with self.assertRaisesRegex(RuntimeError, "limit"):

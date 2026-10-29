@@ -82,9 +82,19 @@ _NON_OBVIOUS = re.compile(
     re.IGNORECASE,
 )
 _MULTI_HOP = re.compile(
-    r"\b(?:grandparent|two\s+hops|(?:\d+|three|two)\s+(?:levels|generations|ancestors)|beyond\s+the\s+immediate\s+parent|parent\s+of\s+(?:its\s+)?parent)\b",
+    r"\b(?:grandparent|two\s+hops|(?:\d+|three|two|four|five)\s+(?:levels?|generations?|ancestors|hops)|beyond\s+the\s+immediate\s+parent|parent\s+of\s+(?:its\s+)?parent)\b",
     re.IGNORECASE,
 )
+_DEPTH_DIGITS = re.compile(
+    r"\b(\d+)\s+(?:levels?|generations?|ancestors|hops)\b",
+    re.IGNORECASE,
+)
+_DEPTH_WORDS = re.compile(
+    r"\b(two|three|four|five)\s+(?:levels?|generations?|ancestors|hops)|(?:\btwo\s+hops\b)|(?:\bgrandparent\b)|"
+    r"(?:\bbeyond\s+the\s+immediate\s+parent\b)|(?:\bparent\s+of\s+(?:its\s+)?parent\b)",
+    re.IGNORECASE,
+)
+_DEPTH_WORD_VALUES = {"two": 2, "three": 3, "four": 4, "five": 5}
 _WORD = re.compile(r"[a-z0-9]+")
 _STOPWORDS = frozenset({
     "a", "an", "and", "any", "anything", "approach", "as", "at", "been", "by", "for", "from",
@@ -152,12 +162,33 @@ def _referenced_leaf_ids(req: HistoryRequest, valid_ids: frozenset[int]) -> tupl
     return tuple(ordered)
 
 
+def _justified_depth(text: str) -> int | None:
+    """Largest ancestor depth the justification text itself names; None when it names none."""
+    depths: list[int] = []
+    for match in _DEPTH_DIGITS.finditer(text):
+        depths.append(int(match.group(1)))
+    for match in _DEPTH_WORDS.finditer(text):
+        word = (match.group(1) or "").lower()
+        if word in _DEPTH_WORD_VALUES:
+            depths.append(_DEPTH_WORD_VALUES[word])
+        else:
+            # grandparent / two hops / beyond immediate parent / parent of parent → one extra hop.
+            depths.append(2)
+    return max(depths) if depths else None
+
+
 def _approved_depth_for(req: HistoryRequest) -> int:
+    """Grant only as far up as the justification requires (and never past requested_depth)."""
     requested = max(1, req.requested_depth)
     if requested == 1:
         return 1
     combined = f"{req.justification}\n{req.evidence}"
-    return requested if _MULTI_HOP.search(combined) else 1
+    if not _MULTI_HOP.search(combined):
+        return 1
+    justified = _justified_depth(combined)
+    if justified is None:
+        justified = 2
+    return min(requested, justified)
 
 
 def _specific_approach_tokens(approach: str) -> frozenset[str]:

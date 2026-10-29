@@ -343,7 +343,7 @@ def is_current(path: Path | str) -> bool:
 
 
 def verdict_fifo_path(root: Path, request_id: int) -> Path:
-    return Path(root) / ".chief-of-stuff" / "verdicts" / f"req_{request_id}.fifo"
+    return Path(root).resolve() / ".chief-of-stuff" / "verdicts" / f"req_{request_id}.fifo"
 
 
 def signal_history_verdict(root: Path, request_id: int) -> None:
@@ -1141,6 +1141,7 @@ class Store:
             if row.status != "pending":
                 if row.status == target_status:
                     s.expunge(row)
+                    signal_history_verdict(self.path.resolve().parent, request_id)
                     return row
                 raise ValueError(f"history request {request_id} is already {row.status}")
             if approved:
@@ -1178,7 +1179,7 @@ class Store:
                 )
             s.flush()
             s.expunge(row)
-        signal_history_verdict(self.path.parent, request_id)
+        signal_history_verdict(self.path.resolve().parent, request_id)
         return row
 
     def judge_history_request(self, request_id: int, *, decided_by: str = "coordinator") -> DecisionHistoryRequest:

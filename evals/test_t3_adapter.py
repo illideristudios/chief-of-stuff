@@ -84,6 +84,11 @@ class T3AdapterTest(unittest.TestCase):
         # A thread waiting on a request is waiting, not finished.
         self.assertIsNone(t3_adapter.outcome({"status": "completed", "activeRunId": None, "pendingRequestCount": 1}))
 
+    def test_an_unrecognized_or_queued_status_is_not_proof_a_thread_ended(self):
+        for status in ("queued", "unrecognized", None):
+            with self.subTest(status=status):
+                self.assertIsNone(t3_adapter.outcome({"status": status, "pendingRequestCount": 0}))
+
     def test_the_channel_files_carry_the_binding_the_agent_and_the_guard_hooks_and_stay_out_of_git(self):
         tree = self.git_tree()
         t3_adapter.write_channel(tree, BINDING, agent="builder", guard=guard_binding.guard_plugin_dir())

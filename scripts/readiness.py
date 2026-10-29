@@ -46,7 +46,8 @@ def why_not(issue_key: str, *, blockers: tuple[str, ...] | None, asks: Sequence[
 
 
 EXHAUSTED_CHIP = "retries exhausted"
-EXHAUSTED_UNBLOCK = "Raise the retry limit and release any human-review hold, or close the issue."
+EXHAUSTED_UNBLOCK = ('Use work Retry --issue NUMBER --recover --commit to acknowledge failures and release the hold, '
+                     'raise the retry limit ([workers] failure_limit), or close the issue.')
 
 
 @dataclass(frozen=True)

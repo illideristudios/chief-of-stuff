@@ -18,12 +18,14 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from datetime import datetime
 
 import claude_adapter
 import host_adapter
 import runtimes
 from model_port import Request
 from shell_setup import ShellError
+from worker_health import Evidence
 
 PROVIDERS = {"claude": "claudeAgent"}  # runtime -> T3 provider instance; the others need their own channel file under T3
 POLL_S = 5.0
@@ -60,7 +62,8 @@ def thread_link(environment: str, thread: str) -> str:
 def outcome(thread: dict) -> int | None:
     """The exit code of a thread that has ended, else None: idle with no pending request is ended, and `failed` kinds
     exit 1. A pending request is a thread waiting for an answer, which is not an end."""
-    if thread.get("activeRunId") or thread.get("pendingRequestCount") or thread.get("status") in ("running", "starting"):
+    if (thread.get("activeRunId") or thread.get("pendingRequestCount")
+            or thread.get("status") not in (*FAILED, "completed", "idle")):
         return None
     return 1 if thread.get("status") in FAILED else 0
 
@@ -122,6 +125,35 @@ def start(request: Request, run_dir: Path, *, env: dict[str, str], cli: str | No
 def _t3(spec: dict, *argv: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     base = ["--base-dir", spec["home"]] if spec["home"] else []
     return subprocess.run([spec["cli"], *argv, *base], input=stdin, capture_output=True, text=True, timeout=120)
+
+
+def observe(record: dict) -> Evidence:
+    """Read the actual thread, never infer its activity from the local polling process.
+
+    Use the launch's saved CLI and home, so an engine restart observes the same environment.
+    A CLI error, partial response or missing identity is unknown, not permission to relaunch.
+    """
+    try:
+        run_dir = Path(record["run_dir"])
+        spec = json.loads((run_dir / "t3.json").read_text())
+        thread_id = record.get("thread_id")
+        if not thread_id:
+            thread_id = json.loads((run_dir / "thread.json").read_text())["thread_id"]
+        done = _t3(spec, "thread", "show", thread_id, "--json", "--messages", "0")
+        if done.returncode:
+            raise RuntimeError((done.stderr or "T3 thread read failed").strip()[:300])
+        thread = json.loads(done.stdout)["thread"]
+        if thread["threadId"] != thread_id:
+            raise ValueError("T3 thread identity mismatch")
+        status = thread["status"]
+        updated = datetime.fromisoformat(thread["updatedAt"])
+        pending = thread["pendingRequestCount"]
+        if not isinstance(status, str) or not status or updated.utcoffset() is None or type(pending) is not int or pending < 0:
+            raise ValueError("incomplete T3 thread evidence")
+        return Evidence(alive=outcome(thread) is None, last_activity_at=updated, launcher="t3",
+                        status=status, pending_requests=pending)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
+        return Evidence(launcher="t3", error=f"T3 evidence unavailable: {exc}")
 
 
 def _start_thread(spec: dict) -> str:

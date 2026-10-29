@@ -647,7 +647,7 @@ class EngineTest(unittest.TestCase):
     def test_unreadable_live_tree_still_reaches_stall_judgement(self):
         self.run_pass()
         self.now += timedelta(hours=1)
-        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "stalled")])
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "suspected stall")])
 
     def test_stall_wait_uses_configured_threshold(self):
         workers = engine.settings.Workers(stall=engine.settings.Stall(after_minutes=12))
@@ -659,14 +659,13 @@ class EngineTest(unittest.TestCase):
         self.now += timedelta(minutes=11)
         self.assertEqual(run(), [])
         self.now += timedelta(minutes=1)
-        self.assertEqual(run(), [reconcile.Wait(KEY, "stalled")])
+        self.assertEqual(run(), [reconcile.Wait(KEY, "suspected stall")])
 
-    def test_unsupported_restart_never_silently_falls_back_to_wait(self):
+    def test_restart_configuration_is_accepted_for_a_fresh_launch(self):
         workers = engine.settings.Workers(stall=engine.settings.Stall(action="restart"))
-        with self.assertRaisesRegex(ValueError, "automatic stall restart is not supported"):
-            engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
-                            trees=self.trees, launch=self.launch, workers=workers, clock=lambda: self.now)
-        self.assertEqual(self.launched, [])
+        actions = engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
+                                  trees=self.trees, launch=self.launch, workers=workers, clock=lambda: self.now)
+        self.assertEqual(actions, [reconcile.Dispatch(KEY, "implement", "builder", 1)])
 
     def test_blocked_review_limit_survives_store_reopen(self):
         self.forge.rows[0]["stage"] = "review"
