@@ -44,6 +44,7 @@ class EngineStatus:
     interval: float = 60.0
     started_at: datetime | None = None
     last_pass_at: datetime | None = None
+    pass_started_at: datetime | None = None
     last_attempt_at: datetime | None = None
     stopped_at: datetime | None = None
     last_error: str | None = None
@@ -93,6 +94,7 @@ def write_engine_status(
     last_pass_at: datetime | None,
     last_attempt_at: datetime | None,
     stopped_at: datetime | None,
+    pass_started_at: datetime | None = None,
     interval: float = 60.0,
     mode: str = "service",
     last_error: str | None = None,
@@ -106,6 +108,7 @@ def write_engine_status(
     payload = {
         "started_at": started_at.isoformat() if started_at is not None else None,
         "last_pass_at": last_pass_at.isoformat() if last_pass_at is not None else None,
+        "pass_started_at": pass_started_at.isoformat() if pass_started_at is not None else None,
         "last_attempt_at": last_attempt_at.isoformat() if last_attempt_at is not None else None,
         "stopped_at": stopped_at.isoformat() if stopped_at is not None else None,
         "interval": float(interval),
@@ -157,6 +160,7 @@ def read_engine_status(root: Path) -> EngineStatus | None:
         interval=interval,
         started_at=_parse_iso(data.get("started_at")),
         last_pass_at=_parse_iso(data.get("last_pass_at")),
+        pass_started_at=_parse_iso(data.get("pass_started_at")),
         last_attempt_at=_parse_iso(data.get("last_attempt_at")),
         stopped_at=_parse_iso(data.get("stopped_at")),
         last_error=last_error.strip() if isinstance(last_error, str) and last_error.strip() else None,
@@ -237,6 +241,8 @@ def engine_health(status: EngineStatus, now: datetime, zone: ZoneInfo) -> Engine
             ("engine error", pass_meta),
             f"engine pass failed{at_clause}{pass_clause}: {status.last_error}",
         )
+    if status.pass_started_at is not None:
+        return EngineHealth("running", ("engine running", pass_meta), None)
     stale_after = timedelta(seconds=max(float(status.interval or 60.0) * ENGINE_STALE_FACTOR, ENGINE_STALE_FLOOR_S))
     anchors = [t for t in (status.started_at, status.last_pass_at) if t is not None]
     anchor = max(anchors) if anchors else None

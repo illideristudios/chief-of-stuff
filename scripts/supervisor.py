@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import plistlib
+import signal
 import shutil
 import subprocess
 import sys
@@ -19,7 +20,7 @@ import shell_setup
 
 RELEASE = Path(__file__).resolve().parent.parent
 
-ACTIONS = ("install", "uninstall", "status", "ensure")
+ACTIONS = ("install", "uninstall", "status", "ensure", "ensure-background")
 DISABLED_MARKER = "engine.disabled"
 
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
@@ -157,6 +158,22 @@ def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
         return False
 
 
+def run_preparation(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
+    """Reap a timed-out venv or pip process and its descendants before discarding its generation."""
+    with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                          start_new_session=True) as child:
+        try:
+            out, err = child.communicate(timeout=timeout)
+        except BaseException:
+            try:
+                os.killpg(child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            child.communicate()
+            raise
+        return subprocess.CompletedProcess(argv, child.returncode, out, err)
+
+
 def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900) -> Path:
     """Return the selected release's venv, publishing a fresh generation only after installation succeeds.
 
@@ -217,7 +234,7 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
     try:
         for argv in ([base, "-m", "venv", str(building)],
                      [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=remaining())
+            result = run_preparation(argv, timeout=remaining())
             if result.returncode:
                 raise ServiceError(f"engine dependencies failed to install: "
                                    f"{(result.stderr or result.stdout).strip()[-2000:]}")
@@ -251,6 +268,15 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
     with lock(data / "supervisor.lock"):
         if respect_disabled and (state_dir(root) / DISABLED_MARKER).is_file():
             return "engine: disabled"
+        if respect_disabled:
+            from workspace import lock_held
+            path = job_path(label("engine", root), jobs_dir)
+            if path.exists() and lock_held(state_dir(root) / "engine.lock"):
+                existing = plistlib.loads(path.read_bytes())
+                if existing.get("Label") != label("engine", root) or existing.get("WorkingDirectory") != str(root):
+                    raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
+                if launchctl("print", f"gui/{os.getuid()}/{label('engine', root)}", missing_ok=True):
+                    return "engine: serving"
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = str(log_path)
@@ -279,6 +305,19 @@ def ensure(root: Path, jobs_dir: Path | None = None) -> str:
     if (state_dir(resolved) / DISABLED_MARKER).is_file():
         return "engine: disabled"
     return install(resolved, jobs_dir=jobs_dir, respect_disabled=True)
+
+
+def ensure_background(root: Path) -> str:
+    """Start bounded ensure outside the Claude hook lifetime; diagnostics go to the workspace log."""
+    root = root.resolve()
+    if not (root / "store.db").is_file():
+        return "engine: not configured"
+    log = state_dir(root) / "engine-ensure.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    with log.open("a") as output:
+        subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--root", str(root), "ensure"],
+                         stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True)
+    return "engine: ensuring"
 
 
 def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
@@ -312,6 +351,8 @@ def main(argv: list[str] | None = None) -> int:
             print(encode(status(root)))
         elif args.cmd == "ensure":
             print(ensure(root))
+        elif args.cmd == "ensure-background":
+            print(ensure_background(root))
         else:
             print(install(root) if args.cmd == "install" else uninstall(root))
         return 0
@@ -321,4 +362,6 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
+    # Unwind preparation so its subprocess group is reaped on service termination.
+    signal.signal(signal.SIGTERM, lambda signum, _frame: sys.exit(128 + signum))
     sys.exit(main())

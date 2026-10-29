@@ -1145,6 +1145,11 @@ def main(argv: list[str] | None = None) -> int:
                     page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
                     page_thread.start()
                 while True:
+                    with contextlib.suppress(OSError):
+                        write_engine_status(root, started_at=started_at, last_pass_at=last_pass_at,
+                                            last_attempt_at=last_attempt_at, stopped_at=None,
+                                            pass_started_at=datetime.now(timezone.utc), interval=args.interval,
+                                            mode=mode, last_error=last_error, error_kind=error_kind, release=release)
                     failed = False
                     try:
                         run_pass(forge=source, store=db, policies=policies, root=root, trees=trees,

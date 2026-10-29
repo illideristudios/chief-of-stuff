@@ -201,7 +201,7 @@ class CoordinatorLaunchTest(unittest.TestCase):
         self.assertEqual(ensured.call_count, 2)
         scripts_called = [Path(call.args[0][1]).name for call in ensured.call_args_list]
         self.assertEqual(scripts_called, ["notify_service.py", "supervisor.py"])
-        self.assertEqual(ensured.call_args_list[1].args[0][-3:], ["--root", str(self.root.resolve()), "ensure"])
+        self.assertEqual(ensured.call_args_list[1].args[0][-3:], ["--root", str(self.root.resolve()), "ensure-background"])
         launch.assert_called_once()
         self.assertIn("engine: test failure", errors.getvalue())
 

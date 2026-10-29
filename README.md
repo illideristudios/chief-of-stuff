@@ -36,6 +36,8 @@ claude plugin install chief-of-stuff@chief-of-stuff
 claude --agent chief-of-stuff
 ```
 
+For a store-backed workspace, the plugin session startup hook starts an engine ensure in the background. The versioned launcher does the same for every runtime. First-time dependency preparation may take up to 900 seconds; errors are recorded in `.chief-of-stuff/engine-ensure.log`. An explicitly stopped engine remains disabled until installed again.
+
 The launcher starts even when the selected CLI does not expose the configured `Calendar tool:`. The coordinator reports the missing tool, leaves calendar facts unverified, and continues work that does not depend on the calendar. To enable calendar reads, configure an equivalent calendar tool in that CLI.
 
 If a workspace requires workers to use only the configured `User:` name, add `- Identity: user-name-only` to its `## Coordinator` block. Without that line, assignments make no claim about aliases or names found in workspace files.

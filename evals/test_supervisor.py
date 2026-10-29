@@ -40,7 +40,8 @@ class SupervisorTest(unittest.TestCase):
                           "XDG_STATE_HOME": "",
                       }),
                       mock.patch.object(supervisor.shell_setup, "resolve", return_value="/login/bin/python3"),
-                      mock.patch.object(supervisor.subprocess, "run", side_effect=self.fake_run)):
+                      mock.patch.object(supervisor.subprocess, "run", side_effect=self.fake_run),
+                      mock.patch.object(supervisor, "run_preparation", side_effect=self.fake_run)):
             patch.start()
             self.addCleanup(patch.stop)
         self.loaded = False
@@ -218,6 +219,7 @@ class VenvTest(SupervisorTest):
 
         with mock.patch.object(supervisor.time, "monotonic", side_effect=lambda: elapsed[0]), \
              mock.patch.object(supervisor.subprocess, "run", side_effect=slow), \
+             mock.patch.object(supervisor, "run_preparation", side_effect=slow), \
              self.assertRaises(subprocess.TimeoutExpired):
             supervisor.ensure_venv(self.data, timeout=60)
         self.assertLessEqual(elapsed[0], 60)
