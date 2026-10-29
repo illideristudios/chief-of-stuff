@@ -360,6 +360,8 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     `stage_log` is (day, tracker text) for the earlier days the Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
     `look_log` the earlier days needed for hold starts; `loop_log` the active tasks' older fix history."""
+    same_home = (sources.home is not None and cfg.backlog is not None and type(sources.home) is type(cfg.backlog)
+                 and board_sources.backlog.home_of(sources.home) == board_sources.backlog.home_of(cfg.backlog))
     sources = board_sources.for_home(sources, cfg.backlog)
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
@@ -453,8 +455,14 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     if db is not None and (latest := next((row.message for row in reversed(db.engine_logs)
                                            if row.kind == "policy_change"), "")):
         meta.append(latest)
-    head = panels.Header(f"Board · {now.strftime('%a %d %b')}", tuple(meta), now, nearest.name, nearest.at,
-                         tuple(f"{k}: {why}" for k, why in sources.errors.items()))
+    warnings = []
+    for panel, reason in sources.errors.items():
+        state = ("stale" if same_home and panel in sources.fetched else "unavailable") if panel in ("kanban", "merge requests") else ""
+        warnings.append(f"{panel}: {state + ' — ' if state else ''}{reason}")
+    if cfg.backlog is not None:
+        warnings.extend(f"{panel}: unavailable — not fetched yet" for panel in ("kanban", "merge requests")
+                        if panel not in sources.errors and (not same_home or panel not in sources.fetched))
+    head = panels.Header(f"Board · {now.strftime('%a %d %b')}", tuple(meta), now, nearest.name, nearest.at, tuple(warnings))
     # NEEDS INPUT counts the held tasks, as the BUILD cards are flagged; ALL counts every task (#349).
     tiles = flow_tiles(len(tasks), len(held),
                        sources, len(running), sum(drifts(t, kanban, sources, stages[t]) for t in tasks), len(unowned),

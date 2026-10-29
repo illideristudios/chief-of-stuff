@@ -162,6 +162,13 @@ class SourceStatusTests(unittest.TestCase):
         page = issue_page.render(118, [(NOW.date(), tracker)], stale, NOW, cfg=cfg)
         self.assertIn('kanban: stale', page)
         self.assertIn('merge requests: stale', page)
+        import render_board
+        board = render_board.render(tracker, cfg, NOW, sources=stale)
+        self.assertIn('kanban: stale', board)
+        self.assertIn('merge requests: stale', board)
+        board = render_board.render(tracker, cfg, NOW, sources=unavailable)
+        self.assertIn('kanban: unavailable', board)
+        self.assertIn('merge requests: unavailable', board)
 
 
 if __name__ == '__main__':
