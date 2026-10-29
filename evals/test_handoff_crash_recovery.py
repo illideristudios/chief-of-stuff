@@ -163,7 +163,7 @@ class HandoffCrashRecovery(SupervisorTest):
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
             with mock.patch.object(supervisor, 'RELEASE', new):
                 self.launchctl_mock.reset_mock()
-                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
+                self.assertIn('engine: upgrade pending', supervisor.ensure(self.root, jobs_dir=self.jobs))
                 self.assertNotIn('bootout', self.verbs())
                 self.assertEqual(supervisor.selected_release(self.root), old)
                 supervisor.commit_handoff(self.root, old, self.jobs)
@@ -302,6 +302,69 @@ class HandoffCrashRecovery(SupervisorTest):
             first.join(5); second.join(5)
         self.assertEqual(calls, ['old', 'new'])
 
+    def test_loaded_engine_with_unlinked_lock_defers_upgrade_to_boundary(self):
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'RELEASE', old):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+        with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
+            (supervisor.state_dir(self.root) / 'engine.lock').unlink()
+            self.launchctl_mock.reset_mock()
+            with mock.patch.object(supervisor, 'RELEASE', new):
+                result = supervisor.ensure(self.root, jobs_dir=self.jobs)
+            self.assertIn('upgrade pending', result)
+            self.assertNotIn('bootout', self.verbs())
+            self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+        with mock.patch.object(supervisor, 'RELEASE', old):
+            supervisor.commit_handoff(self.root, new, self.jobs)
+        self.assertEqual(supervisor.current_release_from_job(self.job()), new)
+
+    def test_loaded_during_automatic_explicit_recovery_is_not_restarted(self):
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit('interrupted')):
+            with self.assertRaises(SystemExit):
+                supervisor.install(self.root, jobs_dir=self.jobs)
+        calls = []
+        def launchctl(verb, *args, **kwargs):
+            calls.append(verb)
+            if verb == 'print':
+                return calls.count('print') > 1
+            return True
+        with mock.patch.object(supervisor, 'launchctl', side_effect=launchctl):
+            result = supervisor.ensure(self.root, jobs_dir=self.jobs)
+        self.assertIn('upgrade pending', result)
+        self.assertNotIn('bootout', calls)
+        self.assertIsNotNone(supervisor._explicit_install(self.root))
+
+    def test_job_loaded_during_ensure_is_not_restarted(self):
+        (self.root / 'store.db').touch()
+        calls = []
+        def launchctl(verb, *args, **kwargs):
+            calls.append(verb)
+            if verb == 'print':
+                return calls.count('print') > 1
+            return True
+        with mock.patch.object(supervisor, 'launchctl', side_effect=launchctl):
+            result = supervisor.ensure(self.root, jobs_dir=self.jobs)
+        self.assertIn('upgrade pending', result)
+        self.assertNotIn('bootout', calls)
+
+    def test_loaded_legacy_engine_reports_controlled_restart_guidance(self):
+        old, new = self.releases()
+        (self.root / 'store.db').touch()
+        with mock.patch.object(supervisor, 'RELEASE', old):
+            supervisor.ensure(self.root, jobs_dir=self.jobs)
+        self.launchctl_mock.reset_mock()
+        with mock.patch.object(supervisor, 'RELEASE', new):
+            for _ in range(2):
+                result = supervisor.ensure(self.root, jobs_dir=self.jobs)
+                self.assertTrue(supervisor.status(self.root, self.jobs)['upgrade_pending'])
+                self.assertIn('upgrade pending', result)
+                self.assertIn('pass', result)
+                self.assertIn('install', result)
+                self.assertEqual(supervisor.current_release_from_job(self.job()), old)
+        self.assertNotIn('bootout', self.verbs())
+
     def test_detached_helper_survives_sigterm_to_parent(self):
         old, new = self.releases()
         (self.root / 'store.db').touch()
@@ -317,7 +380,11 @@ from pathlib import Path
 from unittest import mock
 sys.path.insert(0, os.environ['TEST_SCRIPTS'])
 import engine, supervisor
-signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(KeyboardInterrupt()))
+def interrupted(*_):
+    Path(os.environ['TEST_SIGNAL']).write_text('received')
+    raise KeyboardInterrupt
+signal.signal(signal.SIGTERM, interrupted)
+sys.platform = 'darwin'
 with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), mock.patch.object(supervisor, 'job_path', return_value=Path(os.environ['TEST_JOB'])), mock.patch.object(supervisor, 'launchctl', return_value=True), mock.patch.object(supervisor, '__file__', os.environ['TEST_HELPER']):
     try:
         engine._persist_launchd_handoff(Path(os.environ['TEST_ROOT']), Path(os.environ['TEST_NEW']))
@@ -325,13 +392,14 @@ with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), moc
     except KeyboardInterrupt:
         pass
 ''')
-        env = dict(os.environ, TEST_SCRIPTS=str(Path(supervisor.__file__).parent), TEST_OLD=str(old), TEST_NEW=str(new), TEST_JOB=str(job_path), TEST_HELPER=str(helper), TEST_ROOT=str(self.root), TEST_RESULT=str(result))
+        env = dict(os.environ, TEST_SCRIPTS=str(Path(supervisor.__file__).parent), TEST_OLD=str(old), TEST_NEW=str(new), TEST_JOB=str(job_path), TEST_HELPER=str(helper), TEST_ROOT=str(self.root), TEST_RESULT=str(result), TEST_SIGNAL=str(self.root / 'signal'))
         driver.write_text(driver.read_text().replace("signal.signal(signal.SIGTERM", "os.environ['TEST_PARENT'] = str(os.getpid())\nsignal.signal(signal.SIGTERM"))
         child = subprocess.Popen([sys.executable, str(driver)], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         child.wait(timeout=5)
         deadline = time.monotonic() + 3
         while not result.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
+        self.assertTrue((self.root / 'signal').exists(), 'parent did not receive SIGTERM')
         self.assertTrue(result.exists(), 'helper died before bootstrap after parent received SIGTERM')
 
     def test_explicit_cache_choice_survives_later_newer_ensures_and_recovery(self):

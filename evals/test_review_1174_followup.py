@@ -98,8 +98,8 @@ class ReleaseRegressions(SupervisorTest):
         (other / '.claude-plugin/plugin.json').write_text('{"version":"2.0.0"}')
         (other / 'requirements.txt').write_text('pins')
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'), mock.patch.object(supervisor, 'RELEASE', other):
-            with self.assertRaisesRegex(supervisor.ServiceError, 'cannot.*handoff'):
-                supervisor.ensure(self.root, jobs_dir=self.jobs)
+            self.assertIn('upgrade pending', supervisor.ensure(self.root, jobs_dir=self.jobs))
+            self.assertNotIn('bootout', self.verbs())
 
     def test_unrelated_installed_pointer_cannot_claim_a_handoff(self):
         (self.root / 'store.db').touch()
@@ -111,8 +111,8 @@ class ReleaseRegressions(SupervisorTest):
         (other / 'chief_of_stuff.py').touch()
         (other.parent.parent / 'current').symlink_to(other)
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'), mock.patch.object(supervisor, 'RELEASE', other):
-            with self.assertRaisesRegex(supervisor.ServiceError, 'cannot.*handoff'):
-                supervisor.ensure(self.root, jobs_dir=self.jobs)
+            self.assertIn('upgrade pending', supervisor.ensure(self.root, jobs_dir=self.jobs))
+            self.assertNotIn('bootout', self.verbs())
 
     def test_background_retry_survives_lock_timeout(self):
         (self.root / 'store.db').touch()

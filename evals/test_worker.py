@@ -1244,7 +1244,8 @@ class WorkerTest(unittest.TestCase):
             worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
         self.assertEqual(self.db.segments()[0].outcome, "done")
         command = json.loads((Path(record["run_dir"]) / "command.json").read_text())["argv"]
-        for token in ("-p", "--output-format", "json", "--model", "example", "--session-id", record["session_id"]):
+        for token in ("-p", "--output-format", "stream-json", "--input-format", "--replay-user-messages",
+                      "--model", "example", "--session-id", record["session_id"]):
             self.assertIn(token, command)
         self.assertNotIn("--safe-mode", command)
 

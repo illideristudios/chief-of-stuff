@@ -100,7 +100,7 @@ def job_path(name: str, jobs_dir: Path | None) -> Path:
     return (jobs_dir or Path.home() / "Library/LaunchAgents") / f"{name}.plist"
 
 
-def load_agent(desired: dict, jobs_dir: Path | None) -> str:
+def load_agent(desired: dict, jobs_dir: Path | None, *, defer_loaded: bool = False) -> str:
     """Install or replace the user LaunchAgent `desired` describes; a changed job is booted out and started again."""
     name = desired["Label"]
     target = f"gui/{os.getuid()}/{name}"
@@ -110,6 +110,8 @@ def load_agent(desired: dict, jobs_dir: Path | None) -> str:
                                  existing.get("WorkingDirectory") != desired["WorkingDirectory"]):
         raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
     loaded = launchctl("print", target, missing_ok=True)
+    if loaded and defer_loaded:
+        return "upgrade pending"
     if existing == desired and loaded:
         return "serving"
     if loaded:
@@ -258,7 +260,8 @@ def _explicit_install(root: Path) -> dict | None:
     return None
 
 
-def _finish_explicit_install(root: Path, pending: dict, jobs_dir: Path | None, *, replay: bool) -> str:
+def _finish_explicit_install(root: Path, pending: dict, jobs_dir: Path | None, *, replay: bool,
+                             defer_loaded: bool = False) -> str:
     """Replay uncertain launchd state before retiring the explicit target."""
     job = pending["job"]
     if replay:
@@ -269,8 +272,12 @@ def _finish_explicit_install(root: Path, pending: dict, jobs_dir: Path | None, *
                 raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
         target = f"gui/{os.getuid()}/{job['Label']}"
         if launchctl("print", target, missing_ok=True):
+            if defer_loaded:
+                return _upgrade_pending()
             launchctl("bootout", target)
-    outcome = load_agent(job, jobs_dir)
+    outcome = load_agent(job, jobs_dir, defer_loaded=True) if defer_loaded else load_agent(job, jobs_dir)
+    if outcome == "upgrade pending":
+        return _upgrade_pending()
     (state_dir(root) / PLUGIN_RELEASE_MARKER).unlink(missing_ok=True)
     (state_dir(root) / HANDOFF_MARKER).unlink(missing_ok=True)
     (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
@@ -427,6 +434,12 @@ def launch_env(release: Path | None = None) -> dict:
     return env
 
 
+def _upgrade_pending() -> str:
+    return ("engine: upgrade pending; if the running engine cannot hand off, stop new work, "
+            "verify the current pass has completed and no new pass can start, then run "
+            "chief-of-stuff supervisor --root /path/to/workspace install from the desired release during a maintenance window")
+
+
 def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | None = None,
             *, respect_disabled: bool = False) -> str:
     """Start the engine under launchd, or restart it when the plugin version, its path or its pins changed."""
@@ -455,9 +468,8 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                 # The workspace can unlink a held lock. A loaded job may still be
                 # in a pass, so only the engine's boundary helper can replace it.
                 if launchctl("print", target, missing_ok=True):
-                    return "engine: upgrade pending"
-                return _finish_explicit_install(root, pending, jobs_dir, replay=True)
-            from workspace import lock_held
+                    return _upgrade_pending()
+                return _finish_explicit_install(root, pending, jobs_dir, replay=True, defer_loaded=True)
             path = job_path(label("engine", root), jobs_dir)
             if automatic_engine:
                 selected = selected_release(root)
@@ -472,19 +484,22 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                         selected = registered
                 _validate_release(root, selected)
                 engine = (str(selected / "scripts/engine.py"),)
-            if path.exists() and lock_held(state_dir(root) / "engine.lock"):
+            target = f"gui/{os.getuid()}/{label('engine', root)}"
+            loaded = launchctl("print", target, missing_ok=True)
+            if loaded and not path.exists():
+                return _upgrade_pending()
+            if loaded:
                 existing = plistlib.loads(path.read_bytes())
                 if existing.get("Label") != label("engine", root) or existing.get("WorkingDirectory") != str(root):
                     raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
-                if launchctl("print", f"gui/{os.getuid()}/{label('engine', root)}", missing_ok=True):
-                    # Prepare the selected release without disrupting the pass; the engine follows it at a boundary.
-                    ensure_venv(data, release=selected)
-                    running = current_release_from_job(existing)
-                    installed_pointer = (selected.parent.name == "versions" and running.parent == selected.parent
-                                         and (selected.parent.parent / "current").is_symlink())
-                    if not _request_plugin_release(root, selected, existing) and not installed_pointer:
-                        raise ServiceError(f"cannot request safe handoff to {selected}; existing engine is serving another release")
-                    return "engine: upgrade pending" if running != selected else "engine: serving"
+                # A workspace lock can be unlinked while held; a loaded job is never proof of idleness.
+                ensure_venv(data, release=selected)
+                running = current_release_from_job(existing)
+                installed_pointer = (selected.parent.name == "versions" and running.parent == selected.parent
+                                     and (selected.parent.parent / "current").is_symlink())
+                if not _request_plugin_release(root, selected, existing) and not installed_pointer:
+                    return _upgrade_pending()
+                return _upgrade_pending() if running != selected else "engine: serving"
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = str(log_path)
@@ -502,7 +517,9 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
             _write_intent(root, {**pending, "operation": "install", "pending": True})
             atomic_write(state_dir(root) / EXPLICIT_INSTALL_MARKER, b"{}")
             return _finish_explicit_install(root, pending, jobs_dir, replay=False)
-        outcome = load_agent(desired, jobs_dir)
+        outcome = load_agent(desired, jobs_dir, defer_loaded=True)
+        if outcome == "upgrade pending":
+            return _upgrade_pending()
         (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
         return "engine: " + outcome
 
@@ -621,7 +638,7 @@ def status(root: Path, jobs_dir: Path | None = None) -> dict:
     job = plistlib.loads(path.read_bytes()) if path.exists() else None
     loaded = sys.platform == "darwin" and launchctl("print", f"gui/{os.getuid()}/{name}", missing_ok=True)
     selected = selected_release(root)
-    pending = bool(_explicit_install(root) or (job and loaded and current_release_from_job(job) != selected))
+    pending = bool(_explicit_install(root) or (loaded and (job is None or current_release_from_job(job) != selected)))
     return {"installed": job is not None,
             "loaded": loaded,
             "upgrade_pending": pending,

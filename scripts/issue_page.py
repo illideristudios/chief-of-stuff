@@ -294,7 +294,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     cards = "".join(_change(c, every, now) for c in changes) or _section("Change", f'    <div class="card"><p>No change names {ref} yet.</p></div>')
     change = changes[0] if changes else None
     current = {t.name.strip().casefold(): t for t in mine}.values()
-    why_not = ("the issue is closed" if issue and issue.state == "closed" else
+    why_not = ("the issue is closed" if (item and item.forge_state == "closed") or (issue and issue.state == "closed") else
                "the task is done" if status == "merged" or all(t.kind == "done" for t in current) else "")
     ahead = (_next(rows, change, every, why_not, now, exhaustion=exhausted)
              + (_files(change, every, issue_href(identity)[len("/issues/"):]) if change and _paths(change) else ""))

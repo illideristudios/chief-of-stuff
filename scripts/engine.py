@@ -676,6 +676,7 @@ def run_pass(*, forge: Any, store: Any, policies: policy.Policies, root: Path, t
         if item.forge_state == "open" and item.issue_key not in present:
             store.upsert_item(item.issue_key, forge_state="closed")
 
+    worker.deliver_messages(store, root, clock)
     facts = worker.collect(store, root, clock, trees,
                    gather=partial(engine_facts.gather, forge=forge, store=store, root=root, trees=trees,
                                   now=clock(), require_green=require_green,
@@ -1059,6 +1060,29 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     return True
 
 
+def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:
+    """Settle and hand off messages promptly, independently of slow forge passes.
+
+    Its store is private to this thread. Mailbox locks and store claims serialize it with a normal pass.
+    """
+    db = None
+    try:
+        while not stop.is_set():
+            try:
+                if db is None:
+                    db = store_access.migrated_store(root)
+                worker.deliver_messages(db, root)
+            except Exception as exc:
+                print(f"engine: message delivery sweep failed: {exc}", file=sys.stderr, flush=True)
+                if db is not None:
+                    db.engine.dispose()
+                    db = None
+            stop.wait(every)
+    finally:
+        if db is not None:
+            db.engine.dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
     """Run passes until stopped, or one with --once; `install`, `uninstall`, `ensure` and `status` manage the LaunchAgent.
 
@@ -1177,11 +1201,14 @@ def main(argv: list[str] | None = None) -> int:
                 )
             stop_pages = threading.Event()
             page_thread = None
+            message_thread = None
             try:
                 if not args.once:
                     import pages  # deferred: --once never serves the board
                     page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                     page_thread.start()
+                    message_thread = threading.Thread(target=_message_loop, args=(root, stop_pages), daemon=True)
+                    message_thread.start()
                 while True:
                     with contextlib.suppress(OSError):
                         write_engine_status(root, started_at=started_at, last_pass_at=last_pass_at,
@@ -1235,6 +1262,8 @@ def main(argv: list[str] | None = None) -> int:
                         page_thread.start()
             finally:
                 stop_pages.set()
+                if message_thread is not None and message_thread.ident is not None:
+                    message_thread.join()
                 if page_thread is not None and page_thread.ident is not None:
                     page_thread.join()  # supervise's I/O is bounded; cancellation reaps unrecorded children before exec
                 db.engine.dispose()

@@ -180,7 +180,7 @@ class FollowupRegression(SupervisorTest):
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
             self.launchctl_mock.reset_mock()
             with mock.patch.object(supervisor, 'RELEASE', new):
-                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
+                self.assertIn('engine: upgrade pending', supervisor.ensure(self.root, jobs_dir=self.jobs))
             self.assertNotIn('bootout', self.verbs())
             with mock.patch.object(supervisor, 'RELEASE', old):
                 self.assertEqual(supervisor.selected_release(self.root), new)
@@ -226,7 +226,7 @@ class FollowupRegression(SupervisorTest):
                 self.assertTrue(entered.wait(10))
                 # Simulate a separate new-plugin hook while the old engine is blocked.
                 with mock.patch.object(supervisor, 'RELEASE', new):
-                    self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
+                    self.assertIn('engine: upgrade pending', supervisor.ensure(self.root, jobs_dir=self.jobs))
                 handoff.assert_not_called()
             finally:
                 finish.set()
@@ -261,7 +261,7 @@ class FollowupRegression(SupervisorTest):
                 with mock.patch.object(supervisor, 'load_agent', side_effect=SystemExit):
                     with self.assertRaises(SystemExit):
                         supervisor.install(self.root, jobs_dir=self.jobs)
-                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
+                self.assertIn('engine: upgrade pending', supervisor.ensure(self.root, jobs_dir=self.jobs))
                 self.assertTrue(supervisor.status(self.root, self.jobs)['upgrade_pending'])
                 self.assertNotIn('bootout', self.verbs())
                 handoff.assert_not_called()
@@ -278,15 +278,22 @@ class FollowupRegression(SupervisorTest):
         for root in (self.root, other):
             (root / 'store.db').touch()
         results = []
-        with supervisor.lock(self.data / 'supervisor.lock'):
-            threads = [threading.Thread(target=lambda r=root: results.append(supervisor.ensure(r, jobs_dir=self.jobs)))
-                       for root in (self.root, other)]
+        loaded = set()
+        def launchctl(verb, target, *args, **kwargs):
+            if verb == 'print':
+                return target in loaded
+            if verb == 'bootstrap':
+                loaded.add(f"{target}/{Path(args[0]).stem}")
+            return True
+        with mock.patch.object(supervisor, 'launchctl', side_effect=launchctl):
+            with supervisor.lock(self.data / 'supervisor.lock'):
+                threads = [threading.Thread(target=lambda r=root: results.append(supervisor.ensure(r, jobs_dir=self.jobs)))
+                           for root in (self.root, other)]
+                for thread in threads:
+                    thread.start()
             for thread in threads:
-                thread.start()
-        for thread in threads:
-            thread.join(5)
-            self.assertFalse(thread.is_alive())
-        # The launchctl mock tracks one job globally; both independent plist files must exist.
+                thread.join(5)
+                self.assertFalse(thread.is_alive())
         self.assertEqual(len(results), 2)
         for root in (self.root, other):
             self.assertTrue(supervisor.job_path(supervisor.label('engine', root), self.jobs).exists())

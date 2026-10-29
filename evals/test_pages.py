@@ -783,6 +783,7 @@ class RenderOnRequestTest(unittest.TestCase):
         self.assertIn(b"Security audit", get(self.port, "/").body)
         self.tracker.write_text(TRACKER.format(day=self.day, task="Draft release notes"))
         self.assertIn(b"Draft release notes", get(self.port, "/").body)
+        self.assertEqual(get(self.port, "/decisions").status, 200)
         self.assertTrue((self.pages / "decisions.html").is_file())
 
     def test_decisions_route_lists_store_decisions_and_matches_board_badge(self):
@@ -811,6 +812,29 @@ class RenderOnRequestTest(unittest.TestCase):
         for text in ("First store ask", "Second store ask", "Answered store ask", "example/repo#42"):
             with self.subTest(text=text):
                 self.assertIn(text, decisions)
+
+    def test_decisions_pages_match_board_navigation_counts(self):
+        # #965: Decisions list and a JSON decision page show the same Workers/Dispatch/Decisions badges as `/`.
+        import store
+        (self.pages / "decision-nav-check.json").write_text(decision("nav-check"))
+        db_path = self.root / "store.db"
+        store.migrate(db_path)
+        db = store.Store(db_path)
+        try:
+            db.upsert_item("github:example/repo#42", title="Engine task", stage="implement", forge_state="open")
+            db.upsert_item("github:example/repo#43", title="Needs a person", human_review=True)
+            db.add_decision("github:example/repo#43", "scope", "Store ask on the hold")
+        finally:
+            db.engine.dispose()
+        nav = re.compile(r'<nav class="tabs"[^>]*>.*?</nav>')
+        board_nav = nav.search(get(self.port, "/").body.decode()).group(0)
+        for route in ("/decisions", "/decisions/nav-check"):
+            with self.subTest(route=route):
+                page_nav = nav.search(get(self.port, route).body.decode()).group(0)
+                for badge in ('title="1 need input">1', 'title="1 ready to dispatch">1',
+                              'title="2 pending">2'):
+                    self.assertIn(badge, board_nav)
+                    self.assertIn(badge, page_nav)
 
     def test_an_unchanged_page_is_served_as_written(self):
         get(self.port, "/")
@@ -863,7 +887,7 @@ class RenderOnRequestTest(unittest.TestCase):
         page = get(self.port, "/decisions/cache-ttl")
         self.assertEqual(page.status, 200)
         self.assertIn(b"Cache TTL", page.body)
-        self.assertIn(b'href="/decisions"', page.body)
+        self.assertIn(b'href="/decisions#pending-decisions"', page.body)
         self.assertIn(b'href="/decisions/cache-ttl"', get(self.port, "/decisions").body)
         # The user, 2026-09-26: "get rid of the .html versions entirely".
         for missing in ("/decisions/nope", "/decisions/../decisions", "/decisions/cache-ttl.json", "/decisions.html",
@@ -1051,18 +1075,171 @@ class LastLookedTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertIsNotNone(workspace.looked_before(self.pages))
 
-    def test_a_look_re_renders_the_board_only(self):
-        # #579 review R6: `.looked-before` is the board's source, not every page's.
-        import issue_page
+    def test_a_look_refreshes_since_on_all_routes(self):
         self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        earlier = datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE))
+        later = datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE))
+        (self.pages / ".looked-before").write_text(earlier.isoformat())
+        routes = ("/decisions/cache-ttl", "/issues/7", "/issues/7/source", "/workers", "/decisions", "/")
+        for route in routes:
+            with self.subTest(route=route, phase="before"):
+                response = get(self.port, route)
+                self.assertEqual(response.status, 200)
+                self.assertIn(b"1 went needs input since 08:00", response.body)
+        (self.pages / ".last-looked").write_text(later.isoformat())
+        get(self.port, "/", headers=self.LOOK)
+        for route in routes:
+            with self.subTest(route=route, phase="after"):
+                response = get(self.port, route)
+                self.assertEqual(response.status, 200)
+                self.assertNotIn(b"went needs input since", response.body)
+
+
+    def test_direct_routes_use_the_tracker_of_the_board_served_at_root(self):
+        from datetime import timedelta
+        import render_board
+        today = datetime.fromisoformat(self.day).date()
+        older = (today - timedelta(days=2)).isoformat()
+        newer = (today - timedelta(days=1)).isoformat()
+        self.tracker.unlink()
+        (self.root / "daily" / f"{older}-tracker.md").write_text(ISSUE_TRACKER.format(day=older, task="Security audit") + "\n- 10:00 one-shot audit: HUMAN REVIEW NEEDED\n")
+        (self.root / "daily" / f"{newer}-tracker.md").write_text(TRACKER.format(day=newer, task="Other task"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        render_board.write(self.root, older)
+        for page in ("decisions.html", "decision-cache-ttl.html"):
+            (self.pages / page).unlink()
+        nav = re.compile(r'<nav class="tabs"[^>]*>.*?</nav>')
+        board_nav = nav.search(get(self.port, "/").body.decode()).group()
+        self.assertIn('title="1 need input">1', board_nav)
+        for route in ("/decisions", "/decisions/cache-ttl", "/workers", "/issues/7", "/issues/7/source"):
+            with self.subTest(route=route):
+                response = get(self.port, route)
+                self.assertEqual(response.status, 200)
+                self.assertIn('title="1 need input">1', nav.search(response.body.decode()).group())
+        render_board.write(self.root, newer, target="board")
+        self.assertNotIn('title="1 need input">1', nav.search(get(self.port, "/").body.decode()).group())
+        for route in ("/decisions", "/decisions/cache-ttl", "/workers", "/issues/7", "/issues/7/source"):
+            with self.subTest(route=route, board="newer"):
+                self.assertNotIn('title="1 need input">1', nav.search(get(self.port, route).body.decode()).group())
+
+    def test_concurrent_board_render_cannot_overwrite_a_fresh_decision_badge(self):
+        import render_board
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        entered, resume = threading.Event(), threading.Event()
+        original = render_board.tab_counts
         calls = []
-        real = issue_page.write
-        with mock.patch.object(issue_page, "write", lambda *a, **k: calls.append(1) or real(*a, **k)):
-            get(self.port, "/", headers=self.LOOK)
-            self.assertEqual(get(self.port, "/issues/7").status, 200)
-            get(self.port, "/", headers=self.LOOK)
-            get(self.port, "/issues/7")
-        self.assertEqual(len(calls), 1)
+
+        def paused(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if threading.current_thread().name == "paused-board" and not calls:
+                calls.append(True)
+                entered.set()
+                if not resume.wait(10):
+                    raise TimeoutError("board render did not resume")
+            return result
+
+        result = []
+        def render_board_request():
+            result.append(pg.fresh(self.root, self.pages, f"{self.day}-board.html"))
+        with mock.patch.object(render_board, "tab_counts", paused):
+            thread = threading.Thread(target=render_board_request, name="paused-board")
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(10))
+                marker.write_text(datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+                self.assertNotIn(b"went needs input since", get(self.port, "/decisions/cache-ttl").body)
+                self.assertNotIn(b"went needs input since", get(self.port, "/decisions").body)
+            finally:
+                resume.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(result, [""])
+        for route in ("/decisions/cache-ttl", "/decisions"):
+            with self.subTest(route=route):
+                body = get(self.port, route).body.decode()
+                self.assertNotIn("went needs input since", body[body.index('<nav class="tabs"'):body.index('</nav>')])
+
+    def test_decision_cli_output_is_refreshed_by_the_server(self):
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        route = "/decisions/cache-ttl"
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, route).body)
+        script = Path(__file__).resolve().parent.parent / "scripts" / "decision_page.py"
+        subprocess.run([sys.executable, str(script), "--root", str(self.root), "--name", "cache-ttl",
+                        "--date", self.day], check=True, capture_output=True, text=True)
+        self.assertNotIn("went needs input since", (self.pages / "decision-cache-ttl.html").read_text())
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, route).body)
+        subprocess.run([sys.executable, str(script), "--root", str(self.root), "--name", "cache-ttl",
+                        "--date", self.day], check=True, capture_output=True, text=True)
+        pg.RENDERED_AT.pop(str(self.pages / "decision-cache-ttl.html"), None)
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, route).body)
+
+    def test_board_cli_with_old_navigation_cannot_leave_stale_decision_pages(self):
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, "/decisions/cache-ttl").body)
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, "/decisions").body)
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        code = """import sys
+sys.path.insert(0, sys.argv[1])
+import render_board
+original = render_board.tab_counts
+def paused(*args, **kwargs):
+    result = original(*args, **kwargs)
+    print('ready', flush=True)
+    sys.stdin.readline()
+    return result
+render_board.tab_counts = paused
+render_board.main(['--root', sys.argv[2], '--date', sys.argv[3]])
+"""
+        proc = subprocess.Popen([sys.executable, "-c", code, str(scripts), str(self.root), self.day],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.assertEqual(proc.stdout.readline().strip(), "ready")
+        marker.write_text(datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        attempting, responses = threading.Event(), []
+        import decision_page
+        real_lock = decision_page.page_render_lock
+        def observe_lock(*args, **kwargs):
+            if kwargs.get("shared"):
+                attempting.set()
+            return real_lock(*args, **kwargs)
+        def request():
+            responses.append(get(self.port, "/decisions/cache-ttl"))
+        with mock.patch.object(decision_page, "page_render_lock", side_effect=observe_lock):
+            thread = threading.Thread(target=request)
+            thread.start()
+            try:
+                self.assertTrue(attempting.wait(10))
+            finally:
+                proc.stdin.write("continue\n")
+                proc.stdin.flush()
+                _, stderr = proc.communicate(timeout=10)
+                thread.join(10)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(responses), 1)
+        self.assertNotIn(b"went needs input since", responses[0].body)
+        for route in ("/decisions/cache-ttl", "/decisions"):
+            with self.subTest(route=route):
+                self.assertNotIn(b"went needs input since", get(self.port, route).body)
+
+    def test_a_changed_look_refreshes_an_authored_decision_without_a_board_render(self):
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, "/decisions/cache-ttl").body)
+        marker.write_text(datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        self.assertNotIn(b"went needs input since", get(self.port, "/decisions/cache-ttl").body)
 
 
 class ReloadMarksItselfTest(unittest.TestCase):
@@ -1425,6 +1602,19 @@ class AnswerTest(unittest.TestCase):
         self.assertEqual(post(self.port, "/decisions/linked", b"key=B", origin=self.origin).status, 404)
         self.assertEqual((outside.read_bytes(), link.is_symlink()), (before, True))
 
+    def test_validation_refusal_survives_navigation_read_failures(self):
+        for target, error in (("_page_data", OSError("private store error")),
+                              ("_tracker_navigation", OSError("private tracker error")),
+                              ("_navigation", RuntimeError("private navigation error"))):
+            with self.subTest(target=target), mock.patch.object(pg, target, side_effect=error):
+                resp = post(self.port, "/decisions/cache-ttl", b"key=Z&words=%3Cdraft%3E", origin=self.origin)
+                self.assertEqual(resp.status, 400)
+                self.assertIn("&lt;draft&gt;", resp.body.decode())
+                self.assertIn("Choose one of the options", resp.body.decode())
+                self.assertNotIn("private", resp.body.decode())
+                self.assertIn("no-store", resp.getheader("Cache-Control"))
+                self.assertIsNone(self.answer())
+
     def test_an_unreadable_decision_takes_no_answer(self):
         self.json.write_text("{")
         self.assertEqual(post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin).status, 409)
@@ -1480,7 +1670,7 @@ class _Renders:
         self.cond, self.gate = threading.Condition(), threading.Semaphore(0)
         self.inside, self.entered, self.most = [], [], {}
         for target, fake in ((render_board, lambda root, day=None, **inputs: self.render(f"{day}-board.html")),
-                             (decision_page, lambda root, pages_dir, slug, day, source=None: self.render(f"decision-{slug}.html")),
+                             (decision_page, lambda root, pages_dir, slug, day, source=None, navigation=None: self.render(f"decision-{slug}.html")),
                              (issue_page, lambda root, pages_dir, n, **inputs: self.render(f"issue-{n}.html"))):
             patcher = mock.patch.object(target, "write", fake)
             patcher.start()
@@ -2310,6 +2500,443 @@ class StandaloneBoardTest(unittest.TestCase):
         report = pg.status(self.root, self.jobs)
         self.assertEqual((report["board"], report["engine"], report["supervised"], report["pid_live"]),
                          ("down", "missing", False, False))
+
+
+class CrossProcessPublicationTest(unittest.TestCase):
+    setUp = RenderOnRequestTest.setUp
+    fake_refresh = RenderOnRequestTest.fake_refresh
+
+    def test_two_servers_serialize_same_page_publications(self):
+        import select
+        scripts = Path(__file__).resolve().parent.parent / 'scripts'
+        code = '''import sys, threading, contextlib
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import pages, render_board
+root = Path(sys.argv[2]); directory = root / "pages"
+original_lock = pages.publication_lock if hasattr(pages, "publication_lock") else None
+if original_lock:
+    @contextlib.contextmanager
+    def observed_lock(root, path):
+        print("attempting", flush=True)
+        with original_lock(root, path):
+            yield
+    pages.publication_lock = observed_lock
+def write(root, day, **kw):
+    print("entered", flush=True)
+    sys.stdin.readline()
+    (directory / (day + "-board.html")).write_text("<body>" + sys.argv[3] + "</body>")
+render_board.write = write
+server = pages.make_server(directory, 0, root=root, refresh=lambda *a: None)
+print(server.server_address[1], flush=True)
+server.serve_forever()
+'''
+        processes = []
+        for label in ('first', 'second'):
+            proc = subprocess.Popen([sys.executable, '-u', '-c', code, str(scripts), str(self.root), label],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+            processes.append(proc)
+            def cleanup(p=proc):
+                if p.poll() is None:
+                    p.kill()
+                p.communicate(timeout=10)
+            self.addCleanup(cleanup)
+        def line(proc):
+            self.assertTrue(select.select([proc.stdout], [], [], 10)[0], 'server did not signal in time')
+            return proc.stdout.readline().decode().strip()
+        ports = [int(line(p)) for p in processes]
+        results = []
+        threads = [threading.Thread(target=lambda port=p: results.append(get(port, '/')), daemon=True) for p in ports]
+        threads[0].start()
+        self.assertEqual(line(processes[0]), 'attempting')
+        self.assertEqual(line(processes[0]), 'entered')
+        threads[1].start()
+        self.assertEqual(line(processes[1]), 'attempting')
+        try:
+            self.assertFalse(select.select([processes[1].stdout], [], [], 0.6)[0], 'second server rendered concurrently')
+        finally:
+            processes[0].stdin.write(b'go\n'); processes[0].stdin.flush()
+        self.assertEqual(line(processes[1]), 'entered')
+        processes[1].stdin.write(b'go\n'); processes[1].stdin.flush()
+        for thread in threads:
+            thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual([r.status for r in results], [200, 200])
+        again = threading.Thread(target=lambda: results.append(get(ports[0], '/')), daemon=True)
+        again.start()
+        self.assertEqual(line(processes[0]), 'attempting')
+        self.assertEqual(line(processes[0]), 'entered')
+        processes[0].stdin.write(b'go\n'); processes[0].stdin.flush()
+        again.join(10)
+        self.assertFalse(again.is_alive())
+        self.assertIn(b'first', results[-1].body)
+
+    def test_stalled_static_download_does_not_block_board_cli(self):
+        (self.pages / 'large.bin').write_bytes(b'x' * (20 * 1024 * 1024))
+        client = socket.socket()
+        self.addCleanup(client.close)
+        self.server.handle_error = lambda *args: None
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client.settimeout(10)
+        client.connect(('127.0.0.1', self.port))
+        client.sendall(f'GET /large.bin HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n'.encode())
+        self.assertIn(b'200', client.recv(1024))
+        script = Path(__file__).resolve().parent.parent / 'scripts' / 'render_board.py'
+        proc = subprocess.run([sys.executable, str(script), '--root', str(self.root), '--date', self.day],
+                              capture_output=True, text=True, timeout=5)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+
+    def test_authored_decision_uses_served_board_day_for_references(self):
+        from datetime import timedelta
+        import decision_page
+        today = datetime.fromisoformat(self.day).date()
+        board_day = (today - timedelta(days=2)).isoformat()
+        newer_day = (today - timedelta(days=1)).isoformat()
+        self.tracker.unlink()
+        (self.root / 'daily' / f'{board_day}-tracker.md').write_text(ISSUE_TRACKER.format(day=board_day, task='Board task'))
+        (self.root / 'daily' / f'{newer_day}-tracker.md').write_text(ISSUE_TRACKER.format(day=newer_day, task='Newer task').replace('implement', 'review'))
+        (self.pages / f'{board_day}-board.html').write_text('<body>board</body>')
+        decision = json.loads(DECISION)
+        decision['references'] = [{'kind': 'issue', 'value': '#7'}]
+        (self.pages / 'decision-cache-ttl.json').write_text(json.dumps(decision))
+        original = decision_page.write
+        seen = []
+        def observe(root, directory, name, day, **kw):
+            ctx = decision_page.context(root, day)
+            seen.append((day, [(task.item, task.stage) for task in ctx.tasks]))
+            return original(root, directory, name, day, **kw)
+        with mock.patch.object(decision_page, 'write', side_effect=observe):
+            response = get(self.port, '/decisions/cache-ttl')
+            self.assertEqual(response.status, 200)
+        self.assertEqual(seen, [(board_day, [('Board task', 'implement')])])
+        self.assertIn(b'<span class="st">implement</span>', response.body)
+
+    def test_large_static_downloads_and_head(self):
+        payload = b"PDF-video-data\x00" * (2 * 1024 * 1024 + 1)
+        for name in ("large.pdf", "large.mp4"):
+            (self.pages / name).write_bytes(payload)
+            for method in ("GET", "HEAD"):
+                with self.subTest(name=name, method=method):
+                    response = get(self.port, "/" + name, method=method)
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.getheader("Content-Length"), str(len(payload)))
+                    self.assertEqual(response.body, payload if method == "GET" else b"")
+
+    def test_head_never_allocates_a_snapshot(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=AssertionError("HEAD copied file")):
+            response = get(self.port, "/asset.bin", method="HEAD")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Length"), "5")
+
+    def test_snapshot_storage_failure_is_not_a_missing_file(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=OSError(28, "no space")):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 503)
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
+        real_temp = pg.tempfile.TemporaryFile
+        opened = []
+        class FailingWrite:
+            def __init__(self):
+                self.file = real_temp()
+                opened.append(self.file)
+            def fileno(self):
+                return self.file.fileno()
+            def write(self, data):
+                raise OSError(28, "disk full")
+            def close(self):
+                self.file.close()
+        with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=FailingWrite):
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+        self.assertTrue(opened[0].closed)
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
+        with mock.patch.object(pg.Handler, "_open_static", side_effect=OSError(24, "too many files")):
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+        self.assertEqual(get(self.port, "/asset.bin").status, 200)
+
+    def test_concurrent_snapshots_reserve_storage_until_client_disconnects(self):
+        (self.pages / "asset.bin").write_bytes(b"x" * (4 * 1024 * 1024))
+        client = socket.socket()
+        self.addCleanup(client.close)
+        self.server.handle_error = lambda *args: None
+        client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        client.settimeout(10)
+        with mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_SLOTS", 1):
+            client.connect(("127.0.0.1", self.port))
+            client.sendall(f"GET /asset.bin HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode())
+            self.assertIn(b"200", client.recv(1024))
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+            self.assertEqual(get(self.port, "/asset.bin", method="HEAD").status, 200)
+            client.close()
+            for _ in range(100):
+                if pg.STATIC_SNAPSHOT_SLOTS == 0:
+                    break
+                threading.Event().wait(0.01)
+            self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
+            self.assertEqual(get(self.port, "/asset.bin").status, 200)
+
+    def test_cli_can_publish_while_static_copy_is_paused(self):
+        (self.pages / "asset.bin").write_bytes(b"x" * 100_000)
+        entered, release = threading.Event(), threading.Event()
+        real_open = pg.Handler._open_static
+        class PausedFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def fileno(self):
+                return self.stream.fileno()
+            def read(self, size):
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("copy not released")
+                return self.stream.read(size)
+            def close(self):
+                self.stream.close()
+        results = []
+        with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: PausedFile(real_open(handler, name))), \
+             mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_SLOTS", 1):
+            thread = threading.Thread(target=lambda: results.append(get(self.port, "/asset.bin")), daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                self.assertEqual(get(self.port, "/asset.bin").status, 503)
+                script = Path(__file__).resolve().parent.parent / "scripts" / "render_board.py"
+                proc = subprocess.run([sys.executable, str(script), "--root", str(self.root), "--date", self.day],
+                                      capture_output=True, text=True, timeout=5)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+            finally:
+                release.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0].status, 200)
+
+    def test_cli_can_publish_while_static_open_is_paused(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        entered, release = threading.Event(), threading.Event()
+        real_open = pg.Handler._open_static
+        def paused_open(handler, name):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("open not released")
+            return real_open(handler, name)
+        results = []
+        with mock.patch.object(pg.Handler, "_open_static", paused_open):
+            thread = threading.Thread(target=lambda: results.append(get(self.port, "/asset.bin")), daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                script = Path(__file__).resolve().parent.parent / "scripts" / "render_board.py"
+                proc = subprocess.run([sys.executable, str(script), "--root", str(self.root), "--date", self.day],
+                                      capture_output=True, text=True, timeout=5)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+            finally:
+                release.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0].status, 200)
+
+    def test_snapshot_capacity_allows_large_files_and_reserves_concurrent_sizes(self):
+        large = 2 * 1024**3
+        with mock.patch.object(pg, "_static_free_bytes", return_value=3 * large + pg.STATIC_FREE_RESERVE - 1):
+            first = pg.StaticSnapshot(large)
+            try:
+                with self.assertRaises(OSError):
+                    pg.StaticSnapshot(2 * large)
+                self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 1)
+            finally:
+                first.close()
+            second = pg.StaticSnapshot(2 * large)
+            second.close()
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
+        self.assertEqual(pg.STATIC_RESERVED_BYTES, 0)
+
+    def test_insufficient_temporary_space_returns_503_and_releases_slot(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        with mock.patch.object(pg, "_static_free_bytes", return_value=pg.STATIC_FREE_RESERVE + 4):
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
+        self.assertEqual(pg.STATIC_RESERVED_BYTES, 0)
+        self.assertEqual(get(self.port, "/asset.bin").status, 200)
+
+    def test_static_paths_cannot_escape_or_follow_external_symlinks(self):
+        outside = self.root / "secret.bin"
+        outside.write_bytes(b"secret")
+        (self.pages / "escape.bin").symlink_to(outside)
+        (self.pages / "escape-dir").symlink_to(self.root, target_is_directory=True)
+        (self.pages / ".hidden").write_bytes(b"hidden")
+        (self.pages / "hidden-link.bin").symlink_to(self.pages / ".hidden")
+        (self.pages / "visible.bin").write_bytes(b"visible")
+        (self.pages / "inside-link.bin").symlink_to(self.pages / "visible.bin")
+        if hasattr(os, "mkfifo"):
+            os.mkfifo(self.pages / "pipe.bin")
+        for method in ("GET", "HEAD"):
+            for path in ("/escape.bin", "/escape-dir/secret.bin", "/%2e%2e/secret.bin", "/.hidden", "/hidden-link.bin", "/pipe.bin"):
+                with self.subTest(method=method, path=path):
+                    self.assertEqual(get(self.port, path, method=method).status, 404)
+            self.assertEqual(get(self.port, "/escape.bin", method=method, host="evil.test").status, 403)
+            self.assertEqual(get(self.port, "/inside-link.bin", method=method).status, 200)
+
+    def test_static_directory_swap_cannot_escape_during_open(self):
+        safe = self.pages / "safe"
+        safe.mkdir()
+        (safe / "asset.bin").write_bytes(b"safe")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "asset.bin").write_bytes(b"secret")
+        real_open = os.open
+        swapped = threading.Event()
+        def swap_before_open(path, flags, *args, **kwargs):
+            if path == "safe" and kwargs.get("dir_fd") is not None and not swapped.is_set():
+                safe.rename(self.pages / "moved")
+                safe.symlink_to(outside, target_is_directory=True)
+                swapped.set()
+            return real_open(path, flags, *args, **kwargs)
+        with mock.patch.object(pg.os, "open", side_effect=swap_before_open):
+            response = get(self.port, "/safe/asset.bin")
+        self.assertTrue(swapped.is_set())
+        self.assertEqual(response.status, 404)
+        self.assertNotIn(b"secret", response.body)
+
+    def test_static_root_swap_cannot_redirect_open(self):
+        (self.pages / "asset.bin").write_bytes(b"safe")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "asset.bin").write_bytes(b"secret")
+        moved = self.root / "moved-pages"
+        real_open = os.open
+        swapped = threading.Event()
+        def swap_before_open(path, flags, *args, **kwargs):
+            if os.fspath(path) == str(self.pages.resolve()) and not swapped.is_set():
+                self.pages.rename(moved)
+                self.pages.symlink_to(outside, target_is_directory=True)
+                swapped.set()
+            return real_open(path, flags, *args, **kwargs)
+        try:
+            with mock.patch.object(pg.os, "open", side_effect=swap_before_open):
+                response = get(self.port, "/asset.bin")
+            self.assertTrue(swapped.is_set())
+            self.assertEqual(response.status, 404)
+            self.assertNotIn(b"secret", response.body)
+        finally:
+            if swapped.is_set():
+                self.pages.unlink()
+                moved.rename(self.pages)
+
+    def test_replaced_static_root_is_refused_for_get_and_head(self):
+        (self.pages / "asset.bin").write_bytes(b"safe")
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "asset.bin").write_bytes(b"secret")
+        moved = self.root / "moved-pages"
+        self.pages.rename(moved)
+        self.pages.symlink_to(outside, target_is_directory=True)
+        try:
+            for method in ("GET", "HEAD"):
+                response = get(self.port, "/asset.bin", method=method)
+                self.assertEqual(response.status, 404)
+                self.assertNotIn(b"secret", response.body)
+        finally:
+            self.pages.unlink()
+            moved.rename(self.pages)
+
+    def test_static_in_place_truncate_while_transmitting_keeps_body_and_metadata(self):
+        path = self.pages / "asset.bin"
+        original = b"original data" * 100_000
+        path.write_bytes(original)
+        head = get(self.port, "/asset.bin", method="HEAD")
+        real_send = pg.Handler._send_static
+        class TruncateDuringTransmission:
+            def __init__(self, stream):
+                self.stream = stream
+                self.reads = 0
+            def read(self, size):
+                self.reads += 1
+                if self.reads == 2:
+                    path.write_bytes(b"changed")
+                return self.stream.read(size)
+            def close(self):
+                self.stream.close()
+        def wrap_stream(handler, body):
+            finish = real_send(handler, body)
+            def wrapped():
+                result = finish()
+                return (TruncateDuringTransmission(result[0]), result[1])
+            return wrapped
+        with mock.patch.object(pg.Handler, "_send_static", wrap_stream):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(path.read_bytes(), b"changed")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body, original)
+        self.assertEqual(head.body, b"")
+        for header in ("Content-Length", "Last-Modified", "Content-Type"):
+            self.assertEqual(head.getheader(header), response.getheader(header))
+        self.assertEqual(response.getheader("Content-Length"), str(len(original)))
+
+    def test_static_change_during_snapshot_is_refused(self):
+        path = self.pages / "asset.bin"
+        path.write_bytes(b"original" * 100_000)
+        real_open = pg.Handler._open_static
+        class ChangingFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def fileno(self):
+                return self.stream.fileno()
+            def read(self, size):
+                data = self.stream.read(size)
+                path.write_bytes(b"changed")
+                return data
+            def close(self):
+                self.stream.close()
+        with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: ChangingFile(real_open(handler, name))):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 503)
+        self.assertNotIn(b"original", response.body)
+
+    def test_static_metadata_change_during_snapshot_is_retryable(self):
+        path = self.pages / "asset.bin"
+        path.write_bytes(b"original")
+        real_open = pg.Handler._open_static
+        class ChangingFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def fileno(self):
+                return self.stream.fileno()
+            def read(self, size):
+                data = self.stream.read(size)
+                os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+                return data
+            def close(self):
+                self.stream.close()
+        with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: ChangingFile(real_open(handler, name))):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 503)
+        self.assertNotIn(b"original", response.body)
+
+    def test_static_conditional_request_uses_open_file_timestamp(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        response = get(self.port, "/asset.bin")
+        for method in ("GET", "HEAD"):
+            cached = get(self.port, "/asset.bin", method=method, headers={"If-Modified-Since": response.getheader("Last-Modified")})
+            self.assertEqual(cached.status, 304)
+            self.assertEqual(cached.body, b"")
+
+    def test_static_open_file_survives_atomic_replacement(self):
+        path = self.pages / "asset.bin"
+        original = b"old contents"
+        path.write_bytes(original)
+        real_open = pg.Handler._open_static
+        def replace_after_open(handler, name):
+            stream = real_open(handler, name)
+            replacement = path.with_suffix(".new")
+            replacement.write_bytes(b"replacement has a different length")
+            replacement.replace(path)
+            return stream
+        with mock.patch.object(pg.Handler, "_open_static", replace_after_open):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.getheader("Content-Length"), str(len(original)))
+        self.assertEqual(response.body, original)
+
 
 
 if __name__ == "__main__":
