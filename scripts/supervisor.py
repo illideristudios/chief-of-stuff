@@ -255,6 +255,15 @@ def require_macos():
         raise ServiceError("the engine supervisor requires macOS (launchd)")
 
 
+def launch_env(release: Path | None = None) -> dict:
+    """Pass the selected release version and configured paths to launchd."""
+    env = {"CLAUDE_PLUGIN_DATA": str(data_dir()), "CHIEF_OF_STUFF_VERSION": version(release)}
+    for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "XDG_STATE_HOME"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
+    return env
+
+
 def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | None = None,
             *, respect_disabled: bool = False) -> str:
     """Start the engine under launchd, or restart it when the plugin version, its path or its pins changed."""
@@ -276,23 +285,24 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                 if existing.get("Label") != label("engine", root) or existing.get("WorkingDirectory") != str(root):
                     raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
                 if launchctl("print", f"gui/{os.getuid()}/{label('engine', root)}", missing_ok=True):
+                    # Prepare the selected release without disrupting the pass; the engine follows it at a boundary.
+                    ensure_venv(data, release=selected)
+                    if job_path(label("pages", root), jobs_dir).exists():
+                        unload_agent(label("pages", root), root, jobs_dir)
                     return "engine: serving"
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = str(log_path)
-        # launchd does not inherit the installing shell. The probe and history read these paths.
-        env = {"CLAUDE_PLUGIN_DATA": str(data), "CHIEF_OF_STUFF_VERSION": version(selected)}
-        for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "XDG_STATE_HOME"):
-            if os.environ.get(name):
-                env[name] = os.environ[name]
         desired = {"Label": label("engine", root),
                    # Not resolved: the venv python is a symlink, and resolving it would leave the venv.
                    "ProgramArguments": [str(ensure_venv(data, release=selected)), *engine],
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
-                   # The version makes an updated plugin a changed job, which load_agent restarts.
-                   "EnvironmentVariables": env,
+                   "EnvironmentVariables": launch_env(selected),
                    "StandardOutPath": log, "StandardErrorPath": log}
         outcome = load_agent(desired, jobs_dir)
+        # The engine now supervises the board; retire its standalone LaunchAgent.
+        if job_path(label("pages", root), jobs_dir).exists():
+            unload_agent(label("pages", root), root, jobs_dir)
         (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
         return "engine: " + outcome
 

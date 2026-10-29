@@ -1636,5 +1636,139 @@ class SuperviseTest(unittest.TestCase):
         ensured.assert_called_once()
 
 
+def dead_pid() -> int:
+    proc = subprocess.Popen([sys.executable, "-c", ""])
+    proc.wait()
+    return proc.pid
+
+
+class StandaloneBoardTest(unittest.TestCase):
+    """#935: a workspace with a Board line and no engine lost its board at a restart, and its .pid named a dead
+    process. One board LaunchAgent supervises it; a stale .pid is replaced without signalling anything; the port is
+    never substituted; and status tells a missing engine apart from a healthy board."""
+
+    stop_server = SuperviseTest.stop_server
+
+    def setUp(self):
+        SuperviseTest.setUp(self)
+        self.jobs = self.root.parent / "agents"
+        for patch in (mock.patch.object(pg.sys, "platform", "darwin"),
+                      mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(self.root.parent / "data")}),
+                      mock.patch.object(pg.supervisor, "launchctl", return_value=False)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def wait_serving(self):
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline and pg._who(self.port) is None:
+            time.sleep(0.05)
+
+    def test_after_a_restart_the_board_agent_serves_the_configured_port_over_a_dead_pid(self):
+        self.addCleanup(self.stop_server)
+        stale = dead_pid()
+        (self.pages / ".pid").write_text(str(stale))
+        stop = threading.Event()
+        with mock.patch.object(pg, "POLL", 0.05):
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop), daemon=True)
+            thread.start()
+            self.addCleanup(lambda: thread.join(timeout=5))
+            self.addCleanup(stop.set)
+            self.wait_serving()
+            self.assertEqual(get(self.port, "/").status, 200)
+            pid = int((self.pages / ".pid").read_text())
+            self.assertNotEqual(pid, stale)
+            self.assertTrue(pg.is_pages_serve(pid, self.port))
+
+    def test_a_stale_pid_goes_even_when_the_start_fails(self):
+        (self.pages / ".pid").write_text(str(dead_pid()))
+        dead = mock.Mock(pid=4242, **{"poll.return_value": 1})
+        real_popen = subprocess.Popen
+        # Only the server start fails; `ps`, which checks the pid's identity, still runs.
+        start = lambda argv, **kw: dead if "serve" in argv else real_popen(argv, **kw)  # noqa: E731
+        with mock.patch.object(pg.subprocess, "Popen", side_effect=start):
+            with self.assertRaisesRegex(pg.PagesError, "did not come up"):
+                pg.ensure(self.pages, self.port, self.root / "pages.log")
+        self.assertFalse((self.pages / ".pid").exists())
+
+    def test_a_pid_reused_by_another_process_is_never_signalled(self):
+        self.addCleanup(self.stop_server)
+        other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(other.kill)
+        (self.pages / ".pid").write_text(str(other.pid))
+        with mock.patch.object(pg.os, "kill", wraps=os.kill) as kill:
+            self.assertEqual(pg.ensure(self.pages, self.port, self.root / "pages.log"), "pages: started")
+        kill.assert_not_called()
+        self.assertIsNone(other.poll())
+        self.assertNotEqual(int((self.pages / ".pid").read_text()), other.pid)
+
+    def test_a_silent_server_the_pid_still_names_is_reported_not_killed_or_moved(self):
+        (self.pages / ".pid").write_text("4242")
+        with mock.patch.object(pg, "_who", return_value=None), \
+             mock.patch.object(pg, "is_pages_serve", return_value=True), \
+             mock.patch.object(pg.os, "kill") as kill, \
+             mock.patch.object(pg.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(pg.PagesError, f"pid 4242 .* port {self.port}"):
+                pg.ensure(self.pages, self.port, self.root / "pages.log")
+        kill.assert_not_called()
+        popen.assert_not_called()
+        self.assertEqual((self.pages / ".pid").read_text(), "4242")
+
+    def test_a_foreign_server_on_the_port_never_moves_the_board_elsewhere(self):
+        with mock.patch.object(pg, "_who", return_value="nginx"), \
+             mock.patch.object(pg.subprocess, "Popen") as popen:
+            with self.assertRaisesRegex(pg.PagesError, f"port {self.port} answers as nginx"):
+                pg.ensure(self.pages, self.port, self.root / "pages.log")
+        popen.assert_not_called()
+
+    def test_the_board_agent_waits_while_another_supervisor_holds_the_lock(self):
+        stop, waits = threading.Event(), []
+        with mock.patch.object(pg, "supervise") as supervised, \
+             mock.patch.object(stop, "wait", side_effect=lambda s: (waits.append(s), len(waits) == 2 and stop.set())[1]):
+            pg.supervise_standalone(self.root, stop)
+        self.assertEqual(supervised.call_count, 2)  # it does not exit for launchd to relaunch it every ten seconds
+
+    def test_install_writes_one_board_agent_for_the_configured_workspace(self):
+        self.assertEqual(pg.install(self.root, self.jobs), "pages: started")
+        [path] = self.jobs.glob("*.plist")
+        import plistlib
+        job = plistlib.loads(path.read_bytes())
+        self.assertEqual(job["Label"], pg.supervisor.label("pages", self.root))
+        self.assertEqual(job["ProgramArguments"][1:], [str(Path(pg.__file__).resolve()), "--root",
+                                                       str(self.root.resolve()), "supervise"])
+        self.assertTrue(job["RunAtLoad"] and job["KeepAlive"])
+        self.assertEqual(job["WorkingDirectory"], str(self.root.resolve()))
+
+    def test_install_leaves_an_engine_workspace_to_its_engine_and_refuses_without_a_board(self):
+        engine = pg.supervisor.job_path(pg.supervisor.label("engine", self.root), self.jobs)
+        engine.parent.mkdir(parents=True)
+        engine.write_bytes(b"")
+        self.assertEqual(pg.install(self.root, self.jobs), "pages: supervised by the engine")
+        self.assertEqual(list(self.jobs.glob("*.plist")), [engine])
+        (self.root / "CLAUDE.md").write_text(
+            "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
+            f"- Timezone: {ZONE}\n- Board: none\n")
+        engine.unlink()
+        with self.assertRaises(pg.PagesError):
+            pg.install(self.root, self.jobs)
+        self.assertEqual(list(self.jobs.glob("*.plist")), [])
+
+    def test_status_tells_a_missing_engine_from_a_healthy_board(self):
+        self.addCleanup(self.stop_server)
+        pg.ensure(self.pages, self.port, self.root / "pages.log")
+        report = pg.status(self.root, self.jobs)
+        self.assertEqual((report["board"], report["engine"], report["agent"], report["port"]),
+                         ("serving", "missing", "none", self.port))
+        self.assertTrue(report["pid_live"])
+        import supervisor
+        with supervisor.lock(supervisor.state_dir(self.root) / "engine.lock"):
+            self.assertEqual(pg.status(self.root, self.jobs)["engine"], "running")
+
+    def test_status_names_a_down_board_and_its_stale_pid(self):
+        (self.pages / ".pid").write_text(str(dead_pid()))
+        report = pg.status(self.root, self.jobs)
+        self.assertEqual((report["board"], report["engine"], report["supervised"], report["pid_live"]),
+                         ("down", "missing", False, False))
+
+
 if __name__ == "__main__":
     unittest.main()

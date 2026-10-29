@@ -47,6 +47,7 @@ class HealthRegression(unittest.TestCase):
                 health = workspace.engine_health(workspace.read_engine_status(root), now, timezone.utc)
                 self.assertNotEqual(health.state, 'stale')
                 self.assertIsNone(health.warning)
+                self.assertIn('pass in progress', health.meta)
                 workspace.write_engine_status(root, started_at=now-timedelta(minutes=20),
                     last_pass_at=now-timedelta(minutes=10), last_attempt_at=now-timedelta(minutes=10),
                     stopped_at=None)

@@ -14,6 +14,8 @@ reloads itself when the file changes.
 
     python3 pages.py --ensure [--root R]              # start it unless it is already serving; print status only
     python3 pages.py serve --dir D --port P --root R  # what --ensure starts, detached
+    python3 pages.py install|uninstall|status [--root R]  # the board LaunchAgent of a workspace with no engine (#935)
+    python3 pages.py supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
 
 A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
 The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
@@ -865,6 +867,19 @@ def _stop(pages_dir: Path, port: int, stop: threading.Event | None = None) -> No
     raise PagesError(f"the older pages server (pid {pid}) is still answering on port {port}")
 
 
+def _drop_stale_pid(pages_dir: Path, port: int) -> None:
+    """Nothing answers on the port, so a pid file naming no `pages.py serve` there is stale (a dead or reused pid,
+    #935): it goes, and nothing is signalled. One still naming our server on this port names a hung server, the
+    user's to stop: starting another could not bind the port, and the board never moves to another one."""
+    try:
+        pid = int((pages_dir / PID).read_text())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None and is_pages_serve(pid, port):
+        raise PagesError(f"pid {pid} runs the pages server on port {port} but does not answer; stop it by hand")
+    (pages_dir / PID).unlink(missing_ok=True)
+
+
 def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, stop: threading.Event | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
     moves to another port. Returns `pages: serving`, `pages: started`, `pages: restarted` or `pages: stopped`; raises PagesError."""
@@ -889,7 +904,9 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
     or the server does not come up."""
     who = _who(port)
     restart = False
-    if who is not None:
+    if who is None:
+        _drop_stale_pid(pages_dir, port)
+    else:
         if not who.startswith(SERVER):
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
         if _version(who) >= _version(f"{SERVER}/{VERSION}"):
@@ -973,6 +990,80 @@ def supervise(root: Path, stop: threading.Event) -> None:
         print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
 
 
+def supervise_standalone(root: Path, stop: threading.Event) -> None:
+    """The board LaunchAgent's loop, for a workspace no engine supervises (#935). While another supervisor holds
+    the lock it waits and tries again, rather than exit for launchd to relaunch it every ThrottleInterval."""
+    while not stop.is_set():
+        supervise(root, stop)
+        stop.wait(RETRY_MAX)
+
+
+def _held(path: Path) -> bool:
+    """True while another process holds the lock file at `path`."""
+    if not path.exists():
+        return False
+    try:
+        with supervisor.lock(path):
+            return False
+    except supervisor.ServiceError:
+        return True
+
+
+def install(root: Path, jobs_dir: Path | None = None) -> str:
+    """Keep a configured board serving across restarts when no engine LaunchAgent does: one LaunchAgent running
+    `supervise`. A workspace keeps one LaunchAgent, so an engine's is left to supervise its board itself."""
+    root = root.resolve()
+    from_config(root)  # no Board line, nothing to supervise
+    if sys.platform != "darwin":
+        raise PagesError("the board supervisor requires macOS (launchd); run `pages supervise` under your own")
+    if supervisor.job_path(supervisor.label("engine", root), jobs_dir).exists():
+        return "pages: supervised by the engine"
+    log = supervisor.state_dir(root) / "pages.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    desired = {"Label": supervisor.label("pages", root),
+               # Not resolved: `chief-of-stuff pages` runs under the venv's stable link, which later repairs keep.
+               # shortcut: runs the release it was installed from (a newer `--ensure` still replaces an older server);
+               # follow `current` like the engine if the supervise loop itself starts changing between releases.
+               "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--root", str(root), "supervise"],
+               "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
+               "EnvironmentVariables": supervisor.launch_env(),
+               "StandardOutPath": str(log), "StandardErrorPath": str(log)}
+    with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+        return "pages: " + supervisor.load_agent(desired, jobs_dir)
+
+
+def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
+    """Remove the board LaunchAgent. The page server it started keeps serving until it is stopped or the Mac restarts."""
+    root = root.resolve()
+    with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+        supervisor.unload_agent(supervisor.label("pages", root), root, jobs_dir)
+    return "pages: unsupervised"
+
+
+def status(root: Path, jobs_dir: Path | None = None) -> dict:
+    """The board and the engine, each on its own: a board can serve with no engine, and an engine can run with the
+    board down. `agent` is the LaunchAgent that brings the board back after a restart, `supervised` whether a
+    supervisor holds the board now."""
+    root = root.resolve()
+    state = supervisor.state_dir(root)
+    agent = next((kind for kind in ("engine", "pages")
+                  if supervisor.job_path(supervisor.label(kind, root), jobs_dir).exists()), "none")
+    report = {"board": "not configured", "port": None, "pid": None, "pid_live": False,
+              "engine": "running" if _held(state / "engine.lock") else "missing",
+              "agent": {"pages": "board"}.get(agent, agent), "supervised": _held(state / "pages-supervisor.lock")}
+    try:
+        pages_dir, port = from_config(root)
+    except PagesError as exc:
+        report["board"] = f"not configured: {exc}"
+        return report
+    who = _who(port)
+    report.update(port=port, board="down" if who is None else "serving" if who.startswith(SERVER) else f"foreign: {who or 'unnamed'}")
+    with contextlib.suppress(OSError, ValueError):
+        report["pid"] = int((pages_dir / PID).read_text())
+        report["pid_live"] = is_pages_serve(report["pid"], port)
+    return report
+
+
 def main(argv: list[str] | None = None) -> int:
     args_list = list(sys.argv[1:] if argv is None else argv)
     if args_list[:1] == ["--board"]:
@@ -982,7 +1073,7 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
     ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
-    ap.add_argument("command", nargs="?", choices=("serve",))
+    ap.add_argument("command", nargs="?", choices=("serve", "supervise", "install", "uninstall", "status"))
     ap.add_argument("--dir")
     ap.add_argument("--port", type=int)
     args = ap.parse_args(args_list)
@@ -990,6 +1081,23 @@ def main(argv: list[str] | None = None) -> int:
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
         return 0
     root = Path(args.root or ".")
+    if args.command == "supervise":
+        stop = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+        supervise_standalone(root, stop)
+        return 0
+    if args.command in ("install", "uninstall", "status"):
+        try:
+            if args.command == "status":
+                from _vendor.toon_format import encode
+                print(encode(status(root)))
+            else:
+                print(install(root) if args.command == "install" else uninstall(root))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:  # PagesError and ServiceError are RuntimeErrors
+            print(f"pages: {exc}", file=sys.stderr)
+            return 2
+        return 0
     try:
         pages_dir, port = from_config(root)
         print(ensure(pages_dir, port, root / ".chief-of-stuff" / "pages.log", root))

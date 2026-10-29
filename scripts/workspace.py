@@ -242,7 +242,7 @@ def engine_health(status: EngineStatus, now: datetime, zone: ZoneInfo) -> Engine
             f"engine pass failed{at_clause}{pass_clause}: {status.last_error}",
         )
     if status.pass_started_at is not None:
-        return EngineHealth("running", ("engine running", pass_meta), None)
+        return EngineHealth("running", ("engine running", "pass in progress", pass_meta), None)
     stale_after = timedelta(seconds=max(float(status.interval or 60.0) * ENGINE_STALE_FACTOR, ENGINE_STALE_FLOOR_S))
     anchors = [t for t in (status.started_at, status.last_pass_at) if t is not None]
     anchor = max(anchors) if anchors else None
