@@ -302,6 +302,15 @@ class Accessibility(unittest.TestCase):
             ("summary", None, "Show segment details"),
         ])
 
+    def test_issue_links_remain_visible_at_phone_width_and_linked_names_are_marked(self) -> None:
+        import flow_chart
+        phone = flow_chart.css().split("@media (max-width:520px)", 1)[1]
+        self.assertNotIn(".gantt-note,.gantt-ref{display:none}", phone)
+        self.assertIn("a.gantt-name{text-decoration:underline", gantt.css())
+        html = gantt.render([row(seg(-1, 0), ref="#98", href="/issues/98")], DAY)
+        self.assertIn('class="gantt-ref"', html)
+        self.assertIn('href="/issues/98"', html)
+
     def test_disclosure_groups_visible_segments_by_row_with_full_details(self) -> None:
         html = gantt.render([
             row(seg(-9, -7, title="outside"), seg(-9, -3, "fix", "failed", 'worker <one>'),

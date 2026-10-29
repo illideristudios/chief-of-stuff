@@ -169,6 +169,7 @@ BASE_CSS = """\
 .gantt-label{width:var(--gantt-label);flex:none;padding-right:10px;box-sizing:border-box;display:flex;gap:6px;align-items:baseline;overflow:hidden;white-space:nowrap}
 .gantt-ref{font:11px ui-monospace,monospace;color:var(--gantt-muted)}
 .gantt-name{font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;color:inherit;text-decoration:none}
+.gantt a.gantt-name{text-decoration:underline;text-underline-offset:2px}
 .gantt a:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
 .gantt summary:focus-visible{outline:2px solid var(--gantt-ink);outline-offset:1px}
 .gantt-track{position:relative;flex-grow:1;height:14px;border-left:1px solid var(--gantt-edge)}
