@@ -79,6 +79,18 @@ class T3AdapterTest(unittest.TestCase):
     def test_a_thread_link_is_the_deep_link_form(self):
         self.assertEqual(t3_adapter.thread_link("env-1", "mcp:abc"), "t3code://threads/env-1/mcp:abc")
 
+    def test_the_adapter_contract_classifies_plain_replies_and_cancels_by_process(self):
+        from model_port import Reply
+        self.assertIsInstance(t3_adapter.classify(0, "plain T3 reply", ""), Reply)
+        (self.dir / "t3.json").write_text("{}")
+        (self.dir / "thread.json").write_text('{"thread_id":"t1","thread_run_id":"r1"}')
+        process = mock.Mock(t3_run_dir=self.dir)
+        with mock.patch.object(t3_adapter, "_mcp", return_value={}), \
+             mock.patch.object(t3_adapter, "observe", return_value={"status": "interrupted"}), \
+             mock.patch.object(t3_adapter.claude_adapter, "cancel") as stop:
+            t3_adapter.cancel(process)
+        stop.assert_called_once_with(process)
+
     def test_a_thread_ends_when_it_is_idle_and_has_nothing_pending(self):
         running = {"status": "running", "activeRunId": "r", "pendingRequestCount": 0}
         self.assertIsNone(t3_adapter.outcome(running))

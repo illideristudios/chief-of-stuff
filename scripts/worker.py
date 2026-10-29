@@ -725,6 +725,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             via_t3 = record.get("launcher") == "t3"  # a thread's reply is plain text, never a Claude envelope
             if runtime == "claude" and not via_t3:
                 reply = claude_adapter.classify(code, stdout, stderr)
+            elif via_t3:
+                reply = t3_adapter.classify(code, stdout, stderr)
             else:
                 reply = host_adapter.classify(runtime, code, stdout, stderr)
                 host_adapter.cleanup(record)

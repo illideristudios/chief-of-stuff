@@ -180,7 +180,9 @@ def start(request: Request, run_dir: Path, *, env: dict[str, str], cli: str | No
                                 "environment": environment, "prompt": prompt, "poll_s": poll_s, "home": str(home or os.environ.get("T3CODE_HOME") or ""),
                                 "title": f"{env.get('CHIEF_ISSUE_KEY', '')} {env.get('CHIEF_STAGE', '')} {request.session_id}".strip()}))
     prepared = [sys.executable, str(Path(__file__).resolve()), "run", request.session_id, str(spec)]
-    return claude_adapter.spawn(prepared, request, run_dir, env)
+    process = claude_adapter.spawn(prepared, request, run_dir, env)
+    process.t3_run_dir = run_dir
+    return process
 
 
 def _t3(spec: dict, *argv: str, stdin: str | None = None) -> subprocess.CompletedProcess:
@@ -340,8 +342,16 @@ def refresh(run_dir: Path) -> dict:
     return shown
 
 
-def cancel(process, run_dir: Path) -> None:
+def classify(exit_code: int, stdout: str, stderr: str):
+    """The host-adapter classify contract; T3 replies are plain text, not Claude CLI envelopes."""
+    return host_adapter.classify("claude", exit_code, stdout, stderr)
+
+
+def cancel(process, run_dir: Path | None = None) -> None:
     """Stop the remote worker first. Failure preserves the runner and its evidence for recovery."""
+    run_dir = run_dir or getattr(process, "t3_run_dir", None)
+    if not isinstance(run_dir, Path):
+        raise RuntimeError("T3 cancellation requires its engine run directory")
     spec = json.loads((run_dir / "t3.json").read_text())
     if not (run_dir / "thread.json").exists():
         observe(run_dir)  # recover a start whose CLI reply was lost
