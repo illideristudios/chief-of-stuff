@@ -279,12 +279,12 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
     attempt = max((s.attempt for s in history if s.stage == stage), default=0) + 1
     rounds = attempt - 1 - sum(s.stage == stage and s.outcome in RETRYABLE for s in history)
     if stage == "review":
-        # Completed review rounds belong to the fix loop; only failures since the last completed review spend retries.
+        # Completed review rounds belong to the fix loop; failed or blocked attempts since the last completed review spend retries.
         rounds = 0
         for s in sorted((s for s in history if s.stage == stage), key=lambda s: s.attempt, reverse=True):
             if s.outcome == "done":
                 break
-            rounds += s.outcome == "failed"
+            rounds += s.outcome in ("failed", "blocked")
     elif any(e.target == stage for e in workflow.next("review")):
         review = min((_time(s.ended_at) for s in history if s.stage == "review" and s.started_at and s.ended_at),
                      default=None)

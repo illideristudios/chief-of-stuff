@@ -93,6 +93,14 @@ class Workflow:
 
 
 @dataclass(frozen=True)
+class Stall:
+    """Stall detection policy. Automatic restart is not yet supported."""
+    after_minutes: int = 20
+    action: str = "wait"
+    max_restarts: int = 2
+
+
+@dataclass(frozen=True)
 class Workers:
     """Worker launch configuration and standing instructions for one-shot and engine tasks."""
     launcher: str = "ghostty"
@@ -105,6 +113,7 @@ class Workers:
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
     teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
     teardown_list: str = ""  # optional command emitting JSON [{"stack": name, "worktree": path}]
+    stall: Stall = field(default_factory=Stall)
 
 
 @dataclass(frozen=True)
@@ -313,6 +322,26 @@ def pick(rotation: tuple[ModelEntry, ...], after: str | None = None, not_family:
                         (f" outside {not_family}" if not_family else ""))
 
 
+def _stall(table) -> Stall:
+    if not isinstance(table, dict):
+        raise SettingsError("[workers.stall] must be a table")
+    extra = set(table) - {"after_minutes", "action", "max_restarts"}
+    if extra:
+        raise SettingsError(f"[workers.stall] unknown keys: {', '.join(sorted(extra))}")
+    minutes = table.get("after_minutes", 20)
+    if type(minutes) is not int or not 1 <= minutes <= 999999999:
+        raise SettingsError("[workers.stall] after_minutes must be a positive whole number no greater than 999999999")
+    count = table.get("max_restarts", 2)
+    if type(count) is not int or count < 0:
+        raise SettingsError("[workers.stall] max_restarts must be a non-negative whole number")
+    action = table.get("action", "wait")
+    if action == "restart":
+        raise SettingsError("[workers.stall] automatic stall restart is not supported until activity and safe recovery are implemented")
+    if action != "wait":
+        raise SettingsError('[workers.stall] action must be "wait"')
+    return Stall(minutes, action, count)
+
+
 def _workers(table) -> Workers:
     if not isinstance(table, dict):
         raise SettingsError("[workers] must be a table")
@@ -357,7 +386,8 @@ def _workers(table) -> Workers:
             raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules), **commands)
+                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules),
+                   stall=_stall(table.get("stall", {})), **commands)
 
 
 def _repos(table) -> dict[str, str]:

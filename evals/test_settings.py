@@ -161,6 +161,25 @@ class SettingsTest(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):
                 st.load(self.root, self.write(f"[workers]\nmax_concurrency = {bad}\n"))
 
+    def test_stall_policy_defaults_and_configured_wait(self):
+        default = st.load(self.root, None).workers.stall
+        self.assertEqual((default.after_minutes, default.action, default.max_restarts), (20, "wait", 2))
+        policy = st.load(self.root, self.write('[workers.stall]\nafter_minutes = 30\naction = "wait"\nmax_restarts = 1\n')).workers.stall
+        self.assertEqual((policy.after_minutes, policy.action, policy.max_restarts), (30, "wait", 1))
+
+    def test_stall_policy_rejects_invalid_configuration(self):
+        for line in ('after_minutes = 0', 'after_minutes = true', 'after_minutes = 1.5',
+                     'after_minutes = 9999999999999999999', 'max_restarts = -1', 'max_restarts = true',
+                     'action = "unknown"', 'action = 3', 'after_minute = 20'):
+            with self.subTest(line=line), self.assertRaisesRegex(st.SettingsError, r'\[workers.stall\]'):
+                st.load(self.root, self.write('[workers.stall]\n' + line + '\n'))
+        with self.assertRaisesRegex(st.SettingsError, r'\[workers.stall\]'):
+            st.load(self.root, self.write('[workers]\nstall = "wait"\n'))
+
+    def test_automatic_stall_restart_is_explicitly_refused_until_safe(self):
+        with self.assertRaisesRegex(st.SettingsError, 'automatic stall restart is not supported'):
+            st.load(self.root, self.write('[workers.stall]\naction = "restart"\n'))
+
     def test_green_test_requirement_is_opt_in_and_strictly_boolean(self):
         self.assertFalse(st.load(self.root, None).workers.require_green_tests)
         for value, expected in (("true", True), ("false", False)):

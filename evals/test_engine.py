@@ -513,6 +513,39 @@ class EngineTest(unittest.TestCase):
         self.now += timedelta(hours=1)
         self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "stalled")])
 
+    def test_stall_wait_uses_configured_threshold(self):
+        workers = engine.settings.Workers(stall=engine.settings.Stall(after_minutes=12))
+        def run():
+            return engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
+                                   trees=self.trees, launch=self.launch, workers=workers,
+                                   clock=lambda: self.now)
+        run()
+        self.now += timedelta(minutes=11)
+        self.assertEqual(run(), [])
+        self.now += timedelta(minutes=1)
+        self.assertEqual(run(), [reconcile.Wait(KEY, "stalled")])
+
+    def test_unsupported_restart_never_silently_falls_back_to_wait(self):
+        workers = engine.settings.Workers(stall=engine.settings.Stall(action="restart"))
+        with self.assertRaisesRegex(ValueError, "automatic stall restart is not supported"):
+            engine.run_pass(forge=self.forge, store=self.db, policies=self.p, root=self.root,
+                            trees=self.trees, launch=self.launch, workers=workers, clock=lambda: self.now)
+        self.assertEqual(self.launched, [])
+
+    def test_blocked_review_limit_survives_store_reopen(self):
+        self.forge.rows[0]["stage"] = "review"
+        self.p = replace(self.p, base=policy.Policy(retry_limit=1))
+        for attempt in (1, 2):
+            self.assertEqual(self.run_pass(), [reconcile.Review(KEY, attempt)])
+            self.finish("review", attempt=attempt, outcome="blocked")
+        self.db.engine.dispose()
+        self.db = store.Store(self.root / "store.db", clock=lambda: self.now)
+        self.addCleanup(self.db.engine.dispose)
+        actions = self.run_pass()
+        self.assertEqual(actions, [reconcile.Escalate(KEY, "retry limit reached for review")])
+        self.assertEqual(len(self.launched), 2)
+        self.assertEqual(self.db.resume(KEY)["interrupt"]["kind"], "exhausted")
+
     def publish_exit(self, outcome="done", stage="implement"):
         run = Path(self.db.resume(KEY)["runs"][f"{stage}-1"]["run_dir"])
         run.mkdir(parents=True, exist_ok=True)
@@ -3653,6 +3686,41 @@ class MainTest(unittest.TestCase):
         self.assertEqual(len(seen), 1)
         self.assertEqual(seen[0][0], self.root)
         self.assertTrue(seen[0][1].is_set())
+
+    def test_loop_restarts_a_page_supervisor_that_exited(self):
+        import pages
+        first_done, second_started = threading.Event(), threading.Event()
+        calls = []
+        threads = []
+        def serve(root, stop):
+            calls.append((root, stop))
+            threads.append(threading.current_thread())
+            if len(calls) == 1:
+                first_done.set()
+                return  # e.g. another process temporarily owns pages-supervisor.lock
+            second_started.set()
+            stop.wait(2)
+        waits = 0
+        def sleep(_seconds):
+            nonlocal waits
+            waits += 1
+            if waits == 1:
+                self.assertTrue(first_done.wait(2))
+                threads[0].join(timeout=2)
+                self.assertFalse(threads[0].is_alive())
+            else:
+                self.assertTrue(second_started.wait(2))
+                raise KeyboardInterrupt
+        errors = io.StringIO()
+        with mock.patch.object(pages, "supervise", side_effect=serve), \
+             mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
+             mock.patch.object(engine, "run_pass"), \
+             mock.patch.object(engine.time, "sleep", side_effect=sleep), \
+             contextlib.redirect_stderr(errors):
+            self.assertEqual(engine.main(["--root", str(self.root)]), 0)
+        self.assertEqual(len(calls), 2)
+        self.assertIs(calls[0][1], calls[1][1])
+        self.assertTrue(calls[1][1].is_set())
 
 
 class PolicyFingerprintTest(unittest.TestCase):

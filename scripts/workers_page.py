@@ -9,6 +9,7 @@ session log; and ENDED TODAY, a row per one-shot launcher end line in today's tr
 from __future__ import annotations
 
 from datetime import date, datetime
+import json
 from html import escape
 from pathlib import Path
 
@@ -81,12 +82,15 @@ def _task_stage(t, fallback: str) -> str:
     return f'{base} <span class="chip stage">{stage}</span>' if stage else base
 
 
-def _worker_lead(w: board_sources.Worker, looping: bool) -> str:
+def _worker_lead(w: board_sources.Worker, looping: bool, session_id: int | None = None) -> str:
     """State chip (`RUNNING`, `LOOPING`) and the worker name stacked over `runtime model · kind`."""
     state = "LOOPING" if looping else "RUNNING"
     sub = " · ".join(x for x in (" ".join(x for x in (w.runtime, w.model) if x), w.kind) if x)
+    name = escape(w.name)
+    if type(session_id) is int and session_id > 0:
+        name = f'<a href="/workers/sessions/{session_id}">{name}</a>'
     return (f'<span class="lead"><span class="chip {state.lower()}">{state}</span>'
-            f'<span class="stack"><b>{escape(w.name)}</b><span class="meta">{escape(sub)}</span></span></span>')
+            f'<span class="stack"><b>{name}</b><span class="meta">{escape(sub)}</span></span></span>')
 
 
 def _table(heads: tuple[str, ...], rows: list[list[str]]) -> str:
@@ -131,7 +135,7 @@ def _running_row(lead: str, task: str, started: datetime, now: datetime, tree: P
 
 
 def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, int], by_name: dict, now: datetime,
-                  trees: Path, account: str) -> tuple[list[list[str]], set[str]]:
+                  trees: Path, account: str, sessions: dict[str, int] | None = None) -> tuple[list[list[str]], set[str]]:
     """RUNNING rows from the board's worker sources, and the names they cover."""
     running: list[list[str]] = []
     seen_running: set[str] = set()
@@ -146,7 +150,7 @@ def _session_rows(sources: board_sources.Sources, row_of, fix_counts: dict[str, 
         t = by_name.get(w.task.strip().casefold()) or row_of(w.task)[0]
         key = (t.name.strip() if t and t.name.strip() else w.task.strip()).casefold()
         is_looping = fix_counts.get(key, 0) >= 2 or bool(t and t.stage.strip().casefold() == "looping")
-        running.append(_running_row(_worker_lead(w, is_looping), _task_stage(t, w.task), w.started, now,
+        running.append(_running_row(_worker_lead(w, is_looping, (sessions or {}).get(w.name)), _task_stage(t, w.task), w.started, now,
                                     trees / w.tree if w.tree else None, account))
     return running, seen_running
 
@@ -178,7 +182,7 @@ def _store_rows(db: PageData, seen_running: set[str], now: datetime, trees: Path
             is_looping = fix_by_issue.get(seg.issue_key, 0) >= 2
             stage_chip = f' <span class="chip stage">{escape(seg.stage)}</span>' if seg.stage else ""
             tree = trees / runner
-            running.append(_running_row(_worker_lead(w_obj, is_looping), f"{task_link}{stage_chip}", started_dt, now,
+            running.append(_running_row(_worker_lead(w_obj, is_looping, getattr(seg, "id", None)), f"{task_link}{stage_chip}", started_dt, now,
                                         tree if tree.exists() else None, account))
         else:
             ended_dt = parse_stamp(seg.ended_at, now)
@@ -192,7 +196,10 @@ def _store_rows(db: PageData, seen_running: set[str], now: datetime, trees: Path
             state = "DONE" if done else "CRASHED"
             action = (f'<a class="ref" data-k="issue" href="{escape(issue_href(seg.issue_key))}">#{escape(num)}</a>'
                       if done else '<span class="chip redispatch">re-dispatch</span>')
-            ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{escape(runner)}</b>',
+            worker_name = escape(runner)
+            if type(getattr(seg, "id", None)) is int and seg.id > 0:
+                worker_name = f'<a href="/workers/sessions/{seg.id}">{worker_name}</a>'
+            ended.append([f'<span class="chip {state.lower()}">{state}</span> <b>{worker_name}</b>',
                           f"{ended_dt:%H:%M}", task_link, escape(summary), action])
     return running, ended, need, store_shots
 
@@ -204,7 +211,9 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
     by_name = {t.name.strip().casefold(): t for t in tasks if t.name.strip()}
     row_of = launcher(tasks)
     fix_counts, ended, need = _tracker_ends(tracker_text, row_of)
-    running, seen_running = _session_rows(sources, row_of, fix_counts, by_name, now, trees, claude_account)
+    sessions = {s.runner: s.id for s in db.segments() if getattr(s, "runner", "") and s.ended_at is None
+                and type(getattr(s, "id", None)) is int and s.id > 0} if db is not None else {}
+    running, seen_running = _session_rows(sources, row_of, fix_counts, by_name, now, trees, claude_account, sessions)
     store_shots = 0
     if db is not None:
         store_running, store_ended, store_need, store_shots = _store_rows(db, seen_running, now, trees, claude_account)
@@ -228,6 +237,84 @@ def render(tracker_text: str, sources: board_sources.Sources, now: datetime, tre
             + f'\n  </section>\n  <section>\n    <h2>Ended today · {len(ended)}</h2>\n'
             + _table(("worker", "at", "task", "summary", "action"), ended)
             + "\n  </section>\n</main>\n</body>\n</html>\n")
+
+
+def render_session(db: PageData, segment_id: int, trees: Path, *, config_dir: Path | None = None,
+                   cursor: session_logs.Cursor | None = None) -> str | None:
+    """One engine attempt's recorded session; transcript content is returned, never written to pages dir."""
+    seg = next((s for s in db.segments() if getattr(s, "id", None) == segment_id), None)
+    if seg is None:
+        return None
+    item = db.item(seg.issue_key)
+    title = item.title if item and item.title else seg.issue_key
+    data = db.resume(seg.issue_key)
+    runs = data.get("runs") if isinstance(data, dict) else None
+    record = runs.get(f"{seg.stage}-{seg.attempt}") if isinstance(runs, dict) else None
+    page = None
+    why = ""
+    if seg.runtime != "claude":
+        why = "Transcript not available for this runtime yet."
+    elif config_dir is None:
+        why = "Transcript unavailable: the account used for this attempt could not be verified."
+    elif not isinstance(record, dict) or not isinstance(record.get("tree"), str) or not isinstance(record.get("session_id"), str):
+        why = "Transcript unavailable: this attempt has no recorded session identity."
+    else:
+        try:
+            tree, base = Path(record["tree"]).resolve(), trees.resolve()
+            if tree == base or not tree.is_relative_to(base):
+                raise ValueError("worker tree is outside this workspace")
+            page = session_logs.read_claude(tree, record["session_id"], config_dir=config_dir, cursor=cursor)
+        except (ValueError, OSError, RuntimeError):
+            why = "Transcript unavailable: the recorded session identity cannot be verified."
+    if page:
+        why = {"missing": "Transcript unavailable: no session log was found for this attempt.",
+               "unreadable": "Transcript unavailable: the session log could not be read.",
+               "record_too_large": "Transcript incomplete: a session record is too large to display."}.get(page.status, "")
+
+    def shown(event):
+        kind = event["kind"]
+        label = {"user": "User", "assistant": "Worker", "tool_use": "Tool call", "tool_result": "Tool result"}[kind]
+        if kind in ("user", "assistant"):
+            value = event.get("text", "")
+        elif kind == "tool_use":
+            value = f'{event.get("name", "")}\n{json.dumps(event.get("input"), ensure_ascii=False)}'
+        else:
+            value = event.get("content")
+            if not isinstance(value, str):
+                value = json.dumps(value, ensure_ascii=False)
+        when = event.get("timestamp", "")
+        return (f'<div class="session-event"><span class="session-time">{escape(when)}</span>'
+                f'<div><b>{label}</b><div class="session-text">{escape(value)}</div></div></div>')
+
+    events = "".join(shown(event) for event in page.events) if page else ""
+    if page and not page.events and not why:
+        why = "No transcript events are available on this page yet."
+    warning = f'<p role="status">{escape(why)}</p>' if why else ""
+    reset = '<p role="status">The session log changed; showing its beginning again.</p>' if page and page.reset else ""
+    next_link = ""
+    if page and page.has_more:
+        c = page.cursor
+        token = f"{c.device},{c.inode},{c.offset},{c.tail_hash}"
+        next_link = f'<p><a href="/workers/sessions/{segment_id}?cursor={escape(token, quote=True)}">Next transcript page</a></p>'
+    refresh = '<meta http-equiv="refresh" content="5">' if not seg.ended_at and not next_link else ""
+    state = "Ended" if seg.ended_at else "Recorded as running"
+    css = """<style>
+.session-event{display:grid;grid-template-columns:minmax(130px,180px) minmax(0,1fr);gap:12px;padding:10px 0}
+.session-event+.session-event{border-top:1px dotted var(--line)}
+.session-time{font:11px ui-monospace,monospace;color:var(--muted);overflow-wrap:anywhere}
+.session-text{white-space:pre-wrap;overflow-wrap:anywhere;margin-top:4px}
+@media(max-width:600px){.session-event{grid-template-columns:1fr;gap:4px}}
+</style>"""
+    return (f'<!doctype html><html lang="en"><head><meta charset="utf-8">{refresh}'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1"><title>{escape(title)} · Worker</title>'
+            f'{HEAD}{CSS}{css}</head><body><main>{tab_bar("Workers", 0, parent=True)}'
+            f'<header class="top"><div><span class="eyebrow"><a href="/workers">Workers</a> · '
+            f'{escape(seg.runtime or "unknown runtime")} · attempt {seg.attempt}</span>'
+            f'<h1>{escape(title)}</h1><span class="meta">{state}</span></div></header>'
+            f'<section><h2>Transcript</h2>{reset}{warning}<div class="card">{events}</div>{next_link}'
+            f'<p class="meta">{"This page refreshes every five seconds. " if refresh else ""}'
+            'Messaging from this page is not available yet.</p>'
+            '</section></main></body></html>')
 
 
 def write(root: Path, pages_dir: Path, *, db: PageData | None = None, navigation: dict | None = None) -> Path:

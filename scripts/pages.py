@@ -63,6 +63,7 @@ RETRY_MAX = 60
 RENDERED = re.compile(r"\d{4}-\d{2}-\d{2}-board\.html|workers\.html|decisions\.html|decision-[a-z0-9]+(?:-[a-z0-9]+)*\.html|issue-(?:\d+|k[0-9a-f]+)(?:-source)?\.html")
 ROUTE = re.compile(r"/decisions/([a-z0-9]+(?:-[a-z0-9]+)*)")
 ISSUE = re.compile(r"/issues/([a-z0-9_.-]+:[A-Za-z0-9_./-]+#\d+|\d+)(/source)?")
+WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 # ponytail: a lock per page (never freed; a workspace has tens of pages) under the server's `[pages] workers` slots.
@@ -162,6 +163,44 @@ def _navigation(root: Path, pages_dir: Path, data):
 def _issue_identity(name: str, source: bool = False):
     token = name[len("issue-"):-len("-source.html") if source else -5]
     return bytes.fromhex(token[1:]).decode() if token.startswith("k") else int(token)
+
+
+def _worker_config_dir(root: Path, data, segment_id: int) -> Path | None:
+    """Recover the Claude config directory from this exact attempt's recorded launch command."""
+    seg = next((s for s in data.segments() if getattr(s, "id", None) == segment_id), None)
+    if seg is None:
+        return None
+    number = seg.issue_key.rpartition("#")[2]
+    if (not number.isdecimal() or not re.fullmatch(r"[A-Za-z0-9_-]+", seg.stage)
+            or type(seg.attempt) is not int or seg.attempt < 1):
+        return None
+    data_for_issue = data.resume(seg.issue_key)
+    runs = data_for_issue.get("runs") if isinstance(data_for_issue, dict) else None
+    run = runs.get(f"{seg.stage}-{seg.attempt}") if isinstance(runs, dict) else None
+    if not isinstance(run, dict) or not all(isinstance(run.get(k), str) and run[k] for k in ("tree", "session_id", "run_dir")):
+        return None
+    expected = supervisor.state_dir(root) / "runs" / f"{int(number)}-{seg.stage}-{seg.attempt}"
+    try:
+        if Path(run["run_dir"]).resolve() != expected.resolve():
+            return None
+        path = expected / "command.json"
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        with os.fdopen(fd, "rb") as stream:
+            stat = os.fstat(stream.fileno())
+            if not S_ISREG(stat.st_mode) or stat.st_size > MAX_PAGE:
+                return None
+            command = json.load(stream)
+        if not isinstance(command, dict):
+            return None
+        env = command.get("env")
+        home = env.get("CLAUDE_CONFIG_DIR") if isinstance(env, dict) else None
+        if (command.get("session_id") != run["session_id"] or not isinstance(command.get("cwd"), str)
+                or Path(command["cwd"]).resolve() != Path(run["tree"]).resolve()
+                or not isinstance(home, str) or not Path(home).is_absolute()):
+            return None
+        return Path(home)
+    except (OSError, ValueError, TypeError, RuntimeError, json.JSONDecodeError):
+        return None
 
 
 def inside(pages_dir: Path | str, name: str) -> Path | None:
@@ -417,7 +456,48 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self._allowed():
-            self._send_html(True) if self._is_html() else super().do_GET()
+            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+            if match:
+                self._send_worker_session(int(match[1]), True)
+            else:
+                self._send_html(True) if self._is_html() else super().do_GET()
+
+    def _send_worker_session(self, segment_id: int, body: bool):
+        """Render a recorded engine attempt in memory; never publish transcript HTML into the pages directory."""
+        import session_logs
+        import workers_page
+        from workspace import worktrees_dir
+
+        root = getattr(self.server, "root", None)
+        if root is None:
+            return self.send_error(404, "no such worker session")
+        query = parse_qs(urlsplit(self.path).query, keep_blank_values=True)
+        values = query.get("cursor", [])
+        cursor = None
+        if values:
+            if len(values) != 1 or not re.fullmatch(r"[0-9]{1,20},[0-9]{1,20},[0-9]{1,20},[a-f0-9]{64}", values[0]):
+                return self.send_error(400, "invalid transcript cursor")
+            device, inode, offset, digest = values[0].split(",")
+            cursor = session_logs.Cursor(int(device), int(inode), int(offset), digest)
+        try:
+            data = _page_data(root)
+            if data is None:
+                return self.send_error(404, "no such worker session")
+            trees = root / worktrees_dir((root / "CLAUDE.md").read_text())
+            home = _worker_config_dir(root, data, segment_id)
+            page = workers_page.render_session(data, segment_id, trees, config_dir=home, cursor=cursor)
+        except Exception:
+            return self.send_error(500, "could not read worker session")
+        if page is None:
+            return self.send_error(404, "no such worker session")
+        payload = page.encode("utf-8", errors="replace")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if body:
+            self.wfile.write(payload)
 
     def _post_store_decision(self, form: dict[str, list[str]]):
         """Record a person's answer, reversal or re-route. A reversal or re-route is an intent on its own row, and
@@ -558,7 +638,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_HEAD(self):
         if self._allowed():
-            self._send_html(False) if self._is_html() else super().do_HEAD()
+            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+            if match:
+                self._send_worker_session(int(match[1]), False)
+            else:
+                self._send_html(False) if self._is_html() else super().do_HEAD()
 
     def list_directory(self, path):
         # The stdlib listing, without dotfiles (the pid file is the server's) or rendered pages (routes, not files).
@@ -576,7 +660,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return f"{kind}; charset=utf-8" if kind.startswith("text/") else kind
 
     def end_headers(self):
-        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Cache-Control", "no-store" if WORKER_SESSION.fullmatch(urlsplit(self.path).path) else "no-cache")
         if page_reload.RELOAD_COOKIE in ((getattr(self, "headers", None) or {}).get("Cookie") or ""):
             # Consumed by the request that carries it, so it cannot mark another tab's navigation (Codex on #579).
             self.send_header("Set-Cookie", f"{page_reload.RELOAD_COOKIE.split('=')[0]}=; Max-Age=0; Path=/")
