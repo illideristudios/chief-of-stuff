@@ -53,25 +53,26 @@ class LedgerTest(unittest.TestCase):
         (self.root / ".chief-of-stuff").mkdir()
 
     def test_pending_excludes_gap_ids_already_in_the_ledger(self):
+        import architect_signal_store as store
         import architect_signals as sig
-        sig.record_acted(self.root, "C4", issue_key="github:o/app#12", signal_key="architect-signal:C4@abc")
-        pending = sig.pending(self.root, COMPLIANCE)
+        store.record_acted(self.root, "C4", issue_key="github:o/app#12", signal_key="architect-signal:C4@abc")
+        pending = sig.pending(sig.unassigned_gaps(COMPLIANCE), store.load_ledger(self.root)["acted"])
         self.assertEqual([r.id for r in pending], ["C5"])
 
     def test_recording_does_not_edit_compliance_md(self):
-        import architect_signals as sig
+        import architect_signal_store as store
         path = self.root / "architecture" / "compliance.md"
         path.parent.mkdir()
         path.write_text(COMPLIANCE)
         before = path.read_text()
-        sig.record_acted(self.root, "C4", issue_key="github:o/app#12", signal_key="architect-signal:C4@abc")
+        store.record_acted(self.root, "C4", issue_key="github:o/app#12", signal_key="architect-signal:C4@abc")
         self.assertEqual(path.read_text(), before)
         self.assertTrue((self.root / ".chief-of-stuff" / "architect-signals.json").is_file())
 
     def test_a_repeated_record_for_the_same_gap_is_idempotent(self):
-        import architect_signals as sig
-        sig.record_acted(self.root, "C4", issue_key="github:o/app#12", signal_key="architect-signal:C4@abc")
-        sig.record_acted(self.root, "C4", issue_key="github:o/app#99", signal_key="architect-signal:C4@abc")
+        import architect_signal_store as store
+        store.record_acted(self.root, "C4", issue_key="github:o/app#12", signal_key="architect-signal:C4@abc")
+        store.record_acted(self.root, "C4", issue_key="github:o/app#99", signal_key="architect-signal:C4@abc")
         ledger = json.loads((self.root / ".chief-of-stuff" / "architect-signals.json").read_text())
         self.assertEqual(list(ledger["acted"].keys()), ["C4"])
         self.assertEqual(ledger["acted"]["C4"]["issue_key"], "github:o/app#12")
@@ -150,9 +151,11 @@ class AgentRulesTest(unittest.TestCase):
 
 
 class CirclesTest(unittest.TestCase):
-    def test_architect_signals_sits_in_use_cases(self):
+    def test_the_split_matches_section_4(self):
         from evals.test_architecture import CIRCLES
         self.assertIn("architect_signals", CIRCLES["use_cases"])
+        self.assertIn("architect_signal_store", CIRCLES["adapters"])
+        self.assertIn("architect_signals_cli", CIRCLES["drivers"])
 
 
 if __name__ == "__main__":
