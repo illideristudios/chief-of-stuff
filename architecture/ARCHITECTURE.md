@@ -460,3 +460,34 @@ K := an issue with the signal's key already exists on the forge      Fi := the f
 4.  K → ¬Fi          [call, T3 design §6]
 ∴   no human step lies between recorded drift or a settled architecture and a fix, and a repeated signal files nothing twice
 ```
+
+## 17. Decision graph
+
+The coordinator answers worker questions in its scope (section 6) from precedent (owner, 2026-10-29, T3 design §7). Today precedent is the Decisions rows of the tracker. The answer source is a seam: the decision graph replaces those rows behind it without a change to the coordinator. The graph's storage and schema, and its tool's interface, are the builder's, within the rules below. A justified request reaches the coordinator, and its verdict reaches the blocked worker, without the worker polling in a model loop.
+
+The graph exists to prevent decision poisoning: superseded decisions left in a context window and mistaken for current ones. Its rules, all decided (owner, 2026-10-29):
+- **Leaves only, by default.** An agent sees the current decisions, those nothing has replaced.
+- **A leaf is a whole decision.** It carries the full decision text as a usable unit, not a diff, with its reason. The reason of a current leaf is always granted.
+- **Provenance is by links to parents.** A leaf may replace several earlier decisions, so the structure is a graph, not a tree. Rejected alternatives live only in ancestors, never in a leaf.
+- **One tool.** History is reached only through the approved tool, the only way an agent reaches the graph. The coordinator, the architect and the owner read freely, and should not routinely, to protect their context. The owner's view for traversing the graph is open (section 19).
+- **History needs a justified, approved request.** The tool refuses a request for ancestors and tells the worker to justify it. The justification goes to the coordinator, which is harsh and judges the text without reading the history. On approval, the tool returns the slice straight to the worker, as far up as the justification requires and the coordinator approves. Every grant is logged (call).
+- **Grant:** two current decisions contradict, and the request states exactly what each requires that cannot both hold; or a current decision does not match what the code shows, and the mismatch is also reported to the architect.
+- **Deny:** a reviewer finding that contradicts a leaf, on which the coordinator rules from the leaf and its reason; "more context"; "looks related"; "the decision is unclear"; "double-checking my own work"; any request that meets no grant case.
+- **Was this approach rejected?** A worker that names the specific approach it is about to build, and why the answer is not obvious, may ask. On approval the tool answers only that question: the matching rejected alternative and its reason, and no ancestors (owner, 2026-10-29: "grant it as a narrow answer"). A vague request, such as "has anything like this been tried", names no approach and is denied (call).
+
+```
+Rq := a worker requests history      J := the request states a justification      Ap := the coordinator approves
+G := the justification meets a grant case      Rd := the worker receives the ancestors, as far up as approved
+Fr := the requester is the coordinator, the architect or the owner      Lg := the grant is logged
+Rj := a worker asks whether approach a was already rejected      Nm := the request names a and why the answer is not obvious
+Hit := a rejected alternative matches a      Sl := the tool returns that alternative and its reason, and no ancestors
+
+1.  Rq ∧ ¬J → refused, told to justify      [owner, 2026-10-29]
+2.  ¬G → ¬Ap                                [owner, 2026-10-29: the coordinator is harsh]
+3.  Rq ∧ J ∧ Ap → Rd                        [owner, 2026-10-29]
+4.  Fr → reads freely                        [owner, 2026-10-29]
+5.  Ap → Lg                                  [call, T3 design §7]
+6.  Rj ∧ ¬Nm → ¬Ap                           [owner: harsh; call: a vague request names no approach]
+7.  Rj ∧ Nm ∧ Ap ∧ Hit → Sl                  [owner, 2026-10-29]
+∴   history reaches a worker only on a justified, approved and logged request, and a rejected approach reaches it without the history around it
+```
