@@ -454,6 +454,55 @@ class AcceptanceTest(unittest.TestCase):
                     self.assertIn(bullet, text(got))
                 self.assertNotIn("not a criterion", text(got))
 
+    def test_hidden_comments_and_code_examples_are_not_criteria_or_headings(self):
+        body = """<!--
+## Acceptance
+- [x] hidden heading and criterion
+-->
+```md
+## Acceptance
+- [x] example heading and criterion
+```
+## Acceptance
+- [x] Real criterion
+<!--
+## Other
+- [ ] hidden criterion
+-->
+~~~markdown
+## Other
+- [ ] example criterion
+~~~
+- [ ] Another real criterion
+## Other
+- [ ] outside section
+"""
+        got = text(page_section(page(src=sources(issue=replace(ISSUE, body=body))), "Acceptance"))
+        self.assertIn("1 of 2 met", got)
+        self.assertIn("Real criterion", got)
+        self.assertIn("Another real criterion", got)
+        for unwanted in ("hidden", "example", "outside"):
+            self.assertNotIn(unwanted, got)
+
+    def test_tracker_issue_references_set_body_and_acceptance_link_context(self):
+        cases = (
+            ("GitHub issues; repo example/repo", "other/repo#109", "https://github.com/other/repo/issues/109", "https://github.com/other/repo"),
+            ("GitHub issues; repo example/repo", "[issue](https://github.com/other/repo/issues/109)", "https://github.com/other/repo/issues/109", "https://github.com/other/repo"),
+            ("GitLab issues; host https://labs.example.test; project team/app", "https://labs.example.test/team/other/-/issues/109", "https://labs.example.test/team/other/-/issues/109", "https://labs.example.test/team/other/-"),
+        )
+        for spec, ref, url, base in cases:
+            with self.subTest(ref=ref):
+                cfg = parse_coordinator("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n- Timezone: America/Chicago\n- Backlog: " + spec + "\n", TODAY)
+                tracker = f"# Tracker\n\n## Tasks\n\n{HEAD}| Task | Item | Robin | open | {TODAY} | | M | build | implement | {ref} | |\n"
+                issue = replace(ISSUE, url=url, body="## Context\nSee #10 and src/lib.py:4.\n\n## Acceptance\n- [ ] Check #10 and src/lib.py:4\n")
+                key = bs.backlog.issue_ref(ref, cfg.backlog).label(cfg.backlog)
+                src = bs.Sources({"kanban": NOW}, {key: issue}, {}, (), {}, home=cfg.backlog)
+                html = ip.render(109, [(TODAY, tracker)], src, NOW, LANES, cfg=cfg)
+                for section_name in ("Issue", "Acceptance"):
+                    part = page_section(html, section_name)
+                    self.assertIn(f'href="{base}/issues/10"', part)
+                    self.assertIn(f'href="{base}/blob/HEAD/src/lib.py#L4"', part)
+
     def test_no_acceptance_heading_says_the_issue_states_none(self):
         issue = replace(ISSUE, body="## Context\n\n- [ ] something\n")
         got = text(section(page(src=sources(MR, OTHER, issue=issue)), "Acceptance"))

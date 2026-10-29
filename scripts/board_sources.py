@@ -334,8 +334,9 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
             changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
     for node in filter(None, (data.get("open") or {}).get("nodes") or []):
         changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
-    err_msg = _graphql_errors(body) or (err.strip() if code else "")
-    if repos and all(data.get(f"r{i}") is None for i in range(len(repos))) and err_msg:
+    missing = [repo for i, repo in enumerate(repos) if data.get(f"r{i}") is None]
+    err_msg = _graphql_errors(body) or (err.strip() if code else "") or (f"GitHub did not answer for {', '.join(missing)}" if missing else "")
+    if err_msg:
         return None, changes, err_msg
     return issues, changes, err_msg
 
@@ -412,11 +413,13 @@ def gitlab(home: backlog.Backlog, wanted: dict[str, set[int]], mrs: set[int], si
             return None
         if body["data"].get("p0") is None:
             errors.setdefault(panel, _graphql_errors(body) or f"GitLab did not answer for {project}")
-            if lose and project == home.project:
+            if lose:
                 lost.add(panel)
             return None
         if message := _graphql_errors(body):
             errors.setdefault(panel, message)
+            if lose and panel == "kanban":
+                lost.add(panel)
         return body["data"]["p0"]
 
     def pages(project: str, name: str, iids: list[int], body: str, panel: str, lose: bool = True):

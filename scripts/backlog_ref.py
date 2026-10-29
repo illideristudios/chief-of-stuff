@@ -202,9 +202,14 @@ _REF_LINK = re.compile(r"^\[[^\]]*\]\((https://[^)\s]+)\)$")
 
 def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool = False) -> IssueRef | None:
     """`#N` (in the Backlog), `owner/repo#N` (GitHub), a GitHub issue URL, a GitLab issue URL on the
-    Backlog's own host, or a markdown link to one. Anything else is None, and a bare `#N` with no Backlog to resolve it against is None too.
+    Backlog's own host, a store key, or a markdown link to one. Anything else is None, and a bare `#N` with no Backlog to resolve it against is None too.
     `any_host` admits a GitLab URL on any host: for naming an issue, never for fetching one."""
     text = cell.strip()
+    store = _REF_STORE.match(text)
+    if store:
+        kind, body, number = store.groups()
+        text = (f"https://github.com/{body}/issues/{number}" if kind == "github"
+                else f"https://{body}/-/issues/{number}")
     link = _REF_LINK.match(text)
     if link:
         text = link.group(1)

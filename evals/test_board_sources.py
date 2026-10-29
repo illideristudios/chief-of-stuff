@@ -787,9 +787,11 @@ class GitLabPanelsTest(unittest.TestCase):
                 got, _ = self.again(FailingGitLab, fail, BESIDE)
                 self.assertEqual(set(got.errors), {self.PANEL[fail]})
                 self.assertIn("complexity", got.errors[self.PANEL[fail]])
-                self.assertEqual((got.issues["#1"].title, got.changes["!1001"].title), ("Renamed", "Renamed"))
+                self.assertEqual(got.issues["#1"].title, "Issue 1" if fail == "issues" else "Renamed")
+                self.assertEqual(got.changes["!1001"].title, "Renamed")
                 self.assertEqual(sorted(got.changes), ["!1001", "!1002", "!3001"])
-                self.assertEqual((got.fetched["kanban"], got.fetched["merge requests"]), (self.LATER, self.LATER))
+                self.assertEqual(got.fetched["kanban"], NOW if fail == "issues" else self.LATER)
+                self.assertEqual(got.fetched["merge requests"], self.LATER)
 
     def test_a_failed_detail_request_leaves_the_open_changes_without_jobs_or_threads(self):
         for mode in (TRANSPORT, NO_DATA):
@@ -1549,20 +1551,37 @@ class StoreWorkspaceIssuesTest(unittest.TestCase):
         self.assertNotIn("kanban", cold_got.fetched)
         self.assertIn("cannot read the workspace store", cold_got.errors.get("kanban", ""))
 
-    def test_inaccessible_gitlab_project_records_kanban_error_and_preserves_home_cache(self) -> None:
+    def test_partial_gitlab_failure_keeps_the_last_complete_snapshot(self) -> None:
         root = self.store_workspace(
             "GitLab issues; host https://labs.example.test; project team/app",
-            "gitlab:labs.example.test/team/app#15",
-            "gitlab:labs.example.test/team/secret#15",
+            "gitlab:labs.example.test/team/app#15", "gitlab:labs.example.test/team/secret#15",
         )
-        partial = refresh_gitlab(root, NOW, FakeGitLab(issues=[gl_issue(15)], hidden={"team/secret"}))
-        self.assertEqual(sorted(partial.issues), ["#15"])
+        first = refresh_gitlab(root, NOW, FakeGitLab(issues=[gl_issue(15)]))
+        self.assertEqual(sorted(first.issues), ["#15", "labs.example.test/team/secret#15"])
+        changed = {**gl_issue(15), "description": "Fresh but incomplete"}
+        partial = refresh_gitlab(root, self.LATER, FakeGitLab(issues=[changed], hidden={"team/secret"}))
         self.assertIn("team/secret", partial.errors.get("kanban", ""))
+        self.assertEqual(partial.issues, first.issues)
+        self.assertEqual(partial.fetched["kanban"], NOW)
+        self.assertEqual(bs.load(root / "pages"), partial)
 
-        lost = refresh_gitlab(root, self.LATER, FakeGitLab(issues=[gl_issue(15)], hidden={"team/app"}))
-        self.assertIn("team/app", lost.errors.get("kanban", ""))
-        self.assertEqual(lost.issues, partial.issues)
-        self.assertEqual(lost.fetched["kanban"], NOW)
+    def test_partial_github_failure_keeps_the_last_complete_snapshot(self) -> None:
+        root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118", "github:other/lib#118")
+        def answer(fail=False):
+            def gh(args, input_text=None):
+                data = {"r0": {"n118": {**gh_issue(118), "body": "Changed" if fail else "Home"}},
+                        "r1": None if fail else {"n118": {**gh_issue(118), "body": "Other"}},
+                        "merged": {"nodes": []}, "open": {"nodes": []}}
+                errors = [{"path": ["r1"], "message": "other/lib unavailable"}] if fail else []
+                return int(fail), json.dumps({"data": data, "errors": errors}), ""
+            return gh
+        first = bs.refresh(root, NOW, gh=answer())
+        self.assertEqual(sorted(first.issues), ["#118", "other/lib#118"])
+        partial = bs.refresh(root, self.LATER, gh=answer(True))
+        self.assertIn("other/lib unavailable", partial.errors.get("kanban", ""))
+        self.assertEqual(partial.issues, first.issues)
+        self.assertEqual(partial.fetched["kanban"], NOW)
+        self.assertEqual(bs.load(root / "pages"), partial)
 
     def test_inaccessible_github_repository_records_error_and_preserves_cache_when_all_repos_fail(self) -> None:
         root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118")

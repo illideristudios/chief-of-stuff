@@ -671,6 +671,15 @@ class IssueRefTest(unittest.TestCase):
         self.assertEqual(ref.label(GH), "#9")
         self.assertEqual(ref.label(bl.GitHubBacklog("o/n")), f"{REPO}#9")
 
+    def test_store_keys_use_the_same_reference_and_host_validation(self):
+        gl = bl.Backlog(host="https://gl.example", project="g/p")
+        self.assertEqual(bl.issue_ref("github:o/n#9", GH), bl.IssueRef("o/n", 9))
+        self.assertEqual(bl.issue_ref("gitlab:gl.example/g/sub/p#7", gl), bl.IssueRef("g/sub/p", 7, "gl.example"))
+        self.assertIsNone(bl.issue_ref("gitlab:other.example/g/p#7", gl))
+        self.assertEqual(bl.issue_ref("gitlab:other.example/g/p#7", gl, any_host=True),
+                         bl.IssueRef("g/p", 7, "other.example"))
+        self.assertIsNone(bl.issue_ref("github:invalid#9", GH))
+
     def test_store_label_reads_a_home_key_as_a_number(self):
         # #903: a store key labels like IssueRef.label. Home is `#N`; another project names itself; no home drops only the forge prefix.
         gl = bl.Backlog(host="https://gl.example", project="g/p")

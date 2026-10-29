@@ -16,6 +16,7 @@ from html import escape
 from pathlib import Path
 
 import board_sources
+from _vendor.markdown_it import MarkdownIt
 import flow_chart
 from backlog_ref import Backlog, GitHubBacklog, home_of, issue_ref, store_label
 from clock import parse_stamp
@@ -57,8 +58,6 @@ header .chip.needs-input,header .chip.retries-exhausted{color:var(--dl);border-c
 .rv+.rv{border-top:1px dotted var(--line)} .rv>.prose{grid-column:2;margin:0}
 </style>
 """
-ACCEPTANCE = re.compile(r"(?im)^#{1,6}[ \t]*acceptance\b.*$")
-HEADING = re.compile(r"^\s*#{1,6}\s")
 BULLET = re.compile(r"^\s*[-*+]\s+(?:\[([ xX])\]\s*)?(.*\S)")
 
 
@@ -186,17 +185,11 @@ def _canonical_key(raw: str, home: Backlog | GitHubBacklog | None) -> str:
 
 def _issue_linker(raw_refs: tuple[str, ...], cfg: Config, root: Path | None) -> Linker:
     """Resolve bare `#N`/`!N` and file references inside an issue against that issue's own repository or project."""
-    if len(raw_refs) == 1:
-        raw = raw_refs[0]
-        if raw.startswith("github:"):
-            repo = raw[len("github:"):].rpartition("#")[0]
-            if repo:
-                same = isinstance(cfg.backlog, GitHubBacklog) and cfg.backlog.repo == repo
-                return Linker(GitHubBacklog(repo), root if same else None)
-        elif raw.startswith("gitlab:") and isinstance(cfg.backlog, Backlog):
-            host, has_proj, proj = raw[len("gitlab:"):].rpartition("#")[0].partition("/")
-            if has_proj and proj and host == home_of(cfg.backlog)[0]:
-                return Linker(cfg.backlog.sibling(proj), root if proj == cfg.backlog.project else None)
+    if len(raw_refs) == 1 and (ref := issue_ref(raw_refs[0], cfg.backlog)):
+        if ref.host == "github.com" and isinstance(cfg.backlog, GitHubBacklog):
+            return Linker(GitHubBacklog(ref.repo), root if ref.repo == cfg.backlog.repo else None)
+        if isinstance(cfg.backlog, Backlog) and ref.host == home_of(cfg.backlog)[0]:
+            return Linker(cfg.backlog.sibling(ref.repo), root if ref.repo == cfg.backlog.project else None)
     return Linker(cfg.backlog, root)
 
 
@@ -257,13 +250,20 @@ def _acceptance(issue: board_sources.Issue | None, linker: Linker = Linker(), *,
         why = unread or "the issue has not been read from the forge yet"
         return _section("Acceptance",
                         f'    <div class="card unread"><p class="why">Acceptance criteria not read: {escape(why)}.</p></div>')
-    m = ACCEPTANCE.search(issue.body)
-    met = []
-    for line in (issue.body[m.end():].splitlines() if m else []):
-        if HEADING.match(line):
-            break
-        if b := BULLET.match(line):
-            met.append((b[1] in ("x", "X"), b[2]))
+    # Parse blocks before looking for headings and bullets: comments and code are not prose.
+    tokens = MarkdownIt("commonmark", {"html": True}).parse(issue.body)
+    lines = issue.body.splitlines()
+    met, in_acceptance = [], False
+    for i, token in enumerate(tokens):
+        if token.type == "heading_open":
+            if in_acceptance:
+                break
+            heading = tokens[i + 1].content
+            in_acceptance = bool(re.match(r"(?i)^acceptance\b", heading))
+        elif in_acceptance and token.type == "list_item_open" and token.map:
+            line = drop_html_comments(lines[token.map[0]])
+            if b := BULLET.match(line):
+                met.append((b[1] in ("x", "X"), b[2]))
     card_cls = "card unread" if stale else "card"
     note = f'      <p class="meta why">{escape(stale)}</p>\n' if stale else ""
     if not met:
