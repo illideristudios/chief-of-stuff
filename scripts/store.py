@@ -66,6 +66,7 @@ class Segment(Base):
     model: Mapped[str] = mapped_column(String, default="", server_default="")
     effort: Mapped[str] = mapped_column(String, default="", server_default="")
     agent_type: Mapped[str] = mapped_column(String, default="", server_default="")
+    workflow: Mapped[str] = mapped_column(String, default="", server_default="")
 
     @property
     def runner(self) -> str:
@@ -159,6 +160,13 @@ class Resume(Base):
     __tablename__ = "resume"
     issue_key: Mapped[str] = mapped_column(ForeignKey("work_item.issue_key", ondelete="CASCADE"), primary_key=True)
     data: Mapped[Any] = mapped_column(JSON)
+
+
+class RotationCursor(Base):
+    """The last selected entry per configured task class, shared by this workspace's launches."""
+    __tablename__ = "rotation_cursor"
+    task_class: Mapped[str] = mapped_column(String, primary_key=True)
+    entry: Mapped[str] = mapped_column(String)
 
 
 class WorkerRecord:
@@ -349,14 +357,46 @@ class Store:
             self.upsert_item(snap["issue_key"], **{k: snap[k] for k in FORGE_COLUMNS if k in snap})
 
     # segments
+    def rotation_choice(self, issue_key: str, stage: str, attempt: int, task_class: str,
+                        eligible: tuple[str, ...], choose: Callable[[str], str], workflow: str = "") -> str:
+        """Reserve a turn and its workflow atomically; recovering the same launch spends no extra turn.
+
+        Selection policy stays with the caller. A persisted selection which is no longer eligible is replaced.
+        The resume evidence survives a refused start dropping its slot reservation.
+        """
+        with self.session() as s:
+            resume = s.get(Resume, issue_key)
+            data = deepcopy(resume.data) if resume is not None and isinstance(resume.data, dict) else {}
+            choices = data.setdefault("rotation_choices", {})
+            run = f"{stage}-{attempt}"
+            prior = choices.get(run, {})
+            if prior.get("entry") in eligible:
+                return prior["entry"]
+            cursor = s.get(RotationCursor, task_class)
+            entry = choose(cursor.entry if cursor else "")
+            choices[run] = {"entry": entry, "workflow": workflow}
+            if resume is None:
+                s.add(Resume(issue_key=issue_key, data=data))
+            else:
+                resume.data = data
+            if cursor is None:
+                s.add(RotationCursor(task_class=task_class, entry=entry))
+            else:
+                cursor.entry = entry
+            return entry
+
     def record_segment(self, issue_key: str, stage: str, attempt: int, started_at: str,
                        ended_at: str | None = None, outcome: str | None = None,
                        runtime: str | None = None, model: str | None = None,
                        effort: str | None = None, agent_type: str | None = None,
-                       runner: str | None = None) -> None:
+                       runner: str | None = None, workflow: str | None = None) -> None:
         # Omitted fields stay as stored, so a retried start never clears completion or who ran it.
+        if workflow is None:
+            data = self.resume(issue_key)
+            choice = data.get("rotation_choices", {}).get(f"{stage}-{attempt}", {}) if isinstance(data, dict) else {}
+            workflow = choice.get("workflow")
         done = {k: v for k, v in (("ended_at", ended_at), ("outcome", outcome), ("runtime", runtime),
-                                  ("model", model), ("effort", effort), ("agent_type", agent_type))
+                                  ("model", model), ("effort", effort), ("agent_type", agent_type), ("workflow", workflow))
                 if v is not None}
         if outcome == "human_review":
             done["required_human_review"] = True
