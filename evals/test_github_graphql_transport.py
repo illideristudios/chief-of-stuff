@@ -65,6 +65,7 @@ class Server(http.server.ThreadingHTTPServer):
     def __init__(self, address, cert, key):
         super().__init__(address, Handler)
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.load_cert_chain(cert, key)
         self.socket = context.wrap_socket(self.socket, server_side=True)
         self.calls, self.mode = [], ''
