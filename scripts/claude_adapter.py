@@ -23,6 +23,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
+import private_state
 import runtimes
 import session_logs
 from model_port import Failure, Reply, Request, quota_reset
@@ -87,11 +88,21 @@ def spawn(prepared: list[str], request: Request, run_dir: Path, env: dict[str, s
         launch["config_dir"] = config_dir
     if stdin_prompt is not None:
         launch["stdin_prompt"] = stdin_prompt
+        private_state.directory(run_dir)
+        private_state.directory(run_dir / MAILBOX, create=True)
         for name in BOXES:
-            (run_dir / MAILBOX / name).mkdir(parents=True, exist_ok=True)
-    (run_dir / "command.json").write_text(json.dumps(launch))
+            private_state.directory(run_dir / MAILBOX / name, create=True)
+    if stdin_prompt is not None:
+        _private_write(run_dir / "command.json", json.dumps(launch).encode())
+    else:
+        (run_dir / "command.json").write_text(json.dumps(launch))
     try:
-        with (run_dir / "runner.stderr").open("w") as errors:
+        error_path = run_dir / "runner.stderr"
+        errors_file = (os.fdopen(private_state.file(error_path, create=True), "w") if stdin_prompt is not None
+                       else error_path.open("w"))
+        with errors_file as errors:
+            if stdin_prompt is not None:
+                errors.truncate(0)
             return subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "--worker", str(run_dir),
                                      request.session_id], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                                     stderr=errors, env=model_env(), start_new_session=True)
@@ -120,7 +131,10 @@ def cancel(process: subprocess.Popen) -> None:
 def _write(run_dir: Path, name: str, record: dict) -> None:
     path = run_dir / name
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record))
+    if run_dir.name == "acks" and run_dir.parent.name == MAILBOX:
+        _private_write(temporary, json.dumps(record).encode())
+    else:
+        temporary.write_text(json.dumps(record))
     temporary.replace(path)
 
 
@@ -135,12 +149,39 @@ class InputWriteError(Exception):
     """The input stream is incomplete or its delivery is ambiguous."""
 
 
+def _private_write(path: Path, data: bytes) -> None:
+    fd = private_state.file(path, create=True)
+    with os.fdopen(fd, "wb") as handle:
+        handle.truncate(0)
+        handle.write(data)
+
+
+def _protect_run(run_dir: Path) -> None:
+    private_state.directory(run_dir)
+    for name in ("command.json", "stream.jsonl", "stdout", "stdout.tmp", "stderr", "runner.stderr"):
+        private_state.existing_file(run_dir / name)
+    box = run_dir / MAILBOX
+    private_state.directory(box, create=True)
+    for name in BOXES:
+        directory = box / name
+        private_state.directory(directory, create=True)
+        for path in directory.iterdir():
+            private_state.existing_file(path)
+    for name in ("lock", "open", "closed"):
+        private_state.existing_file(box / name)
+
+
 def messaging(run_dir: Path) -> bool:
-    """Whether this run's runner owns a stdin pipe and a mailbox; legacy and non-Claude runs do not."""
+    """Detect messaging runs and secure pre-existing state before recovery."""
     try:
-        return "stdin_prompt" in json.loads((run_dir / "command.json").read_text())
-    except (OSError, ValueError, TypeError):
+        fd = os.open(run_dir / "command.json", os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd) as handle:
+            enabled = "stdin_prompt" in json.load(handle)
+    except (FileNotFoundError, ValueError, TypeError):
         return False
+    if enabled:
+        _protect_run(run_dir)
+    return enabled
 
 
 @contextmanager
@@ -149,7 +190,7 @@ def mailbox_lock(run_dir: Path, *, timeout: float | None = None):
 
     The OS drops a flock when its holder dies, so a crashed handoff never wedges the mailbox.
     """
-    with (run_dir / MAILBOX / "lock").open("a") as handle:
+    with os.fdopen(private_state.file(run_dir / MAILBOX / "lock", create=True), "a") as handle:
         if timeout is None:
             fcntl.flock(handle, fcntl.LOCK_EX)
         else:
@@ -174,7 +215,8 @@ def post(run_dir: Path, message: dict) -> None:
     """Hand one claimed message to the runner. Call under mailbox_lock; the rename is the handoff."""
     path = run_dir / MAILBOX / "inbox" / f"{message['delivery_id']}.json"
     temporary = path.with_suffix(".tmp")
-    with temporary.open("w") as handle:
+    with os.fdopen(private_state.file(temporary, create=True), "w") as handle:
+        handle.truncate(0)
         json.dump(message, handle)
         handle.flush()
         os.fsync(handle.fileno())
@@ -233,7 +275,7 @@ def replayed(run_dir: Path, delivery_id: str, session_id: str, body: str) -> boo
 def _close_intake(run_dir: Path, *, timeout: float | None = None) -> None:
     box = run_dir / MAILBOX
     with mailbox_lock(run_dir, timeout=timeout):
-        (box / "closed").touch()
+        os.close(private_state.file(box / "closed", create=True))
     # No handoff can follow the marker; anything still untaken was never written to the session.
     for path in (box / "inbox").glob("*.json"):
         revoke(run_dir, path.stem)
@@ -289,6 +331,25 @@ class _RunnerCancelled(BaseException):
     pass
 
 
+def _exited_without_reaping(pid: int) -> bool:
+    if hasattr(os, "waitid"):
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+    if sys.platform != "darwin":
+        raise OSError("waitid with WNOWAIT is required")
+    # CPython does not expose waitid on macOS. Darwin's siginfo_t begins with
+    # three ints and si_pid; use aligned, zeroed storage large enough for it.
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    waitid = libc.waitid
+    waitid.argtypes = (ctypes.c_int, ctypes.c_uint, ctypes.c_void_p, ctypes.c_int)
+    waitid.restype = ctypes.c_int
+    info = (ctypes.c_long * 32)()
+    if waitid(1, pid, ctypes.byref(info), 0x04 | 0x01 | 0x20) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return ctypes.cast(ctypes.byref(info), ctypes.POINTER(ctypes.c_int))[3] != 0
+
+
 def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: str) -> bytes:
     """Own the host's stdin: send the assignment, deliver mailbox messages, record echoes, then close stdin once a
     result has arrived and every written message has echoed (or waited ECHO_WAIT_S). Returns the final result line."""
@@ -302,11 +363,11 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
     except OSError as exc:
         print(f"assignment stdin write failed: {exc}", file=sys.stderr)
         raise InputWriteError("assignment stdin write failed") from exc
-    (box / "open").touch()
+    os.close(private_state.file(box / "open", create=True))
     while True:
         # Observe exit without reaping: until intake is closed, cancellation must still
         # be able to signal this group without risking a recycled process-group ID.
-        exited = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None
+        exited = _exited_without_reaping(process.pid)
         with stream.open("rb") as handle:
             handle.seek(offset)
             chunk = handle.read()
@@ -366,8 +427,11 @@ def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: st
 
 def _messaging_worker(run_dir: Path, prepared: dict) -> None:
     final = b""
-    (run_dir / "stdout").write_text("")
-    with (run_dir / "stream.jsonl").open("w+b") as stream, (run_dir / "stderr").open("w") as stderr:
+    _private_write(run_dir / "stdout", b"")
+    with os.fdopen(private_state.file(run_dir / "stream.jsonl", create=True), "w+b") as stream, \
+         os.fdopen(private_state.file(run_dir / "stderr", create=True), "w") as stderr:
+        stream.truncate(0)
+        stderr.truncate(0)
         process = None
         cancelled = False
 
@@ -430,7 +494,7 @@ def _messaging_worker(run_dir: Path, prepared: dict) -> None:
                 stderr.write(f"\nstream recovery failed: {exc}")
     # collect classifies stdout as one JSON answer, as `--output-format json` wrote it.
     temporary = run_dir / "stdout.tmp"
-    temporary.write_bytes(final)
+    _private_write(temporary, final)
     temporary.replace(run_dir / "stdout")
     _write(run_dir, "exit.json", {"exit_code": code, "ended_at": datetime.now(timezone.utc).isoformat()})
 

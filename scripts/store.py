@@ -19,6 +19,8 @@ from typing import Any, Callable, Iterator
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+import private_state
+
 from sqlalchemy import JSON, Boolean, CheckConstraint, ForeignKey, Integer, String, UniqueConstraint, create_engine, delete, event, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
@@ -238,6 +240,7 @@ def _config(path: Path | str) -> Config:
 
 def is_current(path: Path | str) -> bool:
     """True when the database at `path` is already at the latest revision. Only reads, so it is safe beside a live writer."""
+    private_state.store_files(Path(path), create=False)
     if not Path(path).exists():
         return False
     head = ScriptDirectory.from_config(_config(path)).get_current_head()
@@ -251,11 +254,13 @@ def is_current(path: Path | str) -> bool:
 def migrate(path: Path | str) -> None:
     """Enable WAL and bring the database at `path` to the latest revision. Call it once at engine start, never from
     concurrent writers: journal-mode changes need an exclusive lock, and first-time migrations race to create tables."""
+    private_state.store_files(Path(path), create=True)
     command.upgrade(_config(path), "head")
 
 
 class Store:
     def __init__(self, path: Path | str, clock: clock.Clock = clock.system) -> None:
+        private_state.store_files(Path(path), create=True)
         self.clock = clock
         self._active_session = None
         self.engine = create_engine(f"sqlite:///{path}", connect_args={"timeout": 30, "isolation_level": None})

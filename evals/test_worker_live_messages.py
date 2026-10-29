@@ -116,6 +116,21 @@ class LiveMessagesTest(unittest.TestCase):
         self.save_record(runner.pid, process_status.identity(runner.pid, self.session))
         return runner
 
+    def test_sensitive_live_run_files_and_copies_are_private(self):
+        import stat
+        runner = self.start()
+        with claude_adapter.mailbox_lock(self.run_dir):
+            claude_adapter.post(self.run_dir, {"delivery_id": str(uuid.uuid4()), "session_id": self.session,
+                                               "body": "private message"})
+            box = self.run_dir / "mailbox"
+            for path in [self.run_dir, box, *(box / name for name in claude_adapter.BOXES)]:
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
+            for path in [self.run_dir / "command.json", self.run_dir / "stream.jsonl", *box.glob("inbox/*.json")]:
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+        self.gate.touch()
+        runner.wait(timeout=10)
+        self.assertEqual(stat.S_IMODE((self.run_dir / "stdout").stat().st_mode), 0o600)
+
     def stop(self, runner: subprocess.Popen) -> None:
         self.gate.touch()
         for pid in (runner.pid, getattr(self, "host_pid", None)):
