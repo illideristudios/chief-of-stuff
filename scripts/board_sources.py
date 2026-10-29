@@ -4,8 +4,8 @@
     chief-of-stuff sources --root R [--refresh]    # print what the cache holds; --refresh reads it all first
 
 Only what today's tracker names is fetched: its tasks' issues, the pull or merge requests their rows
-mention (`!58` on GitLab, `PR #58` on GitHub, or the request's URL), and the requests merged today, in
-one GraphQL call per forge. An engine workspace (one with a `store.db`) names its tasks in `work_item`
+mention (`!58` on GitLab, `PR #58` on GitHub, or the request's URL), and the requests merged today,
+using bounded GraphQL reads. An engine workspace (one with a `store.db`) names its tasks in `work_item`
 rather than tracker rows, so there the store's issues, recorded merge requests, open requests and recent
 merged requests are fetched too (#896, #996). Workers are the registered sessions process_status finds running, live
 one-shot workers under the Worktrees dir, and the tracker's Sessions rows. The cache is
@@ -24,7 +24,7 @@ import sqlite3
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -65,6 +65,15 @@ GH_CHANGE = ("number url title state isDraft mergedAt baseRefName body headRefOi
              "reviewThreads(first: 100) { nodes { isResolved comments(first: 1) { nodes { author { login } body createdAt url } } } } "
              "commits(last: 1) { nodes { commit { statusCheckRollup { contexts(first: 100) { nodes { __typename "
              "... on CheckRun { name status conclusion startedAt completedAt } ... on StatusContext { state } } } } } } }")
+# Five rich PRs cost 5 points in a live public-repository probe. Bound both
+# request size and total work; the ten-minute automatic cadence makes even the
+# 200-point stop target about 1,200 points/hour per workspace (plus at most
+# the last request's cost). The response supplies the cost after each request.
+GH_PAGE = 5
+GH_MAX_REQUESTS = 40
+GH_POINT_BUDGET = 200
+GH_RESERVE = 500
+GH_INTERVAL = timedelta(minutes=10)
 GL_PAGE = 100  # the most nodes GitLab answers for one connection
 GL_ISSUE = ("iid webUrl title state description labels { nodes { title } } closedAt "
             "milestone { title webPath dueDate state stats { totalIssuesCount closedIssuesCount } }")
@@ -349,53 +358,130 @@ def _gh_change(key: str, p: dict, approver: str, repo: str = "", origin: str = "
 
 
 def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: datetime, approver: str, gh, every_open: bool = False):
-    """(issues, changes, error) from one `gh api graphql` call; issues and changes are None when it failed.
-    `every_open` adds the home repo's open and recent merged pull requests to the named ones."""
-    repos = sorted(wanted)
-    parts = []
-    for i, repo in enumerate(repos):
+    """Read bounded named batches and paged searches. Incomplete panels are never cached as complete."""
+    issues, changes, errors = {}, {}, {}
+    calls, cost, stopped = 0, 0, False
+
+    def ask(selection, panel):
+        nonlocal calls, cost, stopped
+        if stopped:
+            errors.setdefault(panel, "GitHub read stopped after an earlier failure")
+            return None
+        if calls >= GH_MAX_REQUESTS or cost >= GH_POINT_BUDGET:
+            errors.setdefault(panel, "GitHub refresh budget exhausted; data unavailable or stale")
+            return None
+        calls += 1
+        code, out, err = gh(["api", "graphql", "-f", "query=query { " + selection +
+                             " rateLimit { cost remaining limit } }"])
+        try:
+            body = json.loads(out)
+            data = body["data"]
+            if not isinstance(data, dict):
+                raise ValueError("missing data")
+        except (ValueError, KeyError, TypeError):
+            stopped = True
+            errors.setdefault(panel, (err.strip() or f"GitHub read failed (exit {code})")[:500])
+            return None
+        rate = data.get("rateLimit")
+        if not isinstance(rate, dict) or not all(isinstance(rate.get(k), int) for k in ("cost", "remaining", "limit")):
+            stopped = True
+            errors.setdefault(panel, "GitHub rate limit unavailable")
+            return None
+        cost += rate["cost"]
+        if rate["remaining"] < GH_RESERVE or cost > GH_POINT_BUDGET:
+            stopped = True
+            errors.setdefault(panel, "GitHub rate limit or refresh budget reached; data unavailable or stale")
+            return None
+        # A nonexistent named item is a legitimate null. Other partial errors
+        # are not proof that a panel is complete, even when data accompanies them.
+        problems = [e for e in body.get("errors") or [] if not (
+            isinstance(e, dict) and e.get("type") == "NOT_FOUND" and
+            len(e.get("path") or ()) == 2 and str(e["path"][0]).startswith("r") and
+            str(e["path"][1]).startswith("n"))]
+        if problems or (code and not body.get("errors")):
+            errors.setdefault(panel, (_graphql_errors({"errors": problems}) or err.strip() or f"gh exited {code}")[:500])
+            return None
+        return data
+
+    # Each named alias can be either an issue or a PR, so a failed batch makes
+    # both panels incomplete. Limit aliases as well as search page sizes.
+    named_failed = False
+    for i, repo in enumerate(sorted(wanted)):
         owner, name = repo.split("/", 1)
-        items = " ".join(f"n{n}: issueOrPullRequest(number: {n}) {{ __typename ... on Issue {{ {GH_ISSUE} }} "
-                         f"... on PullRequest {{ {GH_CHANGE} }} }}" for n in sorted(wanted[repo]))
-        parts.append(f"r{i}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ {items} }}")
+        nums = sorted(wanted[repo])
+        for start in range(0, len(nums), GH_PAGE):
+            batch = nums[start:start + GH_PAGE]
+            items = " ".join(f"n{n}: issueOrPullRequest(number: {n}) {{ __typename ... on Issue {{ {GH_ISSUE} }} "
+                             f"... on PullRequest {{ {GH_CHANGE} }} }}" for n in batch)
+            data = ask(f"r{i}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) {{ {items} }}", "kanban")
+            nodes = data.get(f"r{i}") if data else None
+            if not isinstance(nodes, dict) or any(f"n{n}" not in nodes for n in batch):
+                errors.setdefault("kanban", "GitHub named items unavailable")
+                named_failed = True
+                break
+            for n in batch:
+                node = nodes[f"n{n}"]
+                if node is None:
+                    continue
+                key = backlog.IssueRef(repo, int(node["number"])).label(home)
+                if node.get("__typename") == "PullRequest":
+                    changes[key] = _gh_change(key, node, approver, home.repo, repo)
+                elif node.get("__typename") == "Issue":
+                    m = node.get("milestone")
+                    issues[key] = Issue(key, node["url"], node["title"], node["state"].lower(),
+                                        tuple(x["name"] for x in (node.get("labels") or {}).get("nodes") or []),
+                                        node.get("body") or "", _when(node.get("closedAt")),
+                                        Milestone(m["title"], m["url"], _due(m.get("dueOn")), m["state"].lower(),
+                                                  int((m.get("issues") or {}).get("totalCount") or 0)) if m else None)
+                else:
+                    errors.setdefault("kanban", "GitHub named item has unknown type")
+                    named_failed = True
+            if named_failed:
+                break
+        if named_failed:
+            break
+    if named_failed:
+        errors.setdefault("merge requests", errors["kanban"])
+
+    searches = [("merged", f"repo:{home.repo} is:pr is:merged " +
+                 ("sort:updated-desc" if every_open else f"merged:>={since.replace(microsecond=0).isoformat()}"))]
     if every_open:
-        search = f"repo:{home.repo} is:pr is:merged sort:updated-desc"
-    else:
-        search = f"repo:{home.repo} is:pr is:merged merged:>={since.replace(microsecond=0).isoformat()}"
-    parts.append(f"merged: search(query: {json.dumps(search)}, type: ISSUE, first: 50) "
-                 f"{{ nodes {{ ... on PullRequest {{ {GH_CHANGE} }} }} }}")
-    if every_open:
-        # shortcut: one unpaged search page, so past 100 open pull requests the rest go unread; page it once a repo has that many.
-        parts.append(f"open: search(query: {json.dumps(f'repo:{home.repo} is:pr is:open')}, type: ISSUE, first: 100) "
-                     f"{{ nodes {{ ... on PullRequest {{ {GH_CHANGE} }} }} }}")
-    code, out, err = gh(["api", "graphql", "-f", "query=query { " + " ".join(parts) + " }"])
-    try:
-        body = json.loads(out)
-        data = body["data"]
-    except (ValueError, KeyError, TypeError):
-        return None, None, err.strip() or f"gh exited {code}"
-    issues, changes = {}, {}
-    for i, repo in enumerate(repos):
-        for node in ((data.get(f"r{i}") or {}).values()):
-            if not isinstance(node, dict):
-                continue
-            key = backlog.IssueRef(repo, int(node["number"])).label(home)
-            if node.get("__typename") == "PullRequest":
-                changes[key] = _gh_change(key, node, approver, home.repo, repo)
-            else:
-                m = node.get("milestone")
-                issues[key] = Issue(key, node["url"], node["title"], node["state"].lower(),
-                                    tuple(x["name"] for x in (node.get("labels") or {}).get("nodes") or []),
-                                    node.get("body") or "", _when(node.get("closedAt")),
-                                    Milestone(m["title"], m["url"], _due(m.get("dueOn")), m["state"].lower(),
-                                              int((m.get("issues") or {}).get("totalCount") or 0)) if m else None)
-    for node in ((data.get("merged") or {}).get("nodes") or []):
-        merged_at = _when(node.get("mergedAt")) if node else None
-        if merged_at and (every_open or merged_at >= since):
-            changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
-    for node in filter(None, (data.get("open") or {}).get("nodes") or []):
-        changes.setdefault(f"#{node['number']}", _gh_change(f"#{node['number']}", node, approver, home.repo))
-    return issues, changes, _graphql_errors(body) or (err.strip() if code else "")
+        searches.append(("open", f"repo:{home.repo} is:pr is:open"))
+    search_failed = False
+    for alias, search in searches:
+        cursor, seen, count = "", set(), 0
+        while True:
+            after = f", after: {json.dumps(cursor)}" if cursor else ""
+            data = ask(f"{alias}: search(query: {json.dumps(search)}, type: ISSUE, first: {GH_PAGE}{after}) "
+                       f"{{ nodes {{ ... on PullRequest {{ {GH_CHANGE} }} }} pageInfo {{ hasNextPage endCursor }} }}", "merge requests")
+            result = data.get(alias) if data else None
+            info = result.get("pageInfo") if isinstance(result, dict) else None
+            nodes = result.get("nodes") if isinstance(result, dict) else None
+            if not isinstance(nodes, list) or not isinstance(info, dict) or not isinstance(info.get("hasNextPage"), bool):
+                errors.setdefault("merge requests", f"GitHub {alias} search unavailable")
+                search_failed = True
+                break
+            for node in nodes:
+                if not isinstance(node, dict):
+                    errors.setdefault("merge requests", f"GitHub {alias} search returned an incomplete item")
+                    search_failed = True
+                    break
+                merged_at = _when(node.get("mergedAt"))
+                if alias == "open" or (merged_at and (every_open or merged_at >= since)):
+                    key = f"#{node['number']}"
+                    changes.setdefault(key, _gh_change(key, node, approver, home.repo))
+            count += len(nodes)
+            if search_failed or not info["hasNextPage"] or (alias == "merged" and every_open and count >= 50):
+                break
+            cursor = info.get("endCursor")
+            if not isinstance(cursor, str) or not cursor or cursor in seen:
+                errors.setdefault("merge requests", f"GitHub {alias} pagination unavailable")
+                search_failed = True
+                break
+            seen.add(cursor)
+        if search_failed:
+            break
+    return (None if named_failed else issues), (None if named_failed or search_failed else changes), errors
 
 
 # --- GitLab ----------------------------------------------------------------------------------------
@@ -663,8 +749,7 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
     if github_home:
         if changes:
             wanted.setdefault(home.repo, set()).update(changes)
-        issues, found, error = github(home, wanted, since, approver, gh, every_open)
-        return issues, found, {"kanban": error, "merge requests": error} if error else {}
+        return github(home, wanted, since, approver, gh, every_open)
     return gitlab(home, wanted, changes, since, approver, call, every_open)
 
 
@@ -714,7 +799,7 @@ def _write(path: Path, sources: Sources) -> None:
     os.replace(out.name, path)
 
 
-def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call) -> Sources:
+def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call, *, scheduled: bool = False) -> Sources:
     """Fetch everything, write the cache, return it. Never raises: a failed source is in `errors`."""
     try:
         cfg = read_config(root)
@@ -730,11 +815,20 @@ def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call) ->
     except OSError:
         text = ""
     tracker = parse_tracker(text)
-    try:
-        issues, changes, errors = forge(root, cfg, tracker, datetime.combine(day, time(0), cfg.zone), gh, call)
-    except Exception as e:  # a forge answer shaped unlike its schema; the page still renders
-        issues, changes, errors = None, None, dict.fromkeys(("kanban", "merge requests"), f"{type(e).__name__}: {e}")
     home = cfg.backlog
+    attempt_key = f"github attempt {home.repo.casefold()}" if isinstance(home, backlog.GitHubBacklog) else ""
+    attempt = fetched.get(attempt_key)
+    skip = scheduled and bool(attempt_key) and attempt is not None and timedelta(0) <= now - attempt < GH_INTERVAL
+    if skip:
+        issues, changes = None, None
+        errors = {k: v for k, v in prev.errors.items() if k in ("kanban", "merge requests")}
+    else:
+        if scheduled and isinstance(home, backlog.GitHubBacklog):
+            fetched[attempt_key] = now
+        try:
+            issues, changes, errors = forge(root, cfg, tracker, datetime.combine(day, time(0), cfg.zone), gh, call)
+        except Exception as e:  # a forge answer shaped unlike its schema; the page still renders
+            issues, changes, errors = None, None, dict.fromkeys(("kanban", "merge requests"), f"{type(e).__name__}: {e}")
     # Both failed panels may be carried together under their old home. When only one
     # succeeded under a different home, the other panel cannot safely share its keys.
     same_home = (prev.home is None and home is None) or (

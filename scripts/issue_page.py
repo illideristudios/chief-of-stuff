@@ -229,7 +229,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
            pending_refs: Container[str] = frozenset(), navigation: dict | None = None, db: PageData | None = None) -> str | None:
     """The page, or None when no task in `trackers` or the store names issue `number`. `cfg` resolves a task's due (the
     board's deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
-    sources = board_sources.for_home(sources, cfg.backlog if cfg else None)
+    home = cfg.backlog if cfg else None
+    same_home = (sources.home is not None and home is not None and type(sources.home) is type(home)
+                 and board_sources.backlog.home_of(sources.home) == board_sources.backlog.home_of(home))
+    sources = board_sources.for_home(sources, home)
     identity = str(number)
     full_key = identity if "#" in identity else None
     numeric = issue_number(identity) if full_key else int(identity)
@@ -442,6 +445,15 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                           f'<a {href(source_url)}>source</a>',
                           '<a href="/">board</a>'])  # (#215) no render clock
     flow = flow_chart.section(rows, now)
+    warnings = []
+    if cfg and cfg.backlog:
+        for panel in ("kanban", "merge requests"):
+            if panel in sources.errors:
+                state = "stale" if same_home and panel in sources.fetched else "unavailable"
+                warnings.append(f"{panel}: {state} — {sources.errors[panel]}")
+            elif not same_home or panel not in sources.fetched:
+                warnings.append(f"{panel}: unavailable — not fetched yet")
+    source_warning = (f'<p class="card">{escape("; ".join(warnings))}</p>\n' if warnings else "")
     return (f"<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
             f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
             f"<title>{escape(ref)} {escape(name)}</title>\n{HEAD}<style>\n{flow_chart.css() if flow else ''}</style>\n{CSS}</head>\n"
@@ -449,6 +461,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
             f"      <h1>{escape(name)}</h1>\n    </div>\n"
             f'    <div><span class="chip {escape(status.replace(" ", "-"))}">{escape(status.upper())}</span>'
             + (' <span class="chip running">RUNNING</span>' if header_live and status != "running" else '') + '</div>\n  </header>\n\n'
+            + source_warning
             + (_section("Issue", f'<div class="card prose">{markdown_blocks(issue.body, linker.resolve)}</div>') if issue and issue.body else "")
             + cards + (f"  <section>\n{flow}{worked_line}  </section>\n" if flow else "") + ahead
             + '  <div class="cols">\n  <div class="col">\n'

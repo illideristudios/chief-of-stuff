@@ -156,9 +156,9 @@ class IdentityTest(unittest.TestCase):
         pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7',
               'closingIssuesReferences': {'nodes': [{'number': 7, 'repository': {'name': 'sibling', 'owner': {'login': 'o'}}}]}}
         def gh(args):
-            return 0, json.dumps({'data': {'r0': {'n7': gh_issue(7)}, 'r1': {'n42': pr}, 'merged': {'nodes': []}}}), ''
+            return 0, json.dumps({'data': {'r0': {'n7': gh_issue(7)}, 'r1': {'n42': pr}, 'merged': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}, 'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
         issues, changes, error = bs.github(home, {'o/app': {7}, 'o/sibling': {42}}, NOW, '', gh)
-        self.assertEqual(error, '')
+        self.assertEqual(error, {})
         self.assertEqual(changes['o/sibling#42'].issues, ('o/sibling#7',))
         src = bs.Sources({}, issues, changes, (), {}, home=home)
         home_task = parse_tracker(tip.TODAY_START.replace('#109', '#7')).tasks[0]
@@ -280,9 +280,9 @@ class ReviewFindingsTest(unittest.TestCase):
             calls.append(query)
             pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
             return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
-                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': []}}}), ''
+                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}, 'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
         src = bs.refresh(root, NOW, gh=gh)
-        self.assertIn('n42: issueOrPullRequest(number: 42)', calls[0])
+        self.assertTrue(any('n42: issueOrPullRequest(number: 42)' in query for query in calls))
         self.assertEqual(src.changes['o/sibling#42'].issues, ('o/sibling#7',))
         sibling = parse_tracker(tip.TODAY_START.replace('#109', 'o/sibling#7')).tasks[0]
         local = parse_tracker(tip.TODAY_START.replace('#109', '#7')).tasks[0]
@@ -374,7 +374,7 @@ class IndependentReviewRegressions(unittest.TestCase):
         def gh(args):
             pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
             return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
-                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': []}}}), ''
+                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': [], 'pageInfo': {'hasNextPage': False, 'endCursor': None}}, 'rateLimit': {'cost': 1, 'remaining': 4900, 'limit': 5000}}}), ''
         bs.refresh(root, NOW, gh=gh)
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
         queries = []

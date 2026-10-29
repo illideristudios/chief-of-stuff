@@ -1307,7 +1307,8 @@ def make_server(pages_dir: Path, port: int, root: Path | None = None, refresh=No
     server.message_secret = secrets.token_bytes(32)
     if root is not None:
         if refresh is None:
-            from board_sources import refresh
+            from board_sources import refresh as refresh_sources
+            refresh = functools.partial(refresh_sources, scheduled=True)
         server.refresher = Refresher(root, refresh, every)
         server.refresher.start()
     return server

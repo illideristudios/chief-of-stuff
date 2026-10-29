@@ -97,8 +97,10 @@ class FakeGh:
             return 1, "", "gh: not logged in"
         query = args[args.index("-f") + 1]
         repo = {"n118": gh_issue(118), "n115": gh_issue(115, ()), "n58": gh_pr(58), **self.nodes}
-        data = {"r0": {n: v for n, v in repo.items() if f"{n}: " in query},
-                "merged": {"nodes": [gh_pr(41, "2026-09-26T05:41:00Z", "MERGED")]}}
+        data = {"r0": {n: repo.get(n) for n in re.findall(r"(n\d+): issueOrPullRequest", query)},
+                "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
+                "merged": {"nodes": [gh_pr(41, "2026-09-26T05:41:00Z", "MERGED")],
+                           "pageInfo": {"hasNextPage": False, "endCursor": None}}}
         return 0, json.dumps({"data": data}), ""
 
 
@@ -108,13 +110,13 @@ class GitHubTest(unittest.TestCase):
         self.gh = FakeGh()
         self.got = bs.refresh(self.root, NOW, gh=self.gh)
 
-    def test_one_batched_graphql_call_for_what_the_tracker_names(self):
-        self.assertEqual(len(self.gh.calls), 1)
-        args = self.gh.calls[0]
-        self.assertEqual(args[:2], ["api", "graphql"])
-        query = args[args.index("-f") + 1]
-        for asked in ("n118: issueOrPullRequest(number: 118)", "n115:", "n58:", "is:merged"):
-            self.assertIn(asked, query)
+    def test_named_and_merged_are_separate_bounded_queries(self):
+        self.assertEqual(len(self.gh.calls), 2)
+        queries = [args[args.index("-f") + 1] for args in self.gh.calls]
+        for asked in ("n118: issueOrPullRequest(number: 118)", "n115:", "n58:"):
+            self.assertIn(asked, queries[0])
+        self.assertIn("is:merged", queries[1])
+        self.assertIn("first: 5", queries[1])
 
     def test_issues_and_changes_by_ref(self):
         self.assertEqual(self.got.issues["#118"].labels, ("stage:2-implement",))
@@ -1450,16 +1452,17 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
                     "n6": {**gh_issue(6, ()), "state": "CLOSED", "closedAt": "2026-09-25T15:00:00Z"},
                     "n33": recorded_merged,
                 },
-                "merged": {"nodes": [recent_merged]},
-                "open": {"nodes": [open_pr]},
+                "merged": {"nodes": [recent_merged], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+                "open": {"nodes": [open_pr], "pageInfo": {"hasNextPage": False, "endCursor": None}},
+                "rateLimit": {"cost": 1, "remaining": 4900, "limit": 5000},
             }
             return 0, json.dumps({"data": data}), ""
 
         got = bs.refresh(root, NOW, gh=gh)
         self.assertEqual(got.errors, {})
-        self.assertEqual(len(queries), 1)
-        self.assertNotIn("team/app", queries[0])
-        self.assertNotIn("n8:", queries[0])
+        self.assertEqual(len(queries), 4)
+        self.assertNotIn("team/app", " ".join(queries))
+        self.assertNotIn("n8:", " ".join(queries))
         self.assertEqual(bs.load(root / "pages"), got)
 
         self.assertEqual(got.issues["#92"].url, "https://github.com/o/app/issues/92")
