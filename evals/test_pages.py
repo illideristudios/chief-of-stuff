@@ -1053,6 +1053,9 @@ ISSUE_TRACKER = """# Tracker {day}
 """
 DECISION = ('{"headline": "Cache TTL", "ask": "Keep 5 minutes?", "options": [{"key": "A", "title": "Keep", '
             '"text": "no change"}, {"key": "B", "title": "Drop", "text": "slower"}], "recommended": "A", "why": "fine", "default": "A at 17:00"}')
+ARCHITECTURAL_HOLD = json.dumps({**json.loads(DECISION), "headline": "Storage architecture",
+                                "ask": "Which storage boundary should the service use?",
+                                "holds": ["#7"], "asked": "09:00"})
 
 
 class HoldWiringTest(unittest.TestCase):
@@ -1085,10 +1088,10 @@ class HoldWiringTest(unittest.TestCase):
         for got in self.notes(root, day):
             self.assertIn("needs input · decision", got)
 
-    def test_a_kanban_hold_stage_names_the_stage_on_both_pages(self):
+    def test_a_legacy_kanban_hold_stage_does_not_hold_either_page(self):
         root, day = self.workspace(toml='[kanban]\nstages = ["impl"]\nhuman_review_label = "needs-human"\nhold_stages = ["implement"]\n[kanban.map]\nimplement = 0\n')
         for got in self.notes(root, day):
-            self.assertIn("needs input · implement", got)
+            self.assertNotIn("needs input · implement", got)
 
 
 class LastLookedTest(unittest.TestCase):
@@ -1100,14 +1103,18 @@ class LastLookedTest(unittest.TestCase):
     # own reload carries its cookie, and an agent's GET is no navigation.
     LOOK = {"Sec-Fetch-Mode": "navigate"}
     RELOAD = {"Sec-Fetch-Mode": "navigate", "Cookie": "theme=dark; cos-reload=1"}
-    setUp = RenderOnRequestTest.setUp
     fake_refresh = RenderOnRequestTest.fake_refresh
+
+    def setUp(self):
+        RenderOnRequestTest.setUp(self)
+        # Since-look behavior uses a real architectural decision, never a retired stage gate.
+        (self.pages / "decision-architecture.json").write_text(ARCHITECTURAL_HOLD)
 
     def since(self, headers=None) -> list[str]:
         return re.findall(r'title="(\d+ went needs input since [\w :]+)"', get(self.port, "/", headers=headers).body.decode())
 
     def test_a_look_counts_from_the_look_before_it_and_a_timer_reload_is_no_look(self):
-        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))  # held at implement since 09:00
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))  # architectural hold since 09:00
         earlier = datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE))
         (self.pages / ".last-looked").write_text(earlier.isoformat())
         self.assertEqual(self.since(), ["1 went needs input since 00:00"])

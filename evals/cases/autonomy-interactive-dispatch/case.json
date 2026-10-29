@@ -32,6 +32,6 @@
       ]
     }
   ],
-  "max_turns": 18,
+  "max_turns": 36,
   "timeout_seconds": 600
 }

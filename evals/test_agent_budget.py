@@ -132,8 +132,8 @@ TRACKER_RETAINED_RULES = (
     '`unassigned` is not the user: an item is theirs only when they took it, and only an `unassigned` task may be proposed for dispatch or assignment.',
     "A task is `done` only when its change is integrated into main **and the suite has been run on main after integration**: work sitting on a branch, in a worktree, in an open pull request, or uncommitted is `waiting`, however green its suites, and merged-but-untested-on-main is `waiting` too — except a task closed because its issue closed on the forge, `done` at the close time regardless, since the forge closure is someone's decision that the task is over.",
     "An open pull request's URL goes in the item when `[workflow] delivery` is `pull-request`.",
-    "The configured delivery and merge owner govern how code reaches main, and the reason the suite runs on main after it is that a merge can break main without either side's branch suite noticing.",
-    'No script can watch a suite run, so the evidence is a claim with a citation: the owner reports the suite result and the commit main was at, and that sha goes in `Verified`.',
+    "The configured delivery governs how code reaches main through the engine, and the reason the suite runs on main after it is that a merge can break main without either side's branch suite noticing.",
+    'After integration, the coordinator or worker records the suite result with a citation and the commit main was at, and that sha goes in `Verified`; collecting this evidence never waits on the owner.',
     "`audit_tasks.py` prints main's current sha on every run — when it no longer matches the one in `Verified`, the evidence is about a main that no longer exists and the task is not closed on it.",
     'Before writing `done` on a task with a worktree, run `chief-of-stuff audit --date <today>`, check `chief-of-stuff inbox list --recipient coordinator --unread` for any pending worker reports or stops on that task, and believe the audit and verified evidence over any unverified claim.',
     'Tasks with no tree — a decision, a relay, a deletion, a console action — are unaffected: there is nothing to merge, and the rule never sends you looking.',
@@ -393,11 +393,11 @@ CHECK_RELAY_SHA256 = {'Check': 'b3f92c4dcf9abe5f37ca9d7ba713ab10b8a56fb89e2c81bf
 # done-gate clause (R3) stay because no pointer moment reaches the Tracker `done` step or a bare `result` call.
 # Review of #539 (R4, R5): the pointer fires on the entry moment (a task the user asks for, a ready task) and on the
 # completion notification, not only on the coordinator's own launch-side actions.
-DISPATCH_POINTER = ("Before acting on a task the user asks for or a ready task (writing its Tasks row, "
-                    "choosing a worker or model, proposing, launching or relaunching it, showing an assignment block, "
-                    "acting on a yes), and on a background launch's completion notification before reading its report, "
+DISPATCH_POINTER = ("Before acting on a task the owner asks for or a ready task (writing its Tasks row, "
+                    "choosing a worker or model, launching or relaunching it, showing an assignment block), "
+                    "and on a background launch's completion notification before reading its report, "
                     "Read ${CLAUDE_PLUGIN_ROOT}/skills/dispatch/SKILL.md")
-DISPATCH_POINTER_MOMENTS = ("task the user asks for", "a ready task", "a yes", "completion notification",
+DISPATCH_POINTER_MOMENTS = ("task the owner asks for", "a ready task", "completion notification",
                             "relaunching", "assignment block", "choosing a worker or model")
 # Deleted (#1039): tasks own no paths, so no two ready tasks overlap and nothing orders them.
 DISPATCH_OVERLAP_ORDER = "; when two ready tasks overlap each other, launch the earlier row first and the other when it returns"

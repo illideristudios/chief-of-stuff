@@ -1,6 +1,6 @@
 ---
 name: review-pipeline
-description: Use before advancing a task, reviewing findings, checking readiness or merging.
+description: Use before moving a task's stage, sending its pull request to the reviewer, handling a Reviewer pass report or an over budget line, running the kanban command, checking review state, or merging.
 ---
 
 ### Pipeline
@@ -15,9 +15,11 @@ Burn findings down to none. Send concrete fixes to the owning worker immediately
 
 After every fix round review the new head. Three fix rounds ending with findings still open park the issue, carrying the findings, research, options and a recommendation. Two worker failures across the issue also park it; the first retry goes to the next agent in the rotation. A relaunch after a stall counts as a failure.
 
+A verify pass with nothing open moves the task to `merge`.
+
 ### Kanban
 
-Sync stage changes through `chief-of-stuff kanban --root <workspace> --date <today> --issue <issue> --from-stage "<previous stage>" --commit`. For a new issue, preview and use `--initialize`. Configured legacy hold stages do not create owner waits. An explicit problem hold still preserves its evidence; resolve the problem using Autonomy and continue independent work. Reconcile manual board changes without overwriting them. An audit reports drift and never moves cards.
+After recording a permitted stage transition in the tracker, sync its one issue with `chief-of-stuff kanban --root <workspace> --date <today> --issue <issue> --from-stage "<previous stage>" --commit`. For a new issue, preview and use `--initialize`; a `workflow` row has no issue and takes no sync. Configured legacy hold stages do not create owner waits. An explicit problem hold still preserves its evidence; resolve the problem using Autonomy and continue independent work. Reconcile manual board changes without overwriting them. An audit reports drift and never moves cards.
 
 ### Merge
 

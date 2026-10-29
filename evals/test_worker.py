@@ -923,7 +923,7 @@ class WorkerTest(unittest.TestCase):
                 self.assertEqual(self.db.segments(KEY)[0].outcome, expected)
                 self.assertEqual("suite_hold" in self.db.resume(KEY), exitless)
 
-    def test_a_dead_worker_without_an_exit_holds_a_red_suite(self):
+    def test_a_dead_worker_without_an_exit_retries_a_red_suite(self):
         forge = self.suite_run()
         run_dir = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
         (run_dir / "exit.json").unlink()
@@ -935,7 +935,9 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.resume(KEY)["suite_hold"]["stage"], "implement")
         launch = mock.Mock(return_value=("example", ""))
         self.suite_pass(forge, launch)
-        launch.assert_not_called()
+        launch.assert_called_once_with(KEY, "implement", 2, "builder")
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "failed")
+        self.assertNotIn("suite_hold", self.db.resume(KEY))
 
     def test_a_non_done_report_is_not_suite_gated(self):
         forge = self.suite_run(outcome="blocked")

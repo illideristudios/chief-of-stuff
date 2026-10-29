@@ -591,6 +591,8 @@ class EngineTest(unittest.TestCase):
         (run / "stdout").write_text(json.dumps({"is_error": False, "result": "finished"}))
         (run / "stderr").write_text("")
         (run / "exit.json").write_text('{"exit_code": 0}')
+        if stage == "review":
+            self.db.update_resume(KEY, lambda data: data["runs"]["review-1"].setdefault("reviewed_head", tf.tma.HEAD))
         self.db.add_report(KEY, stage, 1, "fake-session", outcome, "finished", [])
 
     def test_exited_workers_and_planning_share_one_facts_gather_per_pass(self):

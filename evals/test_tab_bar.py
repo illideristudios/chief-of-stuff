@@ -470,7 +470,7 @@ class LeadCountsTest(unittest.TestCase):
             shutil.rmtree(root, True)
 
     def test_direct_routes_use_latest_tracker_when_today_is_missing(self):
-        from test_pages import ISSUE_TRACKER, LastLookedTest
+        from test_pages import ARCHITECTURAL_HOLD, ISSUE_TRACKER, LastLookedTest
         import decision_page
         import render_board
         root = Path(tempfile.mkdtemp())
@@ -490,6 +490,7 @@ class LeadCountsTest(unittest.TestCase):
             pages.mkdir()
             (pages / "decision-alpha.json").write_text(decision("alpha"))
             (pages / ".looked-before").write_text(datetime.fromisoformat(f"{day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+            (pages / "decision-architecture.json").write_text(ARCHITECTURAL_HOLD)
             render_board.write(root, day)
             (pages / "decision-alpha.html").unlink()  # Exercise a direct render before the board regenerates it.
             server = pg.make_server(pages, 0, root=root, refresh=lambda root, now: None, every=3600)

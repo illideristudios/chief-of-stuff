@@ -128,6 +128,11 @@ class AutonomyTest(unittest.TestCase):
         self.assertEqual(run.DISALLOWED, [])
         self.assertNotIn("--disallowedTools", run.claude_options({}))
 
+    def test_main_suite_evidence_does_not_wait_for_an_owner_report(self):
+        agent = (ROOT / "agents/chief-of-stuff.md").read_text()
+        self.assertNotIn("the owner reports the suite result", agent)
+        self.assertIn("the coordinator or worker records the suite result", agent)
+
     def test_obsolete_owner_stop_cases_are_not_selected_for_live_evals(self):
         from evals import run
         with tempfile.TemporaryDirectory() as temp:
