@@ -180,7 +180,7 @@ class FollowupRegression(SupervisorTest):
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
             self.launchctl_mock.reset_mock()
             with mock.patch.object(supervisor, 'RELEASE', new):
-                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: serving')
+                self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
             self.assertNotIn('bootout', self.verbs())
             with mock.patch.object(supervisor, 'RELEASE', old):
                 self.assertEqual(supervisor.selected_release(self.root), new)
@@ -226,7 +226,7 @@ class FollowupRegression(SupervisorTest):
                 self.assertTrue(entered.wait(10))
                 # Simulate a separate new-plugin hook while the old engine is blocked.
                 with mock.patch.object(supervisor, 'RELEASE', new):
-                    self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: serving')
+                    self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), 'engine: upgrade pending')
                 handoff.assert_not_called()
             finally:
                 finish.set()

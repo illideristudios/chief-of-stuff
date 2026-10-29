@@ -1034,10 +1034,8 @@ def _handoff(release: Path, python: Path, root: Path, interval: float, once: boo
 
 
 def _pending_explicit_install(root: Path) -> bool:
-    reader = getattr(supervisor, "_explicit_install", None)
-    if reader is not None:
-        return reader(root) is not None
-    return (supervisor.state_dir(root) / "engine-explicit-install.json").exists()
+    intent = release_selection.explicit_intent(root, supervisor)
+    return bool(intent and intent["operation"] == "install" and intent["pending"])
 
 
 def _persist_launchd_handoff(root: Path, release: Path) -> bool:

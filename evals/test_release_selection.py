@@ -61,9 +61,23 @@ class ReleaseSelectionTest(unittest.TestCase):
         from types import SimpleNamespace
         legacy = SimpleNamespace(RELEASE=self.new, current_release=lambda: self.new,
                                  state_dir=supervisor.state_dir, label=supervisor.label, ServiceError=supervisor.ServiceError)
-        intent = supervisor.state_dir(self.root) / supervisor.EXPLICIT_INTENT_MARKER
-        intent.write_text(json.dumps({"operation": "install", "release": str(self.old), "pending": False,
-                                      "job": {"Label": supervisor.label("engine", self.root),
-                                              "WorkingDirectory": str(self.root)}}))
+        data = self.root.parent / "data"
+        legacy.data_dir = lambda: data
+        with mock.patch.object(supervisor, "data_dir", return_value=data):
+            supervisor._write_intent(self.root, {"operation": "install", "release": str(self.old), "pending": False,
+                                                "job": {"Label": supervisor.label("engine", self.root),
+                                                        "WorkingDirectory": str(self.root)}})
         self.marker.write_text(str(self.new))
         self.assertEqual(release_selection.selected_release(self.root, legacy), self.old)
+
+    def test_cached_supervisor_with_unsafe_selector_is_not_called(self):
+        from types import SimpleNamespace
+        legacy = SimpleNamespace(RELEASE=self.old, current_release=lambda: self.old,
+                                 data_dir=lambda: self.root.parent / "data", ServiceError=supervisor.ServiceError,
+                                 state_dir=supervisor.state_dir,
+                                 selected_release=mock.Mock(side_effect=AssertionError("unsafe selector")),
+                                 _explicit_intent=mock.Mock(side_effect=AssertionError("unsafe reader")))
+        self.marker.write_text(str(self.new))
+        self.assertEqual(release_selection.selected_release(self.root, legacy), self.new)
+        legacy.selected_release.assert_not_called()
+        legacy._explicit_intent.assert_not_called()

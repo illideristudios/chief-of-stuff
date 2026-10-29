@@ -558,7 +558,7 @@ class EnsureTest(unittest.TestCase):
         root = self.dir.parent / "workspace"
         for selected, should_stop in ((pg.supervisor.RELEASE, True), (root / "other", False)):
             with self.subTest(selected=selected), \
-                 mock.patch.object(pg.supervisor, "_explicit_install", return_value={"release": str(selected)}, create=True), \
+                 mock.patch.object(pg.release_selection, "explicit_intent", return_value={"operation": "install", "pending": True, "release": str(selected)}), \
                  mock.patch.object(pg, "VERSION", "1.0.0"), \
                  mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
                  mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")) as stopped:
@@ -571,8 +571,7 @@ class EnsureTest(unittest.TestCase):
 
     def test_completed_explicit_cache_rollback_replaces_newer_server(self):
         root = self.dir.parent / "workspace"
-        with mock.patch.object(pg.supervisor, "_explicit_install", return_value=None), \
-             mock.patch.object(pg.supervisor, "_explicit_intent", return_value={"operation": "install", "release": str(pg.supervisor.RELEASE), "pending": False}), \
+        with mock.patch.object(pg.release_selection, "explicit_intent", return_value={"operation": "install", "release": str(pg.supervisor.RELEASE), "pending": False}), \
              mock.patch.object(pg, "VERSION", "1.0.0"), \
              mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
              mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")):
@@ -585,11 +584,13 @@ class EnsureTest(unittest.TestCase):
         state = pg.supervisor.state_dir(root)
         state.mkdir(exist_ok=True)
         release = pg.supervisor.RELEASE
-        (state / "engine-explicit-intent.json").write_text(json.dumps({
-            "operation": "install", "release": str(release), "pending": False,
-            "job": {"Label": pg.supervisor.label("engine", root), "WorkingDirectory": str(root.resolve())}}))
+        data = self.dir / "data"
+        with mock.patch.object(pg.supervisor, "data_dir", return_value=data):
+            pg.supervisor._write_intent(root, {
+                "operation": "install", "release": str(release), "pending": False,
+                "job": {"Label": pg.supervisor.label("engine", root), "WorkingDirectory": str(root.resolve())}})
         legacy = SimpleNamespace(RELEASE=release, state_dir=pg.supervisor.state_dir,
-                                 label=pg.supervisor.label, ServiceError=pg.supervisor.ServiceError)
+                                 data_dir=lambda: data, label=pg.supervisor.label, ServiceError=pg.supervisor.ServiceError)
         with mock.patch.object(pg, "supervisor", legacy):
             self.assertTrue(pg._selected_for_rollback(root))
 

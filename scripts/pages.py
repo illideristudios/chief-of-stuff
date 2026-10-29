@@ -913,14 +913,9 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
 def _selected_for_rollback(root: Path | None) -> bool:
     """A fallback to this release is not an explicit selection of it."""
     release = supervisor.RELEASE.resolve()
-    explicit = getattr(supervisor, "_explicit_install", None)
-    if root is not None and explicit is not None:
-        pending = explicit(root)
-        if pending is not None:
-            return Path(pending["release"]).resolve() == release
     if root is not None:
         intent = release_selection.explicit_intent(root, supervisor)
-        if intent and intent["operation"] == "install" and release.parent.name != "versions":
+        if intent and intent["operation"] == "install" and (intent["pending"] or release.parent.name != "versions"):
             return Path(intent["release"]).resolve() == release
     pointer = release.parent.parent / "current"
     try:

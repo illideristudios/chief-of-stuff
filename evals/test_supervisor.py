@@ -324,6 +324,20 @@ class AgentTest(SupervisorTest):
         supervisor.install(self.root, ENGINE, self.jobs)
         self.assertEqual({p.stem for p in self.jobs.glob("*.plist")},
                          {supervisor.label("engine", self.root), supervisor.label("pages", self.root)})
+    def test_board_agent_survives_engine_install_startup_failure_and_uninstall(self):
+        board = supervisor.job_path(supervisor.label("pages", self.root), self.jobs)
+        board.parent.mkdir(parents=True)
+        original = plistlib.dumps({"Label": board.stem, "WorkingDirectory": str(self.root.resolve())})
+        board.write_bytes(original)
+        # bootstrap accepts the job without proving the engine process starts successfully.
+        supervisor.install(self.root, ENGINE, self.jobs)
+        self.assertEqual(board.read_bytes(), original)
+        self.assertNotIn("bootout", self.verbs())
+        supervisor.uninstall(self.root, self.jobs)
+        self.assertEqual(board.read_bytes(), original)
+        self.assertFalse(supervisor.job_path(supervisor.label("engine", self.root), self.jobs).exists())
+        self.assertFalse(any(call.args[0] == "bootout" and board.stem in call.args[1]
+                             for call in self.launchctl_mock.call_args_list))
 
     def test_install_keeps_limit_paths_from_the_installing_shell(self):
         paths = {
@@ -372,10 +386,10 @@ class AgentTest(SupervisorTest):
 
     def test_uninstall_removes_the_job_and_status_reports_it(self):
         self.assertEqual(supervisor.status(self.root, self.jobs),
-                         {"installed": False, "loaded": False, "version": None, "current": "1.0.0"})
+                         {"installed": False, "loaded": False, "upgrade_pending": False, "version": None, "current": "1.0.0"})
         supervisor.install(self.root, ENGINE, self.jobs)
         self.assertEqual(supervisor.status(self.root, self.jobs),
-                         {"installed": True, "loaded": True, "version": "1.0.0", "current": "1.0.0"})
+                         {"installed": True, "loaded": True, "upgrade_pending": True, "version": "1.0.0", "current": "1.0.0"})
         self.assertEqual(supervisor.uninstall(self.root, self.jobs), "engine: stopped")
         self.assertFalse(list(self.jobs.glob("*.plist")))
         self.assertFalse(self.loaded)
