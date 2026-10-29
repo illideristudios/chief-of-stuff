@@ -105,6 +105,28 @@ class T3AdapterTest(unittest.TestCase):
         with self.assertRaises(ShellError):
             t3_adapter.write_channel(tree, BINDING, agent="", guard=guard_binding.guard_plugin_dir())
 
+    def test_the_channel_refuses_a_tree_whose_branch_brings_its_own_claude_config(self):
+        # T3 cannot pass `--setting-sources user --strict-mcp-config`, so a branch's own settings, hooks and
+        # servers would run as this user: such a tree is refused rather than launched.
+        for name in (".claude/settings.json", ".claude/hooks/x.py", ".claude/agents/builder.md"):
+            tree = self.dir / name.replace("/", "_")
+            tree.mkdir()
+            (tree / name).parent.mkdir(parents=True, exist_ok=True)
+            (tree / name).write_text("{}")
+            with self.assertRaises(ShellError, msg=name):
+                t3_adapter.write_channel(tree, BINDING, agent="", guard=guard_binding.guard_plugin_dir())
+
+    def test_the_channel_never_writes_through_a_symlink(self):
+        outside = self.dir / "outside"
+        outside.mkdir()
+        for link in (".claude", ".mcp.json"):
+            tree = self.dir / f"tree{link}"
+            tree.mkdir()
+            (tree / link).symlink_to(outside if link == ".claude" else outside / "target.json")
+            with self.assertRaises(ShellError, msg=link):
+                t3_adapter.write_channel(tree, BINDING, agent="", guard=guard_binding.guard_plugin_dir())
+        self.assertEqual(list(outside.iterdir()), [])
+
     def test_start_registers_the_tree_starts_a_thread_and_writes_the_run_evidence(self):
         tree, run_dir = self.git_tree(), self.dir / "run"
         run_dir.mkdir()
@@ -120,7 +142,8 @@ class T3AdapterTest(unittest.TestCase):
             time.sleep(0.05)
         runner.wait(timeout=5)
         self.assertEqual(json.loads((run_dir / "exit.json").read_text())["exit_code"], 0)
-        self.assertEqual(json.loads((run_dir / "thread.json").read_text())["thread_id"], "mcp:thread-1")
+        self.assertEqual(json.loads((run_dir / "thread.json").read_text()),
+                         {"thread_id": "mcp:thread-1", "thread_link": "t3code://threads/env-9/mcp:thread-1"})
         self.assertIn("all done", (run_dir / "stdout").read_text())
         state = json.loads((self.dir / "state.json").read_text())
         self.assertEqual(state["projects"], [str(tree)])  # refused once, registered, then started

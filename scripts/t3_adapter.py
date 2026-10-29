@@ -79,16 +79,21 @@ def _hooks(guard: Path, binding: dict[str, str]) -> dict:
 
 def write_channel(tree: Path, binding: dict[str, str], *, agent: str, guard: Path) -> None:
     """Write what a T3 thread cannot be given on a command line: the engine's report and ask server with its binding,
-    the named agent, and the guard hooks. Git-excluded, and never over a file the engine did not write."""
+    the named agent, and the guard hooks. Git-excluded, and never over a file the engine did not write.
+
+    T3 cannot pass `--setting-sources user --strict-mcp-config`, so a branch that brings its own Claude config would
+    have it run as this user: that tree is refused, as is any link the write would follow out of the tree."""
     command, args, bound = host_adapter._channel(binding)
     files = {tree / ".mcp.json": {"mcpServers": {"engine": {"command": command, "args": args, "env": bound}}},
              tree / ".claude" / "settings.local.json": {**({"agent": agent} if agent else {}), "hooks": _hooks(guard, binding)}}
-    for path in files:
-        if path.exists():
-            raise ShellError(f"the worker tree already has {path.relative_to(tree)}; refusing to replace it")
+    claude = tree / ".claude"
+    if claude.is_symlink() or any(os.path.lexists(path) for path in (
+            *files, claude / "settings.json", claude / "hooks", claude / "agents", claude / "commands")):
+        raise ShellError("the worker tree has its own Claude config (.mcp.json or .claude/); refusing to launch it under T3")
+    claude.mkdir(exist_ok=True)
     for path, content in files.items():
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(json.dumps(content))
+        with path.open("x") as handle:  # exclusive create: it fails on a link rather than following it
+            json.dump(content, handle)
     for entry in CHANNEL_EXCLUDES:
         host_adapter._exclude(tree, entry)
 
@@ -109,7 +114,7 @@ def start(request: Request, run_dir: Path, *, env: dict[str, str], cli: str | No
     prompt = runtimes.WORKER_BOOTSTRAP.format(assignment=assignment, cwd=request.cwd, session=request.session_id)
     spec = run_dir / "t3.json"
     spec.write_text(json.dumps({"cli": binary, "tree": request.cwd, "provider": provider, "model": request.model,
-                                "prompt": prompt, "poll_s": poll_s, "home": str(home or os.environ.get("T3CODE_HOME") or ""),
+                                "environment": environment_id(home), "prompt": prompt, "poll_s": poll_s, "home": str(home or os.environ.get("T3CODE_HOME") or ""),
                                 "title": f"{env.get('CHIEF_ISSUE_KEY', '')} {env.get('CHIEF_STAGE', '')}".strip()}))
     prepared = [sys.executable, str(Path(__file__).resolve()), "run", request.session_id, str(spec)]
     return claude_adapter.spawn(prepared, request, run_dir, env)
@@ -142,7 +147,8 @@ def run(session_id: str, spec_path: Path) -> int:
     except (RuntimeError, ValueError, KeyError, subprocess.SubprocessError, OSError) as exc:
         print(exc, file=sys.stderr)
         return 1
-    (spec_path.parent / "thread.json").write_text(json.dumps({"thread_id": thread}))
+    (spec_path.parent / "thread.json").write_text(json.dumps(
+        {"thread_id": thread, "thread_link": thread_link(spec["environment"], thread)}))
     while True:
         time.sleep(spec["poll_s"])
         done = _t3(spec, "thread", "show", thread, "--json", "--messages", "1")
