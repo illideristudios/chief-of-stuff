@@ -1958,13 +1958,15 @@ server.serve_forever()
         with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=OSError(28, "no space")):
             response = get(self.port, "/asset.bin")
         self.assertEqual(response.status, 503)
-        self.assertEqual(pg.STATIC_SNAPSHOT_BYTES, 0)
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
         real_temp = pg.tempfile.TemporaryFile
         opened = []
         class FailingWrite:
             def __init__(self):
                 self.file = real_temp()
                 opened.append(self.file)
+            def fileno(self):
+                return self.file.fileno()
             def write(self, data):
                 raise OSError(28, "disk full")
             def close(self):
@@ -1972,7 +1974,7 @@ server.serve_forever()
         with mock.patch.object(pg.tempfile, "TemporaryFile", side_effect=FailingWrite):
             self.assertEqual(get(self.port, "/asset.bin").status, 503)
         self.assertTrue(opened[0].closed)
-        self.assertEqual(pg.STATIC_SNAPSHOT_BYTES, 0)
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
         with mock.patch.object(pg.Handler, "_open_static", side_effect=OSError(24, "too many files")):
             self.assertEqual(get(self.port, "/asset.bin").status, 503)
         self.assertEqual(get(self.port, "/asset.bin").status, 200)
@@ -1984,7 +1986,7 @@ server.serve_forever()
         self.server.handle_error = lambda *args: None
         client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
         client.settimeout(10)
-        with mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_BYTES", 4 * 1024 * 1024):
+        with mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_SLOTS", 1):
             client.connect(("127.0.0.1", self.port))
             client.sendall(f"GET /asset.bin HTTP/1.1\r\nHost: 127.0.0.1:{self.port}\r\n\r\n".encode())
             self.assertIn(b"200", client.recv(1024))
@@ -1992,10 +1994,10 @@ server.serve_forever()
             self.assertEqual(get(self.port, "/asset.bin", method="HEAD").status, 200)
             client.close()
             for _ in range(100):
-                if pg.STATIC_SNAPSHOT_BYTES == 0:
+                if pg.STATIC_SNAPSHOT_SLOTS == 0:
                     break
                 threading.Event().wait(0.01)
-            self.assertEqual(pg.STATIC_SNAPSHOT_BYTES, 0)
+            self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
             self.assertEqual(get(self.port, "/asset.bin").status, 200)
 
     def test_cli_can_publish_while_static_copy_is_paused(self):
@@ -2016,7 +2018,7 @@ server.serve_forever()
                 self.stream.close()
         results = []
         with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: PausedFile(real_open(handler, name))), \
-             mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_BYTES", 100_000):
+             mock.patch.object(pg, "MAX_STATIC_SNAPSHOT_SLOTS", 1):
             thread = threading.Thread(target=lambda: results.append(get(self.port, "/asset.bin")), daemon=True)
             thread.start()
             try:
@@ -2031,6 +2033,54 @@ server.serve_forever()
                 thread.join(10)
             self.assertFalse(thread.is_alive())
         self.assertEqual(results[0].status, 200)
+
+    def test_cli_can_publish_while_static_open_is_paused(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        entered, release = threading.Event(), threading.Event()
+        real_open = pg.Handler._open_static
+        def paused_open(handler, name):
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("open not released")
+            return real_open(handler, name)
+        results = []
+        with mock.patch.object(pg.Handler, "_open_static", paused_open):
+            thread = threading.Thread(target=lambda: results.append(get(self.port, "/asset.bin")), daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                script = Path(__file__).resolve().parent.parent / "scripts" / "render_board.py"
+                proc = subprocess.run([sys.executable, str(script), "--root", str(self.root), "--date", self.day],
+                                      capture_output=True, text=True, timeout=5)
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+            finally:
+                release.set()
+                thread.join(10)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(results[0].status, 200)
+
+    def test_snapshot_capacity_allows_large_files_and_reserves_concurrent_sizes(self):
+        large = 2 * 1024**3
+        with mock.patch.object(pg, "_static_free_bytes", return_value=3 * large + pg.STATIC_FREE_RESERVE - 1):
+            first = pg.StaticSnapshot(large)
+            try:
+                with self.assertRaises(OSError):
+                    pg.StaticSnapshot(2 * large)
+                self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 1)
+            finally:
+                first.close()
+            second = pg.StaticSnapshot(2 * large)
+            second.close()
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
+        self.assertEqual(pg.STATIC_RESERVED_BYTES, 0)
+
+    def test_insufficient_temporary_space_returns_503_and_releases_slot(self):
+        (self.pages / "asset.bin").write_bytes(b"asset")
+        with mock.patch.object(pg, "_static_free_bytes", return_value=pg.STATIC_FREE_RESERVE + 4):
+            self.assertEqual(get(self.port, "/asset.bin").status, 503)
+        self.assertEqual(pg.STATIC_SNAPSHOT_SLOTS, 0)
+        self.assertEqual(pg.STATIC_RESERVED_BYTES, 0)
+        self.assertEqual(get(self.port, "/asset.bin").status, 200)
 
     def test_static_paths_cannot_escape_or_follow_external_symlinks(self):
         outside = self.root / "secret.bin"
@@ -2163,7 +2213,27 @@ server.serve_forever()
                 self.stream.close()
         with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: ChangingFile(real_open(handler, name))):
             response = get(self.port, "/asset.bin")
-        self.assertEqual(response.status, 404)
+        self.assertEqual(response.status, 503)
+        self.assertNotIn(b"original", response.body)
+
+    def test_static_metadata_change_during_snapshot_is_retryable(self):
+        path = self.pages / "asset.bin"
+        path.write_bytes(b"original")
+        real_open = pg.Handler._open_static
+        class ChangingFile:
+            def __init__(self, stream):
+                self.stream = stream
+            def fileno(self):
+                return self.stream.fileno()
+            def read(self, size):
+                data = self.stream.read(size)
+                os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+                return data
+            def close(self):
+                self.stream.close()
+        with mock.patch.object(pg.Handler, "_open_static", lambda handler, name: ChangingFile(real_open(handler, name))):
+            response = get(self.port, "/asset.bin")
+        self.assertEqual(response.status, 503)
         self.assertNotIn(b"original", response.body)
 
     def test_static_conditional_request_uses_open_file_timestamp(self):

@@ -74,38 +74,55 @@ WORKER_SESSION = re.compile(r"/workers/sessions/([1-9][0-9]{0,18})")
 MAX_BODY = 16 * 1024  # a write-in is a sentence or a paragraph
 MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rather than load them
 MAX_RESPONSE = 16 * 1024 * 1024  # bound the snapshot held while preparing a response
-# All active static snapshots in this process share a 1 GiB disk budget, including
-# copies still being sent to slow clients. Requests exceeding it receive 503.
-MAX_STATIC_SNAPSHOT_BYTES = 1024 * 1024 * 1024
-STATIC_SNAPSHOT_BYTES = 0
+# Each process permits four active static snapshots, including slow downloads.
+# Reserve 256 MiB on the temporary filesystem and account for the full size of
+# every active snapshot (conservatively double-counting bytes already written).
+MAX_STATIC_SNAPSHOT_SLOTS = 4
+STATIC_FREE_RESERVE = 256 * 1024 * 1024
+STATIC_SNAPSHOT_SLOTS = 0
+STATIC_RESERVED_BYTES = 0
 STATIC_SNAPSHOT_GUARD = threading.Lock()
+
+
+def _static_free_bytes(file):
+    stats = os.fstatvfs(file.fileno())
+    return stats.f_bavail * stats.f_frsize
 
 
 class StaticSnapshot:
     def __init__(self, size):
-        global STATIC_SNAPSHOT_BYTES
-        self.size = size
+        global STATIC_SNAPSHOT_SLOTS, STATIC_RESERVED_BYTES
         self.file = None
+        self.slot = False
+        self.reserved = 0
         with STATIC_SNAPSHOT_GUARD:
-            if size > MAX_STATIC_SNAPSHOT_BYTES - STATIC_SNAPSHOT_BYTES:
-                raise OSError(errno.ENOSPC, "static snapshot budget exhausted")
-            STATIC_SNAPSHOT_BYTES += size
+            if STATIC_SNAPSHOT_SLOTS >= MAX_STATIC_SNAPSHOT_SLOTS:
+                raise OSError(errno.ENOSPC, "static snapshot slots exhausted")
+            STATIC_SNAPSHOT_SLOTS += 1
+            self.slot = True
         try:
             self.file = tempfile.TemporaryFile()
+            with STATIC_SNAPSHOT_GUARD:
+                if _static_free_bytes(self.file) < STATIC_FREE_RESERVE + STATIC_RESERVED_BYTES + size:
+                    raise OSError(errno.ENOSPC, "insufficient temporary space for static snapshot")
+                STATIC_RESERVED_BYTES += size
+                self.reserved = size
         except BaseException:
             self.close()
             raise
 
     def close(self):
-        global STATIC_SNAPSHOT_BYTES
-        if self.size is not None:
+        global STATIC_SNAPSHOT_SLOTS, STATIC_RESERVED_BYTES
+        if self.slot:
             try:
                 if self.file is not None:
                     self.file.close()
             finally:
                 with STATIC_SNAPSHOT_GUARD:
-                    STATIC_SNAPSHOT_BYTES -= self.size
-                self.size = None
+                    STATIC_RESERVED_BYTES -= self.reserved
+                    STATIC_SNAPSHOT_SLOTS -= 1
+                    self.slot = False
+                    self.reserved = 0
 
     def read(self, size):
         return self.file.read(size)
@@ -688,13 +705,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return bool(self.banner) or unquote(urlsplit(self.path).path).lower().endswith(".html")
 
     def _serve(self, body: bool):
-        root = getattr(self.server, "root", None)
-        if root:
-            import decision_page
-            lock = decision_page.page_render_lock(root, shared=True)
-        else:
-            lock = contextlib.nullcontext()
+        # Classify before _allowed, which may render and publish dynamic pages.
+        path = unquote(urlsplit(self.path).path)
+        dynamic = (path in ("/", "/all", "/workers", "/workers/", "/decisions", "/decisions/")
+                   or path.startswith(("/workers/sessions/", "/decisions/", "/issues/"))
+                   or path.lower().endswith(".html"))
+
+        def static():
+            finish = self._send_static(body)
+            return finish() if finish is not None else None
+
         def prepare():
+            if not dynamic:
+                if self._allowed():
+                    return static
+                return None
+            root = getattr(self.server, "root", None)
+            if root:
+                import decision_page
+                lock = decision_page.page_render_lock(root, shared=True)
+            else:
+                lock = contextlib.nullcontext()
             with lock:
                 if self._allowed():
                     match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
@@ -708,7 +739,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         else:
                             super(Handler, self).do_HEAD()
                     else:
-                        return self._send_static(body)
+                        return static
         self._snapshot_response(prepare)
 
     def _snapshot_response(self, prepare):
@@ -770,8 +801,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return os.fdopen(fd, "rb")
 
     def _send_static(self, body):
-        # This open and metadata read run under the publication lock. The descriptor
-        # pins the checked inode even if a publisher replaces its pathname later.
+        # Descriptor traversal pins the checked inode even if its pathname changes.
+        # Static file I/O does not hold the dynamic-page publication lock.
         path = self.translate_path(self.path)
         file = None
         try:
@@ -802,7 +833,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     except (TypeError, IndexError, OverflowError, ValueError):
                         pass
                 if body:
-                    # Copy outside the publication lock, with a reserved disk budget.
+                    # Copy with a reserved temporary-space allowance.
                     # Detect in-place edits before sending any headers or body.
                     snapshot = StaticSnapshot(stat.st_size)
                     remaining = stat.st_size
@@ -829,7 +860,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return result
                 return None
             except ValueError:
-                self.send_error(404, "File not found")
+                self.send_error(503, "Static snapshot changed; retry")
                 return None
             except OSError:
                 self.send_error(503, "Static snapshot unavailable")
