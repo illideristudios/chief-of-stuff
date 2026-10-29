@@ -662,11 +662,11 @@ class ModelsTest(unittest.TestCase):
                 self.assertEqual([str(e) for e in self.load(f'[models.deep]\nrotation = ["{entry}"]\n').models["deep"]],
                                  [entry])
 
-    def test_pick_is_first_by_default_random_on_request_and_nothing_else(self):
+    def test_pick_is_round_robin_by_default_and_random_on_request(self):
         # #877: "can we make it so they randomly select".
         got = self.load('[models.deep]\nrotation = ["claude:opus"]\npick = "random"\n'
                         '[models.review]\nrotation = ["claude:opus"]\n')
-        self.assertEqual(got.model_picks, {"deep": "random", "review": "first"})
+        self.assertEqual(got.model_picks, {"deep": "random", "review": "round_robin"})
         for bad in ('[models.deep]\nrotation = ["claude:opus"]\npick = "best"\n',
                     '[models.deep]\npick = "random"\n'):
             with self.subTest(bad=bad), self.assertRaises(st.SettingsError):

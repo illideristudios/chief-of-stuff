@@ -499,10 +499,21 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(offered, [["cursor:auto", "agy:gemini-4-argon-high", "claude:sonnet@high"]])
         self.assertEqual((used, went), (("sonnet", "high"), "claude"))
 
-    def test_first_stays_the_default_and_a_quota_stop_still_advances_under_random(self):
+    def test_first_round_robin_turn_starts_at_the_first_launchable_entry(self):
         with mock.patch.object(worker.random, "choice") as never:
             self.assertEqual(self.launch_rotation()[1], "codex")
         never.assert_not_called()
+
+    def test_launch_skips_near_cap_and_records_workflow_with_the_selected_entry(self):
+        self.ROTATION = ('[models.implement]\nrotation = ["claude:sonnet@high", "codex:next@medium"]\n'
+                         '[limits]\nwarn_at = 0.65\n')
+        with mock.patch.object(worker, "below_limit", side_effect=lambda runtime, *args: runtime != "claude") as probe:
+            used, went = self.launch_rotation()
+        self.assertEqual((used, went), (("next", "medium", "codex"), "codex"))
+        self.assertIn(mock.call("claude", "", NOW, .65), probe.call_args_list)
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, clock=lambda: NOW, launch=lambda: used)
+        self.assertEqual(self.db.segments(KEY)[0].workflow, self.p.default_workflow)
 
     def test_a_quota_stop_advances_even_when_picking_at_random(self):
         self.ROTATION = self.ROTATION + 'pick = "random"\n'
@@ -623,6 +634,18 @@ class WorkerTest(unittest.TestCase):
                 with mock.patch.object(worker.process_status, "identity", return_value=None):
                     worker.collect(self.db, self.root, lambda: NOW)
                 self.assertEqual(self.db.segments()[0].outcome, "done")
+
+    def test_recovered_start_uses_reserved_entry_when_model_save_was_interrupted(self):
+        used, _ = self.launch_rotation()
+        data = self.db.resume(KEY)
+        data.pop("model")
+        data.pop("runs")
+        self.db.set_resume(KEY, data)
+        with mock.patch.object(worker.process_status, "identity", return_value="start"), \
+             mock.patch.object(worker.host_adapter, "start") as start:
+            recovered = self.launch()
+        start.assert_not_called()
+        self.assertEqual(recovered, used)
 
     def test_dead_or_reused_run_is_preserved_as_refused_before_relaunch(self):
         for recorded, old_identity in ((True, None), (True, "different-birth"), (False, None)):

@@ -17,12 +17,15 @@ import clock as engine_clock
 import dispatch_prompt
 import guard_binding
 import host_adapter
+import limits
+import limits_probe
 import make_worktree
 import process_status
 import reconcile
+import runtimes
 import supervisor
 import t3_adapter
-from settings import ModelEntry, SettingsError, pick, load as load_settings
+from settings import ModelEntry, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
 from model_port import RETRYABLE, Failure, Reply, Request, retry_at
@@ -168,29 +171,51 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
 
 def _model(store: Any, key: str, stage: str, data: dict, actor: Any,
            models: dict[str, tuple[ModelEntry, ...]], at: str,
-           launchable: Callable[[str], bool] = lambda runtime: runtime == "claude", how: str = "first",
-           choose: Callable[[tuple[ModelEntry, ...]], ModelEntry] | None = None) -> ModelEntry:
-    """The entry this start launches: the stage rotation's first launchable entry, or with `how` "random" a uniform
-    pick among the launchable ones (#877: comparing models over time), or the next one after a quota stop, across
-    runtimes (ledger D10, #701); the persona's model when none is launchable. An entry this engine cannot launch here
-    is logged as skipped, never a failure."""
+           launchable: Callable[[str], bool] = lambda runtime: runtime == "claude", how: str = "round_robin",
+           choose: Callable[[tuple[ModelEntry, ...]], ModelEntry] | None = None, *, attempt: int = 1,
+           available: Callable[[ModelEntry], bool] = lambda entry: True, workflow: str = "") -> ModelEntry:
+    """Select from the existing class rotation. Retries follow their recorded entry under every strategy.
+
+    Fresh launches share a durable round-robin cursor; first and random remain explicit configuration.
+    Eligibility uses launch preconditions and known account limits, never performance records.
+    """
     cls = TASK_CLASS.get(stage, stage)
     rotation = models.get(cls, ())
-    usable = tuple(entry for entry in rotation if launchable(entry.runtime))
-    chosen = (((choose or random.choice)(usable) if how == "random" else usable[0]) if usable
-              else ModelEntry("claude", actor.model, actor.effort or None))
-    previous = data.get("model", {}).get(stage)
-    if usable and "quota" in data and previous:
-        try:
-            chosen = pick(usable, after=previous)
-        except SettingsError:
-            pass  # every launchable entry has stopped; the quota wait is over, so start from the first again
-    passed = rotation if how == "random" else (rotation[:rotation.index(chosen)] if chosen in rotation else rotation)
-    skipped = [str(entry) for entry in passed if entry not in usable]
+    launchable_entries = tuple(entry for entry in rotation if launchable(entry.runtime))
+    usable = tuple(entry for entry in launchable_entries if available(entry))
+    skipped = [str(entry) for entry in rotation if entry not in launchable_entries]
     if skipped:
         store.add_log(key, f"skipped {', '.join(skipped)}: not launchable here; a non-Claude host needs its CLI on "
                            "PATH and a forge-protected default branch (§13, #701)", at)
-    return chosen
+    capped = [str(entry) for entry in launchable_entries if entry not in usable]
+    if capped:
+        store.add_log(key, f"skipped {', '.join(capped)}: account near its configured limit", at)
+    if not usable:
+        fallback = ModelEntry("claude", actor.model, actor.effort or None)
+        if capped or not available(fallback):
+            raise RuntimeError("no rotation entry available below its account limit")
+        usable = (fallback,)
+
+    previous = next((str(ModelEntry(seg.runtime, seg.model, seg.effort or None))
+                     for seg in reversed(store.segments(key))
+                     if TASK_CLASS.get(seg.stage, seg.stage) == cls and seg.runtime and seg.model
+                     and (seg.stage != stage or seg.attempt < attempt)), "")
+    if not previous and "quota" in data:
+        previous = data.get("model", {}).get(stage, "")
+
+    def select(cursor: str) -> str:
+        if previous or how == "round_robin":
+            ordered = runtimes.following(rotation, previous or cursor)
+            return str(next((entry for entry in ordered if entry in usable), usable[0]))
+        return str((choose or random.choice)(usable) if how == "random" else usable[0])
+
+    selected = store.rotation_choice(key, stage, attempt, cls, tuple(map(str, usable)), select, workflow)
+    return next(entry for entry in usable if str(entry) == selected)
+
+
+def below_limit(runtime: str, account: str, now: datetime, warn_at: float) -> bool:
+    """Use the existing no-call probe and threshold. Unknown limits leave an entry eligible."""
+    return not limits.near_cap(limits_probe.read(runtime, account), now, warn_at)
 
 
 def _guarded(forge: Any, issue_key: str) -> bool:
@@ -289,9 +314,11 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     existing = _existing_run(data, run_dir, stage, attempt, trees, clock)
     if existing is not None:
         store.set_tree(issue_key, existing["tree"])
-        _save_run(store, issue_key, stage, attempt, existing)
         # Adopt what the start launched, not today's rotation.
-        runtime, _, ran = data.get("model", {}).get(stage, "").partition(":")
+        selected = data.get("rotation_choices", {}).get(f"{stage}-{attempt}", {}).get("entry", "")
+        selected = selected or data.get("model", {}).get(stage, "")
+        _save_run(store, issue_key, stage, attempt, existing, model=selected)
+        runtime, _, ran = selected.partition(":")
         model, _, effort = ran.rpartition("@") if "@" in ran else (ran, "", "")
         used = (model, effort) if model else (actor.model, actor.effort or "")
         return (*used, runtime) if runtime not in ("", "claude") else used
@@ -386,8 +413,19 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             protects.append(_guarded(forge, issue_key))
         return protects[0]
 
-    chosen = _model(store, issue_key, stage, data, actor, loaded.models, clock().isoformat(), launchable,
-                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "first"))
+    now = clock()
+    capacity: dict[str, bool] = {}
+
+    def available(entry: ModelEntry) -> bool:
+        if entry.runtime not in capacity:
+            account = claude_as_profile if entry.runtime == "claude" else ""
+            capacity[entry.runtime] = below_limit(entry.runtime, account, now, loaded.limits.warn_at)
+        return capacity[entry.runtime]
+
+    workflow = policies.workflow_for(data.get("issue_type") or getattr(row, "issue_type", None)).name
+    chosen = _model(store, issue_key, stage, data, actor, loaded.models, now.isoformat(), launchable,
+                    how=loaded.model_picks.get(TASK_CLASS.get(stage, stage), "round_robin"),
+                    attempt=attempt, available=available, workflow=workflow)
     try:
         request = Request(assignment, model=chosen.model, effort=chosen.effort or "", session_id=session_id,
                           cwd=str(tree), worker=True, agent=agent,
