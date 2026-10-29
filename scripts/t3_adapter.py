@@ -87,10 +87,9 @@ def write_channel(tree: Path, binding: dict[str, str], *, agent: str, guard: Pat
     files = {tree / ".mcp.json": {"mcpServers": {"engine": {"command": command, "args": args, "env": bound}}},
              tree / ".claude" / "settings.local.json": {**({"agent": agent} if agent else {}), "hooks": _hooks(guard, binding)}}
     claude = tree / ".claude"
-    if claude.is_symlink() or any(os.path.lexists(path) for path in (
-            *files, claude / "settings.json", claude / "hooks", claude / "agents", claude / "commands")):
+    if os.path.lexists(claude) or os.path.lexists(tree / ".mcp.json"):  # fail closed: any entry is the branch's own
         raise ShellError("the worker tree has its own Claude config (.mcp.json or .claude/); refusing to launch it under T3")
-    claude.mkdir(exist_ok=True)
+    claude.mkdir()
     for path, content in files.items():
         with path.open("x") as handle:  # exclusive create: it fails on a link rather than following it
             json.dump(content, handle)

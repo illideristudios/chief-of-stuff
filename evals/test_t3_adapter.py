@@ -108,9 +108,10 @@ class T3AdapterTest(unittest.TestCase):
     def test_the_channel_refuses_a_tree_whose_branch_brings_its_own_claude_config(self):
         # T3 cannot pass `--setting-sources user --strict-mcp-config`, so a branch's own settings, hooks and
         # servers would run as this user: such a tree is refused rather than launched.
-        for name in (".claude/settings.json", ".claude/hooks/x.py", ".claude/agents/builder.md"):
+        for name in (".claude/settings.json", ".claude/hooks/x.py", ".claude/agents/builder.md", ".claude/anything.txt"):
             tree = self.dir / name.replace("/", "_")
             tree.mkdir()
+            subprocess.run(["git", "init", "-q", str(tree)], check=True)
             (tree / name).parent.mkdir(parents=True, exist_ok=True)
             (tree / name).write_text("{}")
             with self.assertRaises(ShellError, msg=name):

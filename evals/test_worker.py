@@ -377,6 +377,19 @@ class WorkerTest(unittest.TestCase):
         moved.assert_called_once()
         self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
 
+    def test_an_adopted_t3_start_keeps_its_launcher_thread_and_branch_heads_and_takes_nothing_else_from_thread_json(self):
+        self.t3_launched()
+        data = self.db.resume(KEY)
+        run = Path(data.pop("runs")["implement-1"]["run_dir"])
+        self.assertEqual(json.loads((run / "branch_heads.json").read_text()), {"trunk": "d" * 40, "main": "d" * 40})
+        (run / "thread.json").write_text(json.dumps({"thread_id": "mcp:t-1", "thread_link": "t3code://threads/env-1/mcp:t-1",
+                                                     "pid": -1, "runtime": "codex", "branch_heads": {}}))
+        (run / "exit.json").write_text('{"exit_code": 0}')
+        record = worker._existing_run(data, run, "implement", 1, self.trees, lambda: NOW)
+        self.assertEqual((record["launcher"], record["runtime"], record["thread_id"]), ("t3", "claude", "mcp:t-1"))
+        self.assertEqual(record["branch_heads"], {"trunk": "d" * 40, "main": "d" * 40})
+        self.assertEqual(record["pid"], 77)
+
     ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
                 '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
 

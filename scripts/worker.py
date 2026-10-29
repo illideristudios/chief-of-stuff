@@ -124,7 +124,9 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
             return None
         record = json.loads(started.read_text())
         if (run_dir / "thread.json").is_file():
-            record.update(json.loads((run_dir / "thread.json").read_text()), runtime="claude", launcher="t3")
+            heads = run_dir / "branch_heads.json"
+            record.update(_thread_fields(run_dir), runtime="claude", launcher="t3",
+                          **({"branch_heads": json.loads(heads.read_text())} if heads.is_file() else {}))
         prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
             "tree": data.get("worktree"), "branch": data.get("work_branch")}
         record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
@@ -415,6 +417,7 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
             pid = json.loads((run_dir / "started.json").read_text())["pid"]
             if via_t3:  # the thread id is the worker's identity under T3, beside the session id (§13)
                 host.update(_thread(run_dir, runner))
+                (run_dir / "branch_heads.json").write_text(json.dumps(host["branch_heads"]))  # adoption has no `host`
             while True:
                 identity = process_status.identity(pid, session_id, host=True)
                 if identity is None:
@@ -470,14 +473,20 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
 THREAD_WAIT_S = 60.0  # project registration and thread start are two CLI calls to the running T3
 
 
+def _thread_fields(run_dir: Path) -> dict:
+    """Only the thread's id and link from the runner's `thread.json`, as strings: nothing else it holds is taken."""
+    found = json.loads((run_dir / "thread.json").read_text())
+    return {key: str(found[key]) for key in ("thread_id", "thread_link")}
+
+
 def _thread(run_dir: Path, runner: Any) -> dict:
-    """The T3 thread the runner started: {"thread_id", "thread_link"} from its `thread.json`, within THREAD_WAIT_S."""
+    """The T3 thread the runner started, within THREAD_WAIT_S."""
     deadline = time.monotonic() + THREAD_WAIT_S
     while not (run_dir / "thread.json").exists():
         if runner.poll() is not None or time.monotonic() >= deadline:
             raise RuntimeError("could not verify worker start: T3 started no thread")
         time.sleep(0.05)
-    return json.loads((run_dir / "thread.json").read_text())
+    return _thread_fields(run_dir)
 
 
 NEVER_WRITTEN = "it was never written to the worker session"
