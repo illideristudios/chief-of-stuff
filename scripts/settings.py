@@ -109,6 +109,7 @@ class Workers:
     max_concurrency: int | None = None
     herdr_session: str = "chief-of-stuff"
     claude_as_profile: str = ""  # a claude-as profile Claude workers run under; empty is a bare `claude`
+    worker_launcher: str = "cli"  # how an engine worker starts (§13, #1178): a local CLI process, or a T3 thread
     require_green_tests: bool = False  # one-shot and engine done require known counts with passed > 0 and no failures, skips or xfails
     rules: tuple[str, ...] = ()  # standing rules carried before every one-shot and engine task
     teardown: str = ""  # engine-only cleanup command; one-shot launchers do not run it
@@ -369,6 +370,9 @@ def _workers(table) -> Workers:
     if "claude_as_profile" in table and not (isinstance(profile, str) and CLAUDE_AS_PROFILE.fullmatch(profile)):
         raise SettingsError("[workers] claude_as_profile must be a claude-as profile name: letters, digits, '_' and '-', "
                             "not starting with '-'")
+    worker_launcher = table.get("worker_launcher", "cli")
+    if worker_launcher not in ("cli", "t3"):
+        raise SettingsError("[workers] worker_launcher must be `cli` or `t3`")
     rules = table.get("rules", [])
     # Reject controls, invisible formatting (including bidi), and separators that can conceal instructions.
     if not isinstance(rules, list) or not all(
@@ -389,7 +393,7 @@ def _workers(table) -> Workers:
             raise SettingsError(f"[workers] {key} must be a nonempty, single-line command without control characters")
         commands[key] = value
     return Workers(launcher=launcher, mode=mode, max_concurrency=cap, herdr_session=session,
-                   claude_as_profile=profile, require_green_tests=green, rules=tuple(rules),
+                   claude_as_profile=profile, worker_launcher=worker_launcher, require_green_tests=green, rules=tuple(rules),
                    stall=_stall(table.get("stall", {})), **commands)
 
 
