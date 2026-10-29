@@ -54,7 +54,8 @@ import forge
 import page_reload
 import supervisor
 from backlog_ref import GitHubBacklog
-from workspace import LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, pages_address, read_config, record_look, unrecord_look
+from workspace import (ENGINE_STATUS_FILE, LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers,
+                       engine_health, pages_address, read_config, read_engine_status, record_look, unrecord_look)
 
 SERVER = "chief-of-stuff-pages"
 PID = ".pid"
@@ -115,17 +116,21 @@ class PagesError(RuntimeError):
 
 def _sources(root: Path, cfg, pages_dir: Path, day: str) -> list[Path]:
     return [root / "CLAUDE.md", *([root / cfg.settings_path] if cfg.settings_path else []), root / cfg.log_path(day),
-            root / "store.db", root / "store.db-wal", *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
+            root / "store.db", root / "store.db-wal", supervisor.state_dir(root) / ENGINE_STATUS_FILE,
+            *(path for _, path in daily_trackers(root, cfg)), *pages_dir.glob("decision-*.json"),
             pages_dir / CACHE]
 
 
-def _digest(sources: list[Path]) -> str:
-    """sha256 of the sources' bytes, for a render record: content, not times, says whether a render's inputs changed."""
+def _digest(sources: list[Path], extra: str = "") -> str:
+    """sha256 of the sources' bytes and live state token, for a render record: content, not times, says whether a render's inputs changed."""
     h = hashlib.sha256()
     for p in sources:
         if p.is_file():
             h.update(str(p).encode())
             h.update(p.read_bytes())
+    if extra:
+        h.update(b"\0engine\0")
+        h.update(extra.encode())
     return h.hexdigest()
 
 
@@ -264,22 +269,29 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             day = name[:10]
             if not (root / cfg.tracker_path(day)).is_file() and not (root / "store.db").is_file():
                 return ""
+        shows_engine = name.endswith("-board.html") or (name.startswith("issue-") and not name.endswith("-source.html"))
         with page_lock(key):  # checked under the lock: a request that waited finds the page already rendered
             sources = [*_sources(root, cfg, pages_dir, day),
                        *([pages_dir / LOOKED_BEFORE] if name.endswith("-board.html") else []), fragment.THEME_PATH]
             newest = max(RENDERER_MTIME_NS, max((p.stat().st_mtime_ns for p in sources if p.is_file()), default=0))
             mtime = target.stat().st_mtime_ns if target.is_file() else 0
-            digest = _digest(sources)
+            engine_token = ""
+            if shows_engine and (status := read_engine_status(root)) is not None:
+                now_min = datetime.now(cfg.zone).replace(second=0, microsecond=0)
+                engine_token = repr(engine_health(status, now_min, cfg.zone))
+            digest = _digest(sources, extra=engine_token)
             record = RENDERED_AT.get(key)
             rendered = record[0] if record and record[1] in (mtime, None) else mtime
             if rendered >= newest and name != "workers.html":
                 # The filesystem's mtime clock reads behind the wall clock by more than a render takes under load
                 # here, so a source saved after that render began can carry an mtime from before it. Where the
-                # record is this server's render of this file, the sources' bytes settle it: fresh only if they
-                # are still exactly what that render consumed. A source touched without a change keeps the mtime
-                # path's one confirming render — it re-renders, records the same digest, and the polls after it
-                # are fresh.
-                if not (record and record[1] == mtime and record[2] != digest):
+                # record is this server's render of this file, the sources' bytes (and live engine liveness/staleness
+                # token, which can change when `engine.lock` drops without touching any file) settle it: fresh only
+                # if they are still what that render consumed.
+                if engine_token:
+                    if record and record[1] == mtime and record[2] == digest:
+                        return ""
+                elif not (record and record[1] == mtime and record[2] != digest):
                     return ""
             started = time.time_ns()
             with slots:

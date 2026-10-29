@@ -6,11 +6,13 @@ Precise deadlines can also be decided in a tracker's `## Decisions` table; `with
 
 from __future__ import annotations
 
+import fcntl
+import json
 import os
 import re
 import tempfile
 from dataclasses import dataclass, replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -21,9 +23,234 @@ from md import BULLET, cells as _cells, is_separator as _is_separator, section a
 
 DECISION_DEADLINE = re.compile(r"^deadline:\s*(.+?)\s+(?:(\d{4}-\d{2}-\d{2})[ T])?(\d{1,2}):(\d{2})$", re.I)
 
+ENGINE_STATE_DIR = ".chief-of-stuff"
+ENGINE_LOCK_FILE = "engine.lock"
+ENGINE_STATUS_FILE = "engine-status.json"
+ENGINE_STALE_FACTOR = 3.0
+ENGINE_STALE_FLOOR_S = 180.0
+
 
 class ConfigError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class EngineStatus:
+    """Recorded pass health and live lock state for an engine-backed workspace (#936)."""
+    running: bool
+    present: bool = False
+    corrupt: bool = False
+    mode: str = "service"
+    interval: float = 60.0
+    started_at: datetime | None = None
+    last_pass_at: datetime | None = None
+    last_attempt_at: datetime | None = None
+    stopped_at: datetime | None = None
+    last_error: str | None = None
+    error_kind: str | None = None
+    pid: int | None = None
+    release: str | None = None
+
+
+@dataclass(frozen=True)
+class EngineHealth:
+    """Classified engine health for page headers and warnings (#936)."""
+    state: str
+    meta: tuple[str, ...]
+    warning: str | None = None
+
+
+def lock_held(path: Path) -> bool:
+    """True when an exclusive flock is held on `path`. Shared probe never blocks concurrent readers or creates files."""
+    if not path.is_file():
+        return False
+    try:
+        with path.open("r") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return False
+
+
+def _parse_iso(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+    return dt if dt.tzinfo is not None else None
+
+
+def write_engine_status(
+    root: Path,
+    *,
+    started_at: datetime | None,
+    last_pass_at: datetime | None,
+    last_attempt_at: datetime | None,
+    stopped_at: datetime | None,
+    interval: float = 60.0,
+    mode: str = "service",
+    last_error: str | None = None,
+    error_kind: str | None = None,
+    pid: int | None = None,
+    release: str | None = None,
+) -> None:
+    """Atomically write `.chief-of-stuff/engine-status.json` while holding `engine.lock`."""
+    state_dir = root.resolve() / ENGINE_STATE_DIR
+    state_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "started_at": started_at.isoformat() if started_at is not None else None,
+        "last_pass_at": last_pass_at.isoformat() if last_pass_at is not None else None,
+        "last_attempt_at": last_attempt_at.isoformat() if last_attempt_at is not None else None,
+        "stopped_at": stopped_at.isoformat() if stopped_at is not None else None,
+        "interval": float(interval),
+        "mode": mode,
+        "last_error": last_error,
+        "error_kind": error_kind,
+        "pid": os.getpid() if pid is None else pid,
+        "release": release,
+    }
+    _swap_in(state_dir / ENGINE_STATUS_FILE, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def read_engine_status(root: Path) -> EngineStatus | None:
+    """Read engine status and live lock state, or return None for tracker-only workspaces without store/engine state."""
+    resolved = root.resolve()
+    state_dir = resolved / ENGINE_STATE_DIR
+    running = lock_held(state_dir / ENGINE_LOCK_FILE)
+    status_path = state_dir / ENGINE_STATUS_FILE
+    has_status = status_path.is_file()
+    has_store = (resolved / "store.db").is_file()
+    if not running and not has_store and not has_status:
+        return None
+    if not has_status:
+        return EngineStatus(running=running, present=False)
+    try:
+        data = json.loads(status_path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("status root must be an object")
+        raw_interval = data.get("interval", 60.0)
+        interval = float(raw_interval) if isinstance(raw_interval, (int, float)) and raw_interval > 0 else 60.0
+    except (OSError, ValueError, TypeError):
+        return EngineStatus(
+            running=running,
+            present=False,
+            corrupt=True,
+            last_error=f"{ENGINE_STATUS_FILE} is unreadable",
+            error_kind="status",
+        )
+    last_error = data.get("last_error")
+    error_kind = data.get("error_kind")
+    mode = data.get("mode")
+    pid = data.get("pid")
+    release = data.get("release")
+    return EngineStatus(
+        running=running,
+        present=True,
+        corrupt=False,
+        mode=mode if isinstance(mode, str) and mode else "service",
+        interval=interval,
+        started_at=_parse_iso(data.get("started_at")),
+        last_pass_at=_parse_iso(data.get("last_pass_at")),
+        last_attempt_at=_parse_iso(data.get("last_attempt_at")),
+        stopped_at=_parse_iso(data.get("stopped_at")),
+        last_error=last_error.strip() if isinstance(last_error, str) and last_error.strip() else None,
+        error_kind=error_kind.strip() if isinstance(error_kind, str) and error_kind.strip() else None,
+        pid=pid if isinstance(pid, int) else None,
+        release=release if isinstance(release, str) and release else None,
+    )
+
+
+def _engine_stamp(at: datetime, now: datetime, zone: ZoneInfo) -> str:
+    local_at = at.astimezone(zone)
+    local_now = now.astimezone(zone)
+    days = (local_now.date() - local_at.date()).days
+    if days == 0:
+        return f"{local_at:%H:%M}"
+    if 0 < days < 7:
+        return f"{local_at:%a %H:%M}"
+    return f"{local_at:%Y-%m-%d %H:%M}"
+
+
+def engine_health(status: EngineStatus, now: datetime, zone: ZoneInfo) -> EngineHealth:
+    """Classify live engine status into header metadata and an actionable warning when degraded."""
+    last_pass = _engine_stamp(status.last_pass_at, now, zone) if status.last_pass_at is not None else None
+    pass_meta = f"last pass {last_pass}" if last_pass is not None else "last pass none"
+    if not status.running:
+        if status.corrupt:
+            return EngineHealth(
+                "unknown",
+                ("engine stopped", "last pass unknown"),
+                f"engine not running: {ENGINE_STATUS_FILE} is unreadable (last pass unknown)",
+            )
+        if not status.present:
+            return EngineHealth(
+                "missing",
+                ("engine stopped", "last pass unknown"),
+                "engine not running (last pass unknown)",
+            )
+        if status.last_error:
+            pass_clause = f" (last pass {last_pass})" if last_pass is not None else ""
+            if status.error_kind == "startup":
+                at_clause = f" at {_engine_stamp(status.last_attempt_at, now, zone)}" if status.last_attempt_at else ""
+                return EngineHealth(
+                    "failed",
+                    ("engine stopped", pass_meta),
+                    f"engine failed to start{at_clause}{pass_clause}: {status.last_error}",
+                )
+            since_clause = f" since {_engine_stamp(status.stopped_at, now, zone)}" if status.stopped_at else ""
+            return EngineHealth(
+                "failed",
+                ("engine stopped", pass_meta),
+                f"engine not running{since_clause}{pass_clause}: {status.last_error}",
+            )
+        since_clause = f" since {_engine_stamp(status.stopped_at, now, zone)}" if status.stopped_at else ""
+        pass_clause = f" (last pass {last_pass})" if last_pass is not None else " (no completed pass)"
+        return EngineHealth(
+            "stopped",
+            ("engine stopped", pass_meta),
+            f"engine not running{since_clause}{pass_clause}",
+        )
+
+    if status.corrupt:
+        return EngineHealth(
+            "unknown",
+            ("engine running", "last pass unknown"),
+            f"engine status unreadable: {ENGINE_STATUS_FILE} is unreadable (last pass unknown)",
+        )
+    if not status.present:
+        return EngineHealth(
+            "unknown",
+            ("engine running", "last pass unknown"),
+            "engine pass status unavailable (last pass unknown)",
+        )
+    if status.last_error:
+        at_clause = f" at {_engine_stamp(status.last_attempt_at, now, zone)}" if status.last_attempt_at else ""
+        pass_clause = f" (last pass {last_pass})" if last_pass is not None else ""
+        return EngineHealth(
+            "failed",
+            ("engine error", pass_meta),
+            f"engine pass failed{at_clause}{pass_clause}: {status.last_error}",
+        )
+    stale_after = timedelta(seconds=max(float(status.interval or 60.0) * ENGINE_STALE_FACTOR, ENGINE_STALE_FLOOR_S))
+    anchors = [t for t in (status.started_at, status.last_pass_at) if t is not None]
+    anchor = max(anchors) if anchors else None
+    if anchor is None or (now.astimezone(zone) - anchor.astimezone(zone)) > stale_after:
+        if last_pass is not None:
+            warn = f"engine stale: no completed pass since {last_pass}"
+        elif status.started_at is not None:
+            warn = f"engine stale: no completed pass since start at {_engine_stamp(status.started_at, now, zone)}"
+        else:
+            warn = "engine stale: no completed pass recorded"
+        return EngineHealth("stale", ("engine stale", pass_meta), warn)
+    if status.last_pass_at is None or (status.started_at is not None and status.last_pass_at < status.started_at):
+        return EngineHealth("starting", ("engine starting", pass_meta), None)
+    return EngineHealth("running", ("engine running", f"last pass {last_pass}"), None)
 
 
 @dataclass(frozen=True)
@@ -242,7 +469,6 @@ def worktrees_dir(claude_md: str) -> str:
         if m and _unquote(m.group(2)).lower() == "worktrees":
             return _unquote(m.group(3))
     return ""
-
 
 
 def _decision_deadline(cells: list[str], item_col: int, tracker_day: date,

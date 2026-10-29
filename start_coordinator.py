@@ -238,6 +238,15 @@ def main(argv: list[str] | None = None) -> int:
             print(notifications.stderr.strip() or "notify: service setup failed", file=sys.stderr)
     except (OSError, subprocess.TimeoutExpired) as exc:
         print(f"notify: service setup failed: {exc}", file=sys.stderr)
+    if (root / "store.db").is_file():
+        try:
+            engine_service = subprocess.run(
+                [sys.executable, str(release / "scripts" / "supervisor.py"), "--root", str(root), "ensure"],
+                capture_output=True, text=True, timeout=60)
+            if engine_service.returncode:
+                print(engine_service.stderr.strip() or "engine: service setup failed", file=sys.stderr)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"engine: service setup failed: {exc}", file=sys.stderr)
     child_env = dict(os.environ, CHIEF_OF_STUFF_RELEASE=str(release), CHIEF_OF_STUFF_WORKSPACE=str(root))
     stop = threading.Event()
     monitor = None

@@ -186,6 +186,25 @@ class CoordinatorLaunchTest(unittest.TestCase):
                 launch.assert_called_once()
                 self.assertIn("test failure", errors.getvalue())
 
+    def test_store_workspace_also_ensures_engine_supervisor_before_cli(self):
+        (self.root / "store.db").touch()
+        results = [mock.Mock(returncode=0, stderr=""), mock.Mock(returncode=2, stderr="engine: test failure")]
+        with mock.patch.object(start, "resolve", return_value="/bin/fake"), \
+             mock.patch.object(start, "login_argv", side_effect=lambda cmd: cmd), \
+             mock.patch.object(start.subprocess, "run", side_effect=results) as ensured, \
+             mock.patch.object(start.subprocess, "call", return_value=0) as launch, \
+             mock.patch.object(start.threading, "Thread"), \
+             contextlib.redirect_stderr(io.StringIO()) as errors:
+            code = start.main(["--runtime", "claude", "--root", str(self.root),
+                               "--install-dir", str(self.install_dir)])
+        self.assertEqual(code, 0)
+        self.assertEqual(ensured.call_count, 2)
+        scripts_called = [Path(call.args[0][1]).name for call in ensured.call_args_list]
+        self.assertEqual(scripts_called, ["notify_service.py", "supervisor.py"])
+        self.assertEqual(ensured.call_args_list[1].args[0][-3:], ["--root", str(self.root.resolve()), "ensure"])
+        launch.assert_called_once()
+        self.assertIn("engine: test failure", errors.getvalue())
+
     def test_watcher_stops_with_its_session_and_notifies_once_per_change(self):
         release = start.install(ROOT, self.install_dir)
         stop = threading.Event()

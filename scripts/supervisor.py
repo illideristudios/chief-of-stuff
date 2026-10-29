@@ -19,7 +19,8 @@ import shell_setup
 
 RELEASE = Path(__file__).resolve().parent.parent
 
-ACTIONS = ("install", "uninstall", "status")
+ACTIONS = ("install", "uninstall", "status", "ensure")
+DISABLED_MARKER = "engine.disabled"
 
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
 ENGINE: tuple[str, ...] = (str(RELEASE / "scripts/engine.py"),)
@@ -130,8 +131,8 @@ def data_dir() -> Path:
     return Path(os.environ.get("CLAUDE_PLUGIN_DATA") or Path.home() / ".claude/plugins/data/chief-of-stuff-chief-of-stuff")
 
 
-def version() -> str:
-    return json.loads((RELEASE / ".claude-plugin/plugin.json").read_text())["version"]
+def version(release: Path | None = None) -> str:
+    return json.loads(((release or RELEASE) / ".claude-plugin/plugin.json").read_text())["version"]
 
 
 def current_release() -> Path:
@@ -237,37 +238,55 @@ def require_macos():
         raise ServiceError("the engine supervisor requires macOS (launchd)")
 
 
-def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | None = None) -> str:
+def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | None = None,
+            *, respect_disabled: bool = False) -> str:
     """Start the engine under launchd, or restart it when the plugin version, its path or its pins changed."""
+    selected = current_release() if engine is None else RELEASE
     if engine is None:
-        engine = (str(RELEASE / "scripts/engine.py"),)
+        engine = (str(selected / "scripts/engine.py"),)
     if not engine:
         raise ServiceError("the engine entry command is empty")
     require_macos()
     root, data = root.resolve(), data_dir()
     with lock(data / "supervisor.lock"):
+        if respect_disabled and (state_dir(root) / DISABLED_MARKER).is_file():
+            return "engine: disabled"
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = str(log_path)
         # launchd does not inherit the installing shell. The probe and history read these paths.
-        env = {"CLAUDE_PLUGIN_DATA": str(data), "CHIEF_OF_STUFF_VERSION": version()}
+        env = {"CLAUDE_PLUGIN_DATA": str(data), "CHIEF_OF_STUFF_VERSION": version(selected)}
         for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "XDG_STATE_HOME"):
             if os.environ.get(name):
                 env[name] = os.environ[name]
         desired = {"Label": label("engine", root),
                    # Not resolved: the venv python is a symlink, and resolving it would leave the venv.
-                   "ProgramArguments": [str(ensure_venv(data)), *engine],
+                   "ProgramArguments": [str(ensure_venv(data, release=selected)), *engine],
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
                    # The version makes an updated plugin a changed job, which load_agent restarts.
                    "EnvironmentVariables": env,
                    "StandardOutPath": log, "StandardErrorPath": log}
-        return "engine: " + load_agent(desired, jobs_dir)
+        outcome = load_agent(desired, jobs_dir)
+        (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
+        return "engine: " + outcome
+
+
+def ensure(root: Path, jobs_dir: Path | None = None) -> str:
+    """Ensure the engine LaunchAgent is installed for store-backed workspaces unless explicitly uninstalled."""
+    resolved = root.resolve()
+    if not (resolved / "store.db").is_file():
+        return "engine: not configured"
+    if (state_dir(resolved) / DISABLED_MARKER).is_file():
+        return "engine: disabled"
+    return install(resolved, jobs_dir=jobs_dir, respect_disabled=True)
 
 
 def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
     require_macos()
+    resolved = root.resolve()
     with lock(data_dir() / "supervisor.lock"):
-        unload_agent(label("engine", root), root.resolve(), jobs_dir)
+        unload_agent(label("engine", resolved), resolved, jobs_dir)
+        atomic_write(state_dir(resolved) / DISABLED_MARKER, b"")
     return "engine: stopped"
 
 
@@ -278,7 +297,7 @@ def status(root: Path, jobs_dir: Path | None = None) -> dict:
     return {"installed": job is not None,
             "loaded": sys.platform == "darwin" and launchctl("print", f"gui/{os.getuid()}/{name}", missing_ok=True),
             "version": job and job.get("EnvironmentVariables", {}).get("CHIEF_OF_STUFF_VERSION"),
-            "current": version()}
+            "current": version(current_release())}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -291,6 +310,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "status":
             from _vendor.toon_format import encode
             print(encode(status(root)))
+        elif args.cmd == "ensure":
+            print(ensure(root))
         else:
             print(install(root) if args.cmd == "install" else uninstall(root))
         return 0

@@ -405,6 +405,61 @@ class AgentTest(SupervisorTest):
                              [str(second_venv), str(next_release / "scripts/engine.py")])
             self.assertEqual(self.job()["EnvironmentVariables"]["CHIEF_OF_STUFF_VERSION"], "1.0.2")
 
+    def test_install_from_pinned_older_release_installs_current_release_pointer(self):
+        install_dir = self.release.parent / "install"
+        old = install_dir / "versions/1.0.0-aaa"
+        new = install_dir / "versions/1.0.3-bbb"
+        for rel, ver, req in ((old, "1.0.0", "SQLAlchemy==2.0.54\n"), (new, "1.0.3", "SQLAlchemy==2.0.56\n")):
+            (rel / ".claude-plugin").mkdir(parents=True)
+            (rel / "scripts").mkdir(parents=True)
+            (rel / "chief_of_stuff.py").touch()
+            (rel / "scripts/engine.py").touch()
+            (rel / ".claude-plugin/plugin.json").write_text(json.dumps({"version": ver}))
+            (rel / "requirements.txt").write_text(req)
+        (install_dir / "current").symlink_to(new.relative_to(install_dir))
+        with mock.patch.object(supervisor, "RELEASE", old.resolve()):
+            self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: started")
+            expected_venv = supervisor.ensure_venv(self.data, release=new.resolve())
+            self.assertEqual(self.job()["ProgramArguments"],
+                             [str(expected_venv), str(new.resolve() / "scripts/engine.py")])
+            self.assertEqual(self.job()["EnvironmentVariables"]["CHIEF_OF_STUFF_VERSION"], "1.0.3")
+
+    def test_ensure_provisions_store_workspaces_and_respects_explicit_uninstall(self):
+        # Tracker-only workspace without store.db is skipped:
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: not configured")
+        self.assertFalse(self.loaded)
+
+        # Store-backed workspace automatically starts its engine LaunchAgent:
+        (self.root / "store.db").touch()
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: started")
+        self.assertTrue(self.loaded)
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: serving")
+
+        # Explicit uninstall marks the engine disabled so ensure leaves it stopped until explicit install:
+        self.assertEqual(supervisor.uninstall(self.root, self.jobs), "engine: stopped")
+        self.assertFalse(self.loaded)
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: disabled")
+        self.assertFalse(self.loaded)
+
+        self.assertEqual(supervisor.install(self.root, jobs_dir=self.jobs), "engine: started")
+        self.assertTrue(self.loaded)
+        self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: serving")
+
+    def test_ensure_respects_uninstall_completed_before_it_acquires_the_lock(self):
+        (self.root / "store.db").touch()
+        real_lock = supervisor.lock
+
+        @contextlib.contextmanager
+        def uninstall_before_lock(path, *args, **kwargs):
+            supervisor.atomic_write(supervisor.state_dir(self.root) / supervisor.DISABLED_MARKER, b"")
+            with real_lock(path, *args, **kwargs):
+                yield
+
+        with mock.patch.object(supervisor, "lock", side_effect=uninstall_before_lock):
+            self.assertEqual(supervisor.ensure(self.root, jobs_dir=self.jobs), "engine: disabled")
+        self.assertFalse(self.loaded)
+        self.assertFalse(self.jobs.exists())
+
     def test_cli_install_status_and_uninstall_manage_the_default_engine(self):
         with mock.patch.object(supervisor, "job_path",
                                side_effect=lambda name, jobs_dir=None: (jobs_dir or self.jobs) / f"{name}.plist"):
