@@ -350,8 +350,8 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
     def test_needs_input_and_the_decisions_tab_link_to_the_decisions_page(self) -> None:
         """#1122: the NEEDS INPUT tile and the Decisions tab both open /decisions."""
         html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
-        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions"><span class="panels-label">NEEDS INPUT')
-        self.assertRegex(html, r'<a href="/decisions"[^>]*>Decisions')
+        self.assertRegex(html, r'<a class="panels-tile" data-kind="blocked" href="/decisions#pending-decisions"><span class="panels-label">NEEDS INPUT')
+        self.assertRegex(html, r'<a href="/decisions#pending-decisions"[^>]*>Decisions')
 
     def test_needs_input_and_the_decisions_badge_count_open_and_blocked_decisions(self) -> None:
         """#1124: a blocked row is a failed intent a person's newer answer clears, so it still needs input."""
@@ -965,6 +965,32 @@ class RetryExhaustionDisplayTest(unittest.TestCase):
         self.assertIn("plan-3", workers)
         self.assertNotIn("re-dispatch", workers)  # no inert or unverified retry action
         self.assertIn("/issues/", workers)
+
+    def test_closing_an_exhausted_issue_clears_current_needs_input(self) -> None:
+        _seed_exhausted(self.db, KEY_A, title="Closed after exhaustion", failure="dispatch failed")
+        self.db.record_segment(KEY_A, "review", 1, (NOW - timedelta(minutes=20)).isoformat(),
+                               (NOW - timedelta(minutes=19)).isoformat(), "human_review", runner="old-review")
+        data = task_forge.page_data(self.db)
+        _, _, need, _ = workers_page._store_rows(data, set(), NOW, self.root / "trees", "")
+        self.assertEqual(need, 1)
+        self.db.upsert_item(KEY_A, forge_state="closed")
+        data = task_forge.page_data(self.db)
+        self.assertIsNone(data.exhaustion(KEY_A))
+        _, _, need, _ = workers_page._store_rows(data, set(), NOW, self.root / "trees", "")
+        self.assertEqual(need, 0)
+        tracker = "# Tracker\n\n## Log\n\n- 00:30 one-shot old-review: HUMAN REVIEW NEEDED — stuck. Changes: none.\n"
+        navigation = decision_actions.tab_counts(data.items(), data.decisions(), data.segments(), data.resumes)
+        workers = workers_page.render(tracker, bs.EMPTY, NOW, self.root / "trees", 4, db=data, navigation=navigation)
+        self.assertRegex(workers, r'<b>0</b><span class="cap">NEEDS INPUT')
+        self.assertNotIn('title="1 need input"', workers)
+        body = issue_page.render(KEY_A, [], bs.EMPTY, NOW, root=self.root, db=data)
+        self.assertNotIn('class="chip retries-exhausted"', body)
+        self.assertIn("Nothing happens next: the issue is closed", body)
+
+    def test_exhaustion_guidance_does_not_claim_resetting_the_worktree_retries(self) -> None:
+        self.assertNotIn("Reset the worktree", task_forge.EXHAUSTED_UNBLOCK)
+        self.assertIn("retry limit", task_forge.EXHAUSTED_UNBLOCK)
+        self.assertIn("hold", task_forge.EXHAUSTED_UNBLOCK)
 
     def test_a_recovered_issue_is_not_labelled_from_stale_exhausted_log_lines(self) -> None:
         _seed_exhausted(self.db, KEY_C, title="Recovered after raise",
