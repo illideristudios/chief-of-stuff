@@ -177,11 +177,23 @@ def ambiguous_issue_numbers(tasks: list[Task], home) -> set[int]:
     return {number for number, keys in identities.items() if len(keys) > 1}
 
 
+def _worker_threads(db) -> dict[str, str]:
+    """Each issue's latest T3 worker thread link, from the run records (#1178)."""
+    found = {}
+    for item in db.items():
+        runs = (db.resume(item.issue_key) or {}).get("runs", {})
+        links = [r["thread_link"] for r in runs.values() if isinstance(r, dict) and r.get("thread_link")]
+        if links:
+            found[item.issue_key] = links[-1]
+    return found
+
+
 def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None = None,
                   sources: board_sources.Sources = board_sources.EMPTY, now: datetime | None = None,
                   held: dict[Task, str] | None = None, loops: set[Task] | frozenset[Task] = frozenset(),
                   live_keys: frozenset[str] = frozenset(), live_tasks: set[Task] | frozenset[Task] = frozenset(),
-                  ambiguous_numbers: set[int] | None = None) -> list[columns.Column]:
+                  ambiguous_numbers: set[int] | None = None,
+                  threads: dict[str, str] | None = None) -> list[columns.Column]:
     """The Build board: a column per lane stage, a card per task at it. Sources add each card's changes and marks, and
     a `main` column of the changes merged today; `held` (task_forge.hold_causes) flags a card NEEDS INPUT."""
     lanes = lanes or {}
@@ -223,6 +235,8 @@ def build_columns(tasks: list[Task], lanes: dict | None, kanban: Kanban | None =
         full_key = ":" in raw_issue and "#" in raw_issue and not raw_issue.startswith(("http://", "https://"))
         issue = store_label(raw_issue, sources.home) if full_key else (issue_key(task.issue, sources.home) if changes or url else raw_issue)
         refs = ((issue, page(raw_issue, url)),) * bool(issue) + tuple((c.ref, change_href(c)) for c in changes)
+        if thread := (threads or {}).get(task.issue):  # #1178: the T3 thread of the task's worker
+            refs += (("T3 thread", thread),)
         lane = lanes.get(task.lane.strip())
         finished = task.kind == "done" or (lane and lane.stages and stage == lane.stages[-1])
         marks = (change_marks(changes, queue, shared)
@@ -407,8 +421,9 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     live_keys = frozenset(s.issue_key for s in db.segments() if s.ended_at is None) if db is not None else frozenset()
     known = [t for d, _ in stage_log or [] for t in rows[d]] + tasks
     ambiguous_numbers = ambiguous_issue_numbers(known, sources.home)
+    threads = _worker_threads(db) if db is not None else {}
     build_cols = build_columns(tasks, lanes, kanban, sources, now, held, loops, live_keys,
-                               source_worker_tasks(sources, tasks), ambiguous_numbers)
+                               source_worker_tasks(sources, tasks), ambiguous_numbers, threads)
     inline = lambda text: markdown_inline(text, decision_page.Linker(cfg.backlog).resolve)  # noqa: E731
     build_html = (f'<section id="flow"><h2>Build</h2>\n<div class="meta">{_plural(issues, "issue")} · {_plural(changes, "merge request")}</div>\n'
                   f'{columns.render(build_cols, inline=inline, linked_inline=lambda text: markdown_inline(text, links=False))}'
