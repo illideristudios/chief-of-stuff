@@ -9,6 +9,7 @@ from __future__ import annotations
 
 
 import argparse
+import contextlib
 import hashlib
 import html
 import re
@@ -18,7 +19,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from decision_actions import current_rows, state_of, tab_counts as store_tab_counts
+from decision_actions import current_rows, state_of
 from estimate import (ALL_SIZES, NO_ESTIMATE, SIZES, day_bar, estimates, history, horizon,  # noqa: E402
                       nearest_deadline, queue_durations, task_end as _end)
 from md import BULLET, section as _section, unquote as _unquote  # noqa: E402
@@ -395,7 +396,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     # The board's estimate, by item: where the Flow draws a row's end and what an epic's forecast is (#230).
     ends = {t.item: end[0] for t in active if (end := _end(t, cfg, now, now, est))[1] in ("due", "derived")}
     if db is not None:
-        navigation = store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
+        navigation = decision_page.store_navigation(db, decisions or [])
     else:
         navigation = tab_counts(tracker_text, cfg, now, lanes or {}, kanban, sources, pending_refs, looked,
                                 [*(look_log or []), *(stage_log or [])], slots, held=held, ends=ends, tracker_day=tracker_day)
@@ -495,9 +496,12 @@ figure{{margin:0;padding:0;background:none;border:0}}
 # --- cli -----------------------------------------------------------------------------------------
 
 
-def write(root: Path, day: str | None = None, *, now: datetime | None = None, db: PageData | None = None) -> tuple[Path, Config, datetime, str, dict]:
-    """Write `<day>-board.html` and `decisions.html` into the pages dir. The page server calls this in
-    process; a missing CLAUDE.md, tracker or setting raises ConfigError."""
+def write(root: Path, day: str | None = None, *, now: datetime | None = None, db: PageData | None = None,
+          target: str = "all") -> tuple[Path, Config, datetime, str, dict]:
+    """Write the board and decisions, or only the requested server page under its own lock.
+
+    A missing CLAUDE.md, tracker or setting raises ConfigError.
+    """
     if not (root / "CLAUDE.md").is_file():
         raise ConfigError(f"no CLAUDE.md at {root}")
     cfg = read_config(root)
@@ -521,9 +525,6 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
     except SettingsError as e:
         raise ConfigError(str(e)) from None
     ctx = decision_page.decision_context(root, tracker_day, now)
-    navigation = (store_tab_counts(db.items(), db.decisions(), db.segments(), db.resumes)
-                  if db is not None else None)
-    pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
     reach = (now - flow_chart.WINDOWS[-1][1]).date()
     looked = looked_before(out.parent)
     sources = board_sources.load(out.parent)
@@ -549,6 +550,23 @@ def write(root: Path, day: str | None = None, *, now: datetime | None = None, db
             logs.append((d, text))
     stage_log = sorted((d, text) for d, text in logs if reach <= d)
     look_log = sorted((d, text) for d, text in logs if since_day <= d < reach)
+    # Same lead counts the board draws (#965): store rows (with resumes for exhaustion), or the tracker.
+    if db is not None:
+        navigation = decision_page.store_navigation(db, decision_page.entries(out.parent, ctx))
+    else:
+        pending_preview = decision_page.entries(out.parent, ctx)
+        navigation = tab_counts(tracker_text, cfg, now, settings.lanes, settings.kanban, sources,
+                                decision_page.held_refs(pending_preview, ctx), looked,
+                                [*look_log, *stage_log], settings.workers.max_concurrency or 1,
+                                tracker_day=tracker_day)
+    if target == "all":
+        pending = decision_page.write_all(out.parent, ctx, day, root, db=db, navigation=navigation)
+    else:
+        pending = decision_page.entries(out.parent, ctx)
+        if target == "decisions":
+            html, pending = decision_page.index(out.parent, ctx, day, pending, db=db, navigation=navigation)
+            write_if_changed(out.parent / "decisions.html", html)
+            return out, cfg, now, tracker_text, req_texts
     page = render(tracker_text, cfg, now, lanes=settings.lanes,
                   tracker_day=tracker_day, decisions=pending, kanban=settings.kanban,
                   sources=sources,
@@ -566,7 +584,10 @@ def main(argv: list[str] | None = None, *, writer=write) -> Path:
     ap.add_argument("--root", default=".", help="workspace root holding CLAUDE.md")
     args = ap.parse_args(argv)
     try:
-        out, cfg, now, tracker_text, req_texts = writer(Path(args.root), args.date)
+        root = Path(args.root)
+        lock = decision_page.page_render_lock(root) if (root / "CLAUDE.md").is_file() else contextlib.nullcontext()
+        with lock:
+            out, cfg, now, tracker_text, req_texts = writer(root, args.date)
     except ConfigError as e:
         sys.exit(f"render_board: {e}")
     parsed = parse_tracker(tracker_text)
