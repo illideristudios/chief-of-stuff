@@ -892,6 +892,39 @@ def _release_id(release: Path) -> str:
     return hashlib.sha256(os.fsencode(release.resolve())).hexdigest()[:24]
 
 
+def _version_tuple(value: str) -> tuple[int, ...] | None:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value):
+        return None
+    return tuple(int(part) for part in value.split("."))
+
+
+def _selected_for_rollback(root: Path | None) -> bool:
+    """A fallback to this release is not an explicit selection of it."""
+    release = supervisor.RELEASE.resolve()
+    explicit = getattr(supervisor, "_explicit_install", None)
+    if root is not None and explicit is not None:
+        pending = explicit(root)
+        if pending is not None:
+            return Path(pending["release"]).resolve() == release
+    pointer = release.parent.parent / "current"
+    try:
+        return (release.parent.name == "versions" and pointer.is_symlink()
+                and pointer.resolve(strict=True) == release
+                and (release / "chief_of_stuff.py").is_file())
+    except (OSError, RuntimeError):
+        return False
+
+
+def _newer_server(who: str) -> bool:
+    match = re.match(rf"^{re.escape(SERVER)}/([0-9]+(?:\.[0-9]+)*)(?:\s|$)", who)
+    running = _version_tuple(match[1]) if match else None
+    ours = _version_tuple(VERSION)
+    if running is None or ours is None:
+        return False
+    width = max(len(running), len(ours))
+    return running + (0,) * (width - len(running)) > ours + (0,) * (width - len(ours))
+
+
 def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
     """Probe, replace and start under the same lock, including concurrent CLI ensures.
 
@@ -908,6 +941,8 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
         if identity and identity[1] == RELEASE_ID:
             return "pages: serving"
         if identity and root is not None and identity[1] == _release_id(_selected_release(root)):
+            return "pages: serving"
+        if _newer_server(who) and not _selected_for_rollback(root):
             return "pages: serving"
         _stop(pages_dir, port, stop)
         restart = True

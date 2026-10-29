@@ -529,6 +529,53 @@ class EnsureTest(unittest.TestCase):
         self.assertEqual(errors, [])
         popen.assert_not_called()
 
+    def test_stale_ensure_preserves_newer_server_with_or_without_identity(self):
+        root = self.dir.parent / "workspace"
+        for identity in ("", " release-" + "a" * 24):
+            for selected in (None, root):
+                with self.subTest(identity=identity, root=selected), \
+                     mock.patch.object(pg, "VERSION", "1.2.3"), \
+                     mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0{identity}"), \
+                     mock.patch.object(pg, "_stop", side_effect=AssertionError("newer server stopped")), \
+                     mock.patch.object(pg.subprocess, "Popen", side_effect=AssertionError("server replaced")):
+                    self.assertEqual(pg.ensure(self.dir, self.port, self.log, selected), "pages: serving")
+
+    def test_authoritative_installed_rollback_replaces_newer_server(self):
+        root = self.dir.parent / "workspace"
+        with tempfile.TemporaryDirectory() as tmp:
+            release = Path(tmp) / "versions" / "old"
+            release.mkdir(parents=True)
+            (release / "chief_of_stuff.py").touch()
+            (release.parent.parent / "current").symlink_to(release)
+            with mock.patch.object(pg.supervisor, "RELEASE", release), \
+                 mock.patch.object(pg, "VERSION", "1.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("rollback selected")):
+                with self.assertRaisesRegex(RuntimeError, "rollback selected"):
+                    pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_explicit_rollback_replaces_newer_server_only_for_selected_release(self):
+        root = self.dir.parent / "workspace"
+        for selected, should_stop in ((pg.supervisor.RELEASE, True), (root / "other", False)):
+            with self.subTest(selected=selected), \
+                 mock.patch.object(pg.supervisor, "_explicit_install", return_value={"release": str(selected)}, create=True), \
+                 mock.patch.object(pg, "VERSION", "1.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")) as stopped:
+                if should_stop:
+                    with self.assertRaisesRegex(RuntimeError, "selected rollback"):
+                        pg.ensure(self.dir, self.port, self.log, root)
+                else:
+                    self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+                    stopped.assert_not_called()
+
+    def test_versions_compare_numerically_and_equal_versions_can_change_release(self):
+        with mock.patch.object(pg, "VERSION", "1.9.0"):
+            self.assertTrue(pg._newer_server(f"{pg.SERVER}/1.10.0"))
+            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.9"))
+            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.9.0.0"))
+            self.assertFalse(pg._newer_server(f"{pg.SERVER}/1.10.0-rc1"))
+
     def test_an_older_server_is_restarted(self):
         # A server started before `--root` existed never renders; `--ensure` replaces it, by its pid file.
         self.addCleanup(self.stop)
