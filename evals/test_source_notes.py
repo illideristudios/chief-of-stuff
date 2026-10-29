@@ -208,8 +208,8 @@ class NotesPage(SourcePage):
                 out = sp.write(root, root / "pages", 109)
                 query.assert_not_called()
             html = out.read_text()
-            self.assertIn("Review notes unavailable", html)
-            self.assertIn("Cap uploads", html)
+            self.assertNotIn("Cap uploads", html)
+            self.assertIn("Nothing to diff", html)
 
             fresh = replace(self.mr, url=f"{new.host}/{new.project}/-/merge_requests/48", title="New project change")
             with mock.patch.object(bs, "forge", return_value=({}, {fresh.ref: fresh}, {})), \
@@ -240,7 +240,7 @@ class NotesPage(SourcePage):
         with mock.patch.object(bs, "load", return_value=src), mock.patch.object(sp, "notes") as query:
             out = sp.write(root, root / "pages", 109)
             query.assert_not_called()
-        self.assertIn("Review notes unavailable", out.read_text())
+        self.assertIn("Nothing to diff", out.read_text())
 
 
 def iso(hhmm: str) -> str:

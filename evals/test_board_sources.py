@@ -22,6 +22,10 @@ sys.path[:0] = [str(Path(__file__).resolve().parents[1] / "scripts"), str(Path(_
 
 import board_sources as bs  # noqa: E402
 import render_board as rb  # noqa: E402
+import issue_page as ip  # noqa: E402
+import task_forge  # noqa: E402
+import settings as st  # noqa: E402
+from tracker import parse_tracker  # noqa: E402
 import workers_page  # noqa: E402
 from tracker import issue_key  # noqa: E402
 from workspace import parse_coordinator  # noqa: E402
@@ -1203,6 +1207,137 @@ class CarriedStateKeepsItsHomeTest(unittest.TestCase):
         claude.write_text(claude.read_text().replace("repo o/app", "repo acme/web"))
         got = bs.refresh(root, NOW, gh=FakeGh())
         self.assertEqual(got.home, bs.backlog.GitHubBacklog("acme/web"))
+
+    def test_page_view_uses_configured_identity_without_destroying_stale_cache(self):
+        root, first = self.refreshed()
+        claude = root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("repo o/app", "repo acme/web"))
+        stale = bs.refresh(root, NOW, gh=FakeGh(fail=True))
+        home = bs.backlog.GitHubBacklog("acme/web")
+        view = bs.for_home(stale, home)
+        self.assertEqual(view.home, home)
+        self.assertEqual((view.issues, view.changes), ({}, {}))
+        self.assertEqual((view.errors, view.fetched), (stale.errors, stale.fetched))
+        self.assertEqual(bs.load(root / "pages").issues, first.issues)
+        self.assertEqual(bs.for_home(stale, None).issues, {})
+        self.assertEqual(bs.for_home(stale, None).changes, {})
+        self.assertEqual(bs.for_home(stale, first.home).issues, first.issues)
+        new_forge = FakeGh()
+        def new_gh(args):
+            code, out, err = new_forge(args)
+            return code, out.replace("https://github.com/o/app/", "https://github.com/acme/web/"), err
+        recovered = bs.refresh(root, NOW, gh=new_gh)
+        self.assertEqual(bs.for_home(recovered, home).issues["#115"].state, "open")
+
+    def test_one_failed_panel_after_home_change_is_not_carried(self):
+        for failed in ("issues", "changes"):
+            with self.subTest(failed=failed):
+                root, _ = self.refreshed()
+                claude = root / "CLAUDE.md"
+                claude.write_text(claude.read_text().replace("repo o/app", "repo acme/web"))
+                panels = (None, {}) if failed == "issues" else ({}, None)
+                with mock.patch.object(bs, "forge", return_value=(*panels, {failed: "unavailable"})):
+                    got = bs.refresh(root, NOW)
+                self.assertEqual((got.issues, got.changes), ({}, {}))
+                self.assertEqual(got.home, bs.backlog.GitHubBacklog("acme/web"))
+
+    def test_credential_only_change_keeps_cached_facts(self):
+        home = bs.backlog.Backlog("https://forge.example", "group/project", env="OLD")
+        current = replace(home, env="NEW", account="other")
+        cached = bs.Sources({}, {"#1": bs.Issue("#1", "https://forge.example/group/project/-/issues/1", "Old", "open", ())}, {}, (), {"kanban": "failed"}, home)
+        view = bs.for_home(cached, current)
+        self.assertEqual(view.issues, cached.issues)
+        self.assertEqual(view.home, current)
+
+    def test_board_issue_flow_and_stage_do_not_attach_old_home(self):
+        root, _ = self.refreshed()
+        claude = root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("repo o/app", "repo acme/web"))
+        stale = bs.refresh(root, NOW, gh=FakeGh(fail=True))
+        tracker = (root / "daily" / f"{DAY}-tracker.md").read_text().replace(
+            "| size | issue |", "| size | lane | stage | issue |").replace(
+            "| M | #118 |", "| M | build | implement | #118 |").replace(
+            "| S | #115 |", "| S | build | implement | #115 |")
+        cfg = parse_coordinator(claude.read_text(), today=NOW.date())
+        lanes = {"build": st.Lane(("implement", "merge"), ())}
+        with mock.patch.object(rb.flow_chart, "build", wraps=rb.flow_chart.build) as flow:
+            board = rb.render(tracker, cfg, NOW, lanes=lanes, sources=stale)
+        self.assertEqual(flow.call_args.kwargs["home"], cfg.backlog)
+        self.assertEqual(flow.call_args.kwargs["ended"], {})
+        self.assertNotIn("PR 41", board)
+        self.assertIn("not logged in", board)
+        page = ip.render(115, [(NOW.date(), tracker)], stale, NOW, lanes, cfg)
+        self.assertNotIn("Issue 115", page)
+        self.assertNotIn("PR 41", page)
+        task = next(t for t in parse_tracker(tracker).tasks if t.issue == "#118")
+        view = bs.for_home(stale, cfg.backlog)
+        self.assertEqual(task_forge.effective_stage(task, view, lanes), "implement")
+
+    def test_rendering_follows_each_refresh_outcome(self):
+        root = workspace("GitLab; host https://forge.example; project group/old; token env OLD")
+        path = root / "daily" / f"{DAY}-tracker.md"
+        tracker = ("## Tasks\n\n| name | item | owner | state | since | due | size | lane | stage | issue | checklist |\n"
+                   "|---|---|---|---|---|---|---|---|---|---|---|\n"
+                   "| Build | Build thing | Robin | running 01:00 | 01:00 | | S | build | implement | #7 | |\n"
+                   "\n## Log\n\n- 01:00 stage: Build → implement\n")
+        path.write_text(tracker)
+        lanes = {"build": st.Lane(("implement", "merge"), ())}
+        old_issue = bs.Issue("#7", "https://forge.example/group/old/-/issues/7", "Old issue", "closed", (), closed_at=NOW)
+        old_change = bs.Change("!1", "https://forge.example/group/old/-/merge_requests/1", "Old change", "merged",
+                               False, "passed", True, 1, NOW, "main", (), ("#7",))
+        new_issue = replace(old_issue, url="https://forge.example/group/new/-/issues/7", title="New issue", state="open", closed_at=None)
+        new_change = replace(old_change, url="https://forge.example/group/new/-/merge_requests/1", title="New change", state="open", merged_at=None)
+        def refresh(issues, changes):
+            errors = {name: "offline" for name, panel in (("kanban", issues), ("merge requests", changes)) if panel is None}
+            with mock.patch.object(bs, "forge", return_value=(issues, changes, errors)):
+                return bs.refresh(root, NOW)
+        def check(got, title, merged):
+            cfg = parse_coordinator((root / "CLAUDE.md").read_text(), today=NOW.date())
+            with mock.patch.object(rb.flow_chart, "build", wraps=rb.flow_chart.build) as flow:
+                board = rb.render(tracker, cfg, NOW, lanes=lanes, sources=got)
+                board_call = flow.call_args
+                page = ip.render(7, [(NOW.date(), tracker)], got, NOW, lanes, cfg)
+                page_call = flow.call_args
+            for call in (board_call, page_call):
+                self.assertEqual(call.kwargs["home"], cfg.backlog)
+                self.assertEqual(bool(call.kwargs["ended"]), merged)
+            for candidate in ("Old issue", "New issue"):
+                self.assertEqual(candidate in page, candidate == title)
+            self.assertEqual("Old change" in board, title == "Old issue")
+            view = bs.for_home(got, cfg.backlog)
+            task = parse_tracker(tracker).tasks[0]
+            self.assertEqual(task_forge.effective_stage(task, view, lanes), "merge" if merged else "implement")
+            if got.errors:
+                self.assertIn("offline", board)
+        old = refresh({"#7": old_issue}, {"!1": old_change})
+        check(old, "Old issue", True)
+        claude = root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("token env OLD", "token env NEW"))
+        check(refresh(None, None), "Old issue", True)
+        claude.write_text(claude.read_text().replace("group/old", "group/new"))
+        stale = refresh(None, None)
+        check(stale, "", False)
+        configured = claude.read_text()
+        claude.write_text("\n".join(line for line in configured.splitlines() if "Backlog:" not in line) + "\n")
+        check(stale, "", False)
+        claude.write_text(configured)
+        check(refresh({"#7": new_issue}, None), "New issue", False)
+        check(refresh({"#7": new_issue}, {"!1": new_change}), "New issue", False)
+
+    def test_source_page_does_not_read_or_render_old_home_change(self):
+        from types import SimpleNamespace
+        import source_page
+        root, _ = self.refreshed()
+        claude = root / "CLAUDE.md"
+        claude.write_text(claude.read_text().replace("repo o/app", "repo acme/web"))
+        bs.refresh(root, NOW, gh=FakeGh(fail=True))
+        cfg = bs.read_config(root)
+        tracker = (root / "daily" / f"{DAY}-tracker.md").read_text()
+        with mock.patch.object(source_page, "inputs", return_value=(cfg, NOW, [(NOW.date(), tracker)], SimpleNamespace(graph=None))), \
+             mock.patch.object(source_page, "notes") as notes:
+            page = source_page.write(root, root / "pages", 118)
+        notes.assert_not_called()
+        self.assertNotIn("PR 58", page.read_text())
 
 
 class IssueKeyTest(unittest.TestCase):

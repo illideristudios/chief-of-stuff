@@ -229,6 +229,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
            pending_refs: Container[str] = frozenset(), navigation: dict | None = None, db: PageData | None = None) -> str | None:
     """The page, or None when no task in `trackers` or the store names issue `number`. `cfg` resolves a task's due (the
     board's deadlines); `graph`, `pages` and `root` draw Architecture as the decision page draws its module graph."""
+    sources = board_sources.for_home(sources, cfg.backlog if cfg else None)
     identity = str(number)
     full_key = identity if "#" in identity else None
     numeric = issue_number(identity) if full_key else int(identity)

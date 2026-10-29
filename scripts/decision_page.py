@@ -458,7 +458,8 @@ def decision_context(root: Path, day: date, now: datetime | None = None) -> Cont
         settings = None
     kanban = settings and settings.kanban
     pages = root / cfg.pages_dir if cfg.pages_dir else tracker.parent
-    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks, board_sources.load(pages),
+    return Context(now, tuple(rows), tuple(sorted(log, key=lambda x: x[0])), tasks,
+                   board_sources.for_home(board_sources.load(pages), cfg.backlog),
                    kanban.human_review_label if kanban else "", cfg.user, cfg.backlog,
                    settings and settings.graph, pages)
 

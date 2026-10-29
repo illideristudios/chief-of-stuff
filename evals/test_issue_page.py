@@ -116,7 +116,7 @@ def page(number: int = 109, src: bs.Sources | None = None, today: str | None = N
     if ip is None:
         raise AssertionError("scripts/issue_page.py does not exist yet")
     trackers = trackers or [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, today if today is not None else today_tracker())]
-    return ip.render(number, trackers, src if src is not None else sources(MR, OTHER), NOW, LANES)
+    return ip.render(number, trackers, src if src is not None else sources(MR, OTHER), NOW, LANES, BoardTest().cfg())
 
 
 def text(html: str) -> str:
@@ -800,7 +800,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
     NOW2 = datetime.combine(TODAY, time(20, 0), CT)
 
     def task_page(self, today: str, changes: tuple = (), now: datetime = NOW2) -> str:
-        return ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, today)], sources(*changes), now, LANES)
+        return ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, today)], sources(*changes), now, LANES, BoardTest().cfg())
 
     @staticmethod
     def flow_rows(render_call) -> dict[str, tuple]:
@@ -835,7 +835,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
         # Acceptance 3: "Its elapsed and waiting totals stop at the merge time" — not keep counting past it. In
         # work_trackers() (#200's fixture from CompactWorkersTest), rev-w2 is still open at NOW (02:10); merged at
         # 01:40 it caps to "Worked 4h25m of 5h35m elapsed · 1h10m waiting", not the uncapped "4h55m of 6h05m".
-        html = ip.render(109, work_trackers(), sources(merged("#109", "01:40", 48)), NOW, LANES)
+        html = ip.render(109, work_trackers(), sources(merged("#109", "01:40", 48)), NOW, LANES, BoardTest().cfg())
         start = re.search(r"<h2[^>]*>\s*Flow\b", html)
         self.assertIsNotNone(start, "no Flow section")
         after = next((m.start() for m in re.finditer(r"<h2[^>]*>\s*(?!Flow\b)", html[start.end():])), None)
@@ -860,7 +860,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
                                                        kanban=KANBAN, stage_log=[(YESTERDAY, YESTERDAY_TRACKER)],
                                                        sources=src))
         task_rows = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, TODAY_START)],
-                                                     src, self.NOW2, LANES))
+                                                     src, self.NOW2, LANES, cfg))
         self.assertIn("Upload size limit", board_rows)
         self.assertIn("Upload size limit", task_rows)
         self.assertEqual(board_rows["Upload size limit"][1].note, task_rows["Upload size limit"][1].note)
@@ -878,7 +878,7 @@ class ForgeMergedTaskPageTest(unittest.TestCase):
                                                          kanban=kanban, stage_log=[(YESTERDAY, YESTERDAY_TRACKER)],
                                                          sources=src, pending_refs=refs))
                 task = self.flow_rows(lambda: ip.render(109, [(YESTERDAY, YESTERDAY_TRACKER), (TODAY, TODAY_START)],
-                                                        src, self.NOW2, LANES, kanban=kanban, pending_refs=refs))
+                                                        src, self.NOW2, LANES, cfg, kanban=kanban, pending_refs=refs))
                 self.assertEqual(board["Upload size limit"][1].note, f"needs input · {cause}")
                 self.assertEqual(task["Upload size limit"][1].note, f"needs input · {cause}")
 
@@ -911,7 +911,7 @@ def midnight_page(clock: str, now: datetime) -> str:
         one_shot.update_tracker(path, "Cap uploads", "impl-1", "Robin", "done", "implemented the limit",
                                  "src/upload/limits.py", "22:15")
         closed = path.read_text().replace("| Robin | waiting |", f"| Robin | done {clock} |")
-    return ip.render(109, [(YESTERDAY, closed)], sources(), now, LANES)
+    return ip.render(109, [(YESTERDAY, closed)], sources(), now, LANES, BoardTest().cfg())
 
 
 def flow_section(html: str) -> str:
@@ -1067,7 +1067,7 @@ class TaskPageLinksAndSafetyTest(unittest.TestCase):
                 pdata = task_forge.page_data(db)
 
                 # 1. Open task with open change and verified live branch:
-                open_html = ip.render(open_key, [], src, NOW, LANES, db=pdata)
+                open_html = ip.render(open_key, [], src, NOW, LANES, replace(BoardTest().cfg(), backlog=home), db=pdata)
                 check_links(self, open_html)
                 open_source = f"{ip.issue_href(open_key)}/source"
                 self.assertIn(f'href="{open_issue_url}"', re.search(r"<header\b.*?</header>", open_html, re.S)[0])
@@ -1082,7 +1082,7 @@ class TaskPageLinksAndSafetyTest(unittest.TestCase):
                 self.assertIn(f'href="{open_source}"', open_refs)
 
                 # 2. Merged task with merged change, no changed-file list, and deleted branch:
-                merged_html = ip.render(merged_key, [], src, NOW, LANES, db=pdata)
+                merged_html = ip.render(merged_key, [], src, NOW, LANES, replace(BoardTest().cfg(), backlog=home), db=pdata)
                 check_links(self, merged_html)
                 merged_source = f"{ip.issue_href(merged_key)}/source"
                 self.assertNotIn("No change names #5 yet", merged_html)
@@ -1095,7 +1095,7 @@ class TaskPageLinksAndSafetyTest(unittest.TestCase):
                 self.assertIn(f'href="{merged_source}"', merged_refs)
 
                 # 3. Task with no change yet, only a local worktree branch in resume:
-                early_html = ip.render(early_key, [], src, NOW, LANES, db=pdata)
+                early_html = ip.render(early_key, [], src, NOW, LANES, replace(BoardTest().cfg(), backlog=home), db=pdata)
                 check_links(self, early_html)
                 early_source = f"{ip.issue_href(early_key)}/source"
                 early_refs = section(early_html, "References")

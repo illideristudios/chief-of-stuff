@@ -3,6 +3,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,6 +14,10 @@ import source_page
 import task_forge
 from tracker import parse_tracker
 from test_board_sources import gl_mr
+
+
+def configured(home):
+    return replace(tip.BoardTest().cfg(), backlog=home)
 
 
 class IdentityTest(unittest.TestCase):
@@ -74,7 +79,8 @@ class IdentityTest(unittest.TestCase):
         trackers = [(tip.TODAY - timedelta(days=1), old), (tip.TODAY, current)]
         for render in (issue_page.render, source_page.render):
             with self.subTest(render=render.__module__):
-                html = render(109, trackers, src, tip.NOW)
+                html = (render(109, trackers, src, tip.NOW, cfg=configured(home)) if render is issue_page.render
+                        else render(109, trackers, src, tip.NOW))
                 self.assertIn("Home", html)
                 self.assertNotIn("Other issue", html)
                 self.assertNotIn("Other change", html)
@@ -82,7 +88,9 @@ class IdentityTest(unittest.TestCase):
         other_row = next(line for line in old.splitlines() if line.startswith("| Old task |"))
         ambiguous = [(tip.TODAY, current.replace("\n\n## File ownership", "\n" + other_row + "\n\n## File ownership"))]
         for render in (issue_page.render, source_page.render):
-            self.assertIsNone(render(109, ambiguous, src, tip.NOW))
+            html = (render(109, ambiguous, src, tip.NOW, cfg=configured(home)) if render is issue_page.render
+                    else render(109, ambiguous, src, tip.NOW))
+            self.assertIsNone(html)
 
     def test_historical_nested_projects_do_not_share_flow_or_history(self):
         home = self.home
@@ -93,7 +101,7 @@ class IdentityTest(unittest.TestCase):
                    .replace('Upload size limit', 'New task')
                    .replace('- 00:01 opened the day', '- 00:05 stage: New task → pr'))
         src = bs.Sources({}, {}, {}, (), {}, home=home)
-        html = issue_page.render(109, [(tip.YESTERDAY, old), (tip.TODAY, current)], src, tip.NOW, tip.LANES)
+        html = issue_page.render(109, [(tip.YESTERDAY, old), (tip.TODAY, current)], src, tip.NOW, tip.LANES, configured(src.home))
         self.assertIsNotNone(html)
         self.assertIn('New task', html)
         self.assertNotIn('Old task', html)
@@ -122,7 +130,7 @@ class IdentityTest(unittest.TestCase):
         self.assertIn('gitlab:labs.example.test/team/nested/other#7', src.issues)
         self.assertTrue(any('team/nested/other' in q for q in fake.queries))
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
-        html = issue_page.render(7, [(NOW.date(), tracker)], src, NOW)
+        html = issue_page.render(7, [(NOW.date(), tracker)], src, NOW, cfg=bs.read_config(root))
         self.assertIn('Sibling issue', html)
         self.assertIn('MR 42', html)
 
@@ -143,8 +151,8 @@ class IdentityTest(unittest.TestCase):
         self.assertEqual(task_forge.task_changes(sibling_task, src), (changes['o/sibling#42'],))
         sibling_tracker = tip.TODAY_START.replace('#109', 'o/sibling#7')
         home_tracker = tip.TODAY_START.replace('#109', '#7')
-        self.assertIn('PR 42', issue_page.render(7, [(tip.TODAY, sibling_tracker)], src, tip.NOW))
-        self.assertNotIn('PR 42', issue_page.render(7, [(tip.TODAY, home_tracker)], src, tip.NOW))
+        self.assertIn('PR 42', issue_page.render(7, [(tip.TODAY, sibling_tracker)], src, tip.NOW, cfg=configured(home)))
+        self.assertNotIn('PR 42', issue_page.render(7, [(tip.TODAY, home_tracker)], src, tip.NOW, cfg=configured(home)))
         body_only = {**pr, 'closingIssuesReferences': {'nodes': []}}
         self.assertEqual(bs._gh_change('o/sibling#42', body_only, '', home.repo, 'o/sibling').issues, ('o/sibling#7',))
 
@@ -154,7 +162,7 @@ class IdentityTest(unittest.TestCase):
         current = (tip.TODAY_START.replace('#109', 'team/nested/new#109')
                    .replace('- 00:01 opened the day', '- 00:05 stage: Upload size limit → pr'))
         src = bs.Sources({}, {}, {}, (), {}, home=self.home)
-        html = issue_page.render(109, [(tip.YESTERDAY, old), (tip.TODAY, current)], src, tip.NOW, tip.LANES)
+        html = issue_page.render(109, [(tip.YESTERDAY, old), (tip.TODAY, current)], src, tip.NOW, tip.LANES, configured(src.home))
         self.assertNotIn('00:03', html)
         self.assertIn('00:05', html)
         duplicate = next(line for line in old.splitlines() if line.startswith('| Upload size limit |'))
@@ -276,10 +284,10 @@ class ReviewFindingsTest(unittest.TestCase):
         self.assertIn('00:05', html)
         other = row.replace('#109', 'o/other#109')
         reused = current.replace('\n\n## File ownership', '\n' + other + '\n\n## File ownership')
-        html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, old), (tip.TODAY, reused)], src, tip.NOW, tip.LANES)
+        html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, old), (tip.TODAY, reused)], src, tip.NOW, tip.LANES, configured(src.home))
         self.assertNotIn('00:05', html)
         ambiguous_old = old.replace('\n\n## File ownership', '\n' + other + '\n\n## File ownership')
-        html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, ambiguous_old), (tip.TODAY, current)], src, tip.NOW, tip.LANES)
+        html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, ambiguous_old), (tip.TODAY, current)], src, tip.NOW, tip.LANES, configured(src.home))
         self.assertNotIn('00:05', html)
 
 
@@ -318,7 +326,7 @@ class IndependentReviewRegressions(unittest.TestCase):
             self.assertNotIn('MR 42', html)
         gitlab_tracker = tracker.replace('https://github.com/team/other/issues/7', 'gitlab:labs.example.test/team/other#7')
         self.assertEqual(task_forge.task_changes(parse_tracker(gitlab_tracker).tasks[0], src), (src.changes["!42"],))
-        self.assertIn('MR 42', issue_page.render(7, [(NOW.date(), gitlab_tracker)], src, NOW))
+        self.assertIn('MR 42', issue_page.render(7, [(NOW.date(), gitlab_tracker)], src, NOW, cfg=bs.read_config(root)))
         foreign_tracker = tracker.replace('https://github.com/team/other/issues/7', 'gitlab:foreign.example/team/other#7')
         self.assertEqual(task_forge.task_changes(parse_tracker(foreign_tracker).tasks[0], src), ())
 

@@ -176,6 +176,17 @@ class Sources:
 EMPTY = Sources({}, {}, {}, (), {})
 
 
+def for_home(sources: Sources, home: backlog.Backlog | backlog.GitHubBacklog | None) -> Sources:
+    """View cached forge facts only when their home is the currently configured forge identity.
+
+    Keep timestamps, errors and workers so stale-source warnings remain visible. Never rewrite the cache:
+    returning to its old home after a failed refresh can still use its last good facts.
+    """
+    same = (sources.home is not None and home is not None and type(sources.home) is type(home)
+            and backlog.home_of(sources.home) == backlog.home_of(home))
+    return replace(sources, home=home, issues=sources.issues if same else {}, changes=sources.changes if same else {})
+
+
 def _when(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 

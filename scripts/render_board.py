@@ -345,6 +345,7 @@ def render(tracker_text: str, cfg: Config, now: datetime, lanes: dict | None = N
     `stage_log` is (day, tracker text) for the earlier days the Flow charts reach back over; `slots` is how many queued tasks run at once, `[workers] max_concurrency`.
     `pending_refs` is decision_page.held_refs; `looked`, the look before the latest (workspace.looked_before), and
     `look_log` the earlier days needed for hold starts; `loop_log` the active tasks' older fix history."""
+    sources = board_sources.for_home(sources, cfg.backlog)
     cfg = with_decision_deadlines(cfg, tracker_text, tracker_day or now.date())
     sha = hashlib.sha256(tracker_text.encode()).hexdigest()
     tracker = parse_tracker(tracker_text)
