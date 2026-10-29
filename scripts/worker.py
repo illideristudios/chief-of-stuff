@@ -356,7 +356,10 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
     got = forge.issue(int(issue_key.rpartition("#")[2]))
     if not got.ok or got.issue is None:
         raise RuntimeError(f"cannot read worker issue: {got.error}")
-    assignment = dispatch_prompt.compose_issue(row, got.issue.title, got.issue.body, stage, actor, root=root,
+    body = got.issue.body
+    if stage != "review" and (changes := data.get("architect_changes")):
+        body += f"\n\n## Architect findings for {changes['head']}\n\n{changes['reply']}\n"
+    assignment = dispatch_prompt.compose_issue(row, got.issue.title, body, stage, actor, root=root,
                                                skills=defaults.skills if defaults else (), rules=rules,
                                                require_green=require_green)
     number = int(issue_key.rpartition("#")[2])

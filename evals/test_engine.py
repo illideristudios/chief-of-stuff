@@ -214,6 +214,103 @@ class EngineTest(unittest.TestCase):
     def findings(self, attempt=1, counts=None):
         review_report(self.db, KEY, attempt, counts)
 
+    def architect_gate(self, replies=()):
+        self.forge.rows[0].update(stage="review")
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True})
+        self.db.upsert_item(KEY, stage="review")
+        self.db.record_segment(KEY, "review", 1, (NOW - timedelta(minutes=2)).isoformat(),
+                               (NOW - timedelta(minutes=1)).isoformat(), "done")
+        self.findings()
+        self.architect_comments = [tf.backlog.Note("architect", body=body) for body in replies]
+        self.architect_requests = []
+        self.forge.comments = lambda number: tuple(self.architect_comments)
+
+        def comment(number, body, commit=False):
+            self.assertEqual((number, commit), (1, True))
+            self.architect_requests.append(body)
+            self.architect_comments.append(tf.backlog.Note("engine", body=body))
+            return ""
+        self.forge.comment = comment
+
+    def test_architect_request_posts_once_while_waiting_on_this_head(self):
+        self.architect_gate()
+        for _ in range(2):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(len(self.architect_requests), 1)
+        self.assertTrue(self.architect_requests[0].startswith(f"Architect review requested: {tf.tma.HEAD}\n"))
+        self.assertEqual(self.launched, [])
+        self.assertEqual(self.forge.merges, [])
+
+    def test_current_architect_approval_merges_without_a_consult_segment(self):
+        self.architect_gate((f"Architect: APPROVED {tf.tma.HEAD}",))
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(len(self.forge.merges), 1)
+        self.assertEqual(self.architect_requests, [])
+
+    def test_architect_request_carries_the_review_findings(self):
+        self.architect_gate()
+        self.p.stages["review"] = policy.Place("review", "critic", {"architect": True, "blocking_severity": "critical"})
+        self.findings(counts={"minor": 1})
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(json.loads(self.architect_requests[0].split("Findings to dispose of:\n", 1)[1]),
+                         [{"severity": "minor", "title": "finding", "evidence": "seen"}])
+
+    def test_architect_comment_failure_keeps_waiting_without_posting(self):
+        self.architect_gate()
+        self.forge.comments = mock.Mock(side_effect=ForgeError("comments unavailable"))
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(self.architect_requests, [])
+        self.assertEqual(self.forge.merges, [])
+
+    def test_existing_architect_request_is_not_reposted_after_engine_restart(self):
+        self.architect_gate((f"Architect review requested: {tf.tma.HEAD}\n\nFindings to dispose of:\n[]",))
+        self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(self.architect_requests, [])
+
+    def test_new_head_after_approval_posts_one_new_architect_request(self):
+        self.architect_gate((f"Architect review requested: {tf.tma.HEAD}", f"Architect: APPROVED {tf.tma.HEAD}"))
+        self.forge.closing_request = lambda key: SimpleNamespace(number=10, head="b" * 40, verdict="ready", approval="")
+        self.db.update_resume(KEY, lambda data: data["runs"]["review-1"].update(reviewed_head="b" * 40))
+        for _ in range(2):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(len(self.architect_requests), 1)
+        self.assertTrue(self.architect_requests[0].startswith(f"Architect review requested: {'b' * 40}\n"))
+        self.assertEqual(self.forge.merges, [])
+        # The reply is on the issue thread where the request was posted.
+        self.architect_comments.append(tf.backlog.Note("architect", body=f"Architect: APPROVED {'b' * 40}"))
+        self.assertEqual(self.run_pass(), [reconcile.Merge(KEY)])
+        self.assertEqual(len(self.forge.merges), 1)
+
+    def test_architect_changes_route_findings_to_fix_without_another_request(self):
+        reply = f"Architect: CHANGES {tf.tma.HEAD}\nfix: preserve the parser state"
+        self.architect_gate((reply,))
+        self.assertEqual(self.run_pass(), [reconcile.Dispatch(KEY, "implement", "builder", 1)])
+        self.assertEqual(self.launched, [(KEY, "implement", 1, "builder")])
+        self.assertEqual(self.db.resume(KEY)["architect_changes"], {"head": tf.tma.HEAD, "reply": reply})
+        self.assertEqual(self.forge.merges, [])
+        self.assertEqual(self.architect_requests, [])
+
+    def test_malformed_architect_reply_keeps_waiting_without_duplicate_requests(self):
+        self.architect_gate(("Architect: APPROVED",))
+        for _ in range(2):
+            self.assertEqual(self.run_pass(), [reconcile.Wait(KEY, "architect consultation is required")])
+        self.assertEqual(len(self.architect_requests), 1)
+        self.assertEqual(self.forge.merges, [])
+
+    def test_architect_changes_are_carried_into_the_fix_assignment(self):
+        self.architect_gate((f"Architect: CHANGES {tf.tma.HEAD}\nfix: preserve the parser state",))
+        self.run_pass()
+        got = SimpleNamespace(ok=True, issue=SimpleNamespace(title="Parser", body="Fix parsing"))
+        with mock.patch.object(self.forge, "issue", return_value=got), \
+             mock.patch.object(engine.worker, "_existing_run", return_value=None), \
+             mock.patch.object(engine.worker.dispatch_prompt, "compose_issue", side_effect=RuntimeError("captured")) as compose:
+            with self.assertRaisesRegex(RuntimeError, "captured"):
+                engine.worker.launch(KEY, "implement", 1, "builder", store=self.db, root=self.root,
+                                     trees=self.trees, policies=self.p, forge=self.forge)
+        body = compose.call_args.args[2]
+        self.assertIn(f"Architect: CHANGES {tf.tma.HEAD}", body)
+        self.assertIn("fix: preserve the parser state", body)
+
     def released_implementation(self, *, request=True, held=False, shared=False):
         pr = {**tf.tma.pr(10, [], draft=True), "headRefName": "work/issue-1"}
         gh = tf.FakeGh(issues=[tf.gh_issue(1, "Released work", ["stage: doing"] + (["needs human"] if held else []))],

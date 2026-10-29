@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
+import re
 from typing import Literal, Mapping, Protocol, Sequence
 
 import completion
@@ -51,6 +52,26 @@ class Decision(Protocol):
     topic: str
     question: str
     answer: str | None
+
+
+@dataclass(frozen=True)
+class ArchitectReview:
+    """The forge's current head and the comments on the issue's consultation thread, oldest first."""
+
+    head: str
+    comments: tuple[str, ...] = ()
+
+    @property
+    def reply(self) -> str:
+        """Only an exact first-line verdict for this full head counts; the rest is disposition data."""
+        if not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", self.head):
+            return ""
+        headers = (f"Architect: APPROVED {self.head}", f"Architect: CHANGES {self.head}")
+        return next((body for body in reversed(self.comments) if body.split("\n", 1)[0] in headers), "")
+
+    @property
+    def verdict(self) -> str:
+        return self.reply.split("\n", 1)[0].split()[1] if self.reply else ""
 
 
 def suite_holds(counts: Mapping[str, int | None], *, require_green: bool) -> bool:
@@ -267,7 +288,7 @@ def _work(key: str, stage: str, workflow: Workflow, history: Sequence[Segment], 
 def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], policies: Policies,
            room: str | None, now: datetime, counts: Mapping[str, int] | None, edges: Sequence[Edge],
            decisions: Sequence[Decision], waived: Sequence[str] = (),
-           latest_segment: Segment | None = None) -> Action:
+           latest_segment: Segment | None = None, architect_review: ArchitectReview | None = None) -> Action:
     key = item.issue_key
     stages = {workflow.start} | {e.target for e in workflow.edges}
     if decision_escalation.pending_decisions(decisions, tuple(e.gate for e in workflow.edges if e.gate), history, workflow.start):
@@ -295,10 +316,12 @@ def _merge(item: WorkItem, workflow: Workflow, history: Sequence[Segment], polic
         return Wait(key, "blocking review findings")
     work_stages = {review_stage} | {s.stage for s in completed if s.stage in policies.stages}
     if any(_policy(policies, stage, room).architect for stage in work_stages):
-        architect = max((s for s in completed if s.stage == "architect" and s.outcome == "done"),
-                        key=lambda s: _time(s.started_at), default=None)
-        if architect is None or any(s.stage not in ("review", "merge", "architect")
-                                    and _time(s.ended_at) > _time(architect.started_at) for s in completed):
+        verdict = architect_review.verdict if architect_review else ""
+        if verdict == "CHANGES":
+            edge = _next(workflow, "review", True)
+            return (_work(key, edge.target, workflow, history, policies, room) if edge else
+                    Wait(key, "architect changes requested; no unique fix edge"))
+        if verdict != "APPROVED":
             return Wait(key, "architect consultation is required")
     if item.merge_state != "ready":
         return Wait(key, "merge is not ready")
@@ -403,7 +426,7 @@ def _stalled(item: WorkItem, segment: Segment, facts: Facts, now: datetime,
 def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_type: str | None,
           room: str | None, now: datetime, counts: Mapping[str, int] | None,
           decisions: Sequence[Decision], hold_stages: Sequence[str], launcher_hold: Mapping[str, object], facts: Facts | None = None,
-          waived: Sequence[str] = ()) -> Action | None:
+          waived: Sequence[str] = (), architect_review: ArchitectReview | None = None) -> Action | None:
     key = item.issue_key
     workflow = policies.workflow_for(issue_type)
     if item.forge_state == "closed" and item.merge_state == "merged" and facts is not None:
@@ -452,7 +475,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if stage == "merge":
         incoming = ((return_edge,) if return_edge else
                     tuple(e for e in workflow.edges if e.target == stage and latest and e.source == latest.stage))
-        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, waived, latest)
+        return _merge(item, workflow, history, policies, room, now, counts, incoming, decisions, waived, latest, architect_review)
     # A segment from an earlier visit to this stage must not skip the next fix round.
     if latest is None or latest.stage != stage:
         return _work(key, stage, workflow, history, policies, room)
@@ -477,7 +500,7 @@ def _item(item: WorkItem, history: Sequence[Segment], policies: Policies, issue_
     if edge is None:
         return Wait(key, "no unique workflow edge")
     if edge.target == "merge":
-        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, waived, latest)
+        return _merge(item, workflow, history, policies, room, now, counts, (edge,), decisions, waived, latest, architect_review)
     action = _work(key, edge.target, workflow, history, policies, room)
     if isinstance(action, Escalate):
         return action
@@ -543,13 +566,14 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
          waived_gates: Mapping[str, Sequence[str]] | None = None,
          pending_asks: Mapping[str, bool] | None = None,
          pending_stages: Mapping[str, Mapping] | None = None,
+         architect_reviews: Mapping[str, ArchitectReview] | None = None,
          failure_limit: int = 2,
          failure_acknowledged: Mapping[str, Sequence[str]] | None = None) -> list[Action]:
     """One action per eligible issue, oldest first; dispatch and review each take one slot.
 
     Findings are complete severity counts from the latest review; an absent item is unknown.
     Gates use their source stage's policy; retries use the destination stage's policy. Completed reviews do not spend retries.
-    Merge requires answered decisions and, where policy requires it, a done architect segment for the current work.
+    Merge requires answered decisions and, where policy requires it, the architect's approval for the forge head.
     Without creation times, issue numbers order work within each forge namespace.
     Attempt-owned extra holds on failed current-stage work can be released for relaunch; hold_stages always wait for a human.
     `facts` are this pass's blockers, stops, tree and stall readings. Without them a running segment
@@ -593,7 +617,8 @@ def plan(items: Sequence[WorkItem], segments: Mapping[str, Sequence[Segment]], p
                            room, now, open_findings.get(item.issue_key),
                            item_decisions, hold_stages,
                            (launcher_holds or {}).get(item.issue_key, {}), facts,
-                           tuple((waived_gates or {}).get(item.issue_key) or ()))
+                           tuple((waived_gates or {}).get(item.issue_key) or ()),
+                           (architect_reviews or {}).get(item.issue_key))
         if facts is not None and action is not None:
             action = _with_facts(action, item, facts)
         if isinstance(action, Merge) and (pending_asks or {}).get(item.issue_key):

@@ -968,6 +968,13 @@ class Forge:
         outcome, _, error = result.partition(": ")
         return f"{outcome} {evidence}" + (f": {error}" if error else "")
 
+    def comments(self, number: int) -> tuple[backlog.Note, ...]:
+        """Read the whole issue conversation; a failed read is never an empty consultation."""
+        found = backlog.comments(self.home, number, token=None if self.github else self._token(), gh=self.gh)
+        if not found.ok:
+            raise ForgeError(found.error)
+        return found.notes
+
     def comment(self, number: int, body: str, commit: bool = False) -> str:
         """Post or preview a comment on an issue."""
         if not commit:
