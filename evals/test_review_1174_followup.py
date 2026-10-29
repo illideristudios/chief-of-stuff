@@ -77,14 +77,16 @@ class ReleaseRegressions(SupervisorTest):
         with mock.patch.object(supervisor, 'RELEASE', old):
             supervisor.ensure(self.root, jobs_dir=self.jobs)
         job_path = supervisor.job_path(supervisor.label('engine', self.root), self.jobs)
-        def run(argv, **kwargs):
+        def spawn(argv, **kwargs):
             self.assertTrue(workspace.lock_held(supervisor.state_dir(self.root) / 'engine.lock'))
             self.assertTrue(kwargs['start_new_session'])
             self.assertEqual(argv[-1], 'commit-handoff')
-            return subprocess.CompletedProcess(argv, 0)
+            child = mock.Mock()
+            child.wait.return_value = 0
+            return child
         with mock.patch.object(supervisor, 'RELEASE', old), \
              mock.patch.object(supervisor, 'job_path', return_value=job_path), \
-             mock.patch.object(engine.subprocess, 'run', side_effect=run), \
+             mock.patch.object(engine.subprocess, 'Popen', side_effect=spawn), \
              supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'):
             self.assertTrue(engine._persist_launchd_handoff(self.root, new))
 

@@ -1038,15 +1038,16 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     if sys.platform != "darwin" or not path.exists():
         return False
     job = plistlib.loads(path.read_bytes())
-    if supervisor.current_release_from_job(job) != supervisor.RELEASE:
+    if (supervisor.current_release_from_job(job) != supervisor.RELEASE
+            and not (supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists()):
         return False
     target = f"gui/{os.getuid()}/{supervisor.label('engine', root)}"
     if not supervisor.launchctl("print", target, missing_ok=True):
         return False
-    result = subprocess.run([sys.executable, str(Path(supervisor.__file__).resolve()), "--root", str(root),
-                             "--release", str(release), "commit-handoff"],
-                            stdin=subprocess.DEVNULL, start_new_session=True, timeout=1500)
-    if result.returncode:
+    child = subprocess.Popen([sys.executable, str(Path(supervisor.__file__).resolve()), "--root", str(root),
+                              "--release", str(release), "commit-handoff"],
+                             stdin=subprocess.DEVNULL, start_new_session=True)
+    if child.wait(timeout=1500):
         raise supervisor.ServiceError("launchd handoff failed; see engine log")
     return True
 
@@ -1077,7 +1078,12 @@ def main(argv: list[str] | None = None) -> int:
             raise KeyboardInterrupt
         previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
-        if (installed := supervisor.selected_release(root)) != supervisor.RELEASE:
+        installed = supervisor.selected_release(root)
+        if (supervisor.state_dir(root) / supervisor.HANDOFF_MARKER).exists():
+            with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
+                if _persist_launchd_handoff(root, installed):
+                    return 0
+        if installed != supervisor.RELEASE:
             if (python := _prepare_handoff(installed)) is not None and supervisor.selected_release(root) == installed:
                 with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
                     if _persist_launchd_handoff(root, installed):

@@ -23,6 +23,7 @@ RELEASE = Path(__file__).resolve().parent.parent
 ACTIONS = ("install", "uninstall", "status", "ensure", "ensure-background", "ensure-retry", "commit-handoff")
 DISABLED_MARKER = "engine.disabled"
 PLUGIN_RELEASE_MARKER = "engine-plugin-release"
+HANDOFF_MARKER = "engine-handoff.json"
 ENSURE_LOCK_TIMEOUT = 1200.0
 
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
@@ -342,6 +343,7 @@ def launch_env(release: Path | None = None) -> dict:
 def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | None = None,
             *, respect_disabled: bool = False) -> str:
     """Start the engine under launchd, or restart it when the plugin version, its path or its pins changed."""
+    automatic_engine = engine is None
     selected = current_release() if engine is None else RELEASE
     if engine is None:
         engine = (str(selected / "scripts/engine.py"),)
@@ -355,6 +357,18 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
         if respect_disabled:
             from workspace import lock_held
             path = job_path(label("engine", root), jobs_dir)
+            if automatic_engine:
+                selected = selected_release(root)
+                if path.exists():
+                    existing = plistlib.loads(path.read_bytes())
+                    if existing.get("Label") != label("engine", root) or existing.get("WorkingDirectory") != str(root):
+                        raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
+                    registered = current_release_from_job(existing)
+                    selected_version, registered_version = _plugin_version(selected), _plugin_version(registered)
+                    if (registered.parent == selected.parent and selected_version is not None
+                            and registered_version is not None and registered_version > selected_version):
+                        selected = registered
+                engine = (str(selected / "scripts/engine.py"),)
             if path.exists() and lock_held(state_dir(root) / "engine.lock"):
                 existing = plistlib.loads(path.read_bytes())
                 if existing.get("Label") != label("engine", root) or existing.get("WorkingDirectory") != str(root):
@@ -377,9 +391,13 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
                    "EnvironmentVariables": launch_env(selected),
                    "StandardOutPath": log, "StandardErrorPath": log}
-        outcome = load_agent(desired, jobs_dir)
+        if respect_disabled and automatic_engine and path.exists():
+            existing = plistlib.loads(path.read_bytes())
+            _request_plugin_release(root, selected, existing)
         if not respect_disabled:
             (state_dir(root) / PLUGIN_RELEASE_MARKER).unlink(missing_ok=True)
+            (state_dir(root) / HANDOFF_MARKER).unlink(missing_ok=True)
+        outcome = load_agent(desired, jobs_dir)
         (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
         return "engine: " + outcome
 
@@ -417,7 +435,7 @@ def current_release_from_job(job: dict) -> Path:
 def ensure_retry(root: Path) -> str:
     """One detached worker per workspace retries timed-out lock acquisitions until resolved."""
     try:
-        with lock(state_dir(root) / "engine-ensure.lock"):
+        with lock(state_dir(root) / "engine-ensure.lock", wait=True):
             while True:
                 try:
                     return ensure(root)
@@ -440,13 +458,24 @@ def commit_handoff(root: Path, selected: Path, jobs_dir: Path | None = None) -> 
         job = plistlib.loads(path.read_bytes())
         if job.get("Label") != label("engine", root) or job.get("WorkingDirectory") != str(root):
             raise ServiceError(f"refusing to replace unrelated LaunchAgent: {path}")
-        if current_release_from_job(job) != RELEASE:
+        marker = state_dir(root) / HANDOFF_MARKER
+        try:
+            pending = json.loads(marker.read_text())
+        except FileNotFoundError:
+            pending = None
+        if pending is None and selected == RELEASE:
+            return "engine: handoff superseded"
+        job_release = current_release_from_job(job)
+        if pending is not None and str(job_release) not in (pending.get("from"), pending.get("to")):
+            raise ServiceError("handoff record does not match the engine registration")
+        if job_release != RELEASE and pending is None:
             return "engine: handoff superseded"
         python = ensure_venv(data_dir(), release=selected)
         old_arguments, old_environment = job["ProgramArguments"], job.get("EnvironmentVariables", {})
         job["ProgramArguments"] = [str(python), str(selected / "scripts/engine.py")]
         job["EnvironmentVariables"] = launch_env(selected)
-        # Persist before bootout so the selected entry survives an interrupted replacement.
+        if pending is None or pending.get("to") != str(selected):
+            atomic_write(marker, json.dumps({"from": str(job_release), "to": str(selected)}).encode())
         atomic_write(path, plistlib.dumps(job))
         target = f"gui/{os.getuid()}/{label('engine', root)}"
         if launchctl("print", target, missing_ok=True):
@@ -457,8 +486,12 @@ def commit_handoff(root: Path, selected: Path, jobs_dir: Path | None = None) -> 
                 job["ProgramArguments"] = old_arguments
                 job["EnvironmentVariables"] = old_environment
                 atomic_write(path, plistlib.dumps(job))
+                if pending is None:
+                    marker.unlink(missing_ok=True)
                 raise
-        return "engine: " + load_agent(job, jobs_dir)
+        outcome = load_agent(job, jobs_dir)
+        marker.unlink(missing_ok=True)
+        return "engine: " + outcome
 
 
 def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
@@ -467,6 +500,7 @@ def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
     with lock(data_dir() / "supervisor.lock"):
         unload_agent(label("engine", resolved), resolved, jobs_dir)
         atomic_write(state_dir(resolved) / DISABLED_MARKER, b"")
+        (state_dir(resolved) / HANDOFF_MARKER).unlink(missing_ok=True)
     return "engine: stopped"
 
 
