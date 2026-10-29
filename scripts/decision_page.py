@@ -5,7 +5,7 @@
 
 The decision is read from `<pages dir>/decision-<slug>.json` unless `--from` names another file: a
 file, because Claude Code refuses JSON piped through a heredoc. The page is `<pages dir>/decision-<slug>.html`, served by pages.py at `http://127.0.0.1:<port>/decisions/<slug>`.
-Never a claude.ai artifact (Zach, 2026-09-25: "don't serve it as an artifact but serve it using the localhost
+Never a claude.ai artifact (the owner, 2026-09-25: "don't serve it as an artifact but serve it using the localhost
 server thing"). The JSON holds:
 
     headline, ask, options [{key, title, text}], recommended (a key), why, default   required

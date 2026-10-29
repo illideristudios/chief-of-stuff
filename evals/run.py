@@ -48,7 +48,7 @@ from model_port import Failure, Reply, Request  # noqa: E402
 EVALS = Path(__file__).resolve().parent
 PLUGIN_ROOT = EVALS.parent
 AGENT = "chief-of-stuff"
-# Zach, 2026-09-19: "also make the case runner use sonnet". This is the HARNESS default only --
+# the owner, 2026-09-19: "also make the case runner use sonnet". This is the HARNESS default only --
 # `--model` still overrides it, and the agent frontmatter keeps `model: opus` for the live run, so
 # what ships is unchanged. Measured the day it moved: sonnet $0.15/run against opus $0.33, and the
 # `--model` flag beats the frontmatter, so `check_arm` sees sonnet and passes rather than failing
@@ -878,7 +878,7 @@ class Case:
 def load_cases(patterns: list[str], golden_only: bool = False, *, include_superseded: bool = False) -> list[Case]:
     """The cases to run. `golden_only` keeps just the ones their spec marks `"golden": true`.
 
-    Zach, 2026-09-19: sonnet to iterate, opus on the golden cases only for full green. The mark
+    the owner, 2026-09-19: sonnet to iterate, opus on the golden cases only for full green. The mark
     lives in each case.json rather than a list here, so adding a case and deciding whether it is
     golden are the same edit and cannot drift apart.
     """

@@ -1,6 +1,6 @@
 """Unit tests for scripts/policy.py and `settings.load_policy`: policy and workflow as data (design decisions 12 and 13).
 
-Zach, 2026-10-10: "everything is policy driven. We have default policies, and based on personas. This is all
+the owner, 2026-10-10: "everything is policy driven. We have default policies, and based on personas. This is all
 configurable at a stage / room level." Plan M4 exit: a gate turned on for one stage or room holds only there, and an
 exception with no expiry is refused.
 """
@@ -123,7 +123,7 @@ class LoadTest(unittest.TestCase):
 class DefaultsTest(unittest.TestCase):
     def test_the_code_defaults(self):
         got = policy.Policy()
-        self.assertEqual(got.zach_gates, ())  # decision 6: no gate needs Zach's word by default
+        self.assertEqual(got.zach_gates, ())  # decision 6: no gate needs the owner's word by default
         self.assertEqual(got.blocking_severity, "minor")  # burn down to no open findings
         self.assertEqual(got.retry_limit, 3)
         self.assertEqual(got.launch, "adapter")

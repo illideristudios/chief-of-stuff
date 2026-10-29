@@ -351,7 +351,7 @@ class StoreDecisionsOnBoardAndPagesTest(unittest.TestCase):
                              {"status": "blocked", "blocked_reason": "merge conflicts"})
 
     def test_the_board_shows_no_decision_item_and_no_decision_form(self) -> None:
-        """Zach: decisions live on /decisions only; the board keeps no inline block (#895)."""
+        """the owner: decisions live on /decisions only; the board keeps no inline block (#895)."""
         html = pg.write_board(self.root, now=NOW)[0].read_text(encoding="utf-8")
         for absent in ("decision-item", "decision-form", "board-decisions", "<form", "Split upload parser?"):
             with self.subTest(absent=absent):
@@ -465,7 +465,7 @@ class DecisionPageByIdTest(unittest.TestCase):
         self.root, self.db = make_store_workspace()
         self.addCleanup(self.db.engine.dispose)
         self.db.upsert_item(KEY, workflow="build", stage="review", forge_state="open", title="Upload size limit")
-        self.open = self.db.add_decision(KEY, "scope", "Approve this file ownership?", None, "zach", self.TRIO)
+        self.open = self.db.add_decision(KEY, "scope", "Approve this file ownership?", None, "owner", self.TRIO)
         self.asked = self.db.add_decision(KEY, "design", "Split upload parser?")
         self.answered = self.db.add_decision(KEY, "design", "Split upload parser?", "Split into two", "user",
                                              {"status": "answered"})

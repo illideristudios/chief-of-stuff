@@ -1778,7 +1778,7 @@ class EngineTest(unittest.TestCase):
 
     def test_a_decision_hold_wait_blocks_no_answered_decision(self):
         answered = self.decide("design", "Approve schema?", "Yes")
-        self.decide("scope", "Still open?", by="zach")
+        self.decide("scope", "Still open?", by="owner")
         with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "decision pending")]):
             self.run_pass()
         self.assertEqual(self.state(answered).status, "answered")
@@ -1786,7 +1786,7 @@ class EngineTest(unittest.TestCase):
     def test_a_wait_blocked_answer_settles_even_beside_a_pending_sibling(self):
         # #1124: a wait never blocked it for good, so an open sibling is no reason to keep it blocked.
         blocked = self.decide("design", "Approve schema?", "Yes", status="blocked", blocked_reason="merge conflicts")
-        self.decide("scope", "Still open?", by="zach")
+        self.decide("scope", "Still open?", by="owner")
         with mock.patch.object(engine.reconcile, "plan", return_value=[reconcile.Wait(KEY, "merge conflicts")]):
             self.run_pass()
         self.assertEqual((self.state(blocked).status, self.state(blocked).blocked_reason), ("answered", ""))
@@ -2367,7 +2367,7 @@ class EngineTest(unittest.TestCase):
         self.db.upsert_item(KEY, stage="implement")
         ask = self.db.add_ask(KEY, "implement", 1, "s1", "Which credentials?", [], "ctx")
         self.run_pass(model=mock.Mock())
-        self.assertEqual(self.db.decisions(KEY)[-1].decided_by, "zach")
+        self.assertEqual(self.db.decisions(KEY)[-1].decided_by, "owner")
         self.db.answer_ask(KEY, ask, "Use the test account")
         self.run_pass()
         self.assertNotIn("decision_interrupts", self.db.resume(KEY))

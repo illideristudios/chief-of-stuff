@@ -16,7 +16,7 @@ def at(minutes):
     return (T0 + timedelta(minutes=minutes)).isoformat()
 
 
-OWNER = "zach"  # the persisted decided_by value; #809 renames it
+OWNER = "owner"  # the persisted decided_by value; #809 renames it
 
 
 def row(topic, question="Q?", answer=None, by=OWNER, minutes=0, **record):

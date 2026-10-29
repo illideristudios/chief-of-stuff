@@ -1138,7 +1138,7 @@ class BranchNameControlTest(unittest.TestCase):
 
 class RefJoinTest(unittest.TestCase):
     """Finding 112. A ref is minted once and survives a rename; a name is a tab title, and one changed
-    at 03:21 on Zach's word that the worktree is the name. The join read the names, missed, and called
+    at 03:21 on the owner's word that the worktree is the name. The join read the names, missed, and called
     a session that had committed five minutes earlier orphaned. Where both sides carry a ref, the ref
     is the join.
     """
@@ -1315,7 +1315,7 @@ class ShaClosesTheLaneTest(unittest.TestCase):
         self.assertEqual(len(report.orphans), 1, report.lines)
 
 
-# Zach, 2026-09-22 22:20: each task "is actually backed by an entry in github". The audit is where the
+# the owner, 2026-09-22 22:20: each task "is actually backed by an entry in github". The audit is where the
 # issue's state is read; `gh` is injected, so nothing here touches the network.
 ISSUE_CLAUDE = CLAUDE + "- Backlog: GitHub issues; repo https://github.com/o/backlog (private)\n"
 
@@ -1379,7 +1379,7 @@ def issue_workspace(claude: str = ISSUE_CLAUDE, tracker: str = ISSUE_TRACKER) ->
     return tmp, root
 
 
-# Zach, 2026-09-23 22:40: "remove the github issue remote and make everything use gitlab now that we have that going."
+# the owner, 2026-09-23 22:40: "remove the github issue remote and make everything use gitlab now that we have that going."
 GITLAB_CLAUDE = CLAUDE + "- Backlog: GitLab; host https://gl.example; project o/backlog\n"
 
 

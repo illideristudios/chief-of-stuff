@@ -45,7 +45,7 @@ def facts(db: Any) -> list[Facts]:
             trio_decided=any(d.decided_by == "trio" and d.answer for d in mine),
             park=str(park.get("reason", "")) if isinstance(park, dict) else "",
             # shortcut: a "split trio" is an owner decision the trio did not agree on and nobody has answered; the store has no other marker
-            split_trio=any(d.decided_by == "zach" and not d.answer and isinstance(d.record, dict)
+            split_trio=any(d.decided_by == "owner" and not d.answer and isinstance(d.record, dict)
                            and d.record.get("unanimous") is False for d in mine),
             started_at=_when(running[item.issue_key]) if item.issue_key in running else None,
             thread_link=_thread_link(resume)))

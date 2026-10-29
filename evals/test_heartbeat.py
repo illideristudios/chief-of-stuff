@@ -134,10 +134,15 @@ class StoreTest(unittest.TestCase):
 
     def test_an_unanswered_owner_decision_from_a_split_trio_is_a_split(self):
         self.db.upsert_item(A)
-        self.db.add_decision(A, "naming", "Which name?", decided_by="zach", record={"unanimous": False})
+        self.db.add_decision(A, "naming", "Which name?", decided_by="owner", record={"unanimous": False})
         self.db.upsert_item(B)
-        self.db.add_decision(B, "naming", "Which name?", decided_by="zach", record={"unanimous": True})
-        self.assertEqual({k: f.split_trio for k, f in self.rows().items()}, {A: True, B: False})
+        self.db.add_decision(B, "naming", "Which name?", decided_by="owner", record={"unanimous": True})
+        self.db.upsert_item(C)
+        self.db.add_decision(C, "naming", "Which name?", decided_by="trio", record={"unanimous": False})
+        self.db.upsert_item(D)
+        self.db.add_decision(D, "naming", "Which name?", decided_by="owner", answer="Use the short name",
+                             record={"unanimous": False})
+        self.assertEqual({k: f.split_trio for k, f in self.rows().items()}, {A: True, B: False, C: False, D: False})
 
     def test_the_park_reason_and_the_open_segment_come_from_the_store(self):
         self.db.upsert_item(A)

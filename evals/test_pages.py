@@ -1,4 +1,4 @@
-"""pages.py: the workspace's pages, served from this Mac (Zach, 2026-09-24 14:07: "we should host our own
+"""pages.py: the workspace's pages, served from this Mac (the owner, 2026-09-24 14:07: "we should host our own
 webserver and ensure they are set up as part of the agent's boot loop")."""
 
 import collections

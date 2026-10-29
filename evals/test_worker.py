@@ -568,7 +568,7 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(went, "cursor")
 
     def test_random_pick_chooses_only_among_launchable_entries(self):
-        # #877, Zach: "the goal of this is to be evaluate performance of all the different models over time".
+        # #877, the owner: "the goal of this is to be evaluate performance of all the different models over time".
         self.ROTATION = self.ROTATION + 'pick = "random"\n'
         offered = []
 

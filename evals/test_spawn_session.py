@@ -249,7 +249,7 @@ class NoShellTest(unittest.TestCase):
         """
         source = Path(ss.__file__).read_text()
         # The dispatch this run wrote, taken back when its launch failed, is not a session, tree or branch
-        # (Zach, 2026-09-29: narrow the guard to exactly this line).
+        # (the owner, 2026-09-29: narrow the guard to exactly this line).
         source = source.replace("written.unlink(missing_ok=True)", "")
         for forbidden in (r"\bos\.kill\b", r"\.kill\(", r"\.terminate\(", r"\brmtree\b",
                           r"worktree\s+remove", r"branch\s+-[dD]\b", r"\.unlink\(", r"os\.remove\b"):
@@ -290,7 +290,7 @@ class BootstrapTest(unittest.TestCase):
 class GhosttyTabTest(unittest.TestCase):
     """The real launcher: a tab in the window the user already has, not a window of its own.
 
-    Design-input 44 said "a Ghostty tab running `claude`" in Zach's own words and 0.7.0 shipped a
+    Design-input 44 said "a Ghostty tab running `claude`" in the owner's own words and 0.7.0 shipped a
     window. Ghostty's scripting dictionary has `new tab ... with configuration`, so the tab is asked
     for rather than simulated with keystrokes.
     """
@@ -440,7 +440,7 @@ class DispatchFileTest(unittest.TestCase):
         self.assertEqual(calls, [])
 
     def test_an_expansion_that_reached_the_script_is_refused_as_an_unknown_row(self):
-        out, calls = self.spawn(task="locriani")
+        out, calls = self.spawn(task="owner")
         self.assertEqual(out.returncode, 1)
         self.assertEqual(calls, [])
 
@@ -543,7 +543,7 @@ if __name__ == "__main__":
 
 
 class BootstrapNamesItsPathsTest(unittest.TestCase):
-    """Zach, 23:33-23:34: the bootstrap said "in this directory" and Ghostty does not reliably give
+    """the owner, 23:33-23:34: the bootstrap said "in this directory" and Ghostty does not reliably give
     the tab the directory it was asked for, so "this directory" was sometimes not the worktree and
     the session could not find its own assignment.
 
@@ -587,7 +587,7 @@ class BootstrapNamesItsPathsTest(unittest.TestCase):
 
 
 class SessionNameTest(unittest.TestCase):
-    """Zach, 2026-09-22 16:18: "the NUMERIC NAMES I ASSIGN ARE THE ONLY NAMES THEY ARE ALLOWED TO KEEP".
+    """the owner, 2026-09-22 16:18: "the NUMERIC NAMES I ASSIGN ARE THE ONLY NAMES THEY ARE ALLOWED TO KEEP".
 
     The tab title was all `--title` ever set. `claude` itself got no name, so the harness named the
     session after its directory and then retitled it from its first task: impl07 was listed as
@@ -666,7 +666,7 @@ class TaskFlagTest(unittest.TestCase):
 
 
 class AgyTest(unittest.TestCase):
-    """Zach, 2026-09-23 18:42: "within the next hour I need agy instances going"; registration and reporting
+    """the owner, 2026-09-23 18:42: "within the next hour I need agy instances going"; registration and reporting
     through the mailbox only. agy has no `--agent` and no `--name`; `--mode plan` is its plan-first gate."""
 
     AGY = Path("/opt/homebrew/bin/agy")
@@ -1136,7 +1136,7 @@ print(found)
         self.assertFalse(self.dispatch.exists())
 
     def test_claude_as_profile_launches_claude_workers_through_claude_as(self):
-        # Zach, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
+        # the owner, 2026-10-08 20:50: Claude workers launch through `claude-as run <profile>`, not a bare `claude`.
         claude_as = self.executable("claude-as", "")
         (self.root / "chief-of-stuff.toml").write_text('[workers]\nlauncher = "herdr"\nclaude_as_profile = "secondary"\n')
         out = self.invoke(launcher=None, extra=["--dry-run"])

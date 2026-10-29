@@ -1,6 +1,6 @@
 """Unit tests for scripts/settings.py: the workspace's chief-of-stuff.toml, named by the Coordinator block.
 
-Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
+the owner, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". A value that cannot be read is refused, never
 guessed at.
 """
@@ -260,7 +260,7 @@ class SettingsTest(unittest.TestCase):
             self.assertEqual(got.workers.rules, (rule,))
 
     def test_claude_as_profile_is_absent_or_a_claude_as_profile_name(self):
-        # Zach, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
+        # the owner, 2026-10-08 20:50: Claude subagents "need to use "cl secondary" (aka claude-as)".
         self.assertEqual(st.load(self.root, None).workers.claude_as_profile, "")
         got = st.load(self.root, self.write('[workers]\nclaude_as_profile = "secondary"\n')).workers
         self.assertEqual(got.claude_as_profile, "secondary")
@@ -444,7 +444,7 @@ build = { stages = ["implement", "pr", "review", "triage", "merge"], gates = ["t
 
 
 class LanesTest(unittest.TestCase):
-    """#33 (Zach, 2026-09-23): "A lane: the sequence that a task has to move through" — named, in the toml."""
+    """#33 (the owner, 2026-09-23): "A lane: the sequence that a task has to move through" — named, in the toml."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -623,7 +623,7 @@ rotation = ["codex:gpt-test-coder@medium", "claude:sonnet", "claude:haiku@low"]
 
 class ModelsTest(unittest.TestCase):
     """#111: "I want, as part of the toml, the suggested models and model rotations to use." Each entry is
-    `runtime:model-id@effort`; effort is part of the entry (Zach: "effort should be part of the model id")."""
+    `runtime:model-id@effort`; effort is part of the entry (the owner: "effort should be part of the model id")."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()

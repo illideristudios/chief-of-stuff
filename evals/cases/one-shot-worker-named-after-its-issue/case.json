@@ -10,7 +10,7 @@
       "notes/.keep": ""
     }
   },
-  "description": "#565: a worker is named after the issue that spawns it, `<project>-<issue number>-<role>`, so two loops numbering their own workers can no longer give one name to two workers. Zach, 2026-10-08 21:17: \"so worker names should instead be named after the github or gitlab issue that spawn them\". The Security audit task carries issue #74 of the `uploads` repo, so its one-shot worker is `uploads-74-<role>`, never `<role>-<runtime>-<NN>`.",
+  "description": "#565: a worker is named after the issue that spawns it, `<project>-<issue number>-<role>`, so two loops numbering their own workers can no longer give one name to two workers. the owner, 2026-10-08 21:17: \"so worker names should instead be named after the github or gitlab issue that spawn them\". The Security audit task carries issue #74 of the `uploads` repo, so its one-shot worker is `uploads-74-<role>`, never `<role>-<runtime>-<NN>`.",
   "prompt": "Start the security audit. For this isolated test, use --dry-run for the worker launch and do not start a real worker process.",
   "graders": [
     {

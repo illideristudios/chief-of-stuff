@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """The workspace's chief-of-stuff settings: a TOML file the `## Coordinator` block names with `Settings:`.
 
-Zach, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
+the owner, 2026-09-22 22:20, on the day open and close times: "Configurable. We're going to need to pull
 settings into a config file. Default to 6 and 22". Notification, lane, budget, and Kanban settings
 live here, along with suggested models and their rotations (#111), stage launch defaults (#121), and [limits].
 
@@ -62,7 +62,7 @@ class Notify:
 
 @dataclass(frozen=True)
 class Lane:
-    """A lane is the sequence of stages a task moves through (Zach, 2026-09-23, #33). A gate is a stage only
+    """A lane is the sequence of stages a task moves through (the owner, 2026-09-23, #33). A gate is a stage only
     the user's word passes."""
     stages: tuple[str, ...]
     gates: tuple[str, ...] = ()

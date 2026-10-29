@@ -1,4 +1,4 @@
-"""decision_page.py: a decision's full context as a page on the local pages server (Zach, 2026-09-25: "make sure
+"""decision_page.py: a decision's full context as a page on the local pages server (the owner, 2026-09-25: "make sure
 in the future you don't serve it as an artifact but serve it using the localhost server thing")."""
 
 import io
@@ -706,7 +706,7 @@ class StoreIndexTest(unittest.TestCase):
         """#1128: "If you don't answer" is the default recorded with the decision, on its page and in the list."""
         key = "github:example/repo#10"
         self.store.upsert_item(key, title="Auth flow", stage="implement", forge_state="open")
-        new = self.store.add_decision(key, "scope", "Approve this file ownership?", None, "zach", asked_at=NOW.isoformat(),
+        new = self.store.add_decision(key, "scope", "Approve this file ownership?", None, "owner", asked_at=NOW.isoformat(),
                                       record={"default": "Not written: nothing is written unapproved.",
                                               "status": "blocked", "blocked_reason": "awaiting owner"})
         old = self.store.add_decision(key, "design", "Split the parser?", asked_at=NOW.isoformat())

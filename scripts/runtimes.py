@@ -86,7 +86,7 @@ def get(name: str) -> Runtime:
 
 
 def program(name: str, claude_as_profile: str = "") -> tuple[str, list[str]]:
-    """The executable a launch resolves and the argv between it and the CLI's own flags. Zach, 2026-10-08 20:50:
+    """The executable a launch resolves and the argv between it and the CLI's own flags. the owner, 2026-10-08 20:50:
     Claude workers "need to use "cl secondary" (aka claude-as)", so a Claude launch with a profile runs
     `claude-as run <profile>`, which execs `claude` under that profile's config dir."""
     if name == "claude" and claude_as_profile:

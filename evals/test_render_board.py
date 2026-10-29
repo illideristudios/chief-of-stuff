@@ -192,7 +192,7 @@ class SessionParseTest(unittest.TestCase):
         self.assertIn("dancing", odd.warning)
 
     def test_who_it_waits_on_is_an_edge_not_part_of_the_state(self) -> None:
-        """`waiting on` already carries `Zach — A2, A3, B`: the target, then the reason."""
+        """`waiting on` already carries `the owner — A2, A3, B`: the target, then the reason."""
         f = self.s["7719-fixer"]
         self.assertEqual(f.waits_on, "Robin")
         self.assertEqual(f.waits_for, "review of S1")
@@ -222,10 +222,10 @@ class SessionParseTest(unittest.TestCase):
             self.assertEqual(s.waits_on, "", cell)
 
     def test_a_comma_separates_who_from_why_when_no_dash_does(self) -> None:
-        """Live: `Zach, in that session` — three sessions wrote this cell and did not agree on a separator."""
-        s = tr.Session(ref="a", name="n", state="waiting", doing="", waiting_on="Zach, in that session",
+        """Live: `the owner, in that session` — three sessions wrote this cell and did not agree on a separator."""
+        s = tr.Session(ref="a", name="n", state="waiting", doing="", waiting_on="the owner, in that session",
                        free_at="", constraints="", children="", last_reply="")
-        self.assertEqual(s.waits_on, "Zach")
+        self.assertEqual(s.waits_on, "the owner")
         self.assertEqual(s.waits_for, "in that session")
 
     def test_the_node_label_drops_the_history_the_name_cell_accretes(self) -> None:
@@ -608,7 +608,7 @@ class CliTest(unittest.TestCase):
         return root
 
     def test_a_board_dir_takes_the_board(self) -> None:
-        # Zach, 2026-09-24 14:07: "we should host our own webserver"; the board goes where pages.py serves.
+        # the owner, 2026-09-24 14:07: "we should host our own webserver"; the board goes where pages.py serves.
         port = free_port()
         root = self.pages_root(port)
         buf = io.StringIO()
@@ -639,7 +639,7 @@ class CliTest(unittest.TestCase):
         self.assertNotIn("pages:", buf.getvalue())
 
     def test_the_board_writes_a_decisions_page_beside_it(self) -> None:
-        # Zach, 2026-09-26 00:50: "a decisions page that automatically links to each pending decision and shows
+        # the owner, 2026-09-26 00:50: "a decisions page that automatically links to each pending decision and shows
         # completed decisions". A decision is answered once a Decisions row, on any day, names its page.
         root = self.pages_root(free_port())
         pages = root / "pages"
@@ -795,7 +795,7 @@ if __name__ == "__main__":
 
 
 class ResumeLegibilityTest(unittest.TestCase):
-    """Zach, reading the live board: "That's unintelligible. no formatting."
+    """the owner, reading the live board: "That's unintelligible. no formatting."
 
     Three faults under one complaint, and the one that was reported is the least of them.
     """
@@ -803,7 +803,7 @@ class ResumeLegibilityTest(unittest.TestCase):
     LIVE = """- As of: 16:52 — gauntlet-bc [56e3fd]
 - In flight: nothing, and nothing has changed since 13:40
 - Next: goal #1 — owners for the three orphaned trees, then deploy main
-- Waiting on: Zach — tree owners, redeploy, S2, CLAUDE.md:172, restart
+- Waiting on: the owner — tree owners, redeploy, S2, CLAUDE.md:172, restart
 - Re-arm: no Standing list; nothing handed without a fresh yes. Board watch dropped 16:51.
 - Verified 16:52: main = origin/main 6621341, unmoved. Both services 200. Audit clean.
 """
@@ -1061,7 +1061,7 @@ class SizeGrammarTest(unittest.TestCase):
 class SizedEstimateTest(unittest.TestCase):
     """With history, a task ends where its owner's queue puts it times what tasks of its size have taken.
 
-    Zach, 2026-09-18 23:07: "infer a t-shirt size ... generate an average amount of time spent per t-shirt
+    the owner, 2026-09-18 23:07: "infer a t-shirt size ... generate an average amount of time spent per t-shirt
     sized puzzle ... use that." A cursor starts at now; a running task ends at its own start plus the mean
     for its size, never before now; every other task ends at the cursor plus its mean; a task with a due
     advances the cursor and keeps its due. Only blank-due owned tasks get a derived end.
@@ -1131,7 +1131,7 @@ SUNDAY_TRACKER = """# Tracker 2026-09-20
 | Leftover one | worker | open | 2026-09-19 |  | c |
 | Leftover two | worker | open | 2026-09-20 |  | c |
 | Nobody's | unassigned | open | 2026-09-20 |  | c |
-| Study | Zach | open | 2026-09-20 | PCCAT 1st attempt | c |
+| Study | the owner | open | 2026-09-20 | PCCAT 1st attempt | c |
 
 ## Log
 
@@ -1536,10 +1536,10 @@ class MarkSpansTest(unittest.TestCase):
     """
 
     def test_a_split_never_falls_inside_a_bold_span(self) -> None:
-        text = "Head. **22:19: copied into bruno/ (source untouched). Zach wants this:** launch.php reads it. Tail"
+        text = "Head. **22:19: copied into bruno/ (source untouched). the owner wants this:** launch.php reads it. Tail"
         self.assertEqual(
             tr._depth0_split(text),
-            ["Head", "**22:19: copied into bruno/ (source untouched). Zach wants this:** launch.php reads it", "Tail"],
+            ["Head", "**22:19: copied into bruno/ (source untouched). the owner wants this:** launch.php reads it", "Tail"],
         )
 
     def test_an_unbalanced_item_splits_as_it_always_did(self) -> None:
@@ -1745,7 +1745,7 @@ class StateDisputesProseTest(unittest.TestCase):
 
 
 class StandingRowsAreNotTasksTest(unittest.TestCase):
-    """Zach, 2026-09-22 19:28: "standing tasks with NO TASKS should not show up in the task list. A task can
+    """the owner, 2026-09-22 19:28: "standing tasks with NO TASKS should not show up in the task list. A task can
     either be unassigned or in a task. we don't finish TASKS, we finish TASKS". A standing session's row
     exists only because spawn_session.py cannot start a session without one; it is not work."""
 
@@ -1791,7 +1791,7 @@ class StandingRowsAreNotTasksTest(unittest.TestCase):
         self.assertIn(" · 1 task</div>", body)  # the header ends at the count now that " · N in no lane" is gone (#350)
 
 
-# Zach, 2026-09-22 22:20: "each entry in the task tracker is actually backed by an entry in github".
+# the owner, 2026-09-22 22:20: "each entry in the task tracker is actually backed by an entry in github".
 CLAUDE_MD_ISSUES = CLAUDE_MD.replace(
     "- Human-only actions: spending money",
     "- Backlog: GitHub issues; repo https://github.com/o/backlog (private)\n- Human-only actions: spending money")
@@ -1842,7 +1842,7 @@ class IssueColumnTest(unittest.TestCase):
 
 
     def test_a_gitlab_backlog_is_read_from_the_block(self) -> None:
-        """Zach, 2026-09-23 22:40: "make everything use gitlab now that we have that going"."""
+        """the owner, 2026-09-23 22:40: "make everything use gitlab now that we have that going"."""
         text = CLAUDE_MD.replace("- Human-only", "- Backlog: GitLab; host https://gl.example; project o/backlog\n- Human-only")
         self.assertEqual(parse_coordinator(text, today=NOW.date()).backlog, Backlog(host="https://gl.example", project="o/backlog"))
 
@@ -1932,7 +1932,7 @@ class FlowRefReviewTest(unittest.TestCase):
 
 
 class SettingsLineTest(unittest.TestCase):
-    """`Settings: <path>` names the workspace's chief-of-stuff.toml (Zach, 2026-09-22 22:20)."""
+    """`Settings: <path>` names the workspace's chief-of-stuff.toml (the owner, 2026-09-22 22:20)."""
 
     def test_read(self) -> None:
         text = CLAUDE_MD.replace("- Human-only", "- Settings: `chief-of-stuff.toml`\n- Human-only")
@@ -1947,7 +1947,7 @@ class SettingsLineTest(unittest.TestCase):
 
 
 class TasksHeadingTest(unittest.TestCase):
-    """#33 (Zach, 2026-09-23): a row is a task, so the table is `## Tasks`; a tracker written before still says `## Lanes`."""
+    """#33 (the owner, 2026-09-23): a row is a task, so the table is `## Tasks`; a tracker written before still says `## Lanes`."""
 
     def test_an_older_tracker_headed_lanes_reads_the_same(self) -> None:
         old = TRACKER.replace("## Tasks", "## Lanes")
