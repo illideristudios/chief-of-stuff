@@ -148,10 +148,16 @@ def current_release() -> Path:
     return RELEASE
 
 
+def python_environment() -> dict[str, str]:
+    """Exclude Python startup settings from subprocesses launched on behalf of a workspace."""
+    return {key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")}
+
+
 def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
     try:
         return python.is_file() and subprocess.run(
-            [str(python), "-c", ""], capture_output=True, timeout=timeout).returncode == 0
+            [str(python), "-I", "-c", ""], capture_output=True, timeout=timeout,
+            cwd="/", env=python_environment()).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -173,14 +179,15 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
             raise subprocess.TimeoutExpired("engine dependency preparation", timeout)
         return min(seconds, cap)
 
-    requirements = (release or RELEASE) / "requirements.txt"
+    data = data.absolute()
+    requirements = ((release or RELEASE) / "requirements.txt").absolute()
     base = shell_setup.resolve("python3")
     if base is None:
         raise ServiceError("no python3 on the login shell's PATH to build the engine venv")
     try:
         identity = subprocess.run(
-            [base, "-c", "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"],
-            capture_output=True, text=True, timeout=remaining(30))
+            [base, "-I", "-c", "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"],
+            capture_output=True, text=True, timeout=remaining(30), cwd="/", env=python_environment())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ServiceError(f"could not identify the engine's base Python: {exc}") from exc
     if identity.returncode:
@@ -214,9 +221,10 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
     python = building / "bin/python"
     staged = data / f".{pointer.name}.{building.name}"
     try:
-        for argv in ([base, "-m", "venv", str(building)],
-                     [str(python), "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
-            result = subprocess.run(argv, capture_output=True, text=True, timeout=remaining())
+        for argv in ([base, "-I", "-m", "venv", str(building)],
+                     [str(python), "-I", "-m", "pip", "install", "--disable-pip-version-check", "-r", str(requirements)]):
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=remaining(),
+                                    cwd="/", env=python_environment())
             if result.returncode:
                 raise ServiceError(f"engine dependencies failed to install: "
                                    f"{(result.stderr or result.stdout).strip()[-2000:]}")

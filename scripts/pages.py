@@ -1619,9 +1619,11 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                     continue
                 read_fd, write_fd = os.pipe()
                 try:
+                    # Retain the trusted script directory while ignoring Python environment and user site.
                     child = subprocess.Popen(
-                        [str(python), str(entry), "--root", str(root), "--handoff-ready-fd",
-                         str(write_fd), "supervise"], pass_fds=(write_fd,))
+                        [str(python), "-E", "-s", str(entry), "--root", str(root), "--handoff-ready-fd",
+                         str(write_fd), "supervise"], pass_fds=(write_fd,),
+                        env={key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")})
                 except BaseException:
                     os.close(read_fd)
                     raise

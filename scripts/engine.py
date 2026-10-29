@@ -1027,8 +1027,10 @@ def _prepare_handoff(release: Path) -> Path | None:
 
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
     release_selection.validate_handoff(root, release, supervisor)
-    os.execv(str(python), [str(python), str(release / "scripts/engine.py"),
-                              "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
+    # Keep the trusted script directory on sys.path while ignoring Python environment and user site.
+    os.execve(str(python), [str(python), "-E", "-s", str(release / "scripts/engine.py"),
+                               "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []),
+              supervisor.python_environment())
 
 
 def _message_loop(root: Path, stop: threading.Event, *, every: float = 1.0) -> None:

@@ -2588,16 +2588,25 @@ class StandaloneBoardTest(unittest.TestCase):
     def test_failed_child_launch_resumes_supervision(self):
         release = self.root.parent / "new"
         (release / "scripts").mkdir(parents=True)
-        (release / "scripts" / "pages.py").touch()
+        (release / "scripts" / "pages.py").write_text('import json, os\nassert not any(k.upper().startswith("PYTHON") for k in os.environ)\nprint(json.dumps({"ready": True}))\n')
+        marker = self.root / "workspace-code-executed"
+        for name in ("json", "sitecustomize"):
+            (self.root / (name + ".py")).write_text(f'from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError("workspace code")\n')
+        real_popen = subprocess.Popen
+        launched = []
         stop, attempted, resumed = threading.Event(), threading.Event(), threading.Event()
         def ensure(*args, **kwargs):
             if attempted.is_set():
                 resumed.set()
             return "pages: serving"
-        def fail_start(*args, **kwargs):
+        def fail_start(argv, **kwargs):
             attempted.set()
+            child = real_popen(argv, **kwargs, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out, err = child.communicate(timeout=10)
+            launched.append((argv, kwargs, child.returncode, out, err))
             raise OSError("exec failed")
-        with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.root)}), \
+             mock.patch.object(pg.supervisor, "current_release", return_value=release), \
              mock.patch.object(pg.supervisor, "ensure_venv", return_value=Path(sys.executable)), \
              mock.patch.object(pg, "ensure", side_effect=ensure), \
              mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.subprocess, "Popen", side_effect=fail_start):
@@ -2610,6 +2619,13 @@ class StandaloneBoardTest(unittest.TestCase):
                 stop.set()
                 thread.join(timeout=5)
             self.assertFalse(thread.is_alive())
+            self.assertTrue(launched)
+            argv, kwargs, returncode, out, err = launched[0]
+            self.assertEqual(argv[1:3], ["-E", "-s"])
+            self.assertFalse(any(key.upper().startswith("PYTHON") for key in kwargs["env"]))
+            self.assertEqual(returncode, 0, err)
+            self.assertIn('"ready": true', out)
+            self.assertFalse(marker.exists())
 
     def test_a_stale_pid_goes_even_when_the_start_fails(self):
         (self.pages / ".pid").write_text(str(dead_pid()))
