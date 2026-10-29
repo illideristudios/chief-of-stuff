@@ -14,6 +14,8 @@ reloads itself when the file changes.
 
     python3 pages.py --ensure [--root R]              # start it unless it is already serving; print status only
     python3 pages.py serve --dir D --port P --root R  # what --ensure starts, detached
+    python3 pages.py install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
+    python3 pages.py supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
 
 A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
 The server saves it as the decision JSON's `answer` ({key, words, at}) for the coordinator's next pass, and
@@ -29,6 +31,7 @@ name to 127.0.0.1, but that page still sends its own name as the Host.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import email.utils
 import errno
@@ -42,6 +45,7 @@ import io
 import json
 import os
 import re
+import select
 import signal
 import string
 import subprocess
@@ -59,6 +63,7 @@ from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 import forge
 import page_reload
+import release_selection
 import supervisor
 from backlog_ref import GitHubBacklog
 from workspace import (LAST_LOOKED, LOOKED_BEFORE, ConfigError, daily_trackers, looked_before, pages_address,
@@ -207,16 +212,13 @@ def _plugin_version() -> str:
 
 
 VERSION = _plugin_version()
+# Installed release paths are content-addressed; capture the resolved path once so `current` moving
+# cannot change the identity advertised by an already-running server.
+RELEASE_ID = hashlib.sha256(os.fsencode(Path(__file__).resolve().parent.parent)).hexdigest()[:24]
 # The renderer's own code counts as a source: a release upgrade changes it, not the sources.
 import fragment  # light (html, re, pathlib); the renderers stay lazy for --ensure
 
 RENDERER_MTIME_NS = max(p.stat().st_mtime_ns for p in (*Path(__file__).resolve().parent.glob("*.py"), fragment.THEME_PATH) if p.is_file())
-
-
-def _version(server_header: str) -> tuple[int, ...]:
-    """The version a Server header names; a server from before versions were sent is (0,)."""
-    m = re.match(rf"{SERVER}/(\d+(?:\.\d+)*)", server_header)
-    return tuple(int(x) for x in m[1].split(".")) if m else (0,)
 
 
 class PagesError(RuntimeError):
@@ -566,7 +568,7 @@ class Refresher(threading.Thread):
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    server_version = f"{SERVER}/{VERSION}"
+    server_version = f"{SERVER}/{VERSION} release-{RELEASE_ID}"
     banner = ""
 
     def _refusal(self, status, message, *, answer=None, state=None, retry=None, words_name="answer", link=None,
@@ -1363,6 +1365,19 @@ def _stop(pages_dir: Path, port: int, stop: threading.Event | None = None) -> No
     raise PagesError(f"the older pages server (pid {pid}) is still answering on port {port}")
 
 
+def _drop_stale_pid(pages_dir: Path, port: int) -> None:
+    """Nothing answers on the port, so a pid file naming no `pages.py serve` there is stale (a dead or reused pid,
+    #935): it goes, and nothing is signalled. One still naming our server on this port names a hung server, the
+    user's to stop: starting another could not bind the port, and the board never moves to another one."""
+    try:
+        pid = int((pages_dir / PID).read_text())
+    except (OSError, ValueError):
+        pid = None
+    if pid is not None and is_pages_serve(pid, port):
+        raise PagesError(f"pid {pid} runs the pages server on port {port} but does not answer; stop it by hand")
+    (pages_dir / PID).unlink(missing_ok=True)
+
+
 def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, stop: threading.Event | None = None) -> str:
     """Start the server unless ours already answers on the port; replace one older than this code. Never
     moves to another port. Returns `pages: serving`, `pages: started`, `pages: restarted` or `pages: stopped`; raises PagesError."""
@@ -1380,6 +1395,62 @@ def ensure(pages_dir: Path, port: int, log: Path, root: Path | None = None, *, s
         return _ensure(pages_dir, port, log, root, stop)
 
 
+def _selected_release(root: Path) -> Path:
+    return release_selection.selected_release(root, supervisor)
+
+
+def _release_id(release: Path) -> str:
+    return hashlib.sha256(os.fsencode(release.resolve())).hexdigest()[:24]
+
+
+def _version_tuple(value: str) -> tuple[int, ...] | None:
+    if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*", value):
+        return None
+    return tuple(int(part) for part in value.split("."))
+
+
+def _authoritative_release(root: Path | None, *, completed_only: bool = False) -> Path | None:
+    """Return only an explicit selection, never the selector's fallback to this release."""
+    release = supervisor.RELEASE.resolve()
+    if root is not None:
+        try:
+            explicit = release_selection.explicit_release(root, supervisor, completed_only=completed_only)
+        except supervisor.ServiceError as exc:
+            print(f"pages: invalid release selection: {exc}; keeping {release}", file=sys.stderr, flush=True)
+            return None
+        if explicit is not None:
+            return explicit
+    pointer = release.parent.parent / "current"
+    try:
+        if release.parent.name == "versions":
+            if pointer.is_symlink():
+                selected = pointer.resolve(strict=True)
+                if (selected / "chief_of_stuff.py").is_file():
+                    if root is not None:
+                        release_selection.validate_handoff(root, selected, supervisor)
+                    return selected
+        if root is not None:
+            return release_selection.marker_release(root, release, supervisor)
+    except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
+        pass
+    return None
+
+
+def _selected_for_rollback(root: Path | None) -> bool:
+    return _authoritative_release(root, completed_only=True) == supervisor.RELEASE.resolve()
+
+
+def _server_not_older(who: str) -> bool:
+    """Without a proven older version, a different build may be the newer one."""
+    match = re.match(rf"^{re.escape(SERVER)}/([0-9]+(?:\.[0-9]+)*)(?:\s|$)", who)
+    running = _version_tuple(match[1]) if match else None
+    ours = _version_tuple(VERSION)
+    if running is None or ours is None:
+        return True
+    width = max(len(running), len(ours))
+    return running + (0,) * (width - len(running)) >= ours + (0,) * (width - len(ours))
+
+
 def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: threading.Event | None = None) -> str:
     """Probe, replace and start under the same lock, including concurrent CLI ensures.
 
@@ -1387,10 +1458,20 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
     or the server does not come up."""
     who = _who(port)
     restart = False
-    if who is not None:
+    if who is None:
+        _drop_stale_pid(pages_dir, port)
+    else:
         if not who.startswith(SERVER):
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
-        if _version(who) >= _version(f"{SERVER}/{VERSION}"):
+        selected = _authoritative_release(root)
+        if selected is not None and selected != supervisor.RELEASE.resolve():
+            return "pages: serving"
+        identity = re.search(r"\brelease-([0-9a-f]{24})\b", who)
+        if identity and identity[1] == RELEASE_ID:
+            return "pages: serving"
+        if identity and root is not None and identity[1] == _release_id(_selected_release(root)):
+            return "pages: serving"
+        if _server_not_older(who) and not _selected_for_rollback(root):
             return "pages: serving"
         _stop(pages_dir, port, stop)
         restart = True
@@ -1438,7 +1519,7 @@ def from_config(root: Path) -> tuple[Path, int]:
         raise PagesError(str(e)) from None
 
 
-def supervise(root: Path, stop: threading.Event) -> None:
+def supervise(root: Path, stop: threading.Event, startup=None) -> None:
     """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts.
 
     A workspace with no board is polled again, so one added later is served. Returns when `stop` is set or
@@ -1460,6 +1541,8 @@ def supervise(root: Path, stop: threading.Event) -> None:
                     if str(exc) != last_error:
                         print(f"pages: {exc}", file=sys.stderr, flush=True)
                         last_error = str(exc)
+                if startup is not None and not stop.is_set():
+                    startup(status is not None and status != "pages: stopped")
                 if status == "pages: serving":
                     delay, retry = POLL, RETRY_MIN
                 else:
@@ -1468,7 +1551,198 @@ def supervise(root: Path, stop: threading.Event) -> None:
                 if stop.wait(delay):
                     return
     except supervisor.ServiceError:
-        print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
+        if startup is not None:
+            startup(None)  # waiting for the lock is not proof of recovery
+        print("pages: another supervisor already holds pages-supervisor.lock", file=sys.stderr, flush=True)
+
+
+def supervise_with_retry(root: Path, stop: threading.Event, startup=None) -> None:
+    """Retry when another supervisor holds the lock, so either supervisor can take over when the other stops."""
+    while not stop.is_set():
+        if startup is None:
+            supervise(root, stop)
+        else:
+            supervise(root, stop, startup)
+        stop.wait(min(POLL, RETRY_MAX))
+
+
+def _pre_handoff_cli(entry: Path) -> bool:
+    """Recognize the old argparse CLI, which cannot participate in the readiness protocol."""
+    try:
+        tree = ast.parse(entry.read_bytes(), filename=str(entry))
+    except (OSError, SyntaxError, ValueError):
+        return False  # Let the normal candidate startup report other failures.
+    options = {arg.value for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr == "add_argument"
+               for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)}
+    return {"--ensure", "--root"} <= options and "--handoff-ready-fd" not in options
+
+
+def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> None:
+    """Monitor the successor and resume supervision if its startup or later execution fails."""
+    retry_at, delay, failed_release = 0.0, 30.0, None
+    while not stop.is_set():
+        board_stop = threading.Event()
+        thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
+        thread.start()
+        handoff = None
+        try:
+            while not stop.is_set():
+                if not thread.is_alive():
+                    thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
+                    thread.start()
+                release = _selected_release(root)
+                if release != supervisor.RELEASE:
+                    if release != failed_release:
+                        retry_at, delay, failed_release = 0.0, 30.0, release
+                    if time.monotonic() >= retry_at:
+                        acquired = False
+                        try:
+                            with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+                                acquired = True
+                                release_selection.validate_handoff(root, release, supervisor)
+                                if _selected_release(root) != release:
+                                    continue
+                                entry = release / "scripts/pages.py"
+                                if not entry.is_file():
+                                    raise supervisor.ServiceError(f"missing board entry file: {entry}")
+                                if _pre_handoff_cli(entry):
+                                    retry_at = float("inf")
+                                    print(f"pages: release {release} does not declare board handoff support; "
+                                          f"keeping {supervisor.RELEASE} supervising; rollback requires manual intervention",
+                                          file=sys.stderr, flush=True)
+                                    continue
+                                python = supervisor.ensure_venv(supervisor.data_dir(), release=release, timeout=60)
+                            if not stop.is_set() and _selected_release(root) == release:
+                                handoff = (python, entry)
+                                break
+                        except Exception as exc:
+                            if acquired or not isinstance(exc, supervisor.ServiceError):
+                                delay = min(delay * 2, 3600)
+                                retry_at = time.monotonic() + delay
+                                print(f"pages: cannot prepare release {release}: {exc}; keeping {supervisor.RELEASE}",
+                                      file=sys.stderr, flush=True)
+                            # A busy global lock is retried on the next poll.
+                else:
+                    retry_at, delay, failed_release = 0.0, 30.0, None
+                stop.wait(POLL)
+        finally:
+            board_stop.set()
+            thread.join()
+        if handoff is not None and not stop.is_set() and _selected_release(root) == release:
+            child = None
+            try:
+                python, entry = handoff
+                release_selection.validate_handoff(root, release, supervisor)
+                if _selected_release(root) != release:
+                    continue
+                read_fd, write_fd = os.pipe()
+                try:
+                    # Retain the trusted script directory while ignoring Python environment and user site.
+                    child = subprocess.Popen(
+                        [str(python), "-E", "-s", str(entry), "--root", str(root), "--handoff-ready-fd",
+                         str(write_fd), "supervise"], pass_fds=(write_fd,),
+                        env={key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")})
+                except BaseException:
+                    os.close(read_fd)
+                    raise
+                finally:
+                    os.close(write_fd)
+                try:
+                    # A waiting successor sends W while another supervisor owns the lock; it must
+                    # keep reporting and report failure if it later cannot take over the board.
+                    deadline = time.monotonic() + 15
+                    while (not stop.is_set() and child.poll() is None and
+                           _selected_release(root) == release):
+                        if select.select([read_fd], [], [], min(POLL, 0.1))[0]:
+                            report = os.read(read_fd, 4096)
+                            if not report or b"0" in report or any(c not in b"1W" for c in report):
+                                raise supervisor.ServiceError("candidate failed board supervision")
+                            if startup is not None:
+                                startup(None if report[-1:] == b"W" else True)
+                            deadline = time.monotonic() + 75
+                        if time.monotonic() >= deadline:
+                            raise supervisor.ServiceError("candidate stopped reporting board health")
+                finally:
+                    os.close(read_fd)
+            except (OSError, supervisor.ServiceError) as exc:
+                print(f"pages: cannot start release {release}: {exc}; keeping {supervisor.RELEASE}",
+                      file=sys.stderr, flush=True)
+            finally:
+                if child is not None:
+                    if child.poll() is None:
+                        child.terminate()
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+            if not stop.is_set():
+                delay = min(delay * 2, 3600)
+                retry_at = time.monotonic() + delay
+                print(f"pages: release {release} exited; resuming {supervisor.RELEASE}", file=sys.stderr, flush=True)
+
+
+def _held(path: Path) -> bool:
+    """True while another process holds the lock file at `path`."""
+    if not path.exists():
+        return False
+    try:
+        with supervisor.lock(path):
+            return False
+    except supervisor.ServiceError:
+        return True
+
+
+def install(root: Path, jobs_dir: Path | None = None) -> str:
+    """Install an independent board fallback; the supervisor lock coordinates it with a running engine."""
+    root = root.resolve()
+    from_config(root)  # no Board line, nothing to supervise
+    if sys.platform != "darwin":
+        raise PagesError("the board supervisor requires macOS (launchd); run `pages supervise` under your own")
+    log = supervisor.state_dir(root) / "pages.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    desired = {"Label": supervisor.label("pages", root),
+               # Not resolved: `chief-of-stuff pages` runs under the venv's stable link, which later repairs keep.
+               "ProgramArguments": [sys.executable, str(Path(__file__).resolve()), "--root", str(root), "supervise"],
+               "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
+               "EnvironmentVariables": supervisor.launch_env(),
+               "StandardOutPath": str(log), "StandardErrorPath": str(log)}
+    with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+        return "pages: " + supervisor.load_agent(desired, jobs_dir)
+
+
+def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
+    """Remove the board LaunchAgent. The page server it started keeps serving until it is stopped or the Mac restarts."""
+    root = root.resolve()
+    with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
+        supervisor.unload_agent(supervisor.label("pages", root), root, jobs_dir)
+    return "pages: unsupervised"
+
+
+def status(root: Path, jobs_dir: Path | None = None) -> dict:
+    """The board and the engine, each on its own: a board can serve with no engine, and an engine can run with the
+    board down. `agent` is the LaunchAgent that brings the board back after a restart, `supervised` whether a
+    supervisor holds the board now."""
+    root = root.resolve()
+    state = supervisor.state_dir(root)
+    agent = next((kind for kind in ("pages", "engine")
+                  if supervisor.job_path(supervisor.label(kind, root), jobs_dir).exists()), "none")
+    report = {"board": "not configured", "port": None, "pid": None, "pid_live": False,
+              "engine": "running" if _held(state / "engine.lock") else "missing",
+              "agent": {"pages": "board"}.get(agent, agent), "supervised": _held(state / "pages-supervisor.lock")}
+    try:
+        pages_dir, port = from_config(root)
+    except PagesError as exc:
+        report["board"] = f"not configured: {exc}"
+        return report
+    who = _who(port)
+    report.update(port=port, board="down" if who is None else "serving" if who.startswith(SERVER) else f"foreign: {who or 'unnamed'}")
+    with contextlib.suppress(OSError, ValueError):
+        report["pid"] = int((pages_dir / PID).read_text())
+        report["pid_live"] = is_pages_serve(report["pid"], port)
+    return report
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1480,14 +1754,35 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--ensure", action="store_true", help="start the server unless it is serving; print status only")
     ap.add_argument("--root", help="workspace root holding CLAUDE.md (default: the current directory)")
-    ap.add_argument("command", nargs="?", choices=("serve",))
+    ap.add_argument("command", nargs="?", choices=("serve", "supervise", "install", "uninstall", "status"))
     ap.add_argument("--dir")
     ap.add_argument("--port", type=int)
+    ap.add_argument("--handoff-ready-fd", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args(args_list)
     if args.command == "serve":
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
         return 0
     root = Path(args.root or ".")
+    if args.command == "supervise":
+        stop = threading.Event()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            signal.signal(sig, lambda *_: stop.set())
+        def startup(ready):
+            with contextlib.suppress(OSError):
+                os.write(args.handoff_ready_fd, b"W" if ready is None else b"1" if ready else b"0")
+        supervise_standalone(root, stop, startup if args.handoff_ready_fd is not None else None)
+        return 0
+    if args.command in ("install", "uninstall", "status"):
+        try:
+            if args.command == "status":
+                from _vendor.toon_format import encode
+                print(encode(status(root)))
+            else:
+                print(install(root) if args.command == "install" else uninstall(root))
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as exc:  # PagesError and ServiceError are RuntimeErrors
+            print(f"pages: {exc}", file=sys.stderr)
+            return 2
+        return 0
     try:
         pages_dir, port = from_config(root)
         print(ensure(pages_dir, port, root / ".chief-of-stuff" / "pages.log", root))

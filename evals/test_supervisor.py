@@ -29,7 +29,7 @@ class SupervisorTest(unittest.TestCase):
         self.calls = []
         self.pip_fails = False
         self.python_version, self.cache_tag = "3.13.0", "cpython-313"
-        self.identity_call = ["/login/bin/python3", "-c",
+        self.identity_call = ["/login/bin/python3", "-I", "-c",
                               "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"]
         for patch in (mock.patch.object(supervisor, "RELEASE", self.release),
                       mock.patch.object(supervisor.sys, "platform", "darwin"),
@@ -56,7 +56,7 @@ class SupervisorTest(unittest.TestCase):
         self.calls.append(argv)
         if argv == self.identity_call:
             return subprocess.CompletedProcess(argv, 0, json.dumps([self.python_version, self.cache_tag]), "")
-        if argv[1:3] == ["-m", "venv"]:
+        if argv[1:4] == ["-I", "-m", "venv"]:
             (Path(argv[-1]) / "bin").mkdir(parents=True)
             (Path(argv[-1]) / "bin/python").touch()
         if "pip" in argv and self.pip_fails:
@@ -134,7 +134,7 @@ class VenvTest(SupervisorTest):
         self.pip_fails = False
         new_python = supervisor.ensure_venv(self.data, release=current)
         self.assertNotEqual(old_python, new_python)
-        self.assertIn([str(new_python.parent.parent.resolve() / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check",
+        self.assertIn([str(new_python.parent.parent.resolve() / "bin/python"), "-I", "-m", "pip", "install", "--disable-pip-version-check",
                        "-r", str(current / "requirements.txt")], self.calls)
         self.assertEqual(supervisor.ensure_venv(self.data, release=current), new_python)
         self.assertEqual(supervisor.ensure_venv(self.data), old_python)
@@ -231,7 +231,7 @@ class VenvTest(SupervisorTest):
                 self.assertNotEqual(new, old)
                 self.assertTrue(old.is_file(), "the running engine's venv must stay intact")
                 self.assertTrue((old.parent.parent / ".installed").exists())
-                self.assertIn(["/login/bin/python3", "-m", "venv", str(new.parent.parent.resolve())], self.calls)
+                self.assertIn(["/login/bin/python3", "-I", "-m", "venv", str(new.parent.parent.resolve())], self.calls)
                 self.assertEqual(supervisor.ensure_venv(self.data), new)
                 old = new
 
@@ -239,12 +239,12 @@ class VenvTest(SupervisorTest):
         python = supervisor.ensure_venv(self.data)
         venv = python.parent.parent.resolve()
         self.assertEqual(python.parent.parent.name, venv.name.rsplit("-", 1)[0] + ".current")
-        self.assertEqual(self.calls, [self.identity_call, ["/login/bin/python3", "-m", "venv", str(venv)],
-                                      [str(venv / "bin/python"), "-m", "pip", "install", "--disable-pip-version-check",
+        self.assertEqual(self.calls, [self.identity_call, ["/login/bin/python3", "-I", "-m", "venv", str(venv)],
+                                      [str(venv / "bin/python"), "-I", "-m", "pip", "install", "--disable-pip-version-check",
                                        "-r", str(self.release / "requirements.txt")]])
         self.assertEqual(supervisor.ensure_venv(self.data), python)
         # Reuse checks the base identity and probes the cached interpreter; it must not rebuild.
-        self.assertEqual(self.calls[3:], [self.identity_call, [str(python), "-c", ""]])
+        self.assertEqual(self.calls[3:], [self.identity_call, [str(python), "-I", "-c", ""]])
 
     def test_changed_requirements_build_a_new_venv_beside_the_old(self):
         old = supervisor.ensure_venv(self.data)
@@ -313,6 +313,21 @@ class AgentTest(SupervisorTest):
                          {"CLAUDE_PLUGIN_DATA": str(self.data), "CHIEF_OF_STUFF_VERSION": "1.0.0"})
         self.assertEqual(self.verbs(), ["print", "enable", "bootstrap"])
         self.assertEqual(supervisor.install(self.root, ENGINE, self.jobs), "engine: serving")
+
+    def test_board_agent_survives_engine_install_startup_failure_and_uninstall(self):
+        board = supervisor.job_path(supervisor.label("pages", self.root), self.jobs)
+        board.parent.mkdir(parents=True)
+        original = plistlib.dumps({"Label": board.stem, "WorkingDirectory": str(self.root.resolve())})
+        board.write_bytes(original)
+        # bootstrap accepts the job without proving the engine process starts successfully.
+        supervisor.install(self.root, ENGINE, self.jobs)
+        self.assertEqual(board.read_bytes(), original)
+        self.assertNotIn("bootout", self.verbs())
+        supervisor.uninstall(self.root, self.jobs)
+        self.assertEqual(board.read_bytes(), original)
+        self.assertFalse(supervisor.job_path(supervisor.label("engine", self.root), self.jobs).exists())
+        self.assertFalse(any(call.args[0] == "bootout" and board.stem in call.args[1]
+                             for call in self.launchctl_mock.call_args_list))
 
     def test_install_keeps_limit_paths_from_the_installing_shell(self):
         paths = {
@@ -426,6 +441,74 @@ class AgentTest(SupervisorTest):
             self.assertEqual(supervisor.main(["--root", str(self.root), "install"]), 2)
         self.assertIn("cannot install engine", errors.getvalue())
         self.assertNotIn("Traceback", errors.getvalue())
+
+
+class UntrustedWorkspacePythonTest(unittest.TestCase):
+    def test_real_preparation_ignores_workspace_modules_and_python_environment(self):
+        # A separate process gives preparation the real workspace cwd and poisoned environment.
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            scripts = Path(supervisor.__file__).resolve().parent
+            driver = """import os, sys
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+import supervisor
+workspace, release, data, poison = map(Path, sys.argv[2:6])
+os.chdir(workspace)
+if sys.argv[6] == 'path':
+    os.environ['PYTHONPATH'] = str(poison)
+elif sys.argv[6] == 'home':
+    os.environ['PYTHONHOME'] = str(poison)
+    os.environ['PYTHONSTARTUP'] = str(poison / 'sitecustomize.py')
+before = dict(os.environ)
+with mock.patch.object(supervisor.shell_setup, 'resolve', return_value=sys.executable):
+    python = supervisor.ensure_venv(data, release=release)
+    assert supervisor.ensure_venv(data, release=release) == python
+assert os.environ == before
+assert python.is_file()
+"""
+            for module, mode in ((m, kind) for m in ('json', 'venv', 'pip') for kind in ('cwd', 'path')):
+                self._exercise(base, scripts, driver, module, mode)
+            for mode in ('cwd', 'path', 'home'):
+                self._exercise(base, scripts, driver, 'sitecustomize', mode)
+
+    def _exercise(self, base, scripts, driver, module, mode):
+        with self.subTest(module=module, mode=mode):
+            case = base / f'{module}-{mode}'
+            workspace, release, poison, data = (case / name for name in ('workspace', 'release', 'poison', 'data'))
+            for directory in (workspace, release, poison):
+                directory.mkdir(parents=True)
+            (release / 'requirements.txt').write_text('')
+            marker = case / 'executed'
+            shadow_dir = workspace if mode == 'cwd' else poison
+            (shadow_dir / f'{module}.py').write_text(
+                f'from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError("shadowed")\n')
+            result = subprocess.run([sys.executable, '-I', '-c', driver, str(scripts), str(workspace),
+                                     str(release), str(data), str(poison), mode],
+                                    capture_output=True, text=True, timeout=120)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertFalse(marker.exists(), f'workspace module executed: {module} ({mode})')
+
+    def test_real_pip_installs_a_local_wheel(self):
+        import zipfile
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            release = base / 'release'
+            release.mkdir()
+            wheel = base / 'example_isolation-1.0-py3-none-any.whl'
+            with zipfile.ZipFile(wheel, 'w') as archive:
+                archive.writestr('example_isolation.py', 'VALUE = 42\n')
+                archive.writestr('example_isolation-1.0.dist-info/METADATA', 'Metadata-Version: 2.1\nName: example-isolation\nVersion: 1.0\n')
+                archive.writestr('example_isolation-1.0.dist-info/WHEEL', 'Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n')
+                archive.writestr('example_isolation-1.0.dist-info/RECORD', '')
+            (release / 'requirements.txt').write_text(str(wheel) + '\n')
+            with mock.patch.object(supervisor.shell_setup, 'resolve', return_value=sys.executable):
+                python = supervisor.ensure_venv(base / 'data', release=release)
+            result = subprocess.run([str(python), '-I', '-c', 'import example_isolation; print(example_isolation.VALUE)'],
+                                    capture_output=True, text=True, timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), '42')
 
 
 class BasePythonTest(unittest.TestCase):
