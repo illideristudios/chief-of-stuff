@@ -532,14 +532,11 @@ def _store_targets(db_path: Path, home: backlog.Backlog | backlog.GitHubBacklog)
     github_home = isinstance(home, backlog.GitHubBacklog)
     own_host = backlog.home_of(home)[0]
     try:
-        with contextlib.closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
+        with contextlib.closing(sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
             item_rows = conn.execute("SELECT issue_key FROM work_item").fetchall()
-            try:
-                resume_rows = conn.execute("SELECT issue_key, data FROM resume").fetchall()
-            except sqlite3.Error:
-                resume_rows = []
-    except (sqlite3.Error, OSError, ValueError):
-        return wanted, changes
+            resume_rows = conn.execute("SELECT issue_key, data FROM resume").fetchall()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        raise ValueError("cannot read the workspace store") from exc
     for (raw_key,) in item_rows:
         if not isinstance(raw_key, str):
             continue
@@ -583,7 +580,11 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
             wanted.setdefault(ref.repo, set()).add(ref.number)
         changes |= change_numbers(task, home)
     if every_open:
-        store_wanted, store_changes = _store_targets(store_db, home)
+        try:
+            store_wanted, store_changes = _store_targets(store_db, home)
+        except ValueError:
+            reason = "cannot read the workspace store"
+            return None, None, {"kanban": reason, "merge requests": reason}
         for repo, nums in store_wanted.items():
             wanted.setdefault(repo, set()).update(nums)
         changes |= store_changes

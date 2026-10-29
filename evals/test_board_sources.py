@@ -196,7 +196,10 @@ class GitLabTest(unittest.TestCase):
     def test_a_store_workspace_reads_every_open_merge_request(self):
         # #896: a store board names its changes in no tracker row, so every open one is read.
         root = workspace("GitLab issues; host https://labs.example.test; project team/app")
-        (root / "store.db").touch()
+        import sqlite3
+        with sqlite3.connect(root / "store.db") as db:
+            db.execute("CREATE TABLE work_item (issue_key TEXT)")
+            db.execute("CREATE TABLE resume (issue_key TEXT, data TEXT)")
         mr = {"iid": "77", "webUrl": "https://labs.example.test/team/app/-/merge_requests/77", "title": "Search",
               "state": "opened", "draft": False, "mergedAt": None, "targetBranch": "develop", "description": "Closes #115",
               "approved": False, "approvedBy": {"nodes": []}, "headPipeline": None, "diffStats": []}
@@ -1236,6 +1239,34 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
         self.addCleanup(db.engine.dispose)
         self.addCleanup(shutil.rmtree, root, True)
         return db
+
+    def test_unreadable_store_is_reported_as_unknown_not_an_empty_backlog(self):
+        from tracker import parse_tracker
+        from workspace import read_config
+        root = workspace("GitHub issues; repo o/app")
+        self.addCleanup(shutil.rmtree, root, True)
+        (root / "store.db").write_bytes(b"not a sqlite database")
+        gh = mock.Mock()
+        issues, changes, errors = bs.forge(root, read_config(root), parse_tracker(""), NOW, gh, mock.Mock())
+        self.assertIsNone(issues)
+        self.assertIsNone(changes)
+        self.assertIn("store", errors["kanban"].lower())
+        self.assertIn("store", errors["merge requests"].lower())
+        gh.assert_not_called()
+
+    def test_store_targets_handles_uri_characters_in_workspace_path(self):
+        import backlog
+        import sqlite3
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace #1?"
+            root.mkdir()
+            db_path = root / "store.db"
+            with sqlite3.connect(db_path) as db:
+                db.execute("CREATE TABLE work_item (issue_key TEXT)")
+                db.execute("CREATE TABLE resume (issue_key TEXT, data TEXT)")
+                db.execute("INSERT INTO work_item VALUES (?)", ("github:o/app#92",))
+            wanted, _ = bs._store_targets(db_path, backlog.GitHubBacklog("o/app"))
+            self.assertEqual(wanted, {"o/app": {92}})
 
     def test_github_store_fetches_store_issues_recorded_merges_closing_refs_and_branches(self):
         root = workspace("GitHub issues; repo o/app")
