@@ -1,6 +1,14 @@
 # Compliance
 
-Each row is a place where the code disagrees with a section of `ARCHITECTURE.md`. The section stands as written; the row records the gap. Owner is `unassigned` until a slice is dispatched.
+Each row is a place where the code disagrees with a section of `ARCHITECTURE.md`. The section stands as written; the row records the gap. Owner is `unassigned` until a slice is dispatched. A row whose first file is `architecture/ARCHITECTURE.md` records a specification gap instead: a need the document names and does not yet cover, so there is no rule for the code to meet. It stays open until a section covers the need.
+
+```
+r := a row      A(r) := r's first file is architecture/ARCHITECTURE.md      Sg(r) := r is a specification gap
+Cv(r) := a section now covers r's need      Cl(r) := r is closed
+1.  A(r) → Sg(r)         [this record]
+2.  Sg(r) → (Cl(r) → Cv(r))   [this record: a specification gap closes only when a section covers it]
+∴   a specification gap is never closed by a code change alone
+```
 
 | ID | Section | Severity | File and line | Gap | Owner | Status |
 |---|---|---|---|---|---|---|
@@ -32,3 +40,4 @@ Each row is a place where the code disagrees with a section of `ARCHITECTURE.md`
 | C26 | 13 | P1 | `scripts/worker.py:131`, `scripts/worker.py:137`, `scripts/worker.py:298`, `scripts/host_adapter.py:162` | §13 guards every protected branch: a non-Claude entry launches only where the default branch and the request target branch are protected, and the post-run check covers every protected branch. Closed by #866 (issue #860), verified on develop at 2002b5e0: the launch requires the default branch protected (`worker.py:131`) and the closing request's base protected (`:137`, `forge.request_base`), and the run records every protected branch's head (`:298`, `host_adapter.branch_heads` at `host_adapter.py:162`), each checked at collect. The pre-request target check is a Medium in #859. | #866 | closed |
 | C27 | 14 | P1 | `chief_of_stuff.py:80`, `chief_of_stuff.py:113` | §14 has one install bring the Claude Code plugin to the release it installs. `install` copies the release and moves `current` (`:113`) and does nothing else, and the `chief-of-stuff` marketplace's source is the `loop-install` git worktree, not `current`. On 2026-10-21 the plugin was at 0.129.69 while the engines ran 0.129.113, and its hook refused the workspace's `pick` settings. Issue #1003. | unassigned | open |
 | C28 | 13 | P3 | `scripts/runtimes.py:58`, `scripts/tree_state.py:15`, `scripts/host_adapter.py:111` | §13 allows the engine's MCP config in the worker tree only for a host that reads it there, with the in-tree path named in that host's `runtimes.py` entry (Zach, 2026-10-25). On main at 6bde5f27, Cursor's entry (`runtimes.py:58`) names no config path. The path is `tree_state.CURSOR_CHANNEL_EXCLUDE` (`tree_state.py:15`), and `host_adapter._register_cursor` builds it again from parts (`host_adapter.py:111`). Expected: one field on the runtime entry, read by the adapter, the view's exclude and cleanup. | unassigned | open |
+| C29 | 12 | P3 | `architecture/ARCHITECTURE.md:359`, `scripts/readiness.py:30`, `scripts/readiness.py:43` | Specification gap. §12 leaves dependencies between issues in different child workspaces uncovered ("They wait for a need"), and the T3 integration design (`docs/specs/2026-10-29-t3-integration-design.md` §13) lists dependencies between issues in different projects as open while giving the meta coordinator the ordering of work across projects (§12, call). No section says how a cross-project dependency is declared, read or judged. Today `readiness.why_not` (`:30`) judges only the blockers one workspace's pass hands it (`:43`). Closes when a section covers the need, after the owner settles the open item (§19). | unassigned | open |
