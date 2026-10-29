@@ -142,4 +142,3 @@ class AutonomyTest(unittest.TestCase):
             (path / "case.json").write_text('{"prompt":"wait","graders":[],"superseded_by":"autonomy-interactive-dispatch"}')
             with mock.patch.object(run, "EVALS", root):
                 self.assertEqual(run.load_cases([]), [])
-
