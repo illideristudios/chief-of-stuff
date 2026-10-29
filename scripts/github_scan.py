@@ -71,7 +71,7 @@ class Admission:
         if self.calls >= self.requests or self.cost >= self.points:
             raise ReadError('GitHub refresh budget exhausted; scan will resume')
         self.calls += 1
-        query = 'query { ' + selection + ' rateLimit { cost remaining limit } }'
+        query = 'query { ' + selection + ' rateLimit { cost remaining limit resetAt } }'
         if self.transport is None:
             code, out, err = self.gh(['api', 'graphql', '-f', 'query=' + query])
         else:

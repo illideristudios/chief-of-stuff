@@ -322,6 +322,114 @@ github_scan.scan(p, board_sources.backlog.GitHubBacklog('o/app'), {'o/app': set(
         self.assertEqual(recovered.errors, {})
         self.assertEqual(recovered.fetched['kanban'], newer_at + timedelta(minutes=2))
 
+    def test_cache_recovery_with_incomparable_and_invalid_panel_times(self):
+        import shutil
+        for affected, malformed in (('kanban', False), ('merge requests', False),
+                                    ('kanban', True), ('merge requests', True)):
+            with self.subTest(panel=affected, invalid=malformed):
+                root = workspace('GitHub issues; repo o/app')
+                self.addCleanup(shutil.rmtree, root, True)
+                gh = FakeGh()
+                with mock.patch.object(bs, '_write', side_effect=OSError('cache full')):
+                    old = bs.refresh(root, NOW, gh=gh)
+                self.assertIn('cache', old.errors)
+                newer_at = NOW + timedelta(minutes=10)
+                issue = bs.Issue('#118', 'https://github.com/o/app/issues/118', 'Newer', 'open', ())
+                old_change = next(iter(old.changes.values()))
+                newer_change = __import__('dataclasses').replace(old_change, title='Newer change')
+                fetched = {'kanban': NOW, 'merge requests': NOW, 'github sweep': NOW}
+                fetched[affected] = newer_at.replace(tzinfo=None)
+                cache = root / 'pages' / bs.CACHE
+                bs._write(cache, bs.Sources(fetched, {'#118': issue}, {newer_change.ref: newer_change},
+                                            (), {}, old.home), newer_at)
+                if malformed:
+                    raw = json.loads(cache.read_text())
+                    raw['fetched'][affected] = 'invalid timestamp'
+                    cache.write_text(json.dumps(raw))
+                calls = len(gh.calls)
+                got = bs.refresh(root, newer_at + timedelta(minutes=1), gh=gh)
+                self.assertEqual(len(gh.calls), calls)  # replayed the completed checkpoint
+                self.assertIn('revalidating', got.errors[affected])
+                if affected == 'kanban':
+                    self.assertEqual(got.issues['#118'].title, 'Newer')
+                else:
+                    self.assertEqual(got.changes[newer_change.ref].title, 'Newer change')
+                persisted = bs.load(root / 'pages')
+                self.assertEqual((persisted.issues, persisted.changes), (got.issues, got.changes))
+                checkpoint = json.loads((root / 'pages' / scan.CHECKPOINT).read_text())
+                self.assertTrue(checkpoint['cache_revalidation'])
+                recovered = bs.refresh(root, newer_at + timedelta(minutes=2), gh=gh)
+                self.assertNotIn(affected, recovered.errors)
+                self.assertGreater(len(gh.calls), calls)
+                self.assertEqual(recovered.fetched[affected], newer_at + timedelta(minutes=2))
+
+    def test_invalid_checkpoint_observation_retains_cache_and_revalidates(self):
+        import shutil
+        for field, bad in (('named_observed', 'invalid'), ('observed', '2026-09-26T02:10:00')):
+            with self.subTest(field=field):
+                root = workspace('GitHub issues; repo o/app')
+                self.addCleanup(shutil.rmtree, root, True)
+                gh = FakeGh()
+                with mock.patch.object(bs, '_write', side_effect=OSError('cache full')):
+                    old = bs.refresh(root, NOW, gh=gh)
+                newer_at = NOW + timedelta(minutes=10)
+                issue = bs.Issue('#118', 'https://github.com/o/app/issues/118', 'Newer', 'open', ())
+                bs._write(root / 'pages' / bs.CACHE, bs.Sources(
+                    {'kanban': newer_at, 'merge requests': newer_at}, {'#118': issue}, old.changes, (), {}, old.home), newer_at)
+                checkpoint = root / 'pages' / scan.CHECKPOINT
+                original = bs.forge
+                def damage(*args, **kwargs):
+                    result = original(*args, **kwargs)
+                    state = json.loads(checkpoint.read_text())
+                    state[field] = bad
+                    checkpoint.write_text(json.dumps(state))
+                    return result
+                with mock.patch.object(bs, 'forge', side_effect=damage):
+                    got = bs.refresh(root, newer_at + timedelta(minutes=1), gh=gh)
+                panel = 'kanban' if field == 'named_observed' else 'merge requests'
+                self.assertIn('revalidating', got.errors[panel])
+                if panel == 'kanban': self.assertEqual(got.issues['#118'].title, 'Newer')
+                recovered = bs.refresh(root, newer_at + timedelta(minutes=2), gh=gh)
+                self.assertNotIn(panel, recovered.errors)
+
+    def test_invalid_time_on_empty_cache_survives_offline_refresh_before_revalidation(self):
+        import shutil
+        root = workspace('GitHub issues; repo o/app')
+        self.addCleanup(shutil.rmtree, root, True)
+        gh = FakeGh()
+        with mock.patch.object(bs, '_write', side_effect=OSError('cache full')):
+            old = bs.refresh(root, NOW, gh=gh)
+        newer_at = NOW + timedelta(minutes=10)
+        cache = root / 'pages' / bs.CACHE
+        bs._write(cache, bs.Sources({'kanban': newer_at}, {}, {}, (), {}, old.home), newer_at)
+        raw = json.loads(cache.read_text())
+        raw['fetched']['kanban'] = 'invalid'
+        cache.write_text(json.dumps(raw))
+        with mock.patch.object(bs, 'forge', return_value=(None, None, {'kanban': 'offline', 'merge requests': 'offline'})):
+            offline = bs.refresh(root, newer_at + timedelta(minutes=1), gh=gh)
+        self.assertIn('timestamp invalid', offline.errors['kanban'])
+        got = bs.refresh(root, newer_at + timedelta(minutes=2), gh=gh)
+        self.assertEqual(got.issues, {})
+        self.assertIn('revalidating', got.errors['kanban'])
+        recovered = bs.refresh(root, newer_at + timedelta(minutes=3), gh=gh)
+        self.assertNotIn('kanban', recovered.errors)
+        self.assertTrue(recovered.issues)
+
+    def test_equal_checkpoint_and_cache_times_are_comparable(self):
+        import shutil
+        root = workspace('GitHub issues; repo o/app')
+        self.addCleanup(shutil.rmtree, root, True)
+        gh = FakeGh()
+        with mock.patch.object(bs, '_write', side_effect=OSError('cache full')):
+            old = bs.refresh(root, NOW, gh=gh)
+        bs._write(root / 'pages' / bs.CACHE, old, NOW)
+        calls = len(gh.calls)
+        got = bs.refresh(root, NOW + timedelta(minutes=1), gh=gh)
+        self.assertEqual(len(gh.calls), calls)
+        self.assertNotIn('kanban', got.errors)
+        self.assertNotIn('merge requests', got.errors)
+        self.assertFalse((root / 'pages' / scan.CHECKPOINT).exists())
+
     def test_moved_merged_pr_from_first_sweep_survives_second_cursor(self):
         self.gh = Forge(0)
         self.wanted = {}

@@ -19,6 +19,7 @@ import argparse
 import contextlib
 import contextvars
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -278,12 +279,20 @@ def load(pages_dir: Path) -> Sources:
     try:
         d = json.loads((pages_dir / CACHE).read_text())
         home = _home_of(d.get("home"))
-        return Sources({k: datetime.fromisoformat(v) for k, v in d["fetched"].items()},
+        fetched = {}
+        errors = dict(d["errors"])
+        for key, value in d["fetched"].items():
+            try:
+                fetched[key] = datetime.fromisoformat(value)
+            except (ValueError, TypeError):
+                if key in ("kanban", "merge requests"):
+                    errors[key] = "Cache timestamp invalid; revalidating"
+        return Sources(fetched,
                        _cached_issues(d["issues"], home),
                        {k: _change_of(v, home) for k, v in d["changes"].items()},
                        tuple(Worker(**{**w, "started": _when(w["started"]), "last": _when(w["last"])})
                              for w in d["workers"]),
-                       dict(d["errors"]), home)
+                       errors, home)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return EMPTY
 
@@ -610,7 +619,7 @@ def _github_transport(home):
     host = backlog.home_of(home)[0]
     policy = github_admission.Policy(60, GH_MAX_REQUESTS, GH_POINT_BUDGET, 20)
     gate = github_admission.GitHubAdmission(None, host, policy)
-    return github_graphql_transport.GitHubGraphQL(gate, host)
+    return github_graphql_transport.GitHubGraphQL(gate, host, reserve=GH_RESERVE)
 
 
 def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
@@ -771,7 +780,10 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
     home = cfg.backlog
     attempt_key = f"github attempt {home.repo.casefold()}" if isinstance(home, backlog.GitHubBacklog) else ""
     attempt = fetched.get(attempt_key)
-    skip = scheduled and bool(attempt_key) and attempt is not None and timedelta(0) <= now - attempt < GH_INTERVAL
+    try:
+        skip = scheduled and bool(attempt_key) and attempt is not None and timedelta(0) <= now - attempt < GH_INTERVAL
+    except TypeError:
+        skip = False
     if skip:
         issues, changes = None, None
         errors = {k: v for k, v in prev.errors.items() if k in ("kanban", "merge requests")}
@@ -786,6 +798,11 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
                 _SCAN_NOW.reset(token)
         except Exception as e:  # a forge answer shaped unlike its schema; the page still renders
             issues, changes, errors = None, None, dict.fromkeys(("kanban", "merge requests"), f"{type(e).__name__}: {e}")
+    complete_issues, complete_changes = issues is not None, changes is not None
+    for panel, complete in (('kanban', complete_issues), ('merge requests', complete_changes)):
+        prior = prev.errors.get(panel, '')
+        if not complete and 'timestamp invalid; revalidating' in prior:
+            errors[panel] = (errors.get(panel, '') + '; ' if errors.get(panel) else '') + 'Cache timestamp invalid; revalidating'
     # Both failed panels may be carried together under their old home. When only one
     # succeeded under a different home, the other panel cannot safely share its keys.
     same_home = (prev.home is None and home is None) or (
@@ -829,41 +846,82 @@ def _refresh_locked(root, now, cfg, day, pages, gh, call, scheduled, generation)
                     fetched["github sweep"] = observed
             except (OSError, ValueError, TypeError, AttributeError):
                 pass
-    # A resumable scan may predate a newer cache (for example after a cache
-    # write failure). Never replace newer facts with an older observation.
-    # Invalidate only the stale component so the next refresh can revalidate it.
+    # A resumed checkpoint can predate the cache after a failed cache write.
+    # Unknown ordering also retains the cache until the affected evidence has
+    # been collected again. Markers bind that revalidation to the exact panel.
     if same_home and isinstance(cfg.backlog, backlog.GitHubBacklog) and not skip:
+        import github_scan
+        checkpoint_path = pages / github_scan.CHECKPOINT
         try:
-            import github_scan
-            checkpoint_path = pages / github_scan.CHECKPOINT
             checkpoint = json.loads(checkpoint_path.read_text())
-            named_at = _when(checkpoint.get('named_observed'))
-            inventory_at = _when(checkpoint.get('observed'))
-            def complete(panel):
-                return errors.get(panel) in (None, github_scan.BUDGET_STALE, github_scan.BUDGET_UNAVAILABLE)
-            named_old = bool(named_at and any(
-                complete(panel) and prev.fetched.get(panel) and named_at < prev.fetched[panel]
-                for panel in ('kanban', 'merge requests')))
-            inventory_old = bool(inventory_at and complete('merge requests') and
-                                 prev.fetched.get('merge requests') and inventory_at < prev.fetched['merge requests'])
-            if named_old:
+        except (OSError, ValueError, TypeError):
+            checkpoint = None
+        if isinstance(checkpoint, dict):
+            def panel_signature(panel):
+                values = prev.issues if panel == 'kanban' else prev.changes
+                stamp = prev.fetched.get(panel)
+                payload = [asdict(v) for _, v in sorted(values.items())]
+                raw = json.dumps([stamp.isoformat() if stamp else None, payload],
+                                 sort_keys=True, default=lambda v: v.isoformat())
+                return hashlib.sha256(raw.encode()).hexdigest()
+
+            markers = checkpoint.get('cache_revalidation')
+            markers = markers if isinstance(markers, dict) else {}
+            def conflict(field, panel):
+                values = prev.issues if panel == 'kanban' else prev.changes
+                if panel not in prev.fetched and not values and 'revalidating' not in prev.errors.get(panel, ''):
+                    return False
+                try:
+                    observed = github_scan._timestamp(checkpoint.get(field))
+                except (TypeError, ValueError, AttributeError, OverflowError):
+                    return True
+                try:
+                    cached = prev.fetched.get(panel)
+                    if cached is None or cached.utcoffset() is None:
+                        raise ValueError('unknown cache time')
+                    return observed < cached
+                except (TypeError, ValueError, AttributeError, OverflowError):
+                    return markers.get(field + ':' + panel) != panel_signature(panel)
+
+            named_issues = complete_issues and conflict('named_observed', 'kanban')
+            named_changes = complete_changes and conflict('named_observed', 'merge requests')
+            inventory_changes = complete_changes and conflict('observed', 'merge requests')
+            if named_issues or named_changes:
                 checkpoint.update(named={}, named_times={}, named_order={}, named_index=0, named_observed=None)
-                if complete('kanban') and prev.fetched.get('kanban') and named_at < prev.fetched['kanban']:
-                    issues, fetched['kanban'] = prev.issues, prev.fetched['kanban']
-                    errors['kanban'] = 'GitHub named observations older than cache; revalidating' + ('; ' + errors['kanban'] if errors.get('kanban') else '')
-            if inventory_old:
+                # Both panels depend on the named observations; record each
+                # panel's signature when its old evidence must be retained.
+                for panel in ('kanban', 'merge requests'):
+                    markers['named_observed:' + panel] = panel_signature(panel)
+            if inventory_changes:
                 github_scan._inventory_reset(checkpoint)
-            if (named_old or inventory_old) and complete('merge requests'):
-                changes, fetched['merge requests'] = prev.changes, prev.fetched['merge requests']
-                if 'github sweep' in prev.fetched:
-                    fetched['github sweep'] = prev.fetched['github sweep']
+                markers['observed:merge requests'] = panel_signature('merge requests')
+            if named_issues:
+                issues = prev.issues
+                if 'kanban' in prev.fetched:
+                    fetched['kanban'] = prev.fetched['kanban']
                 else:
-                    fetched.pop('github sweep', None)
-                errors['merge requests'] = 'GitHub observations older than cache; revalidating' + ('; ' + errors['merge requests'] if errors.get('merge requests') else '')
-            if named_old or inventory_old:
-                github_scan._save(checkpoint_path, checkpoint)
-        except (OSError, ValueError, TypeError, AttributeError, KeyError):
-            pass  # The cache remains authoritative if checkpoint recovery fails.
+                    fetched.pop('kanban', None)
+                errors['kanban'] = ('GitHub observations older than or incomparable with cache; revalidating'
+                                    + ('; ' + errors['kanban'] if errors.get('kanban') else ''))
+            if named_changes or inventory_changes:
+                changes = prev.changes
+                for key in ('merge requests', 'github sweep'):
+                    if key in prev.fetched:
+                        fetched[key] = prev.fetched[key]
+                    else:
+                        fetched.pop(key, None)
+                errors['merge requests'] = ('GitHub observations older than or incomparable with cache; revalidating'
+                                           + ('; ' + errors['merge requests'] if errors.get('merge requests') else ''))
+            if named_issues or named_changes or inventory_changes:
+                checkpoint['cache_revalidation'] = markers
+                try:
+                    github_scan._save(checkpoint_path, checkpoint)
+                except (OSError, github_scan.ReadError):
+                    # Retain the panel even if invalidation cannot be persisted.
+                    try:
+                        checkpoint_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
     try:
         found = workers(root, cfg, tracker, text, day)
         fetched["workers"] = now

@@ -23,7 +23,8 @@ completion. The callback must still represent exactly one network attempt.
 
 There is no authoritative upper bound on unknown request costs. max_request_cost is
 only a caller-declared query-shape bound, not a guarantee about GitHub. Known costs
-above it block for a window. Other participating calls serialize under a host lock;
+above it block for a window. Different credentials may have separate server quotas, but participating credentials
+are pooled conservatively by host: any low balance pauses all of them. Other participating calls serialize under a host lock;
 non-participating calls are outside this accounting. The state directory and parents
 must be trusted against deletion/replacement and use a local filesystem with reliable
 flock, atomic same-directory replace, file fsync and directory fsync. All cooperating
@@ -32,7 +33,8 @@ Do not delete or replace that lock file. A crash can leave temporary files, whic
 be removed only while all clients are stopped. Durability across power loss depends
 on the filesystem and hardware honoring fsync; network filesystems are unsupported.
 A server deadline outside the supported range blocks indefinitely until an operator
-verifies it has passed and calls clear_unsupported_cooldown(); clear_quarantine()
+verifies it has passed and calls clear_unsupported_cooldown(); a low reserve with
+missing or invalid reset also requires that attestation. clear_quarantine()
 does not clear it. A response lost before it is durably recorded, including a crash
 after dispatch, cannot communicate its server cooldown to later callers. Forked
 callback children must exit or exec and must not continue the parent's request.
@@ -44,6 +46,7 @@ jumps can expire known charges or cooldowns early; callers need a reasonably acc
 from __future__ import annotations
 
 import dataclasses
+from datetime import datetime
 import contextlib
 import email.utils
 import fcntl
@@ -111,6 +114,8 @@ class Response:
     status: int
     headers: object
     secondary_limit: bool = False
+    reserve_low: bool = False
+    reserve_reset: object = None
 
 
 class LockTimeout(StateError):
@@ -368,7 +373,10 @@ class GitHubAdmission:
                     outcome = dispatch()
                     if isinstance(outcome, Response):
                         result, cost = outcome.result, outcome.cost
-                        cooldown, unsupported = self._cooldown(outcome, self._now())
+                        now_response = self._now()
+                        cooldown, unsupported = self._cooldown(outcome, now_response)
+                        reserve_until, reserve_unknown = self._reserve(outcome, now_response)
+                        cooldown, unsupported = max(cooldown, reserve_until), unsupported or reserve_unknown
                     else:
                         result, cost = outcome
                         cooldown, unsupported = 0, False
@@ -500,6 +508,28 @@ class GitHubAdmission:
                 deadlines.append(int(reset.lstrip('0') or '0'))
         # Invalid/missing deadlines cannot be interpreted as permission to retry.
         return (max(deadlines) if deadlines and max(deadlines) > now else fallback), unsupported
+
+    @staticmethod
+    def _reserve(response, now):
+        """Fail closed if a low balance has no trustworthy future reset."""
+        if type(response.reserve_low) is not bool:
+            raise StateError('invalid reserve metadata')
+        if not response.reserve_low:
+            return 0, False
+        deadlines = []
+        raw_header = next((v for k, v in response.headers.items() if k.lower() == 'x-ratelimit-reset'), None)
+        if isinstance(raw_header, str) and re.fullmatch(r'[0-9]{1,12}', raw_header.strip()):
+            deadlines.append(int(raw_header.strip()))
+        try:
+            value = response.reserve_reset
+            if isinstance(value, str):
+                parsed = datetime.fromisoformat(value.replace('Z', '+00:00'))
+                if parsed.utcoffset() is not None:
+                    deadlines.append(parsed.timestamp())
+        except (ValueError, TypeError, OverflowError, OSError):
+            pass
+        future = [d for d in deadlines if math.isfinite(d) and d > now]
+        return (max(future), False) if future else (0, True)
 
     def _finish(self, fd, state, cost, *, unknown=False, cooldown=0, unsupported=False):
         now = self._now()

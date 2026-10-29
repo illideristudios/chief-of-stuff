@@ -36,6 +36,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if mode == 'cooldown':
                 body = {'data': {'rateLimit': {'cost': 1}}}
                 status, headers = 403, {'Retry-After': '120'}
+            elif mode == 'low' and ('inventory:' in query or 'pullRequest(number:' in query):
+                _, raw, _ = self.server.forge(['query=' + query])
+                body, status = json.loads(raw), 200
+                body['data']['rateLimit']['remaining'] = 499
+                headers = {'X-RateLimit-Reset': str(self.server.reset)}
             elif mode == 'unknown':
                 body, status, headers = {'message': 'unknown'}, 429, {'Retry-After': '120'}
             else:
@@ -63,6 +68,21 @@ def scan_process(root, state, port, cert, queue):
     with mock.patch.object(bs, '_github_transport', side_effect=client), mock.patch.object(bs, 'GH_MAX_REQUESTS', 2):
         result = bs.refresh(Path(root), NOW)
         queue.put(result.errors)
+
+def reserve_process(root, state, port, cert, now, token, audit, queue):
+    policy = admission.Policy(60, 100, 500, 20)
+    env = {'GH_ENTERPRISE_TOKEN': token, 'SSL_CERT_FILE': cert,
+           'no_proxy': '*', 'PATH': os.environ['PATH']}
+    def client(home):
+        gate = admission.GitHubAdmission(state, 'localhost', policy, clock=lambda: now, lock_timeout=10)
+        return transport.GitHubGraphQL(gate, 'localhost', env=env,
+                                      endpoint=f'https://localhost:{port}/api/graphql')
+    with mock.patch.object(bs, '_github_transport', side_effect=client):
+        if audit:
+            _, error = bs.change_states(bs.backlog.GitHubBacklog('o/app'), {1001}, bs.backlog.run_gh, None)
+            queue.put(error)
+        else:
+            queue.put(bs.refresh(Path(root), NOW + timedelta(seconds=now - 1000)).errors.get('merge requests', ''))
 
 
 class ScanTransportIntegration(unittest.TestCase):
@@ -100,6 +120,7 @@ class ScanTransportIntegration(unittest.TestCase):
         self.server.active = self.server.peak = 0
         self.server.calls = []
         self.server.mode = ''
+        self.server.reset = 1060
         self.server.forge = Forge(6)
         self.clock = 1000
         self.policy = admission.Policy(60, 100, 500, 20)
@@ -166,6 +187,33 @@ class ScanTransportIntegration(unittest.TestCase):
         again = self.refresh(self.roots[1], NOW + timedelta(minutes=4))
         self.assertGreater(len(self.server.calls), calls)
         self.assertIn('shared budget is stale', again.errors['merge requests'])
+
+    def test_low_reserve_across_processes_workspaces_and_credentials_until_each_reset(self):
+        ctx = multiprocessing.get_context('spawn')
+        def run(index, now, audit=False):
+            queue = ctx.Queue()
+            process = ctx.Process(target=reserve_process, args=(str(self.roots[index]), str(self.root / 'state'),
+                                  self.server.server_port, str(self.cert), now, f'credential-{index}', audit, queue))
+            process.start()
+            result = queue.get(timeout=20)
+            process.join(20)
+            self.assertEqual(process.exitcode, 0)
+            queue.close()
+            return result
+        self.server.mode = 'low'
+        self.assertIn('rate limit', run(0, 1000))
+        self.assertIn('cooldown', run(1, 1001))
+        self.assertIn('cooldown', run(1, 1002, True))
+        self.assertEqual(len(self.server.calls), 2)
+        self.assertIn('inventory:', self.server.calls[-1])
+        self.server.reset = 1120
+        self.assertIn('rate limit', run(1, 1060, True))
+        self.assertIn('pullRequest(number:', self.server.calls[-1])
+        self.assertIn('cooldown', run(0, 1061))
+        self.assertEqual(len(self.server.calls), 3)
+        self.server.mode = ''
+        self.assertEqual(run(0, 1120), '')
+        self.assertGreater(len(self.server.calls), 3)
 
     def test_known_cost_http_error_cooldown_blocks_other_workspace(self):
         self.server.mode = 'cooldown'

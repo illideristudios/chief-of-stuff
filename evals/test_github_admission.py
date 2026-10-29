@@ -482,6 +482,36 @@ class AdmissionTests(unittest.TestCase):
         self.assertEqual(self.gate.request(lambda: ('ok', 1)), 'ok')
         self.assertTrue(self.gate.status()['stale'])
 
+    def test_reserve_missing_invalid_or_past_reset_fails_closed_and_survives_clear_quarantine(self):
+        for reset, headers in ((None, {}), ('invalid', {}), ('1970-01-01T00:00:01Z', {}),
+                               (None, {'X-RateLimit-Reset': 'not-a-time'})):
+            with self.subTest(reset=reset, headers=headers), tempfile.TemporaryDirectory() as root:
+                gate = ledger(root, lambda: 1000)
+                with self.assertRaises(admission.UnsupportedCooldown):
+                    gate.request(lambda: admission.Response('low', 1, 200, headers,
+                                                            reserve_low=True, reserve_reset=reset))
+                gate.clear_quarantine()
+                with self.assertRaises(admission.UnsupportedCooldown):
+                    gate.request(lambda: self.fail('unknown reset must block'))
+                gate.clear_unsupported_cooldown()
+                self.assertEqual(gate.request(lambda: ('ok', 1)), 'ok')
+
+    def test_reserve_and_unknown_cost_both_persist(self):
+        with self.assertRaises(admission.StateError):
+            self.gate.request(lambda: admission.Response('low', None, 200, {'X-RateLimit-Reset': '1200'},
+                                                        reserve_low=True))
+        self.assertTrue(self.gate.status()['stale'])
+        self.gate.clear_quarantine()
+        with self.assertRaises(admission.CooldownActive):
+            self.gate.request(lambda: self.fail('reserve must survive quarantine clear'))
+
+    def test_reserve_uses_latest_valid_reset_and_is_host_scoped(self):
+        self.gate.request(lambda: admission.Response('low', 1, 200, {'X-RateLimit-Reset': '1100'},
+                                                     reserve_low=True, reserve_reset='1970-01-01T00:20:00Z'))
+        self.assertEqual(self.gate.status()['cooldown_until'], 1200)
+        other = admission.GitHubAdmission(self.tmp.name, 'other.example', policy(), clock=lambda: self.now)
+        self.assertEqual(other.request(lambda: ('ok', 1)), 'ok')
+
     def test_rate_limit_headers_and_cooldown_expiry(self):
         cases = [
             (429, {}, False, 1060),

@@ -74,7 +74,7 @@ class Result:
 
 class GitHubGraphQL:
     def __init__(self, gate, host, *, executable=None, env=None, timeout=60.0,
-                 max_output=8 * 1024 * 1024, endpoint=None):
+                 max_output=8 * 1024 * 1024, endpoint=None, reserve=500):
         if not isinstance(host, str):
             raise ValueError('host must be a DNS hostname')
         host = host.lower().removesuffix('.')
@@ -86,6 +86,9 @@ class GitHubGraphQL:
             raise ValueError('invalid timeout')
         if type(max_output) is not int or not 1024 <= max_output <= 32 * 1024 * 1024:
             raise ValueError('invalid output bound')
+        if type(reserve) is not int or reserve < 0:
+            raise ValueError('invalid reserve')
+        self.reserve = reserve
         self.gate, self.host, self.timeout, self.max_output = gate, host, timeout, max_output
         self.env = dict(os.environ if env is None else env)
         self.executable = executable if executable is not None else self.env.get('CHIEF_OF_STUFF_GH', 'gh')
@@ -152,7 +155,11 @@ class GitHubGraphQL:
             data = body.get('data')
             rate = data.get('rateLimit') if isinstance(data, dict) else None
             cost = rate.get('cost') if isinstance(rate, dict) else None
-            return admission.Response((status, body, cost), cost, status, headers, secondary_limit=_limited(body))
+            remaining = rate.get('remaining') if isinstance(rate, dict) else None
+            low = type(remaining) is int and 0 <= remaining < self.reserve
+            reset = rate.get('resetAt') if isinstance(rate, dict) else None
+            return admission.Response((status, body, cost), cost, status, headers,
+                                      secondary_limit=_limited(body), reserve_low=low, reserve_reset=reset)
 
         try:
             status, body, cost = self.gate.request(attempt, deadline=deadline)

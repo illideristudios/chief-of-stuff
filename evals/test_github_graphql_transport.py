@@ -41,6 +41,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if mode == 'errors': body = {'data': {'rateLimit': {'cost': 1}}, 'errors': [{'type': 'RATE_LIMITED', 'message': 'secondary rate limit'}]}
         if mode == 'secret': body = {'data': {'rateLimit': {'cost': 1}, TOKEN: 'echo ' + TOKEN}}
         if mode == 'large': body = {'payload': 'x' * 10000}
+        if mode in ('reserve', 'reserve-missing', 'reserve-edge'):
+            rate = {'cost': 1, 'remaining': 500 if mode == 'reserve-edge' else 499}
+            if mode == 'reserve': rate['resetAt'] = '1970-01-01T00:20:00Z'
+            body = {'data': {'rateLimit': rate}}
         raw = json.dumps(body).encode()
         try:
             self.send_response(status)
@@ -168,6 +172,28 @@ class TransportTest(unittest.TestCase):
         self.server.mode = '403'
         with self.assertRaises(transport.TransportError) as e: self.client.request(QUERY)
         self.assertEqual(e.exception.status, 403); self.assertEqual(self.client.status()['cooldown_until'], 1120)
+    def test_reserve_reset_at_and_boundary_from_http_response(self):
+        self.server.mode = 'reserve-edge'
+        self.client.request(QUERY)
+        self.server.mode = 'reserve'
+        self.client.request(QUERY)
+        self.assertEqual(self.client.status()['cooldown_until'], 1200)
+        with self.assertRaises(admission.CooldownActive):
+            self.client.request(QUERY)
+        self.assertEqual(len(self.server.calls), 2)
+        self.now = 1200
+        self.server.mode = 'reserve-edge'
+        self.client.request(QUERY)
+
+    def test_reserve_without_reset_is_persistently_unavailable(self):
+        self.server.mode = 'reserve-missing'
+        with self.assertRaises(admission.UnsupportedCooldown):
+            self.client.request(QUERY)
+        self.now += 3600
+        with self.assertRaises(admission.UnsupportedCooldown):
+            self.make().request(QUERY)
+        self.assertEqual(len(self.server.calls), 1)
+
     def test_timeout_and_output_bound_mark_stale(self):
         self.server.mode = 'slow'
         with self.assertRaises(transport.TransportError) as e: self.make(timeout=.2).request(QUERY)
