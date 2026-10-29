@@ -698,6 +698,7 @@ These are unsettled. Nothing in this document settles them, and work that depend
 - Interrupting and renaming a thread from outside T3. The `t3` CLI has neither; both are MCP tools that need an outside-agent login and an MCP client in the engine (section 18, heartbeat A; and cancel, section 13). That client is a new dependency, so it is adopted only on the owner's approval.
 - A cross-project meta dashboard, deferred (section 12).
 - Dependencies between issues in different projects, which section 12 leaves uncovered (`compliance.md` row C29).
+- Whether the worker guard should deny destructive and credential commands it allows today. On main at 11c445c5, `guard_commands.denial_reason` gives no reason for `git reset --hard`, `git clean -fdx`, `rm -rf /` or reading `~/.ssh/id_rsa`, so a Claude worker may run each. Section 15 keeps the guard as automation that confines merges, protected pushes and stage writes to the engine, and removes every guard rule whose job is a hard stop. Neither settles whether denying a destructive or credential command is a hard stop or a safety check, so this is the owner's question, not a decision (sections 13 and 15).
 
 Answered by the spike notes of pull request 1188 (#1178, T3 0.1.3) and now stated in section 13: named-agent launch parity (the agent's prompt and tools apply, the rotation entry's model wins); how a T3 worker reaches the engine's report and ask server and which runtime mode it runs under (in-tree `.mcp.json`, T3's default `auto` mode); and how T3's worktrees and the engine's reconcile (each engine worktree is registered as a T3 project). Two spike points stay untested: a plugin-qualified agent name in the tree's `agent` setting, and an agent whose `tools:` list must also admit the engine's MCP tools.
 
@@ -717,4 +718,14 @@ In := a thread can be interrupted from the engine      Rn := a thread can be ren
 1.  Mc → Ap          [the owner's rule: every new library, package or tool is confirmed before adoption]
 2.  In ∨ Rn → Mc     [#1178: the t3 CLI has no interrupt or rename; both are MCP tools]
 ∴   In ∨ Rn → Ap: neither the thread cancel nor heartbeat A's rename is built before the owner approves the client
+```
+
+```
+Dc := the command is destructive or reads a credential (git reset --hard, git clean -fdx, rm -rf /, reading ~/.ssh/id_rsa)
+Gd := the worker guard denies it      Hs := denying it is a hard stop      Ow := the owner has answered
+1.  ¬Gd for each Dc today        [guard_commands.denial_reason on main at 11c445c5]
+2.  Hs → ¬Gd                     [section 15: guard rules whose job is a hard stop are removed]
+3.  ¬Hs → Gd is permitted        [section 15: the guard stays as automation]
+4.  neither Hs nor ¬Hs is stated [sections 13 and 15]
+∴   whether Gd should hold for Dc waits on Ow; until then the guard stays as built (1)
 ```
