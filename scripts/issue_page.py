@@ -330,6 +330,8 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     cfg_given = cfg
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
     home = sources.home if sources.home is not None else cfg.backlog
+    if sources.home is None and home is not None:
+        sources = replace(sources, home=home)
     names = lambda t: {k.strip().casefold() for k in (t.name, t.item) if k.strip()}  # noqa: E731
     known = [t for _, text in trackers for t in parse_tracker(text).tasks]
     mine = tracker_issue_tasks(trackers, numeric, home, full_key)
@@ -376,7 +378,22 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
         issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
     issue_keys = set(lookup)
     keys = set().union(*map(names, mine))
-    log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
+    # Resolve each day's aliases before building Flow: names may be reused by another issue later.
+    log = []
+    selected = {source_key(t.issue, sources.home) for t in mine if t.issue.strip()}
+    for day, text in trackers:
+        day_tasks = parse_tracker(text).tasks
+        aliases = {}
+        for t in day_tasks:
+            identity_key = source_key(t.issue, sources.home) if t.issue.strip() else ""
+            for alias in names(t):
+                aliases.setdefault(alias, set()).add(identity_key)
+        for move in tracker_log.moves(text, day, now.tzinfo):
+            alias = move.name.strip().casefold()
+            identities = aliases.get(alias, set())
+            if identities and identities <= selected:
+                log.append(move)
+    log.sort(key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     linker = Linker(cfg.backlog, root)
     issue_linker = _issue_linker(raw_refs, cfg, root)
@@ -389,12 +406,12 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
     held = held_names(holds)
     rows = store_rows if store_rows is not None else [
-        (s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                            ended=forge_ends(known, sources, now.tzinfo))
-        if r.ref and any(r.ref == issue_key(t.issue) for t in mine)
+        (s, r) for s, r in flow_chart.build(log, mine, lanes or {}, held, ends, now,
+                                            ended=forge_ends(mine, sources, now.tzinfo), home=sources.home)
+        if r.ref and r.ref in selected
     ]
     log = [m for m in log if m.name.strip().casefold() in keys]
-    latest = {k: t for t in known for k in names(t)}  # later trackers win
+    latest = {k: t for t in mine for k in names(t)}  # later selected rows win
     exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
     if exhausted is not None:
         status = EXHAUSTED_CHIP

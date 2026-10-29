@@ -32,12 +32,11 @@ def source_key(key: str, home) -> str:
             return issue_key(f"https://github.com/{namespace[len('github:'):]}/issues/{number}", home)
         if namespace.startswith("gitlab:"):
             return board_sources.store_label(key, home)
-        if namespace and ":" not in namespace and "/" in namespace and isinstance(home, board_sources.backlog.Backlog):
-            host = board_sources.backlog.home_of(home)[0]
-            # A host-qualified cache key already contains its host; a project shorthand does not.
-            if namespace.startswith(host + "/"):
-                return board_sources.backlog.IssueRef(namespace[len(host) + 1:], int(number), host).label(home)
-            return board_sources.backlog.IssueRef(namespace, int(number), host).label(home)
+        if namespace and "/" in namespace and isinstance(home, board_sources.backlog.Backlog):
+            ref = board_sources.backlog.issue_ref(key, home, any_host=True)
+            if ref:
+                return ref.label(home)
+            return key.strip()
     if "://" in key and board_sources.backlog.issue_ref(key, home, any_host=True) is None:
         return key.strip()
     return issue_key(key, home)
