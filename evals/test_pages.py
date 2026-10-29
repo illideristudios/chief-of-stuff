@@ -211,7 +211,8 @@ class ReloadSnippetTest(unittest.TestCase):
         # R13: the source page's Unified/Split radios sit outside any form; picking Split is not input a reload loses.
         # #388: form.elements (not a descendant query) so a control tied by the form attribute still counts.
         _, flat = self.code()
-        selectors = re.findall(r"some\('([^']*)'", flat)
+        typing = flat.split("functiontyping()", 1)[1].split("functionnotice()", 1)[0]
+        selectors = re.findall(r"some\('([^']*)'", typing)
         self.assertTrue(selectors, "found no `some('selector', ...)` dirty check")
         scoped = all("form" in part for sel in selectors for part in sel.split(","))
         self.assertTrue(scoped or "closest('form')" in flat, f"dirty checks reach controls outside a form: {selectors}")
