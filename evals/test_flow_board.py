@@ -31,7 +31,7 @@ from test_render_board import CLAUDE_MD, NOW  # noqa: E402
 
 def change(ref: str, *, state="open", draft=False, pipeline="passed", approved=False, merged_at=None,
            files=(), issues=(), title="") -> bs.Change:
-    return bs.Change(ref, f"https://forge/{ref[1:]}", title or f"Change {ref}", state, draft, pipeline, approved,
+    return bs.Change(ref, f"https://forge.example/group/project/-/merge_requests/{ref[1:]}", title or f"Change {ref}", state, draft, pipeline, approved,
                      int(approved), merged_at, "main", files, issues)
 
 
@@ -50,8 +50,7 @@ SOURCES = bs.Sources(
     )},
     workers=(bs.Worker("impl-07", "one-shot", "claude", "opus", "Cut the release", "trees/cut", NOW - timedelta(minutes=42), None),
              bs.Worker("impl-04", "session", "codex", "", "Audit", "", NOW - timedelta(hours=1, minutes=23), NOW - timedelta(minutes=11))),
-    errors={},
-    home=backlog.Backlog(host="https://forge", project="team/app"),
+    errors={}, home=backlog.Backlog("https://forge.example", "group/project"),
 )
 
 TRACKER = """# Tracker 2026-09-16
@@ -330,6 +329,10 @@ class Build(unittest.TestCase):
         self.assertEqual(rb.build_columns(tasks, LANES, KANBAN, bs.EMPTY, NOW), rb.build_columns(tasks, LANES, KANBAN))
         self.assertEqual([c.name for c in rb.build_columns(tasks, LANES)], ["implement", "review", "triage", "merge"])
 
+    def test_unverified_bare_issue_does_not_match_a_home_less_cached_change(self) -> None:
+        task = next(t for t in rb.parse_tracker(TRACKER).tasks if t.name == "Cut the release")
+        self.assertEqual(task_forge.task_changes(task, replace(SOURCES, home=None)), ())
+
     def test_a_merged_change_draws_the_card_at_its_lanes_last_stage(self) -> None:
         # (#240) A stalled coordinator can leave the tracker cell at `merge` for hours after the change actually
         # merged; the card draws at the lane's last stage instead, and carries neither drift nor the NEEDS INPUT flag for it —
@@ -586,7 +589,8 @@ class CardLinkTest(unittest.TestCase):
         main = rb.build_columns(rb.parse_tracker(TRACKER).tasks, LANES, None, sources, NOW)[-1]
         self.assertEqual({c.name: (c.href, c.refs) for c in main.cards}, {
             "Locale fallback": ("/issues/8", (("#8", "/issues/8"), ("!37", "/issues/8"))),
-            "Unfiled fix": ("https://forge/38", (("!38", "https://forge/38"),))})
+            "Unfiled fix": ("https://forge.example/group/project/-/merge_requests/38",
+                            (("!38", "https://forge.example/group/project/-/merge_requests/38"),))})
 
 
 class UnassignedCardTest(unittest.TestCase):

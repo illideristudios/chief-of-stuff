@@ -401,7 +401,13 @@ def write(root: Path, pages_dir: Path, number: int | str, *, db: PageData | None
             raw_refs = tuple(t.issue for t in mine) if mine else ()
     change = _change_for(lookup_keys(raw_refs, sources.home), sources)
     # ponytail: one small forge query per render (about once a minute while the page is open); cache by head if it bites.
-    found, error = notes(change, cfg.backlog) if change and cfg.backlog else ([], "")
+    found, error = [], ""
+    if change and cfg.backlog:
+        if (sources.home is not None and type(sources.home) is type(cfg.backlog)
+                and backlog.home_of(sources.home) == backlog.home_of(cfg.backlog)):
+            found, error = notes(change, cfg.backlog)
+        else:
+            error = "The cached change's forge home does not match the configured backlog."
     ctx = decision_page.context(root, now.date().isoformat())
     page = render(number, trackers, sources, now, settings.graph, pages_dir, root, found, error,
                   decision_page.pending_count(pages_dir, ctx), navigation, db=db, forge=cfg.backlog)
