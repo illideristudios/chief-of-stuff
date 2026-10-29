@@ -363,6 +363,13 @@ def _gl_change(m: dict, approver: str, home: backlog.Backlog | None = None) -> C
     state = GL_STATE.get(m["state"], m["state"])
     pipe = m.get("headPipeline") or {}
     issues = _closes(m.get("description"), gitlab=True, project=home.project if home else "", host=home.host if home else "")
+    if home:
+        host = backlog.home_of(home)[0]
+        issues = tuple(dict.fromkeys(
+            backlog.IssueRef(path, int(number), host).label(home)
+            if path and "://" not in path and number.isdecimal() else ref
+            for ref in issues for path, _, number in (ref.rpartition("#"),)
+        ))
     branch = m.get("sourceBranch") or ""
     src_project = m.get("sourceProject") if isinstance(m.get("sourceProject"), dict) else None
     branch_url = _branch_url((src_project or {}).get("webUrl") if m.get("sourceBranchExists") else "", branch, gitlab=True)

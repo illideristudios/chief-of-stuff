@@ -1342,6 +1342,14 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
         self.assertEqual(got.changes["#34"].branch, "feat/fork#6")
         self.assertEqual(got.changes["#34"].branch_url, "https://github.com/forker/app/tree/feat/fork%236")
 
+    def test_gitlab_cross_project_closing_refs_use_the_store_cache_key(self):
+        home = bs.backlog.Backlog("https://labs.example.test", "team/app")
+        mr = {**gl_mr(88), "description": "Fixes team/other#7 and https://labs.example.test/team/third/-/issues/8"}
+        change = bs._gl_change(mr, "", home)
+        self.assertEqual(change.issues, ("labs.example.test/team/other#7", "labs.example.test/team/third#8"))
+        for key in ("gitlab:labs.example.test/team/other#7", "gitlab:labs.example.test/team/third#8"):
+            self.assertIn(bs.store_label(key, home), change.issues)
+
     def test_gitlab_store_fetches_store_issues_recorded_merges_closing_forms_and_branches(self):
         root = workspace("GitLab issues; host https://labs.example.test; project team/app")
         db = self.make_store(root)
