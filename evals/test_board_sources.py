@@ -1348,7 +1348,7 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
         home = bs.backlog.Backlog("https://labs.example.test", "team/app")
         mr = {**gl_mr(88), "description": "Fixes team/other#7 and https://labs.example.test/team/third/-/issues/8"}
         change = bs._gl_change(mr, "", home)
-        self.assertEqual(change.issues, ("labs.example.test/team/other#7", "labs.example.test/team/third#8"))
+        self.assertEqual(change.issues, ("gitlab:labs.example.test/team/other#7", "gitlab:labs.example.test/team/third#8"))
         for key in ("gitlab:labs.example.test/team/other#7", "gitlab:labs.example.test/team/third#8"):
             self.assertIn(bs.store_label(key, home), change.issues)
 
@@ -1524,9 +1524,9 @@ class StoreWorkspaceIssuesTest(unittest.TestCase):
         self.assertEqual({u for u, _ in posts}, {"https://labs.example.test/api/graphql"})
         self.assertFalse(any("elsewhere.example.test" in q for _, q in posts))
         self.assertEqual(got.errors, {})
-        self.assertEqual(sorted(got.issues), ["#15", "labs.example.test/team/other#15"])
+        self.assertEqual(sorted(got.issues), ["#15", "gitlab:labs.example.test/team/other#15"])
         self.assertIn("Home criterion", got.issues["#15"].body)
-        self.assertIn("Sibling criterion", got.issues["labs.example.test/team/other#15"].body)
+        self.assertIn("Sibling criterion", got.issues["gitlab:labs.example.test/team/other#15"].body)
 
     def test_corrupt_store_db_records_kanban_error_and_preserves_last_good_issues(self) -> None:
         root = self.store_workspace("GitHub issues; repo o/app", "github:o/app#118")
@@ -1557,7 +1557,7 @@ class StoreWorkspaceIssuesTest(unittest.TestCase):
             "gitlab:labs.example.test/team/app#15", "gitlab:labs.example.test/team/secret#15",
         )
         first = refresh_gitlab(root, NOW, FakeGitLab(issues=[gl_issue(15)]))
-        self.assertEqual(sorted(first.issues), ["#15", "labs.example.test/team/secret#15"])
+        self.assertEqual(sorted(first.issues), ["#15", "gitlab:labs.example.test/team/secret#15"])
         changed = {**gl_issue(15), "description": "Fresh but incomplete"}
         partial = refresh_gitlab(root, self.LATER, FakeGitLab(issues=[changed], hidden={"team/secret"}))
         self.assertIn("team/secret", partial.errors.get("kanban", ""))

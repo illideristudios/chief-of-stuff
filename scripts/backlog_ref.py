@@ -169,11 +169,11 @@ class IssueRef:
         return f"https://{self.host}/{self.repo}/-/issues/{self.number}"
 
     def label(self, home: Backlog | GitHubBacklog | None) -> str:
-        """`#N` in the Backlog, `owner/repo#N` on GitHub, `host/project#N` on any other GitLab: the key an issue is
+        """`#N` in the Backlog, `owner/repo#N` on GitHub, `gitlab:host/project#N` on any other GitLab: the key an issue is
         filed and read under, so a project path on two hosts is two keys."""
         if home is not None and (self.host, self.repo) == home_of(home):
             return f"#{self.number}"
-        return f"{self.repo}#{self.number}" if self.host == GITHUB else f"{self.host}/{self.repo}#{self.number}"
+        return f"{self.repo}#{self.number}" if self.host == GITHUB else f"gitlab:{self.host}/{self.repo}#{self.number}"
 
 
 _REF_STORE = re.compile(r"^(github|gitlab):(.+)#(\d+)$")
@@ -201,16 +201,18 @@ _REF_GITLAB = re.compile(r"^https://([\w.-]+(?::\d+)?)/((?:[\w.-]+/)+[\w.-]+)/-/
 _REF_LINK = re.compile(r"^\[[^\]]*\]\((https://[^)\s]+)\)$")
 
 
+def ambiguous_gitlab_label(text: str) -> bool:
+    """An unmarked label that could name either a host or a nested project."""
+    return bool(_REF_HOST_LABEL.fullmatch(text)) and not text.startswith("gitlab:")
+
+
 def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool = False) -> IssueRef | None:
     """`#N` (in the Backlog), a project shorthand on its forge, a GitHub issue URL, a GitLab issue URL on the
-    Backlog's own host, a store key, or a markdown link to one. Anything else is None, and a bare `#N` with no Backlog to resolve it against is None too.
+    Backlog's own host, a canonical store key, or a markdown link to a URL. A GitLab shorthand with three or
+    more path components is ambiguous and must instead use a URL or canonical store key. Anything else is None,
+    and a bare `#N` with no Backlog to resolve it against is None too.
     `any_host` admits a GitLab URL on any host: for naming an issue, never for fetching one."""
     text = cell.strip()
-    store = _REF_STORE.match(text)
-    if store:
-        kind, body, number = store.groups()
-        text = (f"https://github.com/{body}/issues/{number}" if kind == "github"
-                else f"https://{body}/-/issues/{number}")
     link = _REF_LINK.match(text)
     if link:
         text = link.group(1)
@@ -223,12 +225,19 @@ def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool
         # host would send it there (R1 on PR 14).
         own = any_host or (isinstance(home, Backlog) and m.group(1) == home_of(home)[0])
         return IssueRef(m.group(2), int(m.group(3)), m.group(1)) if own else None
-    # Qualified cache labels must never be interpreted as a project on the home host.
-    m = _REF_HOST_LABEL.match(text)
-    if m and (":" in m.group(1) or "." in m.group(1)
-              or (isinstance(home, Backlog) and m.group(1) == home_of(home)[0])):
-        own = isinstance(home, Backlog) and m.group(1) == home_of(home)[0]
-        return IssueRef(m.group(2), int(m.group(3)), m.group(1)) if own or any_host else None
+    # A store key explicitly marks the first component as a host. A bare three-or-more-component
+    # label cannot distinguish a host-qualified legacy label from a nested project on the home host.
+    m = _REF_STORE.match(text)
+    if m:
+        kind, body, number = m.groups()
+        if kind == "github":
+            return IssueRef(body, int(number)) if GH_REPO.fullmatch(body) else None
+        host, slash, repo = body.partition("/")
+        own = isinstance(home, Backlog) and host == home_of(home)[0]
+        valid = re.fullmatch(r"[\w.-]+(?::\d+)?", host) and re.fullmatch(r"(?:[\w.-]+/)+[\w.-]+", repo)
+        return IssueRef(repo, int(number), host) if slash and valid and (own or any_host) else None
+    if ambiguous_gitlab_label(text):
+        return None
     m = _REF_SHORT.match(text)
     if not m or not (m.group(1) or home):
         return None

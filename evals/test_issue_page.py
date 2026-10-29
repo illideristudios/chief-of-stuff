@@ -1509,7 +1509,7 @@ class UnavailableAndStaleIssueTest(unittest.TestCase):
         cases = (
             (bs.backlog.GitHubBacklog("old/repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/old/repo", "#12"),
             (bs.backlog.GitHubBacklog("Old/Repo"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://github.com/old/repo/issues/12", "https://github.com/Old/Repo", "#12"),
-            (bs.backlog.Backlog("https://labs.example.test", "team/old"), bs.backlog.Backlog("https://labs.example.test", "team/new"), "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-", "labs.example.test/team/other#12"),
+            (bs.backlog.Backlog("https://labs.example.test", "team/old"), bs.backlog.Backlog("https://labs.example.test", "team/new"), "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-/issues/12", "https://labs.example.test/team/other/-", "gitlab:labs.example.test/team/other#12"),
             (bs.backlog.Backlog("https://labs.example.test", "team/old"), bs.backlog.GitHubBacklog("new/repo"), "#12", "https://labs.example.test/team/old/-/issues/12", "https://labs.example.test/team/old/-", "#12"),
             (None, bs.backlog.GitHubBacklog("new/repo"), "https://github.com/old/repo/issues/12", "https://github.com/old/repo/issues/12", "https://github.com/old/repo", "old/repo#12"),
         )
@@ -1701,12 +1701,12 @@ class NamespaceCollisionTest(unittest.TestCase):
             body="## Context\nGitLab home body.\n\n## Acceptance\n- [x] GitLab home criterion\n",
         )
         sib_issue = bs.Issue(
-            "labs.example.test/team/other#15", "https://labs.example.test/team/other/-/issues/15", "GL Sibling", "open", (),
+            "gitlab:labs.example.test/team/other#15", "https://labs.example.test/team/other/-/issues/15", "GL Sibling", "open", (),
             body="## Context\nGitLab sibling body (#4).\n\n## Acceptance\n- [ ] GitLab sibling criterion\n",
         )
         src = bs.Sources(
             {"kanban": NOW},
-            {"#15": home_issue, "labs.example.test/team/other#15": sib_issue},
+            {"#15": home_issue, "gitlab:labs.example.test/team/other#15": sib_issue},
             {}, (), {}, home=gl_home,
         )
         data = task_forge.page_data(self.db)

@@ -401,6 +401,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     # Resolve each day's aliases before building Flow: names may be reused by another issue later.
     log = []
     selected = {source_key(t.issue, sources.home) for t in mine if t.issue.strip()}
+    prior_aliases = {}
     for day, text in trackers:
         day_tasks = parse_tracker(text).tasks
         aliases = {}
@@ -410,9 +411,10 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
                 aliases.setdefault(alias, set()).add(identity_key)
         for move in tracker_log.moves(text, day, now.tzinfo):
             alias = move.name.strip().casefold()
-            identities = aliases.get(alias, set())
+            identities = aliases.get(alias, prior_aliases.get(alias, set()))
             if identities and identities <= selected:
                 log.append(move)
+        prior_aliases.update(aliases)
     log.sort(key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     linker = Linker(cfg.backlog, root)

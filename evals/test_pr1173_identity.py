@@ -28,7 +28,7 @@ class IdentityTest(unittest.TestCase):
             row = tip.TODAY_START.replace("#109", ref)
             task = parse_tracker(row).tasks[0]
             return task_forge.task_changes(task, src)
-        for ref in ("#7", "team/app#8", "labs.example.test/team/app#8", "team/other#9", "team/nested/other#10"):
+        for ref in ("#7", "team/app#8", "https://labs.example.test/team/app/-/issues/8", "team/other#9", "https://labs.example.test/team/nested/other/-/issues/10"):
             with self.subTest(ref=ref):
                 self.assertEqual(matches(ref), (change,))
         for ref in ("#9", "team/another#9", "https://foreign.example/team/app/-/issues/11", "#11"):
@@ -58,7 +58,7 @@ class IdentityTest(unittest.TestCase):
                 db.execute("INSERT INTO resume VALUES (?, ?)", ("gitlab:labs.example.test/team/app#7", json.dumps({"merges": [{"request": 12}]})))
                 db.execute("INSERT INTO resume VALUES (?, ?)", ("gitlab:labs.example.test/team/nested/other#7", json.dumps({"merges": [{"request": 13}]})))
             self.assertEqual(bs._store_targets(path, home), ({}, {12}))
-            self.assertEqual(task_forge.source_key(key, home), "foreign.example:8443/team/app#7")
+            self.assertEqual(task_forge.source_key(key, home), key)
 
     def test_numeric_pages_use_current_tracker_identity_without_historical_union(self):
         home = bs.backlog.GitHubBacklog("example/repo")
@@ -149,12 +149,12 @@ class IdentityTest(unittest.TestCase):
     def test_gitlab_shorthand_refresh_fetches_issue_and_matches_change(self):
         from test_board_sources import gitlab_workspace, refresh_gitlab, FakeGitLab, gl_issue, NOW
         import shutil
-        root = gitlab_workspace([('team/nested/other#7', '!42')])
+        root = gitlab_workspace([('https://labs.example.test/team/nested/other/-/issues/7', '!42')])
         self.addCleanup(shutil.rmtree, root, True)
         issue = {**gl_issue(7), 'webUrl': 'https://labs.example.test/team/nested/other/-/issues/7', 'title': 'Sibling issue'}
         fake = FakeGitLab(issues=[issue], mrs=[{**gl_mr(42), 'description': 'Fixes team/nested/other#7'}])
         src = refresh_gitlab(root, NOW, fake)
-        self.assertIn('labs.example.test/team/nested/other#7', src.issues)
+        self.assertIn('gitlab:labs.example.test/team/nested/other#7', src.issues)
         self.assertTrue(any('team/nested/other' in q for q in fake.queries))
         tracker = (root / 'daily' / f'{NOW.date()}-tracker.md').read_text()
         html = issue_page.render(7, [(NOW.date(), tracker)], src, NOW)
@@ -204,8 +204,8 @@ class IdentityTest(unittest.TestCase):
         issue = {**gl_issue(7), 'webUrl': 'https://labs.example.test/team/other/-/issues/7'}
         fake = FakeGitLab(issues=[issue], mrs=[{**gl_mr(42), 'description': 'Fixes team/other#7'}])
         src = refresh_gitlab(root, NOW, fake)
-        self.assertIn('labs.example.test/team/other#7', src.issues)
-        self.assertIn('labs.example.test/team/other#7', src.changes['!42'].issues)
+        self.assertIn('gitlab:labs.example.test/team/other#7', src.issues)
+        self.assertIn('gitlab:labs.example.test/team/other#7', src.changes['!42'].issues)
         self.assertTrue(any('team/other' in q for q in fake.queries))
         self.assertFalse(any('foreign.example' in q or '"8"' in q for q in fake.queries))
         self.assertTrue(all(url == 'https://labs.example.test/api/graphql' for _, url, _ in fake.posts))
@@ -244,3 +244,75 @@ class IdentityTest(unittest.TestCase):
         duplicate = next(line for line in old.splitlines() if line.startswith('| Old task |'))
         ambiguous = current.replace('\n\n## File ownership', '\n' + duplicate + '\n\n## File ownership')
         self.assertIsNone(issue_page.render(109, [(tip.TODAY, ambiguous)], src, tip.NOW, tip.LANES))
+
+class ReviewFindingsTest(unittest.TestCase):
+    def test_ambiguous_labels_fail_closed_and_explicit_identities_stay_distinct(self):
+        home = bs.backlog.Backlog('https://home', 'team/app')
+        # The same spelling could be a foreign host or a nested project on home.
+        self.assertIsNone(bs.backlog.issue_ref('foreign/team/app#7', home, any_host=True))
+        self.assertIsNone(bs.backlog.issue_ref('group.with.dots/team/app#7', home, any_host=True))
+        foreign = bs.backlog.issue_ref('https://foreign/team/app/-/issues/7', home, any_host=True)
+        nested = bs.backlog.issue_ref('https://home/group.with.dots/team/app/-/issues/7', home)
+        self.assertEqual((foreign.host, foreign.repo), ('foreign', 'team/app'))
+        self.assertEqual((nested.host, nested.repo), ('home', 'group.with.dots/team/app'))
+        self.assertNotEqual(foreign.label(home), nested.label(home))
+        self.assertEqual(task_forge.source_key('gitlab:foreign/team/app#7', home), foreign.label(home))
+        self.assertEqual(task_forge.source_key('gitlab:home/group.with.dots/team/app#7', home), nested.label(home))
+        self.assertIn(nested.label(home), task_forge.lookup_keys((nested.label(home),), home))
+        self.assertEqual(bs.backlog.issue_ref(nested.label(home), home), nested)
+        self.assertIsNone(bs.backlog.issue_ref(foreign.label(home), home))
+        self.assertIsNone(bs.backlog.issue_ref('https://foreign/team/app/-/issues/7', home))
+        self.assertEqual(bs.backlog.issue_ref('team/other#7', home).repo, 'team/other')
+        self.assertNotIn(nested.label(home), task_forge.lookup_keys(('group.with.dots/team/app#7',), home))
+
+    def test_dotted_nested_project_url_refreshes_without_fetching_foreign_host(self):
+        from test_board_sources import gitlab_workspace, refresh_gitlab, FakeGitLab, gl_issue, NOW
+        import shutil
+        root = gitlab_workspace([('https://labs.example.test/group.with.dots/team/app/-/issues/7', '!42'),
+                                 ('https://foreign/team/app/-/issues/8', ''), ('foreign/team/app#9', '')])
+        self.addCleanup(shutil.rmtree, root, True)
+        issue = {**gl_issue(7), 'webUrl': 'https://labs.example.test/group.with.dots/team/app/-/issues/7'}
+        fake = FakeGitLab(issues=[issue], mrs=[{**gl_mr(42), 'description': 'Fixes group.with.dots/team/app#7'}])
+        src = refresh_gitlab(root, NOW, fake)
+        key = 'gitlab:labs.example.test/group.with.dots/team/app#7'
+        self.assertIn(key, src.issues)
+        self.assertIn(key, src.changes['!42'].issues)
+        self.assertTrue(any('group.with.dots/team/app' in q for q in fake.queries))
+        self.assertFalse(any('foreign/team/app' in q or '"8"' in q or '"9"' in q for q in fake.queries))
+
+    def test_sibling_pr_url_is_fetched_by_refresh_in_its_own_repo(self):
+        from test_board_sources import workspace, gh_pr, gh_issue, NOW
+        import shutil
+        root = workspace('GitHub issues; repo o/app', issue='o/sibling#7', mr='https://github.com/o/sibling/pull/42')
+        self.addCleanup(shutil.rmtree, root, True)
+        calls = []
+        def gh(args):
+            query = args[-1]
+            calls.append(query)
+            pr = {**gh_pr(42), 'url': 'https://github.com/o/sibling/pull/42', 'body': 'Fixes #7'}
+            return 0, json.dumps({'data': {'r0': {'n118': gh_issue(118), 'n58': gh_pr(58)},
+                                             'r1': {'n7': gh_issue(7), 'n42': pr}, 'merged': {'nodes': []}}}), ''
+        src = bs.refresh(root, NOW, gh=gh)
+        self.assertIn('n42: issueOrPullRequest(number: 42)', calls[0])
+        self.assertEqual(src.changes['o/sibling#42'].issues, ('o/sibling#7',))
+        sibling = parse_tracker(tip.TODAY_START.replace('#109', 'o/sibling#7')).tasks[0]
+        local = parse_tracker(tip.TODAY_START.replace('#109', '#7')).tasks[0]
+        self.assertEqual(task_forge.task_changes(sibling, src), (src.changes['o/sibling#42'],))
+        self.assertEqual(task_forge.task_changes(local, src), ())
+
+    def test_move_on_day_after_task_removed_remains_in_history(self):
+        old = tip.TODAY_START.replace('- 00:01 opened the day', '- 00:03 stage: Upload size limit → implement')
+        row = next(line for line in old.splitlines() if line.startswith('| Upload size limit |'))
+        current = tip.TODAY_START.replace(row + '\n', '').replace('- 00:01 opened the day',
+                                                                   '- 00:05 stage: Upload size limit → pr')
+        src = bs.Sources({}, {}, {}, (), {}, home=bs.backlog.GitHubBacklog('o/app'))
+        html = issue_page.render(109, [(tip.YESTERDAY, old), (tip.TODAY, current)], src, tip.NOW, tip.LANES)
+        self.assertIn('00:03', html)
+        self.assertIn('00:05', html)
+        other = row.replace('#109', 'o/other#109')
+        reused = current.replace('\n\n## File ownership', '\n' + other + '\n\n## File ownership')
+        html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, old), (tip.TODAY, reused)], src, tip.NOW, tip.LANES)
+        self.assertNotIn('00:05', html)
+        ambiguous_old = old.replace('\n\n## File ownership', '\n' + other + '\n\n## File ownership')
+        html = issue_page.render('github:o/app#109', [(tip.YESTERDAY, ambiguous_old), (tip.TODAY, current)], src, tip.NOW, tip.LANES)
+        self.assertNotIn('00:05', html)
