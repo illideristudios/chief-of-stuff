@@ -146,7 +146,7 @@ def home_of(cfg: Backlog | GitHubBacklog) -> tuple[str, str]:
     """(host, repo or project): where a bare `#N` in the tracker points."""
     if isinstance(cfg, GitHubBacklog):
         return GITHUB, cfg.repo
-    return urlsplit(cfg.host).hostname or "", cfg.project
+    return urlsplit(cfg.host).netloc or "", cfg.project
 
 
 def file_with(cfg: Backlog | GitHubBacklog) -> str:
@@ -194,14 +194,15 @@ def store_label(key: str, home: Backlog | GitHubBacklog | None) -> str:
 
 
 WORKFLOW = "workflow"  # an `issue` cell naming a step the pipeline performs: no issue, never looked up
-_REF_SHORT = re.compile(r"^([\w.-]+/[\w.-]+)?#(\d+)$")
+_REF_SHORT = re.compile(r"^((?:[\w.-]+/)+[\w.-]+)?#(\d+)$")
+_REF_HOST_LABEL = re.compile(r"^([^/]+(?::\d+)?)/((?:[\w.-]+/)+[\w.-]+)#(\d+)$")
 _REF_URL = re.compile(r"^https://github\.com/([\w.-]+/[\w.-]+)/issues/(\d+)/?$")
-_REF_GITLAB = re.compile(r"^https://([\w.-]+)/((?:[\w.-]+/)+[\w.-]+)/-/(?:issues|work_items)/(\d+)/?$")
+_REF_GITLAB = re.compile(r"^https://([\w.-]+(?::\d+)?)/((?:[\w.-]+/)+[\w.-]+)/-/(?:issues|work_items)/(\d+)/?$")
 _REF_LINK = re.compile(r"^\[[^\]]*\]\((https://[^)\s]+)\)$")
 
 
 def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool = False) -> IssueRef | None:
-    """`#N` (in the Backlog), `owner/repo#N` (GitHub), a GitHub issue URL, a GitLab issue URL on the
+    """`#N` (in the Backlog), a project shorthand on its forge, a GitHub issue URL, a GitLab issue URL on the
     Backlog's own host, or a markdown link to one. Anything else is None, and a bare `#N` with no Backlog to resolve it against is None too.
     `any_host` admits a GitLab URL on any host: for naming an issue, never for fetching one."""
     text = cell.strip()
@@ -217,11 +218,19 @@ def issue_ref(cell: str, home: Backlog | GitHubBacklog | None, *, any_host: bool
         # host would send it there (R1 on PR 14).
         own = any_host or (isinstance(home, Backlog) and m.group(1) == home_of(home)[0])
         return IssueRef(m.group(2), int(m.group(3)), m.group(1)) if own else None
+    # Qualified cache labels must never be interpreted as a project on the home host.
+    m = _REF_HOST_LABEL.match(text)
+    if m and (":" in m.group(1) or "." in m.group(1)
+              or (isinstance(home, Backlog) and m.group(1) == home_of(home)[0])):
+        own = isinstance(home, Backlog) and m.group(1) == home_of(home)[0]
+        return IssueRef(m.group(2), int(m.group(3)), m.group(1)) if own or any_host else None
     m = _REF_SHORT.match(text)
     if not m or not (m.group(1) or home):
         return None
     if m.group(1):
-        return IssueRef(m.group(1), int(m.group(2)))
+        if isinstance(home, Backlog):
+            return IssueRef(m.group(1), int(m.group(2)), home_of(home)[0])
+        return IssueRef(m.group(1), int(m.group(2))) if GH_REPO.fullmatch(m.group(1)) else None
     host, repo = home_of(home)
     return IssueRef(repo, int(m.group(2)), host)
 

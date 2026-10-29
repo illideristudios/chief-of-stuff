@@ -256,7 +256,7 @@ def _branch_url(repo_url: str | None, branch: str, *, gitlab: bool = False) -> s
 
 # --- GitHub ----------------------------------------------------------------------------------------
 
-def _gh_change(key: str, p: dict, approver: str, repo: str = "") -> Change:
+def _gh_change(key: str, p: dict, approver: str, repo: str = "", origin: str = "") -> Change:
     reviews = (p.get("latestReviews") or {}).get("nodes") or []
     commit = (((p.get("commits") or {}).get("nodes") or [{}])[0] or {}).get("commit") or {}
     checks = ((commit.get("statusCheckRollup") or {}).get("contexts") or {}).get("nodes") or []
@@ -274,7 +274,11 @@ def _gh_change(key: str, p: dict, approver: str, repo: str = "") -> Change:
                 else p.get("reviewDecision") == "APPROVED")
     closing = p.get("closingIssuesReferences")
     closing_nodes = (closing.get("nodes") if isinstance(closing, dict) else closing) or []
-    issues = _github_closes({**p, "closingIssuesReferences": [x for x in closing_nodes if isinstance(x, dict)]}, repo)
+    issues = _github_closes({**p, "closingIssuesReferences": [x for x in closing_nodes if isinstance(x, dict)]}, origin or repo)
+    if origin and origin.casefold() != repo.casefold():
+        issues = tuple(dict.fromkeys(f"{origin}{ref}" if ref.startswith("#") else
+                                     f"#{ref.rpartition('#')[2]}" if ref.rpartition("#")[0].casefold() == repo.casefold() else ref
+                                     for ref in issues))
     head_ref = p.get("headRef") if isinstance(p.get("headRef"), dict) else None
     branch = (head_ref or {}).get("name") or p.get("headRefName") or ""
     head_repo = p.get("headRepository") if isinstance(p.get("headRepository"), dict) else None
@@ -320,7 +324,7 @@ def github(home: backlog.GitHubBacklog, wanted: dict[str, set[int]], since: date
                 continue
             key = backlog.IssueRef(repo, int(node["number"])).label(home)
             if node.get("__typename") == "PullRequest":
-                changes[key] = _gh_change(key, node, approver, home.repo)
+                changes[key] = _gh_change(key, node, approver, home.repo, repo)
             else:
                 m = node.get("milestone")
                 issues[key] = Issue(key, node["url"], node["title"], node["state"].lower(),

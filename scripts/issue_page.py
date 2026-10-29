@@ -18,7 +18,7 @@ from pathlib import Path
 import board_sources
 import flow_chart
 from clock import parse_stamp
-from task_forge import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, change_issue_keys, lookup_keys, source_worker_tasks, tracker_issue_tasks
+from task_forge import EXHAUSTED_CHIP, EXHAUSTED_UNBLOCK, PageData, change_issue_keys, lookup_keys, source_key, source_worker_tasks, tracker_issue_tasks
 import tracker_log
 from decision_actions import addresses, state_of
 from decision_page import HEAD, Linker, _section, context, entries, held_refs, span, store_decision_badge, write_if_changed
@@ -264,7 +264,22 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     if not mine:
         return None
     keys = set().union(*map(names, mine))
-    log = sorted((m for day, text in trackers for m in tracker_log.moves(text, day, now.tzinfo)), key=lambda m: m.at)
+    # Resolve each day's aliases before building Flow: names may be reused by another issue later.
+    log = []
+    selected = {source_key(t.issue, sources.home) for t in mine if t.issue.strip()}
+    for day, text in trackers:
+        day_tasks = parse_tracker(text).tasks
+        aliases = {}
+        for t in day_tasks:
+            identity_key = source_key(t.issue, sources.home) if t.issue.strip() else ""
+            for alias in names(t):
+                aliases.setdefault(alias, set()).add(identity_key)
+        for move in tracker_log.moves(text, day, now.tzinfo):
+            alias = move.name.strip().casefold()
+            identities = aliases.get(alias, set())
+            if identities and identities <= selected:
+                log.append(move)
+    log.sort(key=lambda m: m.at)
     # A forecast runs to the task's due, as the board's Flow chart feeds estimate.task_end's due.
     cfg = cfg or Config("", "", "", getattr(now.tzinfo, "key", "UTC"), (), None, None)
     linker = Linker(cfg.backlog, root)
@@ -277,9 +292,9 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     holds = hold_causes(today, kanban, sources, lanes or {}, pending_refs)
     held = held_names(holds)
     rows = store_rows if store_rows is not None else [
-        (s, r) for s, r in flow_chart.build(log, known, lanes or {}, held, ends, now,
-                                            ended=forge_ends(known, sources, now.tzinfo))
-        if r.ref and any(r.ref == issue_key(t.issue) for t in mine)
+        (s, r) for s, r in flow_chart.build(log, mine, lanes or {}, held, ends, now,
+                                            ended=forge_ends(mine, sources, now.tzinfo), home=sources.home)
+        if r.ref and r.ref in selected
     ]
     log = [m for m in log if m.name.strip().casefold() in keys]
     raw_refs = ((full_key,) if full_key
@@ -288,7 +303,7 @@ def render(number: int | str, trackers: list[tuple[date, str]], sources: board_s
     lookup = lookup_keys(raw_refs, sources.home)
     issue_keys = set(lookup)
     issue = next((sources.issues[k] for k in lookup if k in sources.issues), None)
-    latest = {k: t for t in known for k in names(t)}  # later trackers win
+    latest = {k: t for t in mine for k in names(t)}  # later selected rows win
     exhausted = db.exhaustion(item.issue_key) if item is not None and db is not None else None
     if exhausted is not None:
         status = EXHAUSTED_CHIP

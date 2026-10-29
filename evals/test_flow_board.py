@@ -95,7 +95,10 @@ class HoldCauseTest(unittest.TestCase):
                                      pending_refs=refs, home=None, lane=LANES["build"])
 
     def test_a_pending_decision_on_the_issue_comes_first(self) -> None:
-        self.assertEqual(self.cause("Write README", {"#7"}), "decision")
+        task = replace(self.tasks["Write README"], issue="#7")
+        self.assertEqual(self.cause("Write README", {"#7"}, task=task), "decision")
+        # An unrecognized URL is not evidence that this decision holds its issue.
+        self.assertEqual(self.cause("Write README", {"#7"}), "triage")
 
     def test_else_a_kanban_hold_stage_names_the_stage(self) -> None:
         self.assertEqual(self.cause("Write README"), "triage")

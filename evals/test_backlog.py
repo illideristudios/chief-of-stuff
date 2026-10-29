@@ -746,10 +746,13 @@ class GitLabIssueRefTest(unittest.TestCase):
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", GH))
         self.assertIsNone(bl.issue_ref("https://gl.example/g/p/-/issues/1", None))
 
-    def test_owner_repo_is_still_github(self):
+    def test_project_shorthand_uses_the_backlog_forge_and_github_urls_remain_explicit(self):
         ref = bl.issue_ref("locriani/GauntletIssues#33", GL)
-        self.assertEqual(ref, bl.IssueRef(REPO, 33))
-        self.assertEqual(ref.label(GL), f"{REPO}#33")
+        self.assertEqual(ref, bl.IssueRef(REPO, 33, "gl.example"))
+        self.assertEqual(ref.label(GL), f"gl.example/{REPO}#33")
+        github = bl.issue_ref(f"https://github.com/{REPO}/issues/33", GL)
+        self.assertEqual(github, bl.IssueRef(REPO, 33))
+        self.assertEqual(github.label(GL), f"{REPO}#33")
 
     def test_the_same_path_on_another_host_is_not_home(self):
         self.assertEqual(bl.IssueRef("g/p", 9).label(GL), "g/p#9")
