@@ -1306,6 +1306,30 @@ class AnswerTest(unittest.TestCase):
         self.json.write_text("{")
         self.assertEqual(post(self.port, "/decisions/cache-ttl", b"key=B", origin=self.origin).status, 409)
 
+    def test_refused_authored_answer_keeps_words_and_hides_parse_details(self):
+        resp = post(self.port, "/decisions/cache-ttl", b"key=Z&words=%3Cdraft%3E", origin=self.origin)
+        body = resp.body.decode()
+        self.assertEqual(resp.status, 400)
+        self.assertIn('class="tabs"', body)
+        self.assertIn('href="/"', body)
+        self.assertIn('&lt;draft&gt;', body)
+        self.assertIn('name="words"', body)
+        self.assertIn("Cache TTL", body)
+        self.assertIn('name="key"', body)
+        self.assertIn("no-store", resp.getheader("Cache-Control"))
+        self.assertIsNone(self.answer())
+        broken = json.loads(self.json.read_text())
+        broken["recommended"] = "sensitive-value"
+        self.json.write_text(json.dumps(broken))
+        resp = post(self.port, "/decisions/cache-ttl", b"words=my+draft", origin=self.origin)
+        self.assertEqual(resp.status, 409)
+        self.assertNotIn("sensitive-value", resp.body.decode())
+        self.assertIn("my draft", resp.body.decode())
+        missing = post(self.port, "/decisions/missing", b"words=keep+me", origin=self.origin)
+        self.assertEqual(missing.status, 404)
+        self.assertIn("keep me", missing.body.decode())
+        self.assertIn("no-store", missing.getheader("Cache-Control"))
+
 
 WAIT = 5.0   # the longest a test waits for something that must happen
 QUIET = 0.5  # how long a test watches for something that must not happen

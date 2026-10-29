@@ -328,6 +328,48 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     server_version = f"{SERVER}/{VERSION}"
     banner = ""
 
+    def _refusal(self, status, message, *, answer=None, state=None, retry=None, words_name="answer", link=None):
+        """A transient recovery page; never write a submitted draft or raw exception to a page file."""
+        import decision_page
+        details = ""
+        if state is not None:
+            details = (f'<div class="card"><h2>{escape(state.prompt)}</h2>'
+                       f'<p>Current status: <b>{escape(state.status)}</b></p>'
+                       f'<p><a href="/decisions/{state.id}">View the current decision</a></p></div>')
+        if link:
+            details += f'<p><a href="{escape(link)}">Reload the decision</a></p>'
+        if answer is not None:
+            field = f'<label>Your draft <textarea name="{words_name}" rows="4">{escape(answer)}</textarea></label>'
+            if retry:
+                action, hidden, extra = retry
+                fields = ''.join(f'<input type="hidden" name="{escape(k)}" value="{escape(str(v))}">' for k, v in hidden.items())
+                details += f'<form method="post" action="{escape(action)}">{fields}{field}{extra}<button type="submit">Try again</button></form>'
+            else:
+                details += f'<div class="card">{field}<p>Copy your draft before opening another page.</p></div>'
+        page = (f'<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+                f'<title>Unable to continue</title>{decision_page.HEAD_OPEN}{fragment.theme()}{decision_page.PAGE_CSS}'
+                '<style>.refusal{max-width:860px;margin:24px auto;padding:0 20px}.refusal textarea{display:block;'
+                'width:100%;box-sizing:border-box;margin:8px 0;font:inherit;background:var(--bg);color:var(--fg);'
+                'border:1px solid var(--line)}.refusal .notice{border-left:4px solid var(--brass);padding:12px}</style>'
+                '</head><body><main class="refusal">'
+                f'{fragment.tab_bar("Decisions", 0, True)}<header class="top"><div><h1>Unable to continue</h1></div></header>'
+                f'<div class="card notice" role="alert">{escape(message)}</div>{details}'
+                '<p><a href="/">Board</a> · <a href="/workers">Workers</a> · <a href="/decisions">Decisions</a></p>'
+                '</main></body></html>').encode("utf-8")
+        self._send_transient(status, page)
+
+    def _send_transient(self, status, page):
+        """Send an in-memory page, never cached or injected with the auto-reloader."""
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        if self.command != "HEAD":
+            self.wfile.write(page)
+
     def _allowed(self) -> bool:
         """Refuse a foreign Host or a dotfile; map `/` to today's (else the newest) board, `/all` to the listing and
         `/workers`, `/decisions[/<slug>]` and `/issues/<n>` to its file; refuse a rendered page's file name; re-render a page its sources outdate."""
@@ -392,13 +434,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             # A path of digits is a store decision, rendered below or a 404; any other is an authored page's JSON.
             source = self._page(f"decision-{m[1]}.json") if m and not m[1].isdigit() else None
             if not (m and m[1].isdigit()) and (source is None or not source.is_file()):
-                self.send_error(404, "no such decision")
+                self._refusal(404, "No such decision. Return to the decisions list or board.")
                 return False
             self.path = f"/decision-{m[1]}.html"
         elif decoded.startswith("/issues/"):
             m = ISSUE.fullmatch(decoded)
             if not m:
-                self.send_error(404, "no such issue")
+                self._refusal(404, "No such issue. Check the address or return to the board.")
                 return False
             self.path = "/" + fragment.issue_page_name(m[1], bool(m[2]))
         elif RENDERED.fullmatch(Path(self.translate_path(path)).name.casefold()):
@@ -420,10 +462,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     with contextlib.suppress(OSError):
                         unrecord_look(pages, prior)
         if name.startswith("issue-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
-            self.send_error(404, "no task names this issue")  # issue_page.write removes the page then
+            self._refusal(404, "No task names this issue. Return to the board or Workers.")
             return False
         if name.startswith("decision-") and not self.banner and not ((page := self._page(name)) and page.is_file()):
-            self.send_error(404, "no such decision")  # decision_page.write_store removes the page then
+            self._refusal(404, "No such decision. Return to the decisions list or board.")
             return False
         return True
 
@@ -556,10 +598,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
         root = getattr(self.server, "root", None)
         dec_id = form.get("decision_id", [""])[0].strip()
+        draft = form.get("answer", [""])[0]
         if root is None or not dec_id.isdigit():
-            return self.send_error(404, "no such decision")
+            return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft)
         action = form.get("action", ["answer"])[0].strip()
-        text = form.get("answer", [""])[0].strip()
+        text = draft.strip()
         target_stage = form.get("target_stage", [""])[0].strip()
         now_iso = datetime.now().astimezone().isoformat(timespec="seconds")
         try:  # #827: the workspace's own policy, overlay included, as the engine runs it
@@ -569,16 +612,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.send_error(503, f"workspace policy unreadable: {exc}")
 
         db = None
+        current = None
         try:
             db = store_access.migrated_store(root)
 
             def record():
                 """Append the person's row, with any comment for the engine to post, in one short write transaction."""
+                nonlocal current
                 dec = db.decision(int(dec_id))
                 if dec is None:
                     return (404, "no such decision")
                 # Rows are append-only: the form names the row it was rendered from, and a newer one refuses it.
-                if decision_escalation.latest(db.decisions(dec.issue_key)).get(decision_escalation.identity(dec)).id != dec.id:
+                latest = decision_escalation.latest(db.decisions(dec.issue_key)).get(decision_escalation.identity(dec))
+                current = decision_actions.state_of(latest)
+                if latest.id != dec.id:
                     return (409, "the decision changed since this page was rendered")
                 item = db.item(dec.issue_key)
                 data = db.resume(dec.issue_key) or {}
@@ -596,11 +643,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 with db.transaction():
                     error = record()
             except decision_actions.BadRequest as exc:
-                return self.send_error(400, str(exc))
+                known = {"an answer must contain text", "unknown decision action", "a reversal must contain text",
+                         "unknown target stage"}
+                message = str(exc) if str(exc) in known else "The selected stage cannot run a worker."
+                retry = None
+                if action in {"answer", "reverse", "reroute", "re-route"}:
+                    extra = (f'<label>Target stage <input type="text" name="target_stage" value="{escape(target_stage)}"></label>'
+                             if action in {"reroute", "re-route"} else "")
+                    hidden = {"decision_id": int(dec_id), "action": action}
+                    back = re.fullmatch(r"/decisions/(\d+)", form.get("back", [""])[0])
+                    if back:
+                        hidden["back"] = f"/decisions/{int(back[1])}"
+                    retry = ("/", hidden, extra)
+                return self._refusal(400, f"Your response was not saved: {message}.", answer=draft, state=current, retry=retry)
             except ValueError as exc:
-                return self.send_error(409, str(exc))
+                known = {"decision is already closed", "only an answered decision can be reversed",
+                         "a target stage is required", "a reversal must contain text", "an answer must contain text"}
+                message = str(exc) if str(exc) in known else "the decision cannot accept this action"
+                return self._refusal(409, f"Your response was not saved: {message}.", answer=draft, state=current)
             if error is not None:
-                return self.send_error(*error)
+                status, message = error
+                return self._refusal(status, f"Your response was not saved: {message}.", answer=draft, state=current)
         except (ServiceError, sqlite3.OperationalError, OperationalError) as exc:
             return self.send_error(503, f"store unavailable: {exc}")
         finally:
@@ -634,12 +697,10 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if size > MAX_BODY:
                 self.close_connection = True
                 return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
-            form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
+            form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"), keep_blank_values=True)
             return self._post_store_decision(form)
         m = ROUTE.fullmatch(route_path)
         source = self._page(f"decision-{m[1]}.json") if m else None
-        if source is None or not source.is_file():
-            return self.send_error(404, "no such decision")
         try:
             size = int(self.headers["Content-Length"])
         except (TypeError, ValueError):
@@ -647,16 +708,24 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if size > MAX_BODY:
             self.close_connection = True
             return self.send_error(413, f"an answer is at most {MAX_BODY} bytes")
-        form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"))
-        key, words = form.get("key", [""])[0], form.get("words", [""])[0].strip()
+        form = parse_qs(self.rfile.read(size).decode("utf-8", "replace"), keep_blank_values=True)
+        draft = form.get("words", [""])[0]
+        key, words = form.get("key", [""])[0], draft.strip()
+        if source is None or not source.is_file():
+            return self._refusal(404, "No such decision. Your answer was not saved.", answer=draft, words_name="words")
         import decision_page
         with page_lock(Path(self.directory) / f"decision-{m[1]}.html"):
             try:
                 d = decision_page.parse(json.loads(source.read_text()))
-            except decision_page.BAD as e:
-                return self.send_error(409, f"the decision does not read: {e}")
+            except decision_page.BAD:
+                return self._refusal(409, "The decision cannot be read. Your answer was not saved; try reloading it later.",
+                                     answer=draft, words_name="words", link=f"/decisions/{m[1]}")
             if (key and key not in [o["key"] for o in d["options"]]) or not (key or words):
-                return self.send_error(400, "an answer is one of the options' keys, or words")
+                page = decision_page.render(d, datetime.now().astimezone().date().isoformat(), slug=m[1],
+                                            refusal="Your answer was not saved. Choose one of the options or write an answer.",
+                                            draft=draft, selected=key if key in [o["key"] for o in d["options"]] else "",
+                                            back="/decisions" if form.get("back") == ["/decisions"] else "")
+                return self._send_transient(400, page.encode("utf-8"))
             d["answer"] = {"key": key or None, "words": words, "at": datetime.now().astimezone().isoformat(timespec="seconds")}
             stat = source.stat()
             tmp = source.with_name(f".{source.name}.tmp")
