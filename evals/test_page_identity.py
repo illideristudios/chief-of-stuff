@@ -14,6 +14,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import page_common  # noqa: E402
 import pages as pg  # noqa: E402
 from test_pages import ZONE, _PagesFixture, get  # noqa: E402
