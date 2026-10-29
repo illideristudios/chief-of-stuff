@@ -39,6 +39,7 @@ import io
 import json
 import os
 import re
+import select
 import signal
 import subprocess
 import sys
@@ -99,16 +100,13 @@ def _plugin_version() -> str:
 
 
 VERSION = _plugin_version()
+# Installed release paths are content-addressed; capture the resolved path once so `current` moving
+# cannot change the identity advertised by an already-running server.
+RELEASE_ID = hashlib.sha256(os.fsencode(Path(__file__).resolve().parent.parent)).hexdigest()[:24]
 # The renderer's own code counts as a source: a release upgrade changes it, not the sources.
 import fragment  # light (html, re, pathlib); the renderers stay lazy for --ensure
 
 RENDERER_MTIME_NS = max(p.stat().st_mtime_ns for p in (*Path(__file__).resolve().parent.glob("*.py"), fragment.THEME_PATH) if p.is_file())
-
-
-def _version(server_header: str) -> tuple[int, ...]:
-    """The version a Server header names; a server from before versions were sent is (0,)."""
-    m = re.match(rf"{SERVER}/(\d+(?:\.\d+)*)", server_header)
-    return tuple(int(x) for x in m[1].split(".")) if m else (0,)
 
 
 class PagesError(RuntimeError):
@@ -327,7 +325,7 @@ class Refresher(threading.Thread):
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
-    server_version = f"{SERVER}/{VERSION}"
+    server_version = f"{SERVER}/{VERSION} release-{RELEASE_ID}"
     banner = ""
 
     def _refusal(self, status, message, *, answer=None, state=None, retry=None, words_name="answer", link=None):
@@ -897,7 +895,8 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
     else:
         if not who.startswith(SERVER):
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
-        if _version(who) >= _version(f"{SERVER}/{VERSION}"):
+        identity = re.search(r"\brelease-([0-9a-f]{24})\b", who)
+        if identity and identity[1] == RELEASE_ID:
             return "pages: serving"
         _stop(pages_dir, port, stop)
         restart = True
@@ -945,7 +944,7 @@ def from_config(root: Path) -> tuple[Path, int]:
         raise PagesError(str(e)) from None
 
 
-def supervise(root: Path, stop: threading.Event) -> None:
+def supervise(root: Path, stop: threading.Event, startup=None) -> None:
     """Keep the board serving as part of the engine, with bounded backoff for failed or flapping starts.
 
     A workspace with no board is polled again, so one added later is served. Returns when `stop` is set or
@@ -967,6 +966,9 @@ def supervise(root: Path, stop: threading.Event) -> None:
                     if str(exc) != last_error:
                         print(f"pages: {exc}", file=sys.stderr, flush=True)
                         last_error = str(exc)
+                if startup is not None:
+                    startup(status is not None and status != "pages: stopped")
+                    startup = None
                 if status == "pages: serving":
                     delay, retry = POLL, RETRY_MIN
                 else:
@@ -975,23 +977,30 @@ def supervise(root: Path, stop: threading.Event) -> None:
                 if stop.wait(delay):
                     return
     except supervisor.ServiceError:
+        if startup is not None:
+            startup(True)  # another supervisor already owns recovery
         print("pages: another supervisor already holds pages-supervisor.lock", file=sys.stderr, flush=True)
 
 
-def supervise_with_retry(root: Path, stop: threading.Event) -> None:
+def supervise_with_retry(root: Path, stop: threading.Event, startup=None) -> None:
     """Retry when another supervisor holds the lock, so either supervisor can take over when the other stops."""
     while not stop.is_set():
-        supervise(root, stop)
-        stop.wait(RETRY_MAX)
+        if startup is None:
+            supervise(root, stop)
+        else:
+            supervise(root, stop, startup)
+            startup = None
+        stop.wait(min(POLL, RETRY_MAX))
 
 
-def supervise_standalone(root: Path, stop: threading.Event) -> None:
-    """Keep supervising during failed upgrades; release the board lock before replacing this process."""
+def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> None:
+    """Monitor the successor and resume supervision if its startup or later execution fails."""
     retry_at, delay, failed_release = 0.0, 30.0, None
     while not stop.is_set():
         board_stop = threading.Event()
-        thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop), daemon=True)
+        thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
         thread.start()
+        startup = None
         handoff = None
         try:
             while not stop.is_set():
@@ -1028,14 +1037,49 @@ def supervise_standalone(root: Path, stop: threading.Event) -> None:
             board_stop.set()
             thread.join()
         if handoff is not None and not stop.is_set() and supervisor.current_release() == release:
-            python, entry = handoff
+            child = None
             try:
-                os.execv(str(python), [str(python), str(entry), "--root", str(root), "supervise"])
-            except OSError as exc:
-                delay = min(delay * 2, 3600)
-                retry_at = time.monotonic() + delay
+                python, entry = handoff
+                read_fd, write_fd = os.pipe()
+                try:
+                    child = subprocess.Popen(
+                        [str(python), str(entry), "--root", str(root), "--handoff-ready-fd",
+                         str(write_fd), "supervise"], pass_fds=(write_fd,))
+                except BaseException:
+                    os.close(read_fd)
+                    raise
+                finally:
+                    os.close(write_fd)
+                try:
+                    deadline = time.monotonic() + 15
+                    ready = False
+                    while not stop.is_set() and child.poll() is None and time.monotonic() < deadline:
+                        if select.select([read_fd], [], [], 0.1)[0]:
+                            ready = os.read(read_fd, 1) == b"1"
+                            break
+                finally:
+                    os.close(read_fd)
+                if not ready or supervisor.current_release() != release:
+                    raise supervisor.ServiceError("candidate did not complete startup")
+                while (not stop.is_set() and child.poll() is None and
+                       supervisor.current_release() == release):
+                    stop.wait(POLL)
+            except (OSError, supervisor.ServiceError) as exc:
                 print(f"pages: cannot start release {release}: {exc}; keeping {supervisor.RELEASE}",
                       file=sys.stderr, flush=True)
+            finally:
+                if child is not None:
+                    if child.poll() is None:
+                        child.terminate()
+                    try:
+                        child.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        child.kill()
+                        child.wait()
+            if not stop.is_set():
+                delay = min(delay * 2, 3600)
+                retry_at = time.monotonic() + delay
+                print(f"pages: release {release} exited; resuming {supervisor.RELEASE}", file=sys.stderr, flush=True)
 
 
 def _held(path: Path) -> bool:
@@ -1111,6 +1155,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("command", nargs="?", choices=("serve", "supervise", "install", "uninstall", "status"))
     ap.add_argument("--dir")
     ap.add_argument("--port", type=int)
+    ap.add_argument("--handoff-ready-fd", type=int, help=argparse.SUPPRESS)
     args = ap.parse_args(args_list)
     if args.command == "serve":
         make_server(Path(args.dir), args.port, Path(args.root) if args.root else None).serve_forever()
@@ -1120,7 +1165,10 @@ def main(argv: list[str] | None = None) -> int:
         stop = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
-        supervise_standalone(root, stop)
+        def startup(ready):
+            os.write(args.handoff_ready_fd, b"1" if ready else b"0")
+            os.close(args.handoff_ready_fd)
+        supervise_standalone(root, stop, startup if args.handoff_ready_fd is not None else None)
         return 0
     if args.command in ("install", "uninstall", "status"):
         try:

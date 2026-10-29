@@ -3,6 +3,7 @@ webserver and ensure they are set up as part of the agent's boot loop")."""
 
 import collections
 import email.utils
+import hashlib
 import http.client
 import json
 import http.server
@@ -1685,13 +1686,18 @@ class StandaloneBoardTest(unittest.TestCase):
         install = self.root.parent / "install"
         versions = install / "versions"
         source = Path(pg.__file__).resolve().parent.parent
-        for name, version in (("old", "1.0.0"), ("new", "2.0.0")):
+        for name, version in (("old", "1.0.0"), ("new", "1.0.0")):
             release = versions / name
             shutil.copytree(source / "scripts", release / "scripts")
             (release / ".claude-plugin").mkdir()
             (release / ".claude-plugin" / "plugin.json").write_text(json.dumps({"version": version}))
             (release / "chief_of_stuff.py").touch()
             (release / "requirements.txt").write_text("")
+        # An earlier installed draft does not advertise a release identity.
+        legacy = versions / "old/scripts/pages.py"
+        legacy.write_text(legacy.read_text().replace('server_version = f"{SERVER}/{VERSION} release-{RELEASE_ID}"',
+                                                    'server_version = f"{SERVER}/{VERSION}"').replace(
+            'if identity and identity[1] == RELEASE_ID:', 'if not identity or identity[1] == RELEASE_ID:'))
         current = install / "current"
         current.symlink_to(versions / "old")
         # Exercise a real supervisor process and real servers; stub only venv preparation to avoid pip.
@@ -1719,10 +1725,15 @@ class StandaloneBoardTest(unittest.TestCase):
                 time.sleep(0.05)
             return False
 
-        self.assertTrue(wait_for(lambda: (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0")))
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0")))
+        old_pid = int((self.pages / ".pid").read_text())
         current.unlink()
         current.symlink_to(versions / "new")
-        self.assertTrue(wait_for(lambda: (pg._who(self.port) or "").startswith(pg.SERVER + "/2.0.0")),
+        new_id = hashlib.sha256(os.fsencode((versions / "new").resolve())).hexdigest()[:24]
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                 int((self.pages / ".pid").read_text()) != old_pid and
+                                 f"release-{new_id}" in (pg._who(self.port) or "")),
                         "standalone supervisor did not upgrade the server")
         def server_pid():
             try:
@@ -1733,9 +1744,82 @@ class StandaloneBoardTest(unittest.TestCase):
         first_pid = server_pid()
         os.kill(first_pid, signal.SIGTERM)
         self.assertTrue(wait_for(lambda: server_pid() is not None and server_pid() != first_pid and
-                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/2.0.0")),
+                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0")),
                         "the upgraded supervisor did not restart the upgraded server")
         self.assertIsNone(proc.poll())
+        upgraded_pid = server_pid()
+        current.unlink()
+        current.symlink_to(versions / "old")
+        self.assertTrue(wait_for(lambda: server_pid() is not None and server_pid() != upgraded_pid and
+                                 (pg._who(self.port) or "").startswith(pg.SERVER + "/1.0.0") and
+                                 "release-" not in (pg._who(self.port) or "")),
+                        "rollback did not restore the earlier release")
+
+    def test_broken_new_release_keeps_the_old_supervisor_alive_to_restore_a_crashed_board(self):
+        self.addCleanup(self.stop_server)
+        install = self.root.parent / "install"
+        versions = install / "versions"
+        source = Path(pg.__file__).resolve().parent.parent
+        old, broken = versions / "old", versions / "broken"
+        shutil.copytree(source / "scripts", old / "scripts")
+        (old / ".claude-plugin").mkdir()
+        (old / ".claude-plugin/plugin.json").write_text('{"version":"1.0.0"}')
+        (old / "chief_of_stuff.py").touch()
+        (old / "requirements.txt").touch()
+        shutil.copytree(old / "scripts", broken / "scripts")
+        shutil.copytree(old / ".claude-plugin", broken / ".claude-plugin")
+        (broken / "chief_of_stuff.py").touch()
+        (broken / "requirements.txt").touch()
+        current = install / "current"
+        current.symlink_to(old)
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(old / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        proc = subprocess.Popen([sys.executable, "-c", code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+        def wait_for(predicate):
+            deadline = time.monotonic() + WAIT + 5
+            while time.monotonic() < deadline:
+                if predicate():
+                    return True
+                if proc.poll() is not None:
+                    return False
+                time.sleep(0.05)
+            return False
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and pg._who(self.port)))
+        marker = self.root / "candidate-attempted"
+        startup_failure = ((old / "scripts/pages.py").read_text().replace(
+            'if __name__ == "__main__":',
+            f'def ensure(*args, **kwargs):\n    Path({str(marker)!r}).touch()\n'
+            '    os.kill(int((args[0] / PID).read_text()), signal.SIGTERM)\n'
+            '    raise RuntimeError("server startup failed")\n\nif __name__ == "__main__":'))
+        mark = f"from pathlib import Path; Path({str(marker)!r}).touch()\n"
+        for failure in (mark + "import missing_release_dependency\n", mark + "raise RuntimeError('startup failed')\n",
+                        startup_failure,
+                        mark + "import os, sys, time\nfd = int(sys.argv[sys.argv.index('--handoff-ready-fd')+1])\n"
+                        "os.write(fd, b'1'); os.close(fd); time.sleep(0.2); sys.exit(1)\n"):
+            with self.subTest(failure=failure):
+                (broken / "scripts/pages.py").write_text(failure)
+                current.unlink()
+                current.symlink_to(broken)
+                self.assertTrue(wait_for(marker.exists), "candidate was not attempted")
+                time.sleep(1)
+                self.assertIsNone(proc.poll(), "old supervisor was discarded after exec succeeded")
+                self.assertTrue(wait_for(lambda: pg._who(self.port) is not None), "old supervisor did not restore startup failure")
+                pid = int((self.pages / ".pid").read_text())
+                os.kill(pid, signal.SIGTERM)
+                self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                         int((self.pages / ".pid").read_text()) != pid and pg._who(self.port)))
+                current.unlink()
+                current.symlink_to(old)
+                marker.unlink()
+                time.sleep(0.3)
 
     def test_failed_upgrade_keeps_supervising_and_shutdown_releases_the_lock(self):
         release = self.root.parent / "new"
@@ -1751,14 +1835,14 @@ class StandaloneBoardTest(unittest.TestCase):
         with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
              mock.patch.object(pg.supervisor, "ensure_venv", side_effect=prepare), \
              mock.patch.object(pg, "ensure", side_effect=ensure), \
-             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.os, "execv") as execv:
+             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.subprocess, "Popen") as popen:
             thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
             thread.start()
             try:
                 self.assertTrue(failed.wait(2))
                 self.assertTrue(serving.wait(2))
                 self.assertTrue(thread.is_alive())
-                execv.assert_not_called()
+                popen.assert_not_called()
             finally:
                 stop.set()
                 thread.join(timeout=5)
@@ -1766,7 +1850,7 @@ class StandaloneBoardTest(unittest.TestCase):
             with pg.supervisor.lock(pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"):
                 pass
 
-    def test_failed_exec_resumes_supervision(self):
+    def test_failed_child_launch_resumes_supervision(self):
         release = self.root.parent / "new"
         (release / "scripts").mkdir(parents=True)
         (release / "scripts" / "pages.py").touch()
@@ -1775,13 +1859,13 @@ class StandaloneBoardTest(unittest.TestCase):
             if attempted.is_set():
                 resumed.set()
             return "pages: serving"
-        def fail_exec(*args):
+        def fail_start(*args, **kwargs):
             attempted.set()
             raise OSError("exec failed")
         with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
              mock.patch.object(pg.supervisor, "ensure_venv", return_value=Path(sys.executable)), \
              mock.patch.object(pg, "ensure", side_effect=ensure), \
-             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.os, "execv", side_effect=fail_exec):
+             mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.subprocess, "Popen", side_effect=fail_start):
             thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
             thread.start()
             try:
