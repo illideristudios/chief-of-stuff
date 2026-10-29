@@ -248,23 +248,23 @@ def _send(process: subprocess.Popen, content: str, session_id: str, uuid_: str |
 
 
 def _stop_after_write_failure(process: subprocess.Popen) -> None:
-    """A partial JSON line cannot safely be followed by another message."""
+    """Kill the host's owned group before reaping its leader, keeping its group id reserved."""
     try:
         process.stdin.close()
     except OSError:
         pass
-    if process.poll() is None:
+    if process.returncode is None:
         try:
-            process.terminate()
-            process.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            try:
-                process.kill()
-            except ProcessLookupError:
-                pass
-            process.wait(timeout=1)
+            os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        # Do not publish exit evidence if signalling or reaping fails. In particular, do not
+        # mistake macOS EPERM for proof that a group with descendants has stopped.
+        process.wait(timeout=1)
+
+
+class _RunnerCancelled(BaseException):
+    pass
 
 
 def _serve(run_dir: Path, process: subprocess.Popen, session_id: str, prompt: str) -> bytes:
@@ -348,22 +348,44 @@ def _messaging_worker(run_dir: Path, prepared: dict) -> None:
     final = b""
     (run_dir / "stdout").write_text("")
     with (run_dir / "stream.jsonl").open("wb") as stream, (run_dir / "stderr").open("w") as stderr:
+        process = None
+        cancelled = False
+
+        def cancel_runner(_signum, _frame):
+            nonlocal cancelled
+            cancelled = True
+            if process is not None:
+                raise _RunnerCancelled()
+
+        previous = signal.signal(signal.SIGTERM, cancel_runner)
         try:
-            process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"],
-                                       env=model_env({**os.environ, **prepared.get("env", {})}),
-                                       stdin=subprocess.PIPE, stdout=stream, stderr=stderr)
-        except OSError as exc:
-            stderr.write(str(exc))
-            _close_intake(run_dir)
-            code = 127
-        else:
-            _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
-                                             "session_id": prepared["session_id"]})
             try:
-                final = _serve(run_dir, process, prepared["session_id"], prepared["stdin_prompt"])
-                code = process.wait()
-            except InputWriteError:
-                code = 1  # never report success for a failed or partially written input line
+                # A distinct group lets the runner stop all ordinary host descendants without
+                # signalling itself. It stays in the detached runner's session.
+                process = subprocess.Popen(prepared["argv"], cwd=prepared["cwd"],
+                                           env=model_env({**os.environ, **prepared.get("env", {})}),
+                                           stdin=subprocess.PIPE, stdout=stream, stderr=stderr, process_group=0)
+                if cancelled:
+                    raise _RunnerCancelled()
+            except OSError as exc:
+                stderr.write(str(exc))
+                _close_intake(run_dir)
+                code = 127
+            else:
+                _write(run_dir, "started.json", {"pid": process.pid, "runner_pid": os.getpid(),
+                                                 "session_id": prepared["session_id"]})
+                try:
+                    final = _serve(run_dir, process, prepared["session_id"], prepared["stdin_prompt"])
+                    code = process.wait()
+                except InputWriteError:
+                    code = 1  # never report success for a failed or partially written input line
+        except _RunnerCancelled:
+            signal.signal(signal.SIGTERM, signal.SIG_IGN)
+            if process is not None:
+                _stop_after_write_failure(process)
+            return
+        finally:
+            signal.signal(signal.SIGTERM, previous)
     if not final:
         final = (run_dir / "stream.jsonl").read_bytes()  # no result event: classify sees what the host printed
     # collect classifies stdout as one JSON answer, as `--output-format json` wrote it.

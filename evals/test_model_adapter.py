@@ -160,6 +160,19 @@ class StartTest(unittest.TestCase):
 
 
 class CancelTest(unittest.TestCase):
+    def test_write_failure_does_not_claim_cleanup_if_group_signal_is_denied(self):
+        process = mock.Mock(pid=4242, returncode=None)
+        with mock.patch.object(claude_adapter.os, "killpg", side_effect=PermissionError):
+            with self.assertRaises(PermissionError):
+                claude_adapter._stop_after_write_failure(process)
+        process.wait.assert_not_called()
+
+    def test_write_failure_does_not_signal_a_reaped_hosts_reusable_group_id(self):
+        process = mock.Mock(pid=4242, returncode=0)
+        with mock.patch.object(claude_adapter.os, "killpg") as killpg:
+            claude_adapter._stop_after_write_failure(process)
+        killpg.assert_not_called()
+
     def test_a_host_that_ignores_sigterm_is_killed_and_reaped(self):
         process = mock.Mock(pid=4242)
         process.wait.side_effect = [subprocess.TimeoutExpired("host", 5), 0]

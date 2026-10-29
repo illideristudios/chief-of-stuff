@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import claude_adapter
 import process_status
+import shell_setup
 import store
 import worker
 from model_port import Reply, Request
@@ -56,9 +57,13 @@ if len(seen) > 1:
 '''
 
 STALL_HOST = '''
-import json, sys, time
+import json, os, signal, subprocess, sys, time
+child = subprocess.Popen([sys.executable, '-c', 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(120)', os.path.dirname(__file__)])
+open(os.path.join(os.path.dirname(__file__), 'child.pid'), 'w').write(str(child.pid))
 if sys.argv[1] != "assignment":
     json.loads(sys.stdin.readline())
+    partial = os.read(sys.stdin.fileno(), 4096)
+    open(os.path.join(os.path.dirname(__file__), 'partial'), 'wb').write(partial)
 while True:
     time.sleep(0.1)
 '''
@@ -118,6 +123,13 @@ class LiveMessagesTest(unittest.TestCase):
                 except ProcessLookupError:
                     pass
         runner.wait(timeout=5)
+
+    def kill_pid(self, pid: int) -> None:
+        try:
+            if process_status.identity(pid, str(self.root)):
+                os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
     def save_record(self, runner_pid: int, runner_identity: str | None, **extra) -> None:
         self.db.set_resume(KEY, {"runs": {"implement-1": {
@@ -297,14 +309,18 @@ class LiveMessagesTest(unittest.TestCase):
 
     def test_stalled_assignment_write_is_bounded_and_does_not_open_intake(self):
         self.host.write_text(STALL_HOST)
-        runner = claude_adapter.spawn([sys.executable, str(self.host), "assignment"],
+        runner = claude_adapter.spawn(shell_setup.login_argv([sys.executable, str(self.host), "assignment"]),
                                       Request("x", session_id=self.session, cwd=str(self.root)),
                                       self.run_dir, stdin_prompt="x" * 1000000)
         self.addCleanup(self.stop, runner)
         started = wait_for(lambda: (self.run_dir / "started.json").exists()
                            and json.loads((self.run_dir / "started.json").read_text()))
         self.host_pid = started["pid"]
+        child = int(wait_for(lambda: (self.root / "child.pid").read_text() if (self.root / "child.pid").exists() else ""))
+        self.addCleanup(self.kill_pid, child)
         runner.wait(timeout=12)
+        self.assertIsNone(process_status.identity(child, str(self.root)), "host child survived exit record")
+        self.assertFalse(process_status.process_exists(self.host_pid), "host was not reaped")
         self.assertFalse(claude_adapter.intake_open(self.run_dir))
         self.assertTrue((self.run_dir / "exit.json").exists())
         self.assertNotEqual(json.loads((self.run_dir / "exit.json").read_text())["exit_code"], 0)
@@ -315,11 +331,39 @@ class LiveMessagesTest(unittest.TestCase):
         message = self.queue("x" * 1000000)
         worker.deliver_messages(self.db, self.root)
         claim = self.status(message)
+        child = int(wait_for(lambda: (self.root / "child.pid").read_text() if (self.root / "child.pid").exists() else ""))
+        self.addCleanup(self.kill_pid, child)
         runner.wait(timeout=12)
+        self.assertIsNone(process_status.identity(child, str(self.root)), "host child survived exit record")
+        self.assertFalse(process_status.process_exists(self.host_pid), "host was not reaped")
+        self.assertTrue((self.root / "partial").read_bytes().startswith(b'{"type": "user"'))
         for _ in range(2):
             worker.deliver_messages(self.db, self.root)
         self.assertEqual(self.status(message).status, "sending")
         self.assertEqual(os.listdir(self.run_dir / claude_adapter.MAILBOX / "taken"), [f"{claim.delivery_id}.json"])
+        self.assertFalse(claude_adapter.intake_open(self.run_dir))
+
+    def test_cancel_stops_the_separate_host_group_without_touching_unrelated_processes(self):
+        self.host.write_text(STALL_HOST)
+        unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(120)"])
+        self.addCleanup(lambda: unrelated.wait(timeout=5))
+        self.addCleanup(lambda: unrelated.kill() if unrelated.poll() is None else None)
+        runner = self.start()
+        child = int(wait_for(lambda: (self.root / "child.pid").read_text() if (self.root / "child.pid").exists() else ""))
+        self.addCleanup(self.kill_pid, child)
+        claude_adapter.cancel(runner)
+        self.assertFalse(process_status.process_exists(self.host_pid))
+        self.assertIsNone(process_status.identity(child, str(self.root)))
+        self.assertIsNone(unrelated.poll())
+
+    def test_host_crash_closes_intake_and_records_failure(self):
+        self.host.write_text("import os, sys\nsys.stdin.readline()\nos._exit(23)\n")
+        runner = claude_adapter.spawn([sys.executable, str(self.host)],
+                                      Request("assignment", session_id=self.session, cwd=str(self.root)),
+                                      self.run_dir, stdin_prompt="assignment")
+        self.addCleanup(self.stop, runner)
+        self.assertEqual(runner.wait(timeout=10), 0)
+        self.assertEqual(json.loads((self.run_dir / "exit.json").read_text())["exit_code"], 23)
         self.assertFalse(claude_adapter.intake_open(self.run_dir))
 
     def test_an_untaken_message_of_a_dead_runner_is_revoked_and_failed(self):
