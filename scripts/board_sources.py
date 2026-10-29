@@ -31,7 +31,7 @@ from urllib.parse import quote, urlsplit
 import backlog
 import process_status
 from _vendor.toon_format import encode as toon_encode
-from backlog_ref import GH_REPO, store_label
+from backlog_ref import GH_REPO, ambiguous_gitlab_label, store_label
 from clock import leading
 from forge_review import (
     GITLAB_PIPELINE,
@@ -590,6 +590,10 @@ def forge(root: Path, cfg: Config, tracker: Tracker, since: datetime, gh, call):
         if ref and (ref.host == backlog.GITHUB) == github_home:
             wanted.setdefault(ref.repo, set()).add(ref.number)
         changes |= change_numbers(task, home)
+        if github_home:
+            for cell in (task.name, task.item, task.issue, task.checklist):
+                for repo, number in re.findall(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)/?(?=$|[\s)>.,;])", cell):
+                    wanted.setdefault(repo, set()).add(int(number))
     if every_open:
         try:
             store_wanted, store_changes = _store_targets(store_db, home)

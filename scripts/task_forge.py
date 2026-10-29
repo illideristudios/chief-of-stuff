@@ -49,6 +49,8 @@ def lookup_keys(refs: Iterable[str], home) -> tuple[str, ...]:
         text = raw.strip()
         if not text or text == tracker.WORKFLOW:
             continue
+        if (isinstance(home, board_sources.backlog.Backlog) and board_sources.ambiguous_gitlab_label(text)):
+            continue  # legacy host labels and nested project shorthand have identical spellings
         # URLs are converted to cache keys; a raw foreign URL in an old change cache must not match.
         candidates = (source_key(text, home),) if "://" in text else (text, source_key(text, home))
         for candidate in candidates:

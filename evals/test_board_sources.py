@@ -1346,7 +1346,7 @@ class StoreWorkspaceSourcesTest(unittest.TestCase):
         home = bs.backlog.Backlog("https://labs.example.test", "team/app")
         mr = {**gl_mr(88), "description": "Fixes team/other#7 and https://labs.example.test/team/third/-/issues/8"}
         change = bs._gl_change(mr, "", home)
-        self.assertEqual(change.issues, ("labs.example.test/team/other#7", "labs.example.test/team/third#8"))
+        self.assertEqual(change.issues, ("gitlab:labs.example.test/team/other#7", "gitlab:labs.example.test/team/third#8"))
         for key in ("gitlab:labs.example.test/team/other#7", "gitlab:labs.example.test/team/third#8"):
             self.assertIn(bs.store_label(key, home), change.issues)
 
