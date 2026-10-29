@@ -86,12 +86,16 @@ Who answers (decided): the coordinator owns scheduling, priority and dispatch, s
 
 ```
 Co := the question is about scheduling, priority or dispatch      D := the decision is architectural
+Sp := the trio splits or exhausts its retry      Wo := the decision waits on the owner
 Ac := the coordinator answers it      Tr := the decision trio answers it      Ar := the owner and the architect decide it
 1.  D → Ar             [owner, 2026-10-29]
 2.  ¬D ∧ Co → Ac       [owner, 2026-10-29: "the coordinator owns scheduling and priority and dispatch"]
 3.  ¬D ∧ ¬Co → Tr      [owner, 2026-10-29: "trio for decisions outside the coordinator's scope"]
-∴   every question has exactly one answerer
+4.  Tr ∧ Sp → Wo       [owner, 2026-10-29: "splits - require my input"]
+∴   every question has exactly one answerer, and a split trio waits for the owner
 ```
+
+A trio split, or a trio whose retries are exhausted, waits on the owner as `ARCHITECTURE.md` section 6 says today (decided). This is the one non-architectural wait the owner keeps. It is not a hard stop in the sense of the rule above, because it fires only on a problem and never by default. The same applies to the park rule below: a split trio surfaces for human review like any other problem.
 
 Review and merge (decided): the default is motion. The review panel, the fix loop and the merge gate of `ARCHITECTURE.md` section 6 stay, because they are automated checks and not stops. The coordinator merges once the review matches the change's current head and main's CI is green. Where the policy requires the architect's approval, the merge waits for the architect and not for the owner. Human review stays possible and surfaces only on a contradiction, an issue or a problem: three fix rounds with findings still open park the issue with those findings and a recommendation.
 
