@@ -1194,7 +1194,8 @@ class CarriedStateKeepsItsHomeTest(unittest.TestCase):
         old.pop("home")  # a cache written before the home was stored
         cache.write_text(json.dumps(old))
         got = bs.refresh(root, NOW, gh=FakeGh(fail=True))
-        self.assertEqual(got.issues["#115"].state, "closed")
+        self.assertEqual(got.issues["o/app#115"].state, "closed")
+        self.assertNotIn("#115", got.issues)
         self.assertIsNone(got.home)
         self.assertIsNone(bs.load(root / "pages").home)
 
@@ -1556,10 +1557,22 @@ class StoreWorkspaceIssuesTest(unittest.TestCase):
             "GitLab issues; host https://labs.example.test; project team/app",
             "gitlab:labs.example.test/team/app#15", "gitlab:labs.example.test/team/secret#15",
         )
-        first = refresh_gitlab(root, NOW, FakeGitLab(issues=[gl_issue(15)]))
+        def answer(hidden=(), description=""):
+            fake = FakeGitLab(issues=[{**gl_issue(15), "description": description}], hidden=hidden)
+            def call(method, url, token, timeout, payload=None):
+                import copy
+                body, headers, error = fake(method, url, token, timeout, payload)
+                body = copy.deepcopy(body)
+                if '"team/secret"' in payload["query"]:
+                    for project in body.get("data", {}).values():
+                        if project:
+                            for node in project.get("issues", {}).get("nodes", []):
+                                node["webUrl"] = "https://labs.example.test/team/secret/-/issues/15"
+                return body, headers, error
+            return call
+        first = refresh_gitlab(root, NOW, answer(description="## Acceptance\n- [ ] Kept"))
         self.assertEqual(sorted(first.issues), ["#15", "gitlab:labs.example.test/team/secret#15"])
-        changed = {**gl_issue(15), "description": "Fresh but incomplete"}
-        partial = refresh_gitlab(root, self.LATER, FakeGitLab(issues=[changed], hidden={"team/secret"}))
+        partial = refresh_gitlab(root, self.LATER, answer(hidden={"team/secret"}, description="Fresh but incomplete"))
         self.assertIn("team/secret", partial.errors.get("kanban", ""))
         self.assertEqual(partial.issues, first.issues)
         self.assertEqual(partial.fetched["kanban"], NOW)
@@ -1570,7 +1583,8 @@ class StoreWorkspaceIssuesTest(unittest.TestCase):
         def answer(fail=False):
             def gh(args, input_text=None):
                 data = {"r0": {"n118": {**gh_issue(118), "body": "Changed" if fail else "Home"}},
-                        "r1": None if fail else {"n118": {**gh_issue(118), "body": "Other"}},
+                        "r1": None if fail else {"n118": {**gh_issue(118),
+                            "url": "https://github.com/other/lib/issues/118", "body": "Other"}},
                         "merged": {"nodes": []}, "open": {"nodes": []}}
                 errors = [{"path": ["r1"], "message": "other/lib unavailable"}] if fail else []
                 return int(fail), json.dumps({"data": data, "errors": errors}), ""

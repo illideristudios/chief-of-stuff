@@ -217,15 +217,45 @@ def _home_of(d: dict | None):
     return None if not d else backlog.Backlog(**d) if "host" in d else backlog.GitHubBacklog(**d)
 
 
+def _cached_issues(values: dict, home) -> dict[str, Issue]:
+    """Rekey legacy entries only when their URL proves their forge and issue identity."""
+    result: dict[str, Issue] = {}
+    collisions: set[str] = set()
+    for key, v in values.items():
+        issue = Issue(**{**v, "labels": tuple(v["labels"]), "closed_at": _when(v.get("closed_at")),
+                         "milestone": _milestone_of(v.get("milestone"))})
+        ref = backlog.issue_ref(issue.url, home, any_host=True)
+        if ref:
+            canonical = ref.label(home)
+            legacy = {canonical, f"{ref.repo}#{ref.number}", f"{ref.host}/{ref.repo}#{ref.number}"}
+            if home is None:
+                legacy.add(f"#{ref.number}")
+            if key not in legacy:
+                continue
+            key = canonical
+            issue = replace(issue, ref=key)
+        elif home is None and re.fullmatch(r"#\d+", key):
+            continue  # no home or URL proves what a bare key names
+        elif (home is None or isinstance(home, backlog.Backlog)) and (
+                GH_REPO.fullmatch(key.rpartition("#")[0]) or ambiguous_gitlab_label(key)):
+            continue  # an unverified old GitLab key could otherwise masquerade as GitHub
+        if key in collisions:
+            continue
+        if key in result and result[key] != issue:
+            del result[key]
+            collisions.add(key)
+        else:
+            result[key] = issue
+    return result
+
+
 def load(pages_dir: Path) -> Sources:
     """The cache, or EMPTY when it is absent or unreadable."""
     try:
         d = json.loads((pages_dir / CACHE).read_text())
         home = _home_of(d.get("home"))
         return Sources({k: datetime.fromisoformat(v) for k, v in d["fetched"].items()},
-                       {k: Issue(**{**v, "labels": tuple(v["labels"]), "closed_at": _when(v.get("closed_at")),
-                                    "milestone": _milestone_of(v.get("milestone"))})
-                        for k, v in d["issues"].items()},
+                       _cached_issues(d["issues"], home),
                        {k: _change_of(v, home) for k, v in d["changes"].items()},
                        tuple(Worker(**{**w, "started": _when(w["started"]), "last": _when(w["last"])})
                              for w in d["workers"]),
@@ -707,12 +737,21 @@ def refresh(root: Path, now: datetime, gh=backlog.run_gh, call=backlog._call) ->
     except Exception as e:  # a forge answer shaped unlike its schema; the page still renders
         issues, changes, errors = None, None, dict.fromkeys(("kanban", "merge requests"), f"{type(e).__name__}: {e}")
     home = cfg.backlog
+    # Both failed panels may be carried together under their old home. When only one
+    # succeeded under a different home, the other panel cannot safely share its keys.
+    changed_home = prev.home != home and (issues is not None or changes is not None)
     if issues is None:
-        issues, home = prev.issues, prev.home  # the home follows the issues: their keys were written under it
+        if changed_home:
+            issues = {}
+            fetched.pop("kanban", None)
+        else:
+            issues, home = prev.issues, prev.home
     elif cfg.backlog is not None:
         fetched["kanban"] = now
     if changes is None:
-        changes = prev.changes
+        changes = {} if changed_home else prev.changes
+        if changed_home:
+            fetched.pop("merge requests", None)
     elif cfg.backlog is not None:
         fetched["merge requests"] = now
     try:

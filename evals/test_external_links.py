@@ -78,5 +78,15 @@ class ExternalLinksTest(tsp.SourcePage):
                                         self.root, notes=[tsp.sp.Note(tsp.LIMITS, 7, "new", OPEN_ADD)]))
 
 
+class MalformedLinksTest(unittest.TestCase):
+    def test_malformed_url_in_shared_prose_does_not_break_rendering(self):
+        from fragment import external_url, href
+        from page_common import markdown_inline, markdown_blocks
+        self.assertEqual(external_url('https://['), '')
+        self.assertEqual(href('https://['), 'href="#"')
+        self.assertIn('https://[', markdown_inline('before https://[ after'))
+        self.assertIn('https://[', markdown_blocks('before https://[ after'))
+
+
 if __name__ == "__main__":
     unittest.main()

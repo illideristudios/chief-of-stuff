@@ -267,7 +267,8 @@ class MarkdownTest(unittest.TestCase):
         from test_issue_page import TODAY, today_tracker
         import issue_page
         cfg = parse_coordinator(CONFIG.format(board='- Backlog: GitHub; repo o/app'), today=TODAY)
-        html = issue_page.render(109, [(TODAY, today_tracker())], sources(MR, issue=replace(ISSUE, body='See #12.')), NOW, cfg=cfg)
+        issue = replace(ISSUE, url='https://github.com/o/app/issues/109', body='See #12.')
+        html = issue_page.render(109, [(TODAY, today_tracker())], sources(MR, issue=issue), NOW, cfg=cfg)
         self.assertIn('href="https://github.com/o/app/issues/12"', html)
 
     def test_cards_and_panel_prose_use_inline_markdown(self):

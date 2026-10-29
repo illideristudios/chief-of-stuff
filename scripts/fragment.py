@@ -23,7 +23,10 @@ def external_url(url: str) -> str:
     clean = (url or "").strip()
     if not clean or any(ord(c) <= 32 or ord(c) == 127 for c in clean):
         return ""
-    parts = urlsplit(clean)
+    try:
+        parts = urlsplit(clean)
+    except ValueError:
+        return ""
     return clean if parts.scheme.lower() in ("http", "https") and bool(parts.netloc) else ""
 
 
@@ -31,7 +34,10 @@ def href(url: str) -> str:
     """`href="url"`, opening in a new tab when `url` is external (http/https); in-app routes stay in the tab."""
     if ext := external_url(url):
         return f'href="{esc(ext)}" target="_blank" rel="noopener"'
-    scheme = urlsplit((url or "").strip()).scheme.lower()
+    try:
+        scheme = urlsplit((url or "").strip()).scheme.lower()
+    except ValueError:
+        return 'href="#"'
     safe = "#" if scheme in ("javascript", "data", "vbscript") else url
     return f'href="{esc(safe)}"'
 
