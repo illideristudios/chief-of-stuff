@@ -62,14 +62,14 @@ class ReleaseTraversal(WorkspaceReleaseBoundary):
                      mock.patch.object(supervisor, 'data_dir', return_value=self.data):
                     self.assertEqual(supervisor.selected_release(self.root), self.old)
 
-    def test_version_two_cached_selector_is_revalidated(self):
+    def test_version_two_cached_selector_is_not_trusted(self):
         candidate = self.release(self.cache / '2.0.0', '2.0.0')
         (candidate / 'scripts/pages.py').unlink()
         (candidate / 'scripts/pages.py').symlink_to(self.root / 'scripts/pages.py')
         self.legacy.TRUSTED_INTENT_VERSION = 2
-        self.legacy.selected_release = lambda root: candidate
-        with self.assertRaises(supervisor.ServiceError):
-            __import__('release_selection').selected_release(self.root, self.legacy)
+        self.legacy.selected_release = mock.Mock(return_value=candidate)
+        self.assertEqual(__import__('release_selection').selected_release(self.root, self.legacy), self.old)
+        self.legacy.selected_release.assert_not_called()
 
 
 class RecoveryAuthority(SupervisorTest):

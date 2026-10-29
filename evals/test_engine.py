@@ -4,6 +4,7 @@ import contextlib
 from dataclasses import replace
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -3492,12 +3493,11 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine, "run_pass", passed), \
              mock.patch.object(engine.time, "sleep", side_effect=sleep), \
              mock.patch.object(engine.time, "time", now), \
-             mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
+             mock.patch.object(engine.os, "execve") as execv, contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         self.assertEqual(passed.call_count, 3, "backoff must leave engine passes running")
         self.assertEqual(preflight.call_args_list, [mock.call(data, release=current, timeout=60)] * 2)
-        execv.assert_called_once_with(str(python), [
-            str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
+        execv.assert_called_once_with(str(python), engine.release_selection.isolated_release_argv(python, current / "scripts/engine.py", "--root", str(self.root), "--interval", "60"), mock.ANY)
         self.assertTrue(stops[0].is_set())
         self.assertIn("pip offline", errors.getvalue())
 
@@ -3571,7 +3571,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(supervisor, "ensure_venv", side_effect=supervisor.ServiceError("pip offline")) as preflight, \
              mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
-             mock.patch.object(engine.os, "execv") as execv, contextlib.redirect_stderr(errors):
+             mock.patch.object(engine.os, "execve") as execv, contextlib.redirect_stderr(errors):
             self.assertEqual(engine.main(["--root", str(self.root), "--once"]), 0)
         passed.assert_called_once()
         self.assertEqual(preflight.call_args.kwargs, {"release": current, "timeout": 60})
@@ -3588,14 +3588,13 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer, newer]), \
              mock.patch.object(supervisor, "data_dir", return_value=self.data), \
              mock.patch.object(supervisor, "ensure_venv", return_value=python) as preflight, \
-             mock.patch.object(engine.os, "execv") as execv, \
+             mock.patch.object(engine.os, "execve") as execv, \
              mock.patch.object(engine.time, "sleep", side_effect=[None, RuntimeError("update ignored")]) as sleep:
             self.assertEqual(engine.main(["--root", str(self.root), "--interval", "5"]), 0)
         self.assertEqual(passed.call_count, 1)
         sleep.assert_called_once_with(5.0)
         preflight.assert_called_once_with(self.data, release=newer, timeout=60)
-        execv.assert_called_once_with(str(python), [
-            str(python), str(newer / "scripts/engine.py"), "--root", str(self.root), "--interval", "5.0"])
+        execv.assert_called_once_with(str(python), engine.release_selection.isolated_release_argv(python, newer / "scripts/engine.py", "--root", str(self.root), "--interval", "5.0"), mock.ANY)
 
     def test_running_plugin_engine_follows_newer_marker_after_a_pass(self):
         cache = self.data / "plugins/cache/market/chief"
@@ -3619,11 +3618,31 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
              mock.patch.object(engine.time, "sleep", side_effect=advance), \
-             mock.patch.object(engine.os, "execv") as execv:
+             mock.patch.object(engine.os, "execve") as execv:
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         passed.assert_called_once()
-        execv.assert_called_once_with(str(python), [str(python), str(newer / "scripts/engine.py"),
-                                                   "--root", str(self.root), "--interval", "60"])
+        execv.assert_called_once_with(str(python), engine.release_selection.isolated_release_argv(python, newer / "scripts/engine.py", "--root", str(self.root), "--interval", "60"), mock.ANY)
+
+    def test_handoff_revalidates_indirect_module_and_pip_inputs_before_exec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            root, release = base / "workspace", base / "release"
+            root.mkdir()
+            (release / "scripts").mkdir(parents=True)
+            (release / "scripts/engine.py").touch()
+            (release / "requirements.txt").touch()
+            payload = root / "payload"
+            payload.touch()
+            for name in ("scripts/indirect.py", "pip-inputs/constraints.txt"):
+                with self.subTest(name=name):
+                    link = release / name
+                    link.parent.mkdir(parents=True, exist_ok=True)
+                    link.symlink_to(payload)
+                    with mock.patch.object(engine.os, "execve") as execute:
+                        with self.assertRaises(supervisor.ServiceError):
+                            engine._handoff(release, Path(sys.executable), root, 1, False)
+                        execute.assert_not_called()
+                    link.unlink()
 
     def test_startup_rechecks_selection_after_preparing_the_release(self):
         first, second = self.root / "first", self.root / "second"
@@ -3655,21 +3674,20 @@ class MainTest(unittest.TestCase):
              mock.patch.object(engine.store_access, "migrated_store", side_effect=RuntimeError("unknown revision")) as migrated, \
              mock.patch.object(pages, "supervise") as serving, \
              mock.patch.object(engine, "run_pass") as passed, \
-             mock.patch.object(engine.os, "execv") as execv:
+             mock.patch.object(engine.os, "execve") as execv:
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         workspace.assert_not_called()
         migrated.assert_not_called()
         serving.assert_not_called()
         passed.assert_not_called()
         preflight.assert_called_once_with(self.data, release=current, timeout=60)
-        execv.assert_called_once_with(str(python), [
-            str(python), str(current / "scripts/engine.py"), "--root", str(self.root), "--interval", "60"])
+        execv.assert_called_once_with(str(python), engine.release_selection.isolated_release_argv(python, current / "scripts/engine.py", "--root", str(self.root), "--interval", "60"), mock.ANY)
 
     def test_loop_keeps_running_while_the_installed_release_is_its_own(self):
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
              mock.patch.object(engine.supervisor, "current_release", return_value=engine.supervisor.RELEASE), \
-             mock.patch.object(engine.os, "execv") as execv, \
+             mock.patch.object(engine.os, "execve") as execv, \
              mock.patch.object(engine.time, "sleep", side_effect=[None, KeyboardInterrupt]):
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         self.assertEqual(passed.call_count, 2)
@@ -3712,7 +3730,7 @@ class MainTest(unittest.TestCase):
              mock.patch.object(pages.subprocess, "Popen", side_effect=start), \
              mock.patch.object(pages, "_who", side_effect=lambda _port: (threading.Event().wait(0.25), None)[1]), \
              mock.patch.object(engine.time, "sleep"), \
-             mock.patch.object(engine.os, "execv", side_effect=handoff) as execv:
+             mock.patch.object(engine.os, "execve", side_effect=handoff) as execv:
             self.assertEqual(engine.main(["--root", str(self.root)]), 0)
         execv.assert_called_once()
 
@@ -3863,6 +3881,41 @@ class LoginPathTest(unittest.TestCase):
         with mock.patch.object(engine.shell_setup, "login_path", return_value=""):
             engine.adopt_login_path(unreadable)
         self.assertEqual((outside["PATH"], unreadable["PATH"]), ("/usr/bin", "/usr/bin"))
+
+
+class HandoffStartupSecurityTest(unittest.TestCase):
+    def test_engine_handoff_ignores_workspace_python_startup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            root, release = base / 'workspace', base / 'release'
+            root.mkdir()
+            (release / 'scripts').mkdir(parents=True)
+            marker = base / 'executed'
+            for name in ('sitecustomize', 'json'):
+                (root / (name + '.py')).write_text(f'from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError("workspace code")\n')
+            (release / 'scripts/trusted_module.py').write_text('VALUE = 42\n')
+            (release / 'scripts/engine.py').write_text('import json, os, trusted_module\nassert trusted_module.VALUE == 42\nassert not any(k.upper().startswith("PYTHON") for k in os.environ)\nassert os.getcwd() == "/"\nprint(json.dumps({"ok": True}))\n')
+            driver = '''import os, sys
+from pathlib import Path
+from unittest import mock
+sys.path.insert(0, sys.argv[1])
+import engine
+root, release = map(Path, sys.argv[2:4])
+os.chdir(root)
+os.environ['PYTHONPATH'] = str(root)
+if sys.argv[4] == 'home':
+    os.environ['PYTHONHOME'] = str(root)
+with mock.patch.object(engine.release_selection, 'validate_handoff'):
+    engine._handoff(release, Path(sys.executable), root, 1, True)
+'''
+            for mode in ('path', 'home'):
+                with self.subTest(mode=mode):
+                    result = subprocess.run([sys.executable, '-I', '-c', driver, str(Path(engine.__file__).parent),
+                                             str(root), str(release), mode], cwd=root, env=dict(os.environ, PYTHONPATH=str(root)),
+                                             capture_output=True, text=True, timeout=20)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn('"ok": true', result.stdout)
+                    self.assertFalse(marker.exists())
 
 
 if __name__ == "__main__":

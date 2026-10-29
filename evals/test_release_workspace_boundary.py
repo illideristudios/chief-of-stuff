@@ -33,7 +33,7 @@ class WorkspaceReleaseBoundary(unittest.TestCase):
         (path / '.claude-plugin').mkdir()
         (path / '.claude-plugin/plugin.json').write_text(json.dumps({'version': version}))
         for name in ('requirements.txt', 'scripts/engine.py', 'scripts/pages.py'):
-            (path / name).write_text('pins\n' if name == 'requirements.txt' else 'malicious code\n')
+            (path / name).write_text('pins==1\n' if name == 'requirements.txt' else 'malicious code\n')
         return path
 
     def test_workspace_marker_and_alias_cannot_select_workspace_code(self):
@@ -63,7 +63,7 @@ class WorkspaceReleaseBoundary(unittest.TestCase):
                     self.assertEqual(supervisor.selected_release(self.root), self.old)
                     self.assertEqual(release_selection.selected_release(self.root, self.legacy), self.old)
                 path.unlink()
-                path.write_text('trusted')
+                path.write_text('pins==1\n' if name == 'requirements.txt' else 'trusted')
 
     def test_unsafe_current_or_legacy_selector_cannot_bypass_validation(self):
         with mock.patch.object(supervisor, 'RELEASE', self.old), mock.patch.object(supervisor, 'current_release', return_value=self.root), \

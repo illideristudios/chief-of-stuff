@@ -61,6 +61,8 @@ def validate_release(root: Path, release: Path, error) -> None:
         if (resolved != release or resolved == root or root in resolved.parents
                 or resolved in root.parents):
             raise error("engine release must be stable and outside the workspace")
+        if not resolved.is_dir():
+            raise error("engine release must be a directory")
         for directory, dirs, files in os.walk(release, followlinks=False, onerror=lambda exc: (_ for _ in ()).throw(exc)):
             for name in dirs + files:
                 path = Path(directory) / name
@@ -71,7 +73,7 @@ def validate_release(root: Path, release: Path, error) -> None:
             for line in requirements.read_text().splitlines():
                 line = line.strip()
                 if line and not line.startswith("#") and not re.fullmatch(
-                        r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:==[A-Za-z0-9][A-Za-z0-9_.+!-]*)?", line):
-                    raise error("engine requirements must contain only package names or exact versions")
+                        r"[A-Za-z0-9][A-Za-z0-9_.-]*==[A-Za-z0-9][A-Za-z0-9_.+!-]*", line):
+                    raise error("engine requirements must contain only pinned package versions")
     except (OSError, RuntimeError, UnicodeError) as exc:
         raise error(f"invalid engine release: {exc}") from exc

@@ -600,11 +600,115 @@ class EnsureTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "rollback selected"):
                     pg.ensure(self.dir, self.port, self.log, root)
 
+    def test_pending_private_intent_does_not_authorize_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "workspace"
+            root.mkdir()
+            release = Path(tmp).resolve() / "old"
+            (release / "scripts").mkdir(parents=True)
+            (release / "scripts/engine.py").touch()
+            (release / "requirements.txt").touch()
+            data = Path(tmp) / "data"
+            private = data / "engine-intents"
+            private.mkdir(parents=True, mode=0o700)
+            label = pg.supervisor.label("engine", root)
+            intent = {"operation": "install", "pending": True, "release": str(release),
+                      "job": {"Label": label, "WorkingDirectory": str(root)}}
+            (private / (label + ".json")).write_text(json.dumps(intent))
+            with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(data)}), \
+                 mock.patch.object(pg.supervisor, "RELEASE", release), \
+                 mock.patch.object(pg, "VERSION", "1.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=RuntimeError("rollback selected")):
+                self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+                intent["pending"] = False
+                (private / (label + ".json")).write_text(json.dumps(intent))
+                with self.assertRaisesRegex(RuntimeError, "rollback selected"):
+                    pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_invalid_private_intent_does_not_replace_a_working_server(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "workspace"
+            root.mkdir()
+            data = Path(tmp) / "data"
+            private = data / "engine-intents"
+            private.mkdir(parents=True, mode=0o700)
+            (private / (pg.supervisor.label("engine", root) + ".json")).write_text("invalid json")
+            with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(data)}), \
+                 mock.patch.object(pg, "VERSION", "2.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("working server stopped")):
+                with self.assertRaises(pg.supervisor.ServiceError):
+                    pg.ensure(self.dir, self.port, self.log, root)
+
+    def test_stale_newer_caller_preserves_selected_legacy_server_without_identity(self):
+        root = self.dir.parent / "workspace"
+        with tempfile.TemporaryDirectory() as tmp:
+            versions = Path(tmp) / "versions"
+            old, new = versions / "old", versions / "new"
+            for release in (old, new):
+                release.mkdir(parents=True)
+                (release / "chief_of_stuff.py").touch()
+            (versions.parent / "current").symlink_to(old)
+            with mock.patch.object(pg.supervisor, "RELEASE", new), \
+                 mock.patch.object(pg, "VERSION", "2.0.0"), \
+                 mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("selected server stopped")):
+                self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+
+    def test_completed_private_rollback_preserves_actual_legacy_server(self):
+        root = self.dir.parent / "workspace"
+        root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(pg.__file__).resolve().parent.parent
+            legacy = Path(tmp).resolve() / "legacy"
+            shutil.copytree(source / "scripts", legacy / "scripts")
+            shutil.copyfile(source / "evals/fixtures/legacy_pages.py", legacy / "scripts/pages.py")
+            (legacy / ".claude-plugin").mkdir()
+            (legacy / ".claude-plugin/plugin.json").write_text('{"version":"1.0.0"}')
+            old_server = subprocess.Popen([sys.executable, str(legacy / "scripts/pages.py"),
+                                           "serve", "--dir", str(self.dir), "--port", str(self.port)],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(lambda: old_server.poll() is None and (old_server.kill(), old_server.wait()))
+            for _ in range(100):
+                if pg._who(self.port):
+                    break
+                time.sleep(0.05)
+            self.assertIsNotNone(pg._who(self.port), "legacy server did not start")
+            (self.dir / ".pid").write_text(str(old_server.pid))
+            data = Path(tmp).resolve() / "data"
+            private = data / "engine-intents"
+            private.mkdir(parents=True, mode=0o700)
+            selected = legacy
+            (selected / "requirements.txt").touch()
+            label = pg.supervisor.label("engine", root)
+            intent = {"operation": "install", "pending": False, "release": str(selected),
+                      "job": {"Label": label, "WorkingDirectory": str(root.resolve())}}
+            (private / (label + ".json")).write_text(json.dumps(intent))
+            self.assertNotIn("release-", pg._who(self.port))
+            with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_DATA": str(data)}), \
+                 mock.patch.object(pg.supervisor, "_explicit_install", side_effect=AssertionError("unsafe cached reader"), create=True), \
+                 mock.patch.object(pg, "VERSION", "999.0.0"), \
+                 mock.patch.object(pg, "_stop", side_effect=AssertionError("selected legacy server stopped")):
+                self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+            self.assertIsNone(old_server.poll())
+
+    def test_explicit_selection_protects_legacy_server_from_stale_newer_caller(self):
+        root = self.dir.parent / "workspace"
+        selected = root / "selected-old"
+        with mock.patch.object(pg.release_selection, "explicit_intent", return_value={"operation": "install", "pending": False}), \
+             mock.patch.object(pg.release_selection, "explicit_release", return_value=selected), \
+             mock.patch.object(pg, "VERSION", "2.0.0"), \
+             mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/1.0.0"), \
+             mock.patch.object(pg, "_stop", side_effect=AssertionError("selected server stopped")):
+            self.assertEqual(pg.ensure(self.dir, self.port, self.log, root), "pages: serving")
+
     def test_explicit_rollback_replaces_newer_server_only_for_selected_release(self):
         root = self.dir.parent / "workspace"
-        for selected, should_stop in ((pg.supervisor.RELEASE, True), (root / "other", False)):
+        for selected, should_stop in ((pg.supervisor.RELEASE, False), (root / "other", False)):
             with self.subTest(selected=selected), \
                  mock.patch.object(pg.release_selection, "explicit_intent", return_value={"operation": "install", "pending": True, "release": str(selected)}), \
+                 mock.patch.object(pg.release_selection, "explicit_release", side_effect=lambda root, sup, completed_only=False: None if completed_only else selected), \
                  mock.patch.object(pg, "VERSION", "1.0.0"), \
                  mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0"), \
                  mock.patch.object(pg, "_stop", side_effect=RuntimeError("selected rollback")) as stopped:
@@ -746,7 +850,7 @@ class RenderOnRequestTest(unittest.TestCase):
         # never be the shared temp dir (#357: reading every file there hung the suite locally).
         parent = tempfile.TemporaryDirectory()
         self.addCleanup(parent.cleanup)
-        self.root = Path(parent.name) / "ws"
+        self.root = Path(parent.name).resolve() / "ws"
         self.root.mkdir()
         self.day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (self.root / "CLAUDE.md").write_text(
@@ -1269,7 +1373,7 @@ class _PagesFixture:
         # never be the shared temp dir (#357: reading every file there hung the suite locally).
         parent = tempfile.TemporaryDirectory()
         self.addCleanup(parent.cleanup)
-        self.root = Path(parent.name) / "ws"
+        self.root = Path(parent.name).resolve() / "ws"
         self.root.mkdir()
         self.day = datetime.now(ZoneInfo(ZONE)).date().isoformat()
         (self.root / "CLAUDE.md").write_text(
@@ -1827,7 +1931,7 @@ class SuperviseTest(unittest.TestCase):
     def setUp(self):
         parent = tempfile.TemporaryDirectory()
         self.addCleanup(parent.cleanup)
-        self.root = Path(parent.name) / "ws"
+        self.root = Path(parent.name).resolve() / "ws"
         self.root.mkdir()
         self.port = free_port()
         self.pages = self.root / "pages"
@@ -1975,6 +2079,65 @@ class StandaloneBoardTest(unittest.TestCase):
         deadline = time.monotonic() + WAIT
         while time.monotonic() < deadline and pg._who(self.port) is None:
             time.sleep(0.05)
+
+    def test_pre_handoff_rollback_is_reported_and_current_supervisor_recovers(self):
+        self.addCleanup(self.stop_server)
+        source = Path(pg.__file__).resolve().parent.parent
+        versions = self.root.parent / "install/versions"
+        old, new = versions / "old", versions / "new"
+        for release, version in ((old, "1.0.0"), (new, "2.0.0")):
+            shutil.copytree(source / "scripts", release / "scripts")
+            (release / ".claude-plugin").mkdir()
+            (release / ".claude-plugin/plugin.json").write_text(json.dumps({"version": version}))
+            (release / "chief_of_stuff.py").touch()
+            (release / "requirements.txt").touch()
+        # Both files are the unmodified 62b1a067 pre-readiness release, not simulated current code.
+        for name in ("pages", "supervisor"):
+            shutil.copyfile(source / f"evals/fixtures/legacy_{name}.py", old / f"scripts/{name}.py")
+        legacy = subprocess.run([sys.executable, str(old / "scripts/pages.py"), "--root", str(self.root),
+                                 "--handoff-ready-fd=4", "supervise"], capture_output=True, text=True, timeout=10)
+        self.assertEqual(legacy.returncode, 2)
+        self.assertIn("unrecognized arguments: --handoff-ready-fd=4", legacy.stderr)
+        current = versions.parent / "current"
+        current.symlink_to(new)
+        code = ("import sys; from pathlib import Path; "
+                f"sys.path.insert(0, {str(new / 'scripts')!r}); "
+                "import pages; pages.POLL = pages.RETRY_MIN = pages.RETRY_MAX = 0.1; "
+                "pages.supervisor.ensure_venv = lambda *a, **k: Path(sys.executable); "
+                f"sys.exit(pages.main(['--root', {str(self.root)!r}, 'supervise']))")
+        log = self.root / "supervisor-test.log"
+        with log.open("w") as output:
+            proc = subprocess.Popen([sys.executable, "-c", code], stdout=output, stderr=output)
+        def cleanup():
+            if proc.poll() is None:
+                proc.terminate()
+                proc.wait(timeout=10)
+        self.addCleanup(cleanup)
+        def wait_for(predicate):
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                try:
+                    if predicate():
+                        return True
+                except (OSError, ValueError):
+                    pass
+                if proc.poll() is not None:
+                    break
+                time.sleep(0.05)
+            return False
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and pg._who(self.port)))
+        current.unlink()
+        current.symlink_to(old)
+        self.assertTrue(wait_for(lambda: "does not declare board handoff support" in log.read_text()), log.read_text())
+        self.assertIsNone(proc.poll())
+        pid = int((self.pages / ".pid").read_text())
+        os.kill(pid, signal.SIGTERM)
+        self.assertTrue(wait_for(lambda: (self.pages / ".pid").exists() and
+                                 int((self.pages / ".pid").read_text()) != pid and pg._who(self.port)),
+                        "current supervisor did not recover the board")
+        time.sleep(0.5)
+        self.assertEqual(log.read_text().count("does not declare board handoff support"), 1)
+        self.assertNotIn("release " + str(old) + " exited", log.read_text())
 
     def test_after_a_restart_the_board_agent_serves_the_configured_port_over_a_dead_pid(self):
         self.addCleanup(self.stop_server)
@@ -2298,7 +2461,7 @@ class StandaloneBoardTest(unittest.TestCase):
         selected = self.root.parent.resolve() / "newer"
         selected.mkdir()
         selected_id = hashlib.sha256(os.fsencode(selected.resolve())).hexdigest()[:24]
-        with mock.patch.object(pg.supervisor, "selected_release", return_value=selected, create=True), \
+        with mock.patch.object(pg, "_selected_release", return_value=selected), \
              mock.patch.object(pg, "_who", return_value=f"{pg.SERVER}/2.0.0 release-{selected_id}"), \
              mock.patch.object(pg, "_stop") as stopped, \
              mock.patch.object(pg.subprocess, "Popen", side_effect=AssertionError("unexpected server start")):
@@ -2314,7 +2477,7 @@ class StandaloneBoardTest(unittest.TestCase):
             attempted.set()
             stop.set()
             return Path(sys.executable)
-        with mock.patch.object(pg.supervisor, "selected_release", return_value=release, create=True), \
+        with mock.patch.object(pg, "_selected_release", return_value=release), \
              mock.patch.object(pg.supervisor, "current_release", return_value=pg.supervisor.RELEASE), \
              mock.patch.object(pg.supervisor, "ensure_venv", side_effect=prepare), \
              mock.patch.object(pg, "ensure", return_value="pages: serving"), \
@@ -2326,6 +2489,99 @@ class StandaloneBoardTest(unittest.TestCase):
             finally:
                 stop.set()
                 thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_handoff_rejects_workspace_inputs_before_prepare_and_execution(self):
+        for change_after_prepare, link_name in ((after, name) for after in (False, True)
+                                                for name in ("scripts/pages.py", "scripts/indirect.py",
+                                                             "pip-inputs/constraints.txt")):
+            with self.subTest(change_after_prepare=change_after_prepare, link_name=link_name):
+                release = self.root.parent / (("candidate-after-" if change_after_prepare else "candidate-before-")
+                                              + link_name.replace("/", "-"))
+                (release / "scripts").mkdir(parents=True)
+                entry = release / "scripts/pages.py"
+                entry.write_text("# candidate\n")
+                (release / "scripts/engine.py").touch()
+                (release / "requirements.txt").touch()
+                malicious = self.root / "pages-attack.py"
+                malicious.write_text("# workspace code\n")
+                link = release / link_name
+                link.parent.mkdir(parents=True, exist_ok=True)
+                def add_link():
+                    link.unlink(missing_ok=True)
+                    link.symlink_to(malicious)
+                if not change_after_prepare:
+                    add_link()
+                stop = threading.Event()
+                prepared = threading.Event()
+                rejected = threading.Event()
+                real_validate = pg.release_selection.validate_handoff
+                def validate(*args):
+                    try:
+                        real_validate(*args)
+                    except pg.supervisor.ServiceError:
+                        rejected.set()
+                        stop.set()
+                        raise
+                def prepare(*args, **kwargs):
+                    prepared.set()
+                    add_link()
+                    return Path(sys.executable)
+                with mock.patch.object(pg, "_selected_release", return_value=release), \
+                     mock.patch.object(pg.release_selection, "validate_handoff", side_effect=validate), \
+                     mock.patch.object(pg.supervisor, "ensure_venv", side_effect=prepare), \
+                     mock.patch.object(pg, "ensure", return_value="pages: serving"), \
+                     mock.patch.object(pg, "POLL", 0.05), \
+                     mock.patch.object(pg.subprocess, "Popen") as popen:
+                    thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+                    thread.start()
+                    try:
+                        self.assertTrue(rejected.wait(3), "unsafe entry was not rejected")
+                    finally:
+                        stop.set()
+                        thread.join(timeout=3)
+                    self.assertFalse(thread.is_alive())
+                    self.assertEqual(prepared.is_set(), change_after_prepare)
+                    popen.assert_not_called()
+
+    def test_invalid_private_intent_keeps_existing_supervisor_running(self):
+        import contextlib
+        import io
+        data = pg.supervisor.data_dir()
+        private = data / "engine-intents"
+        private.mkdir(parents=True, mode=0o700)
+        intent = private / (pg.supervisor.label("engine", self.root) + ".json")
+        intent.write_text("invalid json")
+        stop, served, retried = threading.Event(), threading.Event(), threading.Event()
+        errors = io.StringIO()
+        original_select = pg._selected_release
+        def select(root):
+            result = original_select(root)
+            retried.set()
+            return result
+        def ensure(*args, **kwargs):
+            served.set()
+            return "pages: serving"
+        with mock.patch.object(pg, "_selected_release", side_effect=select), \
+             mock.patch.object(pg, "ensure", side_effect=ensure), \
+             mock.patch.object(pg, "POLL", 0.05), \
+             mock.patch.object(pg.subprocess, "Popen") as popen, contextlib.redirect_stderr(errors):
+            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop))
+            thread.start()
+            try:
+                self.assertTrue(served.wait(2))
+                deadline = time.monotonic() + 2
+                while "cannot read explicit intent" not in errors.getvalue() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertIn("cannot read explicit intent", errors.getvalue())
+                self.assertTrue(thread.is_alive())
+                popen.assert_not_called()
+                intent.unlink()
+                self.assertTrue(retried.wait(2), "selection was not retried after repair")
+                self.assertTrue(thread.is_alive())
+            finally:
+                stop.set()
+                thread.join(timeout=5)
             self.assertFalse(thread.is_alive())
 
     def test_failed_upgrade_keeps_supervising_and_shutdown_releases_the_lock(self):
@@ -2360,16 +2616,26 @@ class StandaloneBoardTest(unittest.TestCase):
     def test_failed_child_launch_resumes_supervision(self):
         release = self.root.parent.resolve() / "new"
         (release / "scripts").mkdir(parents=True)
-        (release / "scripts" / "pages.py").touch()
+        (release / "scripts" / "trusted_module.py").write_text('VALUE = 42\n')
+        (release / "scripts" / "pages.py").write_text('import json, os, trusted_module\nassert trusted_module.VALUE == 42\nassert os.getcwd() == "/"\nassert not any(k.upper().startswith("PYTHON") for k in os.environ)\nprint(json.dumps({"ready": True}))\n')
+        marker = self.root / "workspace-code-executed"
+        for name in ("json", "sitecustomize"):
+            (self.root / (name + ".py")).write_text(f'from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError("workspace code")\n')
+        real_popen = subprocess.Popen
+        launched = []
         stop, attempted, resumed = threading.Event(), threading.Event(), threading.Event()
         def ensure(*args, **kwargs):
             if attempted.is_set():
                 resumed.set()
             return "pages: serving"
-        def fail_start(*args, **kwargs):
+        def fail_start(argv, **kwargs):
             attempted.set()
+            child = real_popen(argv, **kwargs, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            out, err = child.communicate(timeout=10)
+            launched.append((argv, kwargs, child.returncode, out, err))
             raise OSError("exec failed")
-        with mock.patch.object(pg.supervisor, "current_release", return_value=release), \
+        with mock.patch.dict(os.environ, {"PYTHONPATH": str(self.root)}), \
+             mock.patch.object(pg.supervisor, "current_release", return_value=release), \
              mock.patch.object(pg.supervisor, "ensure_venv", return_value=Path(sys.executable)), \
              mock.patch.object(pg, "ensure", side_effect=ensure), \
              mock.patch.object(pg, "POLL", 0.05), mock.patch.object(pg.subprocess, "Popen", side_effect=fail_start):
@@ -2382,6 +2648,14 @@ class StandaloneBoardTest(unittest.TestCase):
                 stop.set()
                 thread.join(timeout=5)
             self.assertFalse(thread.is_alive())
+            self.assertTrue(launched)
+            argv, kwargs, returncode, out, err = launched[0]
+            self.assertEqual(argv[1:3], ["-I", "-c"])
+            self.assertEqual(kwargs["cwd"], "/")
+            self.assertFalse(any(key.upper().startswith("PYTHON") for key in kwargs["env"]))
+            self.assertEqual(returncode, 0, err)
+            self.assertIn('"ready": true', out)
+            self.assertFalse(marker.exists())
 
     def test_a_stale_pid_goes_even_when_the_start_fails(self):
         (self.pages / ".pid").write_text(str(dead_pid()))

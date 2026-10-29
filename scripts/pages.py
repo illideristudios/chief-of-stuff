@@ -31,6 +31,7 @@ name to 127.0.0.1, but that page still sends its own name as the Host.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import email.utils
 import errno
@@ -1395,21 +1396,30 @@ def _version_tuple(value: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in value.split("."))
 
 
-def _selected_for_rollback(root: Path | None) -> bool:
-    """A fallback to this release is not an explicit selection of it."""
+def _authoritative_release(root: Path | None, *, completed_only: bool = False) -> Path | None:
+    """Return an explicit selection; a workspace marker is never rollback authority."""
     release = supervisor.RELEASE.resolve()
     if root is not None:
         intent = release_selection.explicit_intent(root, supervisor)
-        if intent and intent["operation"] == "install" and (intent["pending"] or release.parent.name != "versions"):
-            return Path(intent["release"]).resolve() == release
+        if intent is not None:
+            return release_selection.explicit_release(root, supervisor, completed_only=completed_only)
     pointer = release.parent.parent / "current"
     try:
-        if release.parent.name == "versions":
-            return (pointer.is_symlink() and pointer.resolve(strict=True) == release
-                    and (release / "chief_of_stuff.py").is_file())
-    except (OSError, RuntimeError, ValueError):
-        return False
-    return False
+        if release.parent.name == "versions" and pointer.is_symlink():
+            selected = pointer.resolve(strict=True)
+            if (selected / "chief_of_stuff.py").is_file():
+                if root is not None:
+                    release_selection.validate_handoff(root, selected, supervisor)
+                return selected
+        if root is not None and not completed_only:
+            return release_selection.marker_release(root, release, supervisor)
+    except (OSError, RuntimeError, ValueError, supervisor.ServiceError):
+        pass
+    return None
+
+
+def _selected_for_rollback(root: Path | None) -> bool:
+    return _authoritative_release(root, completed_only=True) == supervisor.RELEASE.resolve()
 
 
 def _server_not_older(who: str) -> bool:
@@ -1435,6 +1445,9 @@ def _ensure(pages_dir: Path, port: int, log: Path, root: Path | None, stop: thre
     else:
         if not who.startswith(SERVER):
             raise PagesError(f"port {port} answers as {who or 'an unnamed server'}, not the pages server")
+        selected = _authoritative_release(root)
+        if selected is not None and selected != supervisor.RELEASE.resolve():
+            return "pages: serving"
         identity = re.search(r"\brelease-([0-9a-f]{24})\b", who)
         if identity and identity[1] == RELEASE_ID:
             return "pages: serving"
@@ -1535,9 +1548,36 @@ def supervise_with_retry(root: Path, stop: threading.Event, startup=None) -> Non
         stop.wait(min(POLL, RETRY_MAX))
 
 
+def _pre_handoff_cli(entry: Path) -> bool:
+    """Recognize the old argparse CLI, which cannot participate in the readiness protocol."""
+    try:
+        tree = ast.parse(entry.read_bytes(), filename=str(entry))
+    except (OSError, SyntaxError, ValueError):
+        return False  # Let the normal candidate startup report other failures.
+    options = {arg.value for node in ast.walk(tree)
+               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+               and node.func.attr == "add_argument"
+               for arg in node.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)}
+    return {"--ensure", "--root"} <= options and "--handoff-ready-fd" not in options
+
+
 def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> None:
     """Monitor the successor and resume supervision if its startup or later execution fails."""
     retry_at, delay, failed_release = 0.0, 30.0, None
+    last_selection_error = None
+
+    def selected():
+        nonlocal last_selection_error
+        try:
+            result = _selected_release(root)
+            last_selection_error = None
+            return result
+        except supervisor.ServiceError as exc:
+            if str(exc) != last_selection_error:
+                print(f"pages: invalid release selection: {exc}; keeping {supervisor.RELEASE}", file=sys.stderr, flush=True)
+                last_selection_error = str(exc)
+            return None
+
     while not stop.is_set():
         board_stop = threading.Event()
         thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
@@ -1548,7 +1588,10 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                 if not thread.is_alive():
                     thread = threading.Thread(target=supervise_with_retry, args=(root, board_stop, startup), daemon=True)
                     thread.start()
-                release = _selected_release(root)
+                release = selected()
+                if release is None:
+                    stop.wait(POLL)
+                    continue
                 if release != supervisor.RELEASE:
                     if release != failed_release:
                         retry_at, delay, failed_release = 0.0, 30.0, release
@@ -1557,11 +1600,20 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                         try:
                             with supervisor.lock(supervisor.data_dir() / "supervisor.lock"):
                                 acquired = True
+                                release_selection.validate_handoff(root, release, supervisor)
+                                if selected() != release:
+                                    continue
                                 entry = release / "scripts/pages.py"
                                 if not entry.is_file():
                                     raise supervisor.ServiceError(f"missing board entry file: {entry}")
+                                if _pre_handoff_cli(entry):
+                                    retry_at = float("inf")
+                                    print(f"pages: release {release} does not declare board handoff support; "
+                                          f"keeping {supervisor.RELEASE} supervising; rollback requires manual intervention",
+                                          file=sys.stderr, flush=True)
+                                    continue
                                 python = supervisor.ensure_venv(supervisor.data_dir(), release=release, timeout=60)
-                            if not stop.is_set() and _selected_release(root) == release:
+                            if not stop.is_set() and selected() == release:
                                 handoff = (python, entry)
                                 break
                         except Exception as exc:
@@ -1577,15 +1629,19 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
         finally:
             board_stop.set()
             thread.join()
-        if handoff is not None and not stop.is_set() and _selected_release(root) == release:
+        if handoff is not None and not stop.is_set() and selected() == release:
             child = None
             try:
                 python, entry = handoff
+                release_selection.validate_handoff(root, release, supervisor)
+                if selected() != release:
+                    continue
                 read_fd, write_fd = os.pipe()
                 try:
                     child = subprocess.Popen(
-                        [str(python), str(entry), "--root", str(root), "--handoff-ready-fd",
-                         str(write_fd), "supervise"], pass_fds=(write_fd,))
+                        release_selection.isolated_release_argv(python, entry, "--root", str(root),
+                                                        "--handoff-ready-fd", str(write_fd), "supervise"),
+                        pass_fds=(write_fd,), cwd="/", env=release_selection.python_environment())
                 except BaseException:
                     os.close(read_fd)
                     raise
@@ -1596,7 +1652,7 @@ def supervise_standalone(root: Path, stop: threading.Event, startup=None) -> Non
                     # keep reporting and report failure if it later cannot take over the board.
                     deadline = time.monotonic() + 15
                     while (not stop.is_set() and child.poll() is None and
-                           _selected_release(root) == release):
+                           selected() == release):
                         if select.select([read_fd], [], [], min(POLL, 0.1))[0]:
                             report = os.read(read_fd, 4096)
                             if not report or b"0" in report or any(c not in b"1W" for c in report):

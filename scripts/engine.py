@@ -1030,8 +1030,16 @@ def _prepare_handoff(release: Path) -> Path | None:
 
 
 def _handoff(release: Path, python: Path, root: Path, interval: float, once: bool) -> None:
-    os.execv(str(python), [str(python), str(release / "scripts/engine.py"),
-                              "--root", str(root), "--interval", str(interval)] + (["--once"] if once else []))
+    release_selection.validate_handoff(root, release, supervisor)
+    argv = release_selection.isolated_release_argv(python, release / "scripts/engine.py",
+                                            "--root", str(root), "--interval", str(interval),
+                                            *(["--once"] if once else []))
+    previous_cwd = os.getcwd()
+    try:
+        os.chdir("/")
+        os.execve(str(python), argv, release_selection.python_environment())
+    finally:  # exec failures and tests that intercept exec must restore the caller's cwd
+        os.chdir(previous_cwd)
 
 
 def _pending_explicit_install(root: Path) -> bool:
@@ -1052,9 +1060,10 @@ def _persist_launchd_handoff(root: Path, release: Path) -> bool:
     target = f"gui/{os.getuid()}/{supervisor.label('engine', root)}"
     if not supervisor.launchctl("print", target, missing_ok=True):
         return False
-    child = subprocess.Popen([sys.executable, str(Path(supervisor.__file__).resolve()), "--root", str(root),
+    child = subprocess.Popen([sys.executable, "-I", str(Path(supervisor.__file__).resolve()), "--root", str(root),
                               "--release", str(release), "commit-handoff"],
-                             stdin=subprocess.DEVNULL, start_new_session=True)
+                             stdin=subprocess.DEVNULL, start_new_session=True, cwd="/",
+                             env=release_selection.python_environment())
     if child.wait(timeout=1500):
         raise supervisor.ServiceError("launchd handoff failed; see engine log")
     return True

@@ -96,7 +96,7 @@ class ReleaseRegressions(SupervisorTest):
         other = self.root.parent / 'other-release'
         (other / '.claude-plugin').mkdir(parents=True)
         (other / '.claude-plugin/plugin.json').write_text('{"version":"2.0.0"}')
-        (other / 'requirements.txt').write_text('pins')
+        (other / 'requirements.txt').write_text('pins==1\n')
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'), mock.patch.object(supervisor, 'RELEASE', other):
             self.assertIn('upgrade pending', supervisor.ensure(self.root, jobs_dir=self.jobs))
             self.assertNotIn('bootout', self.verbs())
@@ -107,7 +107,7 @@ class ReleaseRegressions(SupervisorTest):
         other = self.root.parent / 'install/versions/new'
         (other / '.claude-plugin').mkdir(parents=True)
         (other / '.claude-plugin/plugin.json').write_text('{"version":"2.0.0"}')
-        (other / 'requirements.txt').write_text('pins')
+        (other / 'requirements.txt').write_text('pins==1\n')
         (other / 'chief_of_stuff.py').touch()
         (other.parent.parent / 'current').symlink_to(other)
         with supervisor.lock(supervisor.state_dir(self.root) / 'engine.lock'), mock.patch.object(supervisor, 'RELEASE', other):

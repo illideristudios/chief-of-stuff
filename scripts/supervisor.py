@@ -334,7 +334,7 @@ def _request_plugin_release(root: Path, selected: Path, existing: dict) -> bool:
         return False
 
 
-def _preparation_environment() -> dict[str, str]:
+def python_environment() -> dict[str, str]:
     """Do not pass Python startup configuration from a workspace to preparation subprocesses."""
     return {key: value for key, value in os.environ.items() if not key.upper().startswith("PYTHON")}
 
@@ -343,7 +343,7 @@ def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
     try:
         return python.is_file() and subprocess.run(
             [str(python), "-I", "-c", ""], capture_output=True, timeout=timeout,
-            cwd="/", env=_preparation_environment()).returncode == 0
+            cwd="/", env=python_environment()).returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -351,7 +351,7 @@ def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
 def run_preparation(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
     """Reap a timed-out venv or pip process and its descendants before discarding its generation."""
     with subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                          start_new_session=True, cwd="/", env=_preparation_environment()) as child:
+                          start_new_session=True, cwd="/", env=python_environment()) as child:
         try:
             out, err = child.communicate(timeout=timeout)
         except BaseException:
@@ -389,7 +389,7 @@ def ensure_venv(data: Path, *, release: Path | None = None, timeout: float = 900
     try:
         identity = subprocess.run(
             [base, "-I", "-c", "import json, sys; print(json.dumps([sys.version, sys.implementation.cache_tag]))"],
-            capture_output=True, text=True, timeout=remaining(30), cwd="/", env=_preparation_environment())
+            capture_output=True, text=True, timeout=remaining(30), cwd="/", env=python_environment())
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ServiceError(f"could not identify the engine's base Python: {exc}") from exc
     if identity.returncode:
@@ -563,7 +563,7 @@ def ensure_background(root: Path) -> str:
     with log.open("a") as output:
         subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "--root", str(root), "ensure-retry"],
                          stdin=subprocess.DEVNULL, stdout=output, stderr=output, start_new_session=True,
-                         env=_preparation_environment())
+                         env=python_environment())
     return "engine: ensuring"
 
 

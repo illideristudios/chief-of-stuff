@@ -532,7 +532,7 @@ with mock.patch.object(supervisor, 'RELEASE', Path(os.environ['TEST_OLD'])), moc
         for release in (old, new):
             (release / '.claude-plugin').mkdir(parents=True)
             (release / '.claude-plugin/plugin.json').write_text('{"version":"1.0.0"}')
-            (release / 'requirements.txt').write_text('pins')
+            (release / 'requirements.txt').write_text('pins==1\n')
             (release / 'scripts').mkdir()
             (release / 'scripts/engine.py').touch()
             (release / 'chief_of_stuff.py').touch()
