@@ -3582,7 +3582,7 @@ class MainTest(unittest.TestCase):
         python = self.root / "data/venv-new/bin/python"
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass") as passed, \
-             mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(engine.supervisor, "current_release", side_effect=[supervisor.RELEASE, newer, newer]), \
              mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
              mock.patch.object(supervisor, "ensure_venv", return_value=python) as preflight, \
              mock.patch.object(engine.os, "execv") as execv, \
@@ -3661,7 +3661,7 @@ class MainTest(unittest.TestCase):
 
         with mock.patch.object(engine.forge, "for_workspace", return_value=FakeForge()), \
              mock.patch.object(engine, "run_pass", side_effect=passed), \
-             mock.patch.object(supervisor, "current_release", side_effect=[supervisor.RELEASE, newer]), \
+             mock.patch.object(supervisor, "current_release", side_effect=[supervisor.RELEASE, newer, newer]), \
              mock.patch.object(supervisor, "data_dir", return_value=self.root / "data"), \
              mock.patch.object(supervisor, "ensure_venv", return_value=Path(sys.executable)), \
              mock.patch.object(pages, "read_config", return_value=SimpleNamespace(pages_dir=str(board), board_url="http://127.0.0.1:1/")), \

@@ -22,6 +22,8 @@ RELEASE = Path(__file__).resolve().parent.parent
 
 ACTIONS = ("install", "uninstall", "status", "ensure", "ensure-background")
 DISABLED_MARKER = "engine.disabled"
+PLUGIN_RELEASE_MARKER = "engine-plugin-release"
+ENSURE_LOCK_TIMEOUT = 1200.0
 
 # Run after the venv python, with the workspace as working directory (engine --root defaults to ".").
 ENGINE: tuple[str, ...] = (str(RELEASE / "scripts/engine.py"),)
@@ -49,13 +51,21 @@ def state_dir(root: Path) -> Path:
 
 
 @contextmanager
-def lock(path: Path, wait: bool = False):
+def lock(path: Path, wait: bool = False, timeout: float | None = None):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a") as handle:
-        try:
-            fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
-        except BlockingIOError:
-            raise ServiceError(f"already running or being managed ({path.name} is held)") from None
+        deadline = time.monotonic() + timeout if timeout is not None else None
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait and deadline is None else fcntl.LOCK_NB))
+                break
+            except BlockingIOError:
+                if deadline is None:
+                    raise ServiceError(f"already running or being managed ({path.name} is held)") from None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ServiceError(f"timed out waiting for {path.name}") from None
+                time.sleep(min(0.25, remaining))
         try:
             yield
         finally:
@@ -148,6 +158,61 @@ def current_release() -> Path:
     except (OSError, RuntimeError, ServiceError) as exc:
         print(f"engine: cannot follow current release {pointer}: {exc}; keeping {RELEASE}", file=sys.stderr, flush=True)
     return RELEASE
+
+
+def _plugin_version(release: Path) -> tuple[int, ...] | None:
+    """Recognize versioned Claude cache entries, never an arbitrary checkout or installed release."""
+    parent = release.parent
+    if len(parent.parents) < 3 or parent.parent.parent.name != "cache" or parent.parent.parent.parent.name != "plugins":
+        return None
+    try:
+        value = version(release)
+        if not value or any(not part.isdigit() for part in value.split(".")):
+            return None
+        if not (release / "scripts/engine.py").is_file() or not (release / "requirements.txt").is_file():
+            return None
+        return tuple(int(part) for part in value.split("."))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+
+
+def selected_release(root: Path) -> Path:
+    """Follow the installed pointer, or a validated newer sibling requested by a plugin session."""
+    current = current_release()
+    current_version = _plugin_version(current)
+    if current != RELEASE or current_version is None:
+        return current
+    try:
+        candidate = Path((state_dir(root) / PLUGIN_RELEASE_MARKER).read_text()).resolve(strict=True)
+        candidate_version = _plugin_version(candidate)
+        if (candidate.parent == current.parent and candidate_version is not None
+                and candidate_version > current_version):
+            return candidate
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return current
+
+
+def _request_plugin_release(root: Path, selected: Path, existing: dict) -> None:
+    """Publish a newer cache sibling under the global lock after its dependencies are prepared."""
+    try:
+        running = Path(existing["ProgramArguments"][1]).resolve().parent.parent
+        candidate_version = _plugin_version(selected)
+        running_version = _plugin_version(running)
+        prior_version = None
+        marker = state_dir(root) / PLUGIN_RELEASE_MARKER
+        try:
+            prior = Path(marker.read_text()).resolve(strict=True)
+            if prior.parent == running.parent:
+                prior_version = _plugin_version(prior)
+        except (OSError, RuntimeError, ValueError):
+            pass
+        baseline = max((v for v in (running_version, prior_version) if v is not None), default=None)
+        if (selected.parent == running.parent and candidate_version is not None and baseline is not None
+                and candidate_version > baseline):
+            atomic_write(marker, str(selected).encode())
+    except (OSError, RuntimeError, ValueError, KeyError, IndexError, TypeError):
+        return
 
 
 def _venv_python_runs(python: Path, *, timeout: float = 30) -> bool:
@@ -274,7 +339,7 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
         raise ServiceError("the engine entry command is empty")
     require_macos()
     root, data = root.resolve(), data_dir()
-    with lock(data / "supervisor.lock"):
+    with lock(data / "supervisor.lock", timeout=ENSURE_LOCK_TIMEOUT if respect_disabled else None):
         if respect_disabled and (state_dir(root) / DISABLED_MARKER).is_file():
             return "engine: disabled"
         if respect_disabled:
@@ -287,8 +352,7 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                 if launchctl("print", f"gui/{os.getuid()}/{label('engine', root)}", missing_ok=True):
                     # Prepare the selected release without disrupting the pass; the engine follows it at a boundary.
                     ensure_venv(data, release=selected)
-                    if job_path(label("pages", root), jobs_dir).exists():
-                        unload_agent(label("pages", root), root, jobs_dir)
+                    _request_plugin_release(root, selected, existing)
                     return "engine: serving"
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,9 +364,6 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                    "EnvironmentVariables": launch_env(selected),
                    "StandardOutPath": log, "StandardErrorPath": log}
         outcome = load_agent(desired, jobs_dir)
-        # The engine now supervises the board; retire its standalone LaunchAgent.
-        if job_path(label("pages", root), jobs_dir).exists():
-            unload_agent(label("pages", root), root, jobs_dir)
         (state_dir(root) / DISABLED_MARKER).unlink(missing_ok=True)
         return "engine: " + outcome
 

@@ -1056,8 +1056,8 @@ def main(argv: list[str] | None = None) -> int:
             raise KeyboardInterrupt
         previous_sigterm = signal.signal(signal.SIGTERM, _on_sigterm)
     try:
-        if (installed := supervisor.current_release()) != supervisor.RELEASE:
-            if (python := _prepare_handoff(installed)) is not None:
+        if (installed := supervisor.selected_release(root)) != supervisor.RELEASE:
+            if (python := _prepare_handoff(installed)) is not None and supervisor.selected_release(root) == installed:
                 _handoff(installed, python, root, args.interval, args.once)
                 return 0
         with supervisor.lock(supervisor.state_dir(root) / "engine.lock"):
@@ -1183,8 +1183,8 @@ def main(argv: list[str] | None = None) -> int:
                             release=release,
                         )
                     time.sleep(args.interval)
-                    if (installed := supervisor.current_release()) != supervisor.RELEASE:
-                        if (python := _prepare_handoff(installed)) is not None:
+                    if (installed := supervisor.selected_release(root)) != supervisor.RELEASE:
+                        if (python := _prepare_handoff(installed)) is not None and supervisor.selected_release(root) == installed:
                             newer = installed, python
                             break
                     if page_thread is not None and not page_thread.is_alive():

@@ -28,6 +28,8 @@ ENGINE_LOCK_FILE = "engine.lock"
 ENGINE_STATUS_FILE = "engine-status.json"
 ENGINE_STALE_FACTOR = 3.0
 ENGINE_STALE_FLOOR_S = 180.0
+# A pass can contain many bounded operations; this is an advisory, not a failure deadline.
+ENGINE_LONG_PASS_S = 24 * 60 * 60
 
 
 class ConfigError(Exception):
@@ -242,6 +244,10 @@ def engine_health(status: EngineStatus, now: datetime, zone: ZoneInfo) -> Engine
             f"engine pass failed{at_clause}{pass_clause}: {status.last_error}",
         )
     if status.pass_started_at is not None:
+        if (now - status.pass_started_at).total_seconds() > ENGINE_LONG_PASS_S:
+            since = _engine_stamp(status.pass_started_at, now, zone)
+            return EngineHealth("warning", ("engine running", "pass in progress", pass_meta),
+                                f"engine pass has been in progress since {since}; it may be stuck")
         return EngineHealth("running", ("engine running", "pass in progress", pass_meta), None)
     stale_after = timedelta(seconds=max(float(status.interval or 60.0) * ENGINE_STALE_FACTOR, ENGINE_STALE_FLOOR_S))
     anchors = [t for t in (status.started_at, status.last_pass_at) if t is not None]

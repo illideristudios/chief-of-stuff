@@ -398,6 +398,17 @@ class EngineBoardAndTaskHealthTest(unittest.TestCase):
         self.assertIn("engine stale: no completed pass since 13:50", board_html)
         self.assertIn("engine stale: no completed pass since 13:50", task_html)
 
+    def test_overlong_in_progress_pass_warns_on_board_and_task_page(self) -> None:
+        ws.write_engine_status(self.root, started_at=NOW - timedelta(days=2),
+                               pass_started_at=NOW - timedelta(days=1, hours=1),
+                               last_pass_at=NOW - timedelta(days=2), last_attempt_at=NOW - timedelta(days=2), stopped_at=None)
+        with supervisor.lock(supervisor.state_dir(self.root) / ws.ENGINE_LOCK_FILE):
+            board_html, task_html = self._render_board_and_issue()
+        self.assertIn('pass in progress', board_html)
+        self.assertIn('may be stuck', board_html)
+        self.assertIn('may be stuck', task_html)
+        self.assertNotIn('engine stale', board_html)
+
     def test_missing_and_corrupt_engine_status_warn_with_unknown_last_pass(self) -> None:
         # 1. Missing engine-status.json on a store-backed workspace:
         board_missing, task_missing = self._render_board_and_issue()
