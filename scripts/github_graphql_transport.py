@@ -1,24 +1,33 @@
-"""One admitted GitHub GraphQL CLI invocation, for integration by the scan.
+"""One admitted HTTP POST per GitHub GraphQL attempt.
 
-Call request() for *each* attempt, including retries; never retry inside the
-callback. The caller owns retry policy and must surface admission.status(),
-including stale/unavailable states. The result body is untrusted application
-data; do not log it or the CLI's stderr. Queries must select rateLimit { cost }.
-Only participating clients sharing the same trusted local state directory and
-policy are accounted for; other tools and machines are outside this best-effort
-ledger. It is not an authoritative GitHub quota.
+Use the same host, trusted local state directory and admission policy in all
+participating workspaces. Call request for every attempt, and surface status()
+(including stale/unavailable). Queries must select rateLimit { cost }. HTTP 200
+GraphQL errors are returned in Result.body; HTTP failures raise after cooldown
+metadata has been committed. Result bodies are untrusted and must not be logged.
 
-GitHub CLI handles auth from its environment/configuration. Set host explicitly:
-github.com or a GH Enterprise DNS host, without scheme, port or credentials.
-The host must be the same host used to construct the ledger. Use gh's normal
-GH_TOKEN/GITHUB_TOKEN or GH_ENTERPRISE_TOKEN/GITHUB_ENTERPRISE_TOKEN/host
-configuration, as appropriate. Keep GH_DEBUG and similar diagnostic settings
-off if they could expose secrets. CLI configuration such as api_host, proxies,
-redirects, and refreshable credentials can alter the actual network routing or
-cause additional HTTP calls: gh does not expose a no-redirect switch. Therefore
-this adapter bounds one gh invocation, not provably one wire-level request; it
-must not be wired where the latter is a hard requirement without another HTTP
-transport that disables redirects and accounts for auth refresh separately.
+Credentials are obtained before admission from gh's environment precedence or
+`gh auth token --no-refresh --hostname HOST`. This deliberately does not refresh
+expired credentials; callers must arrange refresh separately. Authentication is separate from
+the admitted GraphQL POST. The HTTP worker does not redirect or retry; failures
+and timeouts leave the ledger stale when the outcome or cost is unknown. Neither
+a killed worker nor any finite backoff establishes remote completion. Auth, other
+requests, nonparticipating clients and other machines are not accounted for, so
+this is best-effort coordination, not an account-wide hard limit.
+
+The endpoint is https://api.github.com/graphql for github.com and
+https://HOST/api/graphql for Enterprise Server, and
+https://api.SUBDOMAIN.ghe.com/graphql for Enterprise Cloud with data residency. An HTTPS endpoint override is
+available for Enterprise ports and installations; its hostname must match the
+ledger host. Python's standard TLS CA configuration (including SSL_CERT_FILE/
+SSL_CERT_DIR) and urllib proxy environment/no_proxy settings apply; gh-specific
+api_host, CA or proxy configuration is not automatically imported. The system
+Python/OpenSSL trust store can differ from gh's. Proxy CONNECT and auth retrieval
+are outside the single GraphQL request; a proxy or server may itself replay traffic.
+The timeout bounds auth, lock waiting and the worker, with up to one second for
+process reaping. Cleanup kills the process group, but cannot control a helper
+that escapes it or a process stuck in uninterruptible OS I/O. Filesystem operations
+needed for durable admission are subject to the underlying filesystem and OS.
 """
 from __future__ import annotations
 
@@ -32,14 +41,15 @@ import re
 import selectors
 import signal
 import subprocess
-import tempfile
+import sys
 import time
+from urllib.parse import urlsplit
 
 import github_admission as admission
 
 
 class TransportError(RuntimeError):
-    """A sanitized transport failure. No server text or process output is logged."""
+    """Sanitized failure; subprocess output and server error text are never included."""
     def __init__(self, kind, *, status=None):
         self.kind, self.status = kind, status
         super().__init__(f'GitHub GraphQL {kind}' + (f' (HTTP {status})' if status is not None else ''))
@@ -50,17 +60,16 @@ class Result:
     body: dict
     cost: int
     status: int
-    # Snapshot after the admitted attempt; may also show another caller's state.
     admission: dict
 
 
 class GitHubGraphQL:
-    """A single-attempt transport. Inject a gh executable and environment for tests."""
-    def __init__(self, gate, host, *, executable=None, env=None, timeout=60.0, max_output=8 * 1024 * 1024):
+    def __init__(self, gate, host, *, executable=None, env=None, timeout=60.0,
+                 max_output=8 * 1024 * 1024, endpoint=None):
         if not isinstance(host, str):
             raise ValueError('host must be a DNS hostname')
         host = host.lower().removesuffix('.')
-        if (not host or len(host) > 253 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p) for p in host.split('.'))):
+        if not host or len(host) > 253 or any(not re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', p) for p in host.split('.')):
             raise ValueError('host must be a DNS hostname without scheme, port, or credentials')
         if not isinstance(gate, admission.GitHubAdmission) or gate.host_dir.name != hashlib.sha256(host.encode()).hexdigest():
             raise ValueError('admission ledger host mismatch')
@@ -73,126 +82,196 @@ class GitHubGraphQL:
         self.executable = executable if executable is not None else self.env.get('CHIEF_OF_STUFF_GH', 'gh')
         if not isinstance(self.executable, str) or (self.executable != 'gh' and not Path(self.executable).is_absolute()):
             raise ValueError('gh executable override must be absolute')
-        # gh otherwise may prompt or dump request/response headers and credentials.
-        self.env['GH_PROMPT_DISABLED'] = '1'
-        self.env.pop('GH_DEBUG', None)
-        self.env.pop('DEBUG', None)
-        self.env.pop('GH_FORCE_TTY', None)
-        self.env.pop('CLICOLOR_FORCE', None)
-        self.env['NO_COLOR'] = '1'
+        api_host = ('api.github.com' if host == 'github.com' else
+                    f'api.{host}' if host.endswith('.ghe.com') else host)
+        default = f'https://{api_host}/' + ('graphql' if api_host != host else 'api/graphql')
+        self.endpoint = endpoint or default
+        try:
+            parsed = urlsplit(self.endpoint)
+            valid_host = parsed.hostname in ({host, api_host} if endpoint else {api_host})
+            if (parsed.scheme != 'https' or not valid_host or parsed.username is not None or parsed.password is not None
+                    or parsed.query or parsed.fragment or not parsed.path.startswith('/') or not parsed.port and parsed.netloc.endswith(':')):
+                raise ValueError()
+        except (ValueError, TypeError):
+            raise ValueError('invalid HTTPS GraphQL endpoint') from None
+        for key in ('GH_DEBUG', 'DEBUG', 'GH_FORCE_TTY', 'CLICOLOR_FORCE'):
+            self.env.pop(key, None)
+        self.env.update(GH_PROMPT_DISABLED='1', NO_COLOR='1', GH_TELEMETRY='false', GH_NO_UPDATE_NOTIFIER='1', GH_NO_EXTENSION_UPDATE_NOTIFIER='1')
 
     def status(self):
         return self.gate.status()
 
+    def _token(self, deadline):
+        names = ('GH_TOKEN', 'GITHUB_TOKEN') if self.host == 'github.com' or self.host.endswith('.ghe.com') else ('GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN')
+        token = next((self.env.get(name) for name in names if self.env.get(name)), None)
+        if token is None:
+            code, raw = _process([self.executable, 'auth', 'token', '--hostname', self.host, '--no-refresh'],
+                                 b'', self.env, deadline, 65536)
+            if code:
+                raise TransportError('authentication unavailable')
+            try:
+                token = raw.decode('utf-8').strip()
+            except UnicodeError:
+                raise TransportError('authentication unavailable') from None
+        if not isinstance(token, str) or not token or len(token.encode('utf-8')) > 65536 or any(c in token for c in '\r\n\x00'):
+            raise TransportError('authentication unavailable')
+        return token
+
     def request(self, query):
         if not isinstance(query, str) or not query or len(query.encode('utf-8')) > 1024 * 1024:
             raise ValueError('invalid GraphQL query')
+        deadline = time.monotonic() + self.timeout
+        token = self._token(deadline)
+        worker_env = {k: v for k, v in self.env.items() if k not in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN')}
+        payload = json.dumps({'query': query, 'token': token, 'endpoint': self.endpoint, 'max_output': self.max_output}).encode()
 
         def attempt():
-            code, output = self._run(query)
-            status, headers, body = _parse(output)
+            if time.monotonic() >= deadline:
+                raise TransportError('timeout')
+            code, output = _process([sys.executable, str(Path(__file__).resolve())], payload,
+                                    worker_env, deadline, self.max_output * 2 + 65536)
+            if code:
+                raise TransportError('request failed')
+            try:
+                result = json.loads(output)
+                status, headers, body = result['status'], result['headers'], result['body']
+                if type(status) is not int or not 200 <= status <= 599 or not isinstance(headers, dict) or not isinstance(body, dict):
+                    raise ValueError()
+            except (ValueError, TypeError, KeyError, RecursionError):
+                raise TransportError('invalid HTTP response') from None
+            body = _redact(body, token)
             data = body.get('data')
             rate = data.get('rateLimit') if isinstance(data, dict) else None
             cost = rate.get('cost') if isinstance(rate, dict) else None
-            # The complete body reaches the ledger so it can identify HTTP 200 errors.
-            return admission.Response((code, status, body, cost), cost, status, headers,
-                                      secondary_limit=_limited(body))
+            return admission.Response((status, body, cost), cost, status, headers, secondary_limit=_limited(body))
 
-        code, status, body, cost = self.gate.request(attempt)
-        # Raise only after the ledger has recorded response metadata.
-        state = self.status()
-        if not 200 <= status < 300 or (code and not body.get('errors')):
+        try:
+            status, body, cost = self.gate.request(attempt, deadline=deadline)
+            if time.monotonic() >= deadline:
+                raise TransportError('timeout')
+            state = self.gate.status(deadline=deadline)
+        except admission.LockTimeout:
+            if time.monotonic() >= deadline:
+                raise TransportError('timeout') from None
+            raise
+        if time.monotonic() >= deadline:
+            raise TransportError('timeout')
+        if not 200 <= status < 300:
             raise TransportError('request failed', status=status)
         return Result(body, cost, status, state)
 
-    def _run(self, query):
-        args = [self.executable, 'api', 'graphql', '--hostname', self.host, '--include', '--method', 'POST', '--input', '-']
-        payload = json.dumps({'query': query}, ensure_ascii=True, separators=(',', ':')).encode()
-        # A temporary file avoids an input-pipe deadlock and is unlinked by the OS.
-        with tempfile.TemporaryFile() as source:
-            source.write(payload); source.seek(0)
-            try:
-                proc = subprocess.Popen(args, stdin=source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                        env=self.env, start_new_session=True, close_fds=True)
-            except OSError:
-                raise TransportError('unavailable') from None
-            streams = selectors.DefaultSelector()
-            output = bytearray()
-            total = 0
-            deadline = time.monotonic() + self.timeout
-            try:
-                for stream, label in ((proc.stdout, 'stdout'), (proc.stderr, 'stderr')):
-                    os.set_blocking(stream.fileno(), False)
-                    streams.register(stream, selectors.EVENT_READ, label)
-                while streams.get_map():
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise TransportError('timeout')
-                    for key, _ in streams.select(remaining):
-                        chunk = os.read(key.fileobj.fileno(), 65536)
-                        if not chunk:
-                            streams.unregister(key.fileobj); key.fileobj.close()
-                            continue
-                        total += len(chunk)
-                        if total > self.max_output:
-                            raise TransportError('output exceeded limit')
-                        if key.data == 'stdout': output.extend(chunk)
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TransportError('timeout')
-                try:
-                    code = proc.wait(timeout=remaining)
-                except subprocess.TimeoutExpired:
-                    raise TransportError('timeout') from None
-                return code, bytes(output)
-            finally:
-                # Kill the entire session even when gh exited but left descendants.
-                try: os.killpg(proc.pid, signal.SIGKILL)
-                except ProcessLookupError: pass
-                proc.wait()
-                streams.close()
-                for stream in (proc.stdout, proc.stderr):
-                    if not stream.closed: stream.close()
+
+def _redact(value, token):
+    if isinstance(value, str):
+        return value.replace(token, '[REDACTED]')
+    if isinstance(value, list):
+        return [_redact(v, token) for v in value]
+    if isinstance(value, dict):
+        return {_redact(k, token): _redact(v, token) for k, v in value.items()}
+    return value
 
 
 def _limited(body):
     if admission.GitHubAdmission._graphql_limited(body):
         return True
     message = body.get('message')
-    return isinstance(message, str) and any(phrase in message.lower() for phrase in
-                                            ('secondary rate limit', 'abuse detection'))
+    return isinstance(message, str) and any(p in message.lower() for p in ('secondary rate limit', 'abuse detection'))
 
 
-def _parse(raw):
+def _process(args, payload, env, deadline, limit):
+    """Bound input, output and wall time, including inherited pipes and descendants."""
+    if time.monotonic() >= deadline:
+        raise TransportError('timeout')
     try:
-        # gh prints the status line with LF, followed by CRLF header lines.
-        line, rest = raw.split(b'\n', 1)
-        first = line.rstrip(b'\r').decode('iso-8859-1')
-        match = re.fullmatch(r'HTTP/\d(?:\.\d)? ([1-5]\d\d)(?: [^\r\n]*)?', first)
-        if not match: raise ValueError()
-        status = int(match.group(1))
-        if status < 200: raise ValueError()
-        if rest.startswith(b'\r\n'):
-            head, payload = b'', rest[2:]
-        else:
-            head, payload = rest.split(b'\r\n\r\n', 1)
-        lines = head.decode('iso-8859-1').split('\r\n') if head else []
-        # Ignore sensitive headers; reject ambiguous duplicate rate-limit headers.
-        wanted = {'retry-after', 'x-ratelimit-remaining', 'x-ratelimit-reset'}
+        proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                env=env, start_new_session=True, close_fds=True)
+    except OSError:
+        raise TransportError('unavailable') from None
+    sel = selectors.DefaultSelector()
+    output, total, offset = bytearray(), 0, 0
+    try:
+        for stream, kind in ((proc.stdout, 'out'), (proc.stderr, 'err'), (proc.stdin, 'in')):
+            os.set_blocking(stream.fileno(), False)
+            sel.register(stream, selectors.EVENT_WRITE if kind == 'in' else selectors.EVENT_READ, kind)
+        while sel.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TransportError('timeout')
+            for key, _ in sel.select(remaining):
+                if key.data == 'in':
+                    try:
+                        n = os.write(key.fd, payload[offset:offset + 65536]) if offset < len(payload) else 0
+                    except BrokenPipeError:
+                        n = 0
+                    offset += n
+                    if not n or offset == len(payload):
+                        sel.unregister(key.fileobj); key.fileobj.close()
+                else:
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        sel.unregister(key.fileobj); key.fileobj.close(); continue
+                    total += len(chunk)
+                    if total > limit:
+                        raise TransportError('output exceeded limit')
+                    if key.data == 'out': output.extend(chunk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TransportError('timeout')
+        try:
+            return proc.wait(timeout=remaining), bytes(output)
+        except subprocess.TimeoutExpired:
+            raise TransportError('timeout') from None
+    finally:
+        try: os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError: pass
+        try: proc.wait(timeout=1)
+        except subprocess.TimeoutExpired: pass
+        sel.close()
+        for stream in (proc.stdin, proc.stdout, proc.stderr):
+            if not stream.closed: stream.close()
+
+
+def _worker():
+    import urllib.error
+    import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            return None
+    request = json.load(sys.stdin)
+    data = json.dumps({'query': request['query']}, ensure_ascii=True, separators=(',', ':')).encode()
+    req = urllib.request.Request(request['endpoint'], data=data, method='POST', headers={
+        'Authorization': 'Bearer ' + request['token'], 'Content-Type': 'application/json',
+        'Accept': 'application/vnd.github+json', 'User-Agent': 'chief-of-stuff-graphql'})
+    opener = urllib.request.build_opener(NoRedirect())
+    try:
+        response = opener.open(req)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        status = response.status
+        wanted = ('retry-after', 'x-ratelimit-remaining', 'x-ratelimit-reset')
         headers = {}
-        for line in lines:
-            key, value = line.split(':', 1)
-            if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", key): raise ValueError()
-            key = key.lower()
-            if key in wanted:
-                if key in headers: raise ValueError()
-                headers[key] = value.strip()
-    except (ValueError, UnicodeError):
-        raise TransportError('invalid HTTP response') from None
+        for key in wanted:
+            values = response.headers.get_all(key, [])
+            if len(values) > 1:
+                raise ValueError('duplicate header')
+            if values:
+                headers[key] = values[0]
+        raw = response.read(request['max_output'] + 1)
+        if len(raw) > request['max_output']:
+            raise ValueError('response too large')
+        try:
+            body = json.loads(raw)
+            if not isinstance(body, dict): body = {}
+        except (ValueError, UnicodeError, RecursionError):
+            body = {}
+        sys.stdout.buffer.write(json.dumps({'status': status, 'headers': headers, 'body': body}, ensure_ascii=False).encode('utf-8'))
+
+
+if __name__ == '__main__':
     try:
-        body = json.loads(payload)
-        if not isinstance(body, dict): body = {}
-    except (ValueError, UnicodeError, RecursionError):
-        body = {}
-    # Preserve parsed HTTP limits even when the body/cost is unavailable.
-    return status, headers, body
+        _worker()
+    except Exception:
+        # Never expose credentials, URLs, request data or server output.
+        sys.exit(1)

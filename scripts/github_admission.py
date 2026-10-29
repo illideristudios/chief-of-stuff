@@ -254,7 +254,7 @@ class GitHubAdmission:
                 pass
 
     @contextlib.contextmanager
-    def _locked(self):
+    def _locked(self, deadline=None):
         fd = None
         locked = False
         yielded = False
@@ -279,14 +279,16 @@ class GitHubAdmission:
                 _lock_fds.add(fd)
             self._check_file(fd)
             os.fchmod(fd, 0o600)
-            deadline = time.monotonic() + self.lock_timeout
+            lock_deadline = time.monotonic() + self.lock_timeout
+            if deadline is not None:
+                lock_deadline = min(lock_deadline, deadline)
             while True:
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     locked = True
                     break
                 except BlockingIOError:
-                    remaining = deadline - time.monotonic()
+                    remaining = lock_deadline - time.monotonic()
                     if remaining <= 0:
                         raise LockTimeout('GitHub admission lock timed out')
                     time.sleep(min(0.02, remaining))
@@ -340,11 +342,13 @@ class GitHubAdmission:
             os.fsync(fd)
         return state, now
 
-    def request(self, dispatch):
+    def request(self, dispatch, *, deadline=None):
         """Execute one attempt and atomically record cost and any cooldown."""
         dispatch_error = None
         try:
-            with self._locked() as (fd, created):
+            with self._locked(deadline) as (fd, created):
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise LockTimeout('GitHub admission deadline expired')
                 owner = os.getpid()
                 state, now = self._load(fd, created)
                 if state['unsupported_cooldown']:
@@ -356,6 +360,8 @@ class GitHubAdmission:
                 state['events'] = events = [e for e in state['events'] if now - e[0] < self.policy.window_seconds]
                 if len(events) >= self.policy.max_requests or sum(e[1] for e in events) >= self.policy.point_budget or any(e[3] for e in events):
                     raise BudgetExhausted('GitHub admission budget exhausted')
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise LockTimeout('GitHub admission deadline expired')
                 events.append([now, self.policy.max_request_cost, True, False])
                 self._write(fd, state)  # Durable before the callback can dispatch.
                 try:
@@ -381,13 +387,13 @@ class GitHubAdmission:
                 raise
             raise StateError('GitHub admission state unavailable') from exc
 
-    def status(self):
+    def status(self, *, deadline=None):
         """Return durable uncertainty and retry deadlines, or raise StateError if unavailable.
 
         A stale budget remains best effort after the automatic backoff expires.
         """
         try:
-            with self._locked() as (fd, created):
+            with self._locked(deadline) as (fd, created):
                 state, now = self._load(fd, created)
                 return {'stale': state['stale'], 'recovery_until': state['recovery_until'],
                         'cooldown_until': state['cooldown_until'],
