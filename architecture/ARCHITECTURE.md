@@ -605,25 +605,49 @@ The engine has a heartbeat, in both of two forms (owner, 2026-10-29).
 - **B. The pinned board.** The board pinned in a T3 Browser panel, with the heartbeat's age at its top. T3 does not keep a pin across restarts. If the rename path fails, B alone carries the heartbeat (call).
 - **Deep links.** A dashboard page links to a thread as `t3code://threads/<environment>/<thread>`. The `<environment>` part is read from T3's data directory (its `environment-id`) and is never hard-coded (call). The `t3-thread://` form works only as a chat chip and is never written into HTML. Behaviour in the desktop app is untested (section 19).
 
+The heartbeat's status is computed once and delivered to sinks (#1179).
+- **One status, two forms.** `heartbeat.status` (Use Cases) classifies each item as running, stalled, parked, done, or done on assumptions, from plain facts. It gives one short line, short enough for a thread title (`chief · N running · N stalled · N parked · N done · N assumed · tick HH:MM`), and one longer summary that names the age of the last tick and each stalled and parked item with its reason. Whether a running worker is stalled is `worker_health.silence`'s call, not a second judgement in the heartbeat.
+- **A sink is where the heartbeat shows.** `heartbeat.Sink` is the seam, and `heartbeat.deliver` hands the status to every sink. A sink that fails is reported as `name: reason` and never stops the other sinks or the engine. The engine delivers after each pass and writes each failure to its engine log.
+- **The file sink is the one built.** `heartbeat_store.FileSink` writes the status to the engine state directory, and the board and the report read it there. A T3 thread-title sink (form A) and a pinned-board sink (form B) plug in at the same seam. Neither is built, and both need the engine's MCP client, which waits on the owner's approval (section 19). Until then the file carries the heartbeat, which is the design's fallback when the rename fails.
+- **The report page.** The page server renders `/report` (`heartbeat_page.py`) from the delivered file. It lists done, done on assumptions, and parked, each item linked to its worker's thread or, without one, to its issue page, under the heartbeat's line and summary. It reads and never acts.
+
+```
+St := the heartbeat status      Sk := a sink      F(Sk) := Sk failed to deliver St
+Ot := the other sinks still receive St      En := the engine pass continues      Lg := F(Sk) is written to the engine log
+Fs := the file sink delivered St      Rp := /report and the board show St
+1.  ∀Sk: F(Sk) → Ot ∧ En ∧ Lg      [#1179: heartbeat.deliver; the engine's beat after each pass]
+2.  Fs → Rp                         [#1179: the page server reads the file the file sink wrote]
+∴   a failing title or board sink never hides the heartbeat that the file sink delivered (1, 2)
+```
+
 The stall watcher is a small, non-model watcher in the engine (call, T3 design §10). It is not in the page server, which records and never acts, and not in the coordinator, which stays on prioritization and execution.
-- **Stalled** means a worker's item count and update time have stopped moving past a threshold, after a startup grace period. The grace period defaults to three minutes and is configurable; the thresholds are the builder's.
-- **Waiting is not stalled.** A pending request count above zero is a worker waiting: the coordinator answers it as section 17 describes, and it counts as a stall only when it stays unanswered past a threshold.
-- **Recovery follows section 15's outcomes** (call), and a relaunch after a stall counts as a failure.
-- **The judgement is pure.** It belongs with the stall judgement already in `worker_health.py` (Use Cases), fed the thread's state as plain facts; the engine gathers the facts, acts on the verdict, and the page server displays it (architect, by section 1: one stall judgement, not two).
+- **Stalled** means a worker's item count and update time have stopped moving past a threshold, after a startup grace period. The grace period defaults to three minutes and is configurable; the thresholds are the builder's. As built, one setting, `[workers.stall] after_minutes` (default 3), is both the grace period and the silence threshold.
+- **Waiting is not stalled.** A pending request count above zero is a worker waiting: the coordinator answers it as section 17 describes, and it counts as a stall only when it stays unanswered past a threshold. A worker waiting on an architectural decision or a split trio waits without expiry, because those waits are section 15's own.
+- **Silence is suspected, never proof.** A worker whose liveness is unknown, or whose thread could not be read, is not judged stalled.
+- **Recovery follows section 15's outcomes** (call), and a relaunch after a stall counts as a failure. `[workers.stall] action` is `wait` (the default) or `restart`. With `restart`, the engine stops a stalled local process, releases its slot only once termination is verified, and relaunches it, up to `max_restarts` (default 2) per issue. The stalled attempt is recorded as a failure, and `[workers] failure_limit` (default 2) failures on an issue park it.
+- **A T3 thread is not restarted.** A stalled worker launched through T3 is treated as `wait` even when `restart` is configured, because the `t3` CLI has no cancel or interrupt (section 13). It stays a suspected stall until the owner approves a cancellation mechanism (section 19).
+- **The judgement is pure.** `worker_health.stall` (Use Cases) sits beside `worker_health.silence`, the stall judgement already there, and is fed the worker's evidence as plain facts (liveness, last activity, pending requests and since when, a decision wait). The engine gathers the facts, acts on the verdict, and the page server displays it (architect, by section 1: one stall judgement, not two).
 
 ```
 Ic := the item count and update time have stopped moving past the threshold      Gp := the startup grace period has passed
 Pr := the pending request count is above zero      Pu := a pending request stayed unanswered past its threshold
+Dw := the worker waits on an architectural decision or a split trio      Uk := the worker's liveness or thread state is unknown
 St := the worker is stalled      Wt := the worker is waiting      Rc := recovery follows section 15
+Rs := [workers.stall] action is restart      T3 := the worker was launched through T3      Rl := the engine stops and relaunches it
+Mx := the issue reached max_restarts      Fl := the stall counts as a failure
 
-1.  Gp ∧ Ic ∧ ¬Pr → St      [call, T3 design §10]
-2.  Pr ∧ ¬Pu → Wt ∧ ¬St     [call, T3 design §10: waiting is not stalled]
-3.  Pr ∧ Pu → St            [call, T3 design §10]
-4.  St → Rc                 [call, T3 design §10]
-∴   every stall is detected without a model turn and recovered by the unattended outcomes, and a waiting worker is answered, not relaunched
+1.  Gp ∧ Ic ∧ ¬Pr ∧ ¬Dw ∧ ¬Uk → St      [call, T3 design §10; worker_health.stall]
+2.  Pr ∧ ¬Pu → Wt ∧ ¬St                 [call, T3 design §10: waiting is not stalled]
+3.  Pr ∧ Pu → St                        [call, T3 design §10]
+4.  Dw → Wt ∧ ¬St                       [section 15: an architectural or split-trio wait is not a stall]
+5.  Uk → ¬St                            [#1163: silence is suspected, never proof]
+6.  St → Rc                             [call, T3 design §10]
+7.  St ∧ Rs ∧ ¬T3 ∧ ¬Mx → Rl ∧ Fl       [#1163: bounded local recovery; section 15: a stall relaunch is a failure]
+8.  St ∧ T3 → ¬Rl                       [#1163: the t3 CLI has no cancel; section 13]
+∴   every stall is detected without a model turn and recovered by the unattended outcomes; a waiting worker is answered, not relaunched; and a T3 worker is held as waiting until a cancel exists (8)
 ```
 
-An unattended run ends with a report to the owner: done, done on assumptions, and parked (architectural, or failed twice, with what was tried). An append-only action log backs it, and the engine's store is its natural home; where it lives is the builder's. The mockup `design/since-you-last-looked-laptop.html` appears to be its surface, and the builder confirms it.
+An unattended run ends with a report to the owner: done, done on assumptions, and parked (architectural, failed twice, or a split trio, with what was tried). `/report` is that report's page. An append-only action log backs it, and the engine's store is its natural home; where it lives is the builder's. The mockup `design/since-you-last-looked-laptop.html` appears to be its surface, and the builder confirms it. The engine records no marker today for an architectural park, a split trio, or an assumption the trio made, so the heartbeat infers each from other records (`compliance.md` row C32).
 
 ```
 H := the owner returns after being away      P := significant progress was made      S := the owner learns of a stall late or never
@@ -649,9 +673,11 @@ Decided but not built yet, after #1178. Each is required by the section named, a
 - Live messages to a T3 worker: `worker.deliver_messages` fails them as "started without live messaging"; `t3 thread send` would carry them (section 13).
 - Thread links on the issue pages and the workers page; only the board links the thread (sections 13 and 18).
 - Mapping the engine's `[workers] claude_as_profile` to a T3 provider instance; every T3 worker runs under T3's default `claudeAgent` (sections 10 and 13).
-- Liveness and stalls from the thread's state; they still come from the runner process (sections 13 and 18).
 - Codex, Cursor and Antigravity under T3; only Claude entries launch through it, since each other runtime needs its own channel file there (section 13, call).
-- Cancelling the thread itself; cancel stops the runner, not the thread, until the MCP client above is approved (section 13).
+- Cancelling the thread itself; cancel stops the runner, not the thread, until the MCP client above is approved (section 13). A stalled T3 worker is therefore held as a wait (section 18; `compliance.md` row C33).
+- The heartbeat's thread-title and pinned-board sinks (section 18; `compliance.md` row C35).
+
+Built since: a T3 worker's liveness and stall evidence come from its thread (`t3_adapter.observe` reads the thread's status, update time and pending request count), not from the runner process. A thread that cannot be read is unknown evidence, never a stall (sections 13 and 18).
 
 ```
 Mc := an MCP client is added to the engine      Ap := the owner approved it as a new dependency
