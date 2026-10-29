@@ -314,6 +314,14 @@ class AgentTest(SupervisorTest):
         self.assertEqual(self.verbs(), ["print", "enable", "bootstrap"])
         self.assertEqual(supervisor.install(self.root, ENGINE, self.jobs), "engine: serving")
 
+    def test_an_engine_install_takes_the_board_over_from_a_standalone_board_agent(self):
+        # #935: a workspace keeps one LaunchAgent; the engine supervises the board itself.
+        board = supervisor.job_path(supervisor.label("pages", self.root), self.jobs)
+        board.parent.mkdir(parents=True)
+        board.write_bytes(plistlib.dumps({"Label": board.stem, "WorkingDirectory": str(self.root.resolve())}))
+        supervisor.install(self.root, ENGINE, self.jobs)
+        self.assertEqual([p.stem for p in self.jobs.glob("*.plist")], [supervisor.label("engine", self.root)])
+
     def test_install_keeps_limit_paths_from_the_installing_shell(self):
         paths = {
             "CLAUDE_CONFIG_DIR": str(self.root / "claude"),

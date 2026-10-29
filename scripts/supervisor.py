@@ -237,6 +237,16 @@ def require_macos():
         raise ServiceError("the engine supervisor requires macOS (launchd)")
 
 
+def launch_env() -> dict:
+    """launchd does not inherit the installing shell. The probe and history read these paths; the version makes an
+    updated plugin a changed job, which load_agent restarts."""
+    env = {"CLAUDE_PLUGIN_DATA": str(data_dir()), "CHIEF_OF_STUFF_VERSION": version()}
+    for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "XDG_STATE_HOME"):
+        if os.environ.get(name):
+            env[name] = os.environ[name]
+    return env
+
+
 def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | None = None) -> str:
     """Start the engine under launchd, or restart it when the plugin version, its path or its pins changed."""
     if engine is None:
@@ -249,19 +259,17 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
         log_path = state_dir(root) / "engine.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log = str(log_path)
-        # launchd does not inherit the installing shell. The probe and history read these paths.
-        env = {"CLAUDE_PLUGIN_DATA": str(data), "CHIEF_OF_STUFF_VERSION": version()}
-        for name in ("CLAUDE_CONFIG_DIR", "CLAUDE_AS_PROFILES_DIR", "XDG_STATE_HOME"):
-            if os.environ.get(name):
-                env[name] = os.environ[name]
         desired = {"Label": label("engine", root),
                    # Not resolved: the venv python is a symlink, and resolving it would leave the venv.
                    "ProgramArguments": [str(ensure_venv(data)), *engine],
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
-                   # The version makes an updated plugin a changed job, which load_agent restarts.
-                   "EnvironmentVariables": env,
+                   "EnvironmentVariables": launch_env(),
                    "StandardOutPath": log, "StandardErrorPath": log}
-        return "engine: " + load_agent(desired, jobs_dir)
+        started = load_agent(desired, jobs_dir)
+        # The engine supervises the board itself; a workspace keeps one LaunchAgent (#935).
+        if job_path(label("pages", root), jobs_dir).exists():
+            unload_agent(label("pages", root), root, jobs_dir)
+        return "engine: " + started
 
 
 def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
