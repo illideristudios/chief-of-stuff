@@ -35,11 +35,13 @@ copy under `--root` when there is one. With no forge, or a reference it cannot p
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import stat
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from html import escape
@@ -65,6 +67,19 @@ NODE = {"deployed": "n", "inflight": "n-inflight", "designed": "n-designed", "ex
 EDGE = {"deployed": "e", "inflight": "e-inflight", "designed": "e-designed"}
 CHIPS = (("deployed", "DEPLOYED"), ("inflight", "IN FLIGHT"), ("designed", "DESIGNED"), ("hot", "WAITING ON THIS"),
          ("external", "EXTERNAL"))
+
+
+@contextmanager
+def page_render_lock(root: Path, *, shared: bool = False):
+    """Coordinate CLI publication with server reads across processes."""
+    path = root.resolve() / ".chief-of-stuff" / "pages-render.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def write_if_changed(path: Path, text: str) -> None:
@@ -491,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"decision: no page — {e}", file=sys.stderr)
         return 1
     try:
-        write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
+        with page_render_lock(Path(args.root)):
+            write(Path(args.root), pages_dir, args.name, args.date, Path(args.source) if args.source else None)
     except (OSError, json.JSONDecodeError, DecisionError, KeyError, TypeError, AttributeError) as e:
         print(f"decision: {e}", file=sys.stderr)
         return 2

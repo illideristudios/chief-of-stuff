@@ -9,6 +9,7 @@ from __future__ import annotations
 
 
 import argparse
+import contextlib
 import hashlib
 import html
 import re
@@ -583,7 +584,10 @@ def main(argv: list[str] | None = None, *, writer=write) -> Path:
     ap.add_argument("--root", default=".", help="workspace root holding CLAUDE.md")
     args = ap.parse_args(argv)
     try:
-        out, cfg, now, tracker_text, req_texts = writer(Path(args.root), args.date)
+        root = Path(args.root)
+        lock = decision_page.page_render_lock(root) if (root / "CLAUDE.md").is_file() else contextlib.nullcontext()
+        with lock:
+            out, cfg, now, tracker_text, req_texts = writer(root, args.date)
     except ConfigError as e:
         sys.exit(f"render_board: {e}")
     parsed = parse_tracker(tracker_text)

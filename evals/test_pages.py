@@ -1040,6 +1040,75 @@ class LastLookedTest(unittest.TestCase):
                 body = get(self.port, route).body.decode()
                 self.assertNotIn("went needs input since", body[body.index('<nav class="tabs"'):body.index('</nav>')])
 
+    def test_decision_cli_output_is_refreshed_by_the_server(self):
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        route = "/decisions/cache-ttl"
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, route).body)
+        script = Path(__file__).resolve().parent.parent / "scripts" / "decision_page.py"
+        subprocess.run([sys.executable, str(script), "--root", str(self.root), "--name", "cache-ttl",
+                        "--date", self.day], check=True, capture_output=True, text=True)
+        self.assertNotIn("went needs input since", (self.pages / "decision-cache-ttl.html").read_text())
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, route).body)
+        subprocess.run([sys.executable, str(script), "--root", str(self.root), "--name", "cache-ttl",
+                        "--date", self.day], check=True, capture_output=True, text=True)
+        pg.RENDERED_AT.pop(str(self.pages / "decision-cache-ttl.html"), None)
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, route).body)
+
+    def test_board_cli_with_old_navigation_cannot_leave_stale_decision_pages(self):
+        self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
+        (self.pages / "decision-cache-ttl.json").write_text(DECISION)
+        marker = self.pages / ".looked-before"
+        marker.write_text(datetime.fromisoformat(f"{self.day}T08:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, "/decisions/cache-ttl").body)
+        self.assertIn(b"1 went needs input since 08:00", get(self.port, "/decisions").body)
+        scripts = Path(__file__).resolve().parent.parent / "scripts"
+        code = """import sys
+sys.path.insert(0, sys.argv[1])
+import render_board
+original = render_board.tab_counts
+def paused(*args, **kwargs):
+    result = original(*args, **kwargs)
+    print('ready', flush=True)
+    sys.stdin.readline()
+    return result
+render_board.tab_counts = paused
+render_board.main(['--root', sys.argv[2], '--date', sys.argv[3]])
+"""
+        proc = subprocess.Popen([sys.executable, "-c", code, str(scripts), str(self.root), self.day],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(lambda: proc.kill() if proc.poll() is None else None)
+        self.assertEqual(proc.stdout.readline().strip(), "ready")
+        marker.write_text(datetime.fromisoformat(f"{self.day}T10:00").replace(tzinfo=ZoneInfo(ZONE)).isoformat())
+        attempting, responses = threading.Event(), []
+        import decision_page
+        real_lock = decision_page.page_render_lock
+        def observe_lock(*args, **kwargs):
+            if kwargs.get("shared"):
+                attempting.set()
+            return real_lock(*args, **kwargs)
+        def request():
+            responses.append(get(self.port, "/decisions/cache-ttl"))
+        with mock.patch.object(decision_page, "page_render_lock", side_effect=observe_lock):
+            thread = threading.Thread(target=request)
+            thread.start()
+            try:
+                self.assertTrue(attempting.wait(10))
+            finally:
+                proc.stdin.write("continue\n")
+                proc.stdin.flush()
+                _, stderr = proc.communicate(timeout=10)
+                thread.join(10)
+        self.assertEqual(proc.returncode, 0, stderr)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(responses), 1)
+        self.assertNotIn(b"went needs input since", responses[0].body)
+        for route in ("/decisions/cache-ttl", "/decisions"):
+            with self.subTest(route=route):
+                self.assertNotIn(b"went needs input since", get(self.port, route).body)
+
     def test_a_changed_look_refreshes_an_authored_decision_without_a_board_render(self):
         self.tracker.write_text(ISSUE_TRACKER.format(day=self.day, task="Security audit"))
         (self.pages / "decision-cache-ttl.json").write_text(DECISION)

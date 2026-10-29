@@ -74,14 +74,17 @@ MAX_PAGE = 1024 * 1024  # rendered pages are a few hundred KB; refuse larger rat
 # An answer saved mid-render of another page (the board) can leave that page stale until the next forge refresh.
 PAGE_LOCKS: dict[str, threading.Lock] = {}
 PAGE_LOCKS_GUARD = threading.Lock()
-# Each page's last render by this server: (when it started, ns; the file's time after it; the sha256 of the
-# sources' bytes it consumed). Apart from the file's time, which is only when its bytes last changed (the
-# Last-Modified a tab reloads on). A page with no record, or whose file changed since (an older release's, an
-# editor's), is judged by its file's time; a None file time marks it stale. The digest decides freshness where
-# the record is this server's own render of this file: this filesystem's mtime clock reads behind the wall
-# clock by more than a render takes under load, so no mtime comparison can order a source saved just after a
-# render began against that render — the bytes can.
-RENDERED_AT: dict[str, tuple[int, int | None, str]] = {}
+# A server render records its start, the output file identity, and its input digest. An external
+# atomic replacement is never assumed current, even when its timestamp is newer than every source.
+RENDERED_AT: dict[str, tuple[int, tuple[int, int, int] | None, str]] = {}
+
+
+def _file_identity(path: Path) -> tuple[int, int, int] | None:
+    try:
+        stat = path.stat()
+        return stat.st_ino, stat.st_mtime_ns, stat.st_ctime_ns
+    except OSError:
+        return None
 
 
 def page_lock(path: Path | str) -> threading.Lock:
@@ -353,18 +356,17 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
             if board:
                 sources.append(pages_dir / board)
             newest = max(RENDERER_MTIME_NS, max((p.stat().st_mtime_ns for p in sources if p.is_file()), default=0))
-            mtime = target.stat().st_mtime_ns if target.is_file() else 0
+            identity = _file_identity(target)
             digest = _digest(sources)
             record = RENDERED_AT.get(key)
-            rendered = record[0] if record and record[1] in (mtime, None) else mtime
-            if rendered >= newest and name != "workers.html":
+            if record and identity is not None and record[1] == identity and record[0] >= newest and name != "workers.html":
                 # The filesystem's mtime clock reads behind the wall clock by more than a render takes under load
                 # here, so a source saved after that render began can carry an mtime from before it. Where the
                 # record is this server's render of this file, the sources' bytes settle it: fresh only if they
                 # are still exactly what that render consumed. A source touched without a change keeps the mtime
                 # path's one confirming render — it re-renders, records the same digest, and the polls after it
                 # are fresh.
-                if not (record and record[1] == mtime and record[2] != digest):
+                if record[2] == digest:
                     return ""
             started = time.time_ns()
             with slots:
@@ -386,7 +388,7 @@ def fresh(root: Path, pages_dir: Path, name: str, slots=contextlib.nullcontext()
                         issue_page.write(root, pages_dir, _issue_identity(name), db=data, navigation=navigation)
                 else:
                     render_board.write(root, day, db=data, target="decisions" if name == "decisions.html" else "board")
-            RENDERED_AT[key] = started, target.stat().st_mtime_ns if target.is_file() else 0, digest  # only after a render that did not raise
+            RENDERED_AT[key] = started, _file_identity(target), digest  # only after a render that did not raise
         return ""
     except Exception as e:  # any renderer failure: the server keeps serving the last good page
         return f"{type(e).__name__}: {e}"
@@ -621,13 +623,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def _is_html(self) -> bool:
         return bool(self.banner) or unquote(urlsplit(self.path).path).lower().endswith(".html")
 
+    def _serve(self, body: bool):
+        root = getattr(self.server, "root", None)
+        if root:
+            import decision_page
+            lock = decision_page.page_render_lock(root, shared=True)
+        else:
+            lock = contextlib.nullcontext()
+        with lock:
+            if self._allowed():
+                match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
+                if match:
+                    self._send_worker_session(int(match[1]), body)
+                elif self._is_html():
+                    self._send_html(body)
+                elif body:
+                    super().do_GET()
+                else:
+                    super().do_HEAD()
+
     def do_GET(self):
-        if self._allowed():
-            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
-            if match:
-                self._send_worker_session(int(match[1]), True)
-            else:
-                self._send_html(True) if self._is_html() else super().do_GET()
+        self._serve(True)
 
     def _send_worker_session(self, segment_id: int, body: bool):
         """Render a recorded engine attempt in memory; never publish transcript HTML into the pages directory."""
@@ -839,12 +855,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
 
     def do_HEAD(self):
-        if self._allowed():
-            match = WORKER_SESSION.fullmatch(urlsplit(self.path).path)
-            if match:
-                self._send_worker_session(int(match[1]), False)
-            else:
-                self._send_html(False) if self._is_html() else super().do_HEAD()
+        self._serve(False)
 
     def list_directory(self, path):
         # The stdlib listing, without dotfiles (the pid file is the server's) or rendered pages (routes, not files).
