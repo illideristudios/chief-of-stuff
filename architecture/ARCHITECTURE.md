@@ -104,6 +104,19 @@ Hr := the change surfaces for human review      Pk := the issue is parked (secti
 ∴   a merge waits on the architect only where the policy requires it, never on the owner, and the owner sees a change only when something is wrong
 ```
 
+The gate is the same for every workflow. "The review" in the rule above is the engine's review panel, so a workflow with no review stage still has its change reviewed before it merges, and a forge approval or change request from a person is human review, which stays possible but neither stands in for the panel nor holds the merge (rule 4). The fix-round limit is policy data like the other retry limits. Where the code disagrees, the rows are in `compliance.md`: a workflow with no review stage merges on the configured forge approver's approval alone (C37), a change request from that approver holds the merge (C38), code left from the removed hard stops is still threaded through the planner and the settings (C39), and the three fix rounds are a constant in the planner, not the policy's `retry_limit` (C40).
+
+```
+Rv := the engine's review panel reviewed the change's current head      Fa := a person approved on the forge      Fc := a person requested changes on the forge
+M := the merge gate merges      Wo := the merge waits on the owner      Hr := human review is possible
+1.  M → Rv                      [rule 1 above: Rv is the review]
+2.  ¬Wo                         [owner, 2026-10-29: merges waiting on the owner are removed]
+3.  Hr                          [owner, 2026-10-29: human review stays possible at any time]
+4.  Fa ∧ ¬Rv → ¬M               [from 1]
+5.  Fc → ¬Wo                    [architect's reading of 2 against 3, from the review that found C38: a person's change request is not a wait the gate imposes]
+∴   a forge approval never replaces the panel (4), a forge change request never holds the merge (5), and human review stays available (3)
+```
+
 The reviewer personas are the 22 personas of the `extras` plugin's code-review skill (1.2.0, `skills/code-review/personas/`). Each ships whole, as its own file under `assets/personas/`, copied with its source noted. A persona's rules are its full lens and numbered checks, never a one-line summary. Making the set pluggable is later work (owner, 2026-10-16).
 
 The panel for a change follows the skill's own selection rule, which ships as policy data in `assets/policy.toml`:
@@ -126,8 +139,8 @@ The engine never starts an architect run on its own (owner, 2026-10-17). The arc
 - **A consult is a request.** The engine posts it where the architect watches, on the change or its issue, in the form `Architect review requested: <sha>`, with the findings to dispose of. It then waits for the architect's reply on the same thread, and treats the issue as waiting on the architect until the reply comes.
 - **The engine reads the reply as data:** `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>`, plus one disposition per finding.
 - **The head is the forge's.** "The current head" is the change's head as the forge adapter reports it, never a worker's local `HEAD`.
-- **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request.
-- **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves.
+- **Only the approval binds to the head.** An approval counts for that head only, so a new head needs a new approval and one new request. As built (#1197), a reply counts only when its first line is exactly `Architect: APPROVED <sha>` or `Architect: CHANGES <sha>` for the full forge head, the engine posts one request per unapproved head, and at merge time it reads the thread again for the request's head and discards the planning pass's reading. A `CHANGES` reply sends the change down the workflow's fix edge.
+- **Dispositions persist.** A finding disposed as fix, file, keep or discard stays disposed across heads, keyed by its finding. A request for a later head carries only the findings not yet disposed, and a `CHANGES` reply whose findings are all disposed needs no further request until the head moves. This is not built: dispositions are not stored, and each request carries every finding of the latest review (`compliance.md` row C36).
 - **The architect grades and signals unprompted** (owner, 2026-10-29, T3 design §11). This replaces the rule that a new architect run happened only when the owner asked for one. The architect grades compliance after each merge to main and whenever a worker or the coordinator reports a mismatch between a decision and the code (call), records each gap as a row in `compliance.md`, and signals the coordinator as section 16 sets out. The policy, the planner and the trio never start a second architect session beside the standing one, and how the standing session is started and kept alive is the builder's.
 
 ```
