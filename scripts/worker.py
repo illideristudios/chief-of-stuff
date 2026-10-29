@@ -21,6 +21,7 @@ import make_worktree
 import process_status
 import reconcile
 import supervisor
+import t3_adapter
 from settings import ModelEntry, SettingsError, pick, load as load_settings
 from workspace import settings_path
 from forge_port import ForgeError  # noqa: F401  (launch's documented failure)
@@ -122,6 +123,8 @@ def _existing_run(data: dict, run_dir: Path, stage: str, attempt: int,
                 raise RuntimeError("existing worker start is unverified; preserving its evidence")
             return None
         record = json.loads(started.read_text())
+        if (run_dir / "thread.json").is_file():
+            record.update(json.loads((run_dir / "thread.json").read_text()), runtime="claude", launcher="t3")
         prepared = data.get("review_trees", {}).get(str(attempt), {}) if stage == "review" else {
             "tree": data.get("worktree"), "branch": data.get("work_branch")}
         record.update(run_dir=str(run_dir), tree=prepared.get("tree"), branch=prepared.get("branch"),
@@ -272,7 +275,7 @@ def stage_defaults(root: Path, text: str, stage: str) -> Any:
 def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, store: Any,
            root: Path, trees: Path, policies: Any, forge: Any, clone: Path | None = None,
            claude_as_profile: str = "", teardown_command: str = "", rules: tuple[str, ...] = (), require_green: bool = False,
-           clock: engine_clock.Clock = engine_clock.system) -> tuple[str, str]:
+           clock: engine_clock.Clock = engine_clock.system, launcher: str = "cli") -> tuple[str, str]:
     """The Launch port: verify a live start or adopt durable completion before slots records it."""
     name = persona or policies.stages[stage].persona
     if name not in policies.personas:
@@ -387,16 +390,22 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                           cwd=str(tree), worker=True, agent=agent,
                           plugin_dirs=plugin_dirs)
         host: dict[str, Any] = {}
-        if chosen.runtime == "claude":
+        via_t3 = launcher == "t3" and chosen.runtime == "claude"  # T3 is the launcher; the worker is still a claude worker
+        if chosen.runtime == "claude" and not via_t3:
             runner = claude_adapter.start(request, run_dir, claude_as_profile=claude_as_profile, env=env)
         else:
-            # §13: no guard plugin on these hosts, so the forge must protect the default and the request's target, and
-            # every protected branch's head is kept so collect can see a merge or push outside the engine (#860).
+            # §13: no guard plugin loads on these hosts or in a T3 thread, so the forge must protect the default and the
+            # request's target, and every protected branch's head is kept so collect can see a merge or push outside
+            # the engine (#860).
             if not _guarded(forge, issue_key):
                 raise RuntimeError(f"{chosen.runtime} workers launch only where the forge protects the default branch "
                                    "and the branch its request targets")
             host = {"runtime": chosen.runtime, "branch_heads": host_adapter.branch_heads(tree, forge.protected_branches())}
-            runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
+            if via_t3:
+                host["launcher"] = "t3"
+                runner = t3_adapter.start(request, run_dir, env=env)
+            else:
+                runner, host["agy_mcp"] = host_adapter.start(chosen.runtime, request, run_dir, env=env)
         try:
             deadline = time.monotonic() + 5
             while not (run_dir / "started.json").exists():
@@ -404,6 +413,8 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
                     raise RuntimeError("could not verify worker start: adapter did not start a host")
                 time.sleep(0.01)
             pid = json.loads((run_dir / "started.json").read_text())["pid"]
+            if via_t3:  # the thread id is the worker's identity under T3, beside the session id (§13)
+                host.update(_thread(run_dir, runner))
             while True:
                 identity = process_status.identity(pid, session_id, host=True)
                 if identity is None:
@@ -454,6 +465,19 @@ def launch(issue_key: str, stage: str, attempt: int, persona: str | None, *, sto
         return chosen.model, chosen.effort or ""
     except Exception as exc:
         raise StartFailed(chosen, exc) from exc
+
+
+THREAD_WAIT_S = 60.0  # project registration and thread start are two CLI calls to the running T3
+
+
+def _thread(run_dir: Path, runner: Any) -> dict:
+    """The T3 thread the runner started: {"thread_id", "thread_link"} from its `thread.json`, within THREAD_WAIT_S."""
+    deadline = time.monotonic() + THREAD_WAIT_S
+    while not (run_dir / "thread.json").exists():
+        if runner.poll() is not None or time.monotonic() >= deadline:
+            raise RuntimeError("could not verify worker start: T3 started no thread")
+        time.sleep(0.05)
+    return json.loads((run_dir / "thread.json").read_text())
 
 
 NEVER_WRITTEN = "it was never written to the worker session"
@@ -610,7 +634,8 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
             code, exited_at = _exit_record(run_dir)
             runtime = record.get("runtime", "claude")
             stdout, stderr = (run_dir / "stdout").read_text(), (run_dir / "stderr").read_text()
-            if runtime == "claude":
+            via_t3 = record.get("launcher") == "t3"  # a thread's reply is plain text, never a Claude envelope
+            if runtime == "claude" and not via_t3:
                 reply = claude_adapter.classify(code, stdout, stderr)
             else:
                 reply = host_adapter.classify(runtime, code, stdout, stderr)
@@ -650,7 +675,7 @@ def collect(store: Any, root: Path, clock: engine_clock.Clock = engine_clock.sys
                         outcome = "done"
                 else:
                     outcome, reason = reports[-1].outcome, reports[-1].summary
-            if runtime != "claude":
+            if runtime != "claude" or via_t3:
                 held = host_adapter.moved_outside_engine(store, record, now.isoformat())
                 if held:
                     outcome, reason = "human_review", held

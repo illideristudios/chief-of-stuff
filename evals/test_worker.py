@@ -327,6 +327,56 @@ class WorkerTest(unittest.TestCase):
         self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
         self.assertIn("trunk moved", " ".join(entry.message for entry in self.db.log(KEY)))
 
+    def t3_launched(self, protected=True):
+        """#1178: a Claude entry started as a T3 thread, recorded and claimed like any other."""
+        self.forge.default_branch_protected = lambda: protected
+
+        def t3_start(request, run_dir, **kwargs):
+            (run_dir / "thread.json").write_text(json.dumps({"thread_id": "mcp:t-1",
+                                                             "thread_link": "t3code://threads/env-1/mcp:t-1"}))
+            return self.start(request, run_dir)
+        with mock.patch.object(worker, "_model", return_value=worker.ModelEntry("claude", "sonnet", "high")), \
+             mock.patch.object(worker.make_worktree, "build", return_value=SimpleNamespace(path=self.tree)), \
+             mock.patch.object(worker.host_adapter, "branch_heads",
+                               side_effect=lambda tree, branches: {b: "d" * 40 for b in branches}), \
+             mock.patch.object(worker.t3_adapter, "start", side_effect=t3_start) as t3, \
+             mock.patch.object(worker.claude_adapter, "start") as claude, \
+             mock.patch.object(worker.process_status, "identity", return_value="process-start"):
+            used = worker.launch(KEY, "implement", 1, None, store=self.db, root=self.root, trees=self.trees,
+                                 policies=self.p, forge=self.forge, clock=lambda: NOW, launcher="t3")
+        slots.claim(self.trees, self.db, issue_key=KEY, stage="implement", attempt=1,
+                    max_concurrency=1, clock=lambda: NOW, launch=lambda: used)
+        return t3, claude
+
+    def test_a_t3_launch_stores_the_thread_id_and_link_in_the_run_record(self):
+        t3, claude = self.t3_launched()
+        claude.assert_not_called()
+        t3.assert_called_once()
+        record = self.db.resume(KEY)["runs"]["implement-1"]
+        self.assertEqual((record["runtime"], record["launcher"]), ("claude", "t3"))
+        self.assertEqual(record["thread_id"], "mcp:t-1")
+        self.assertEqual(record["thread_link"], "t3code://threads/env-1/mcp:t-1")
+        self.assertEqual(record["branch_heads"], {"trunk": "d" * 40, "main": "d" * 40})  # §13: no guard plugin loads, as for any host
+        self.assertEqual(self.db.segments(KEY)[0].runtime, "claude")  # still a claude worker: T3 is the launcher
+
+    def test_a_t3_launch_needs_the_forge_to_protect_the_default_branch(self):
+        with self.assertRaisesRegex(RuntimeError, "protects the default branch"):
+            self.t3_launched(protected=False)
+        self.assertFalse((self.db.resume(KEY) or {}).get("runs"))
+
+    def test_a_t3_run_is_classified_as_a_host_without_a_claude_envelope_and_checked_for_outside_merges(self):
+        self.t3_launched()
+        run = Path(self.db.resume(KEY)["runs"]["implement-1"]["run_dir"])
+        (run / "stdout").write_text("plain reply text, not a Claude envelope")
+        (run / "stderr").write_text("")
+        self.report(run)
+        (run / "exit.json").write_text(json.dumps({"exit_code": 0}))
+        with mock.patch.object(worker.process_status, "identity", return_value=None), \
+             mock.patch.object(worker.host_adapter, "moved_outside_engine", return_value="trunk moved") as moved:
+            worker.collect(self.db, self.root, lambda: NOW + timedelta(minutes=1))
+        moved.assert_called_once()
+        self.assertEqual(self.db.segments(KEY)[0].outcome, "human_review")
+
     ROTATION = ('[models.implement]\nrotation = ["codex:gpt-6.1-sol@high", "cursor:auto", '
                 '"agy:gemini-4-argon-high", "claude:sonnet@high"]\n')
 
