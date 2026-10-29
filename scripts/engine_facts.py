@@ -17,6 +17,7 @@ import git_trees
 import git_view
 import process_status
 import readiness
+import t3_adapter
 from forge_port import ForgeError
 from orphans import Claim
 from reconcile import Facts, latest_segment
@@ -45,6 +46,12 @@ def _alive(record: dict | None) -> bool | None:
     if record is None:
         return None
     run_dir = record.get("run_dir")
+    if record.get("launcher") == "t3":
+        try:
+            state = t3_adapter.observe(Path(run_dir))
+            return True if t3_adapter.outcome(state) is None else None
+        except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError):
+            return None
     if isinstance(run_dir, str) and run_dir and (Path(run_dir) / "exit.json").exists():
         return None  # the adapter finished: `worker.collect` classifies its exit, not a liveness guess
     pid, session, identity = record.get("pid"), record.get("session_id"), record.get("identity")
