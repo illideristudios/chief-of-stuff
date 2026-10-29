@@ -123,5 +123,178 @@ class DecisionGraphEntityTest(unittest.TestCase):
         self.assertIsNone(dg.find_rejected_alternative(nodes, parents, "Unrelated approach"))
 
 
+class DecisionHistoryUseCaseTest(unittest.TestCase):
+    def setUp(self) -> None:
+        import decision_history as dh
+        self.dh = dh
+        self.leaves = (
+            dg.DecisionLeaf(
+                id=2,
+                topic="writes",
+                decision="Every worker state change must write synchronously to store.db inside the tool call.",
+                reason="Crash recovery requires durable state before returning.",
+                parent_ids=(1,),
+            ),
+            dg.DecisionLeaf(
+                id=3,
+                topic="loop",
+                decision="Async MCP handlers must forbid synchronous disk writes on the event loop thread.",
+                reason="Blocking SQLite calls stall concurrent stdio notifications.",
+                parent_ids=(1,),
+            ),
+        )
+
+    def test_unjustified_request_is_refused_and_told_to_justify(self) -> None:
+        refusal = self.dh.validate_worker_request(
+            self.dh.HistoryRequest(kind="ancestors", leaf_id=2, justification="   ")
+        )
+        self.assertIsNotNone(refusal)
+        self.assertIn("justify", refusal.lower())
+
+        refusal_rj = self.dh.validate_worker_request(
+            self.dh.HistoryRequest(kind="was_rejected", approach="unix pipe", justification="")
+        )
+        self.assertIsNotNone(refusal_rj)
+        self.assertIn("justify", refusal_rj.lower())
+
+    def test_free_readers_are_only_coordinator_architect_and_owner(self) -> None:
+        for role in ("coordinator", "architect", "owner"):
+            self.assertTrue(self.dh.reads_freely(role))
+        for role in ("worker", "implementer", "reviewer", ""):
+            self.assertFalse(self.dh.reads_freely(role))
+
+    def test_coordinator_judges_contradiction_and_code_mismatch_without_reading_history(self) -> None:
+        # Grant case 1: two current leaves contradict, stating what each requires that cannot both hold.
+        contradiction = self.dh.HistoryRequest(
+            kind="ancestors",
+            leaf_id=2,
+            other_leaf_id=3,
+            requested_depth=1,
+            justification=(
+                "Decision #2 requires synchronous store.db writes inside every tool call, whereas "
+                "decision #3 forbids synchronous disk writes inside async MCP handlers; both cannot hold "
+                "when the tool handler is async."
+            ),
+        )
+        verdict = self.dh.judge_justification(contradiction, self.leaves)
+        self.assertTrue(verdict.approved, verdict.reason)
+        self.assertEqual(verdict.grant_case, "contradiction")
+        self.assertEqual(verdict.approved_depth, 1)
+        self.assertFalse(verdict.report_to_architect)
+
+        # Bare claim of contradiction without stating what each requires is denied.
+        bare = self.dh.HistoryRequest(
+            kind="ancestors",
+            leaf_id=2,
+            other_leaf_id=3,
+            justification="Decision #2 and decision #3 contradict each other.",
+        )
+        self.assertFalse(self.dh.judge_justification(bare, self.leaves).approved)
+
+        # Grant case 2: current leaf does not match concrete code evidence, reported to the architect.
+        mismatch = self.dh.HistoryRequest(
+            kind="ancestors",
+            leaf_id=3,
+            requested_depth=1,
+            justification=(
+                "Decision #3 forbids synchronous disk writes in async MCP handlers, which does not match "
+                "what the code shows in scripts/engine_mcp.py:67 where Store.record_worker_report runs synchronously."
+            ),
+        )
+        m_verdict = self.dh.judge_justification(mismatch, self.leaves)
+        self.assertTrue(m_verdict.approved, m_verdict.reason)
+        self.assertEqual(m_verdict.grant_case, "code_mismatch")
+        self.assertTrue(m_verdict.report_to_architect)
+        self.assertEqual(m_verdict.approved_depth, 1)
+
+    def test_coordinator_harshly_denies_banned_and_uncovered_rationales(self) -> None:
+        denied_texts = (
+            "A reviewer finding contradicts decision #2 on scripts/engine_mcp.py:67.",
+            "Need more context on why decision #2 replaced #1.",
+            "Decision #1 looks related to the store migration I am writing.",
+            "The decision is unclear about how transactions commit.",
+            "Double-checking my own work against earlier storage rules.",
+            "I want to understand the history of scripts/store.py before refactoring.",
+        )
+        for text in denied_texts:
+            with self.subTest(text=text):
+                req = self.dh.HistoryRequest(kind="ancestors", leaf_id=2, justification=text)
+                verdict = self.dh.judge_justification(req, self.leaves)
+                self.assertFalse(verdict.approved, f"expected harsh denial for: {text}")
+
+        # Requesting history on an id that is not a current leaf is denied.
+        non_leaf = self.dh.HistoryRequest(
+            kind="ancestors",
+            leaf_id=99,
+            justification=(
+                "Decision #99 requires X whereas scripts/engine_mcp.py:10 does not match what the code shows."
+            ),
+        )
+        self.assertFalse(self.dh.judge_justification(non_leaf, self.leaves).approved)
+
+    def test_was_rejected_judgement_grants_specific_non_obvious_approach_and_denies_vague_queries(self) -> None:
+        valid = self.dh.HistoryRequest(
+            kind="was_rejected",
+            approach="polling store.db in a model turn loop",
+            justification=(
+                "I am about to build verdict delivery by polling store.db in a model turn loop; "
+                "the answer is not obvious because current leaves #2 and #3 cover write durability "
+                "and event-loop blocking without stating how a blocked worker waits for a verdict."
+            ),
+        )
+        verdict = self.dh.judge_justification(valid, self.leaves)
+        self.assertTrue(verdict.approved, verdict.reason)
+        self.assertEqual(verdict.grant_case, "rejected_approach")
+        self.assertIsNone(verdict.approved_depth)
+
+        vague_cases = (
+            ("", "Has anything like this been tried before in the engine?"),
+            ("has anything like this been tried", "Checking whether anything like this has been tried."),
+            ("sqlite", "Need more context before building."),
+            ("polling loop", "Just curious."),
+        )
+        for approach, justification in vague_cases:
+            with self.subTest(approach=approach, justification=justification):
+                req = self.dh.HistoryRequest(
+                    kind="was_rejected",
+                    approach=approach,
+                    justification=justification,
+                )
+                self.assertFalse(self.dh.judge_justification(req, self.leaves).approved)
+
+    def test_precedent_seam_swaps_tracker_decisions_for_graph_leaves_without_changing_consumer(self) -> None:
+        tracker_md = (
+            "# Day Tracker\n\n"
+            "## Decisions\n"
+            "| time | item | words |\n"
+            "| --- | --- | --- |\n"
+            "| 09:15 | worker transport | Use stdio MCP for worker reports. |\n"
+            "| 10:30 | store ORM | All store access goes through SQLAlchemy models. |\n"
+        )
+
+        class StaticSource:
+            def __init__(self, entries: tuple[dg.PrecedentEntry, ...]) -> None:
+                self._entries = entries
+
+            def current_precedent(self) -> tuple[dg.PrecedentEntry, ...]:
+                return self._entries
+
+        # Same coordinator lookup function answers from tracker rows today and graph leaves tomorrow.
+        tracker_source = StaticSource(self.dh.tracker_precedent_entries(tracker_md))
+        graph_source = StaticSource(self.dh.graph_precedent_entries(self.leaves))
+
+        from_tracker = self.dh.lookup_precedent(tracker_source, "worker reports transport")
+        self.assertEqual(len(from_tracker), 1)
+        self.assertIn("stdio MCP", from_tracker[0].decision)
+
+        from_graph = self.dh.lookup_precedent(graph_source, "crash recovery store.db")
+        self.assertEqual(len(from_graph), 1)
+        self.assertEqual(from_graph[0].id, "decision:2")
+        self.assertIn("Crash recovery", from_graph[0].reason)
+
+        ranked = self.dh.lookup_precedent(graph_source, "synchronous store.db writes")
+        self.assertEqual([e.id for e in ranked], ["decision:2", "decision:3"])
+
+
 if __name__ == "__main__":
     unittest.main()

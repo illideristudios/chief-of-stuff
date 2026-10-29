@@ -46,6 +46,7 @@ DRAWS_NOTHING = (
     "decision_actions",
     "decision_escalation",
     "decision_graph",  # Entities: decision DAG leaves, ancestors and rejected alternatives.
+    "decision_history",  # Use Cases: harsh justification judgement and PrecedentSource seam.
     "performance",
     "performance_report",
     "limits", "limits_history", "limits_probe", "limits_cli", "session_logs", "github_admission", "github_graphql_transport", "github_scan",
@@ -219,6 +220,7 @@ CIRCLES: dict[str, frozenset[str]] = {
     "use_cases": frozenset({
         "dispatch_prompt", "one_shot", "kanban", "merge_ready", "merge_approved", "review_threads",
         "task_forge", "model_port", "issue_gate", "trio_gate", "decision_actions", "decision_escalation", "engine_merge",
+        "decision_history",
         "forge_port",
         "reconcile", "readiness", "completion", "worker_health", "guard_rules", "performance",
     }),
@@ -427,6 +429,11 @@ class DependencyRuleTest(unittest.TestCase):
         self.assertEqual(import_graph(SCRIPTS)["decision_graph"], set())
         self.assertEqual(forbidden_reach(SCRIPTS, "decision_graph", set(),
                          frozenset({"subprocess", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
+
+    def test_decision_history_reaches_no_adapter_or_io_module(self) -> None:
+        self.assertEqual(forbidden_reach(SCRIPTS, "decision_history",
+                         {"store", "store_access", "forge", "claude_adapter", "settings", "trio_gate", "pages", "workspace"},
+                         frozenset({"subprocess", "socket", "sqlite3", "sqlalchemy", "mcp", *HTTP})), [])
 
     def test_guard_rules_import_no_other_script_or_io(self) -> None:
         self.assertEqual(import_graph(SCRIPTS)["guard_rules"], set())
