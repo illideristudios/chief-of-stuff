@@ -7,7 +7,7 @@ Markup contract these tests read (keep to it; everything else is free):
 
 - Each page holds exactly one `<nav aria-label="Board sections">`. Its direct child elements are the tabs, in order.
 - A tab's name is its text, less the text of any `<span title="…">` inside it; that span is the tab's count badge.
-- A built tab holds one `<a href>`: Board `href="/"`, Workers `href="/workers"` (#195), Decisions `href="/decisions"`. An unbuilt tab holds no `<a>`
+- A built tab holds one `<a href>`: Board `href="/"`, Workers `href="/workers"` (#195), Decisions `href="/decisions#pending-decisions"`. An unbuilt tab holds no `<a>`
   and no `href` at all; any other element will do (a `<span>`, say).
 - The page's own tab carries `aria-current="page"`. A detail page's parent tab carries the class `tab-parent`
   instead (Task and Source under Board, Decision under Decisions), and nothing in the nav is `aria-current`.
@@ -36,7 +36,7 @@ from test_issue_page import ROUTE_TRACKER, ZONE  # noqa: E402
 from test_pages import decision, get  # noqa: E402
 
 TABS = ("Board", "Workers", "Dispatch", "Since you last looked", "Epics", "Decisions", "Limits")
-BUILT = {"Board": "/", "Workers": "/workers", "Decisions": "/decisions"}
+BUILT = {"Board": "/", "Workers": "/workers", "Decisions": "/decisions#pending-decisions"}
 # The five page kinds, by route; the decision and the task (#109) are the fixture's.
 ROUTES = {"board": "/", "decisions index": "/decisions", "decision": "/decisions/alpha", "task": "/issues/109",
           "source": "/issues/109/source"}

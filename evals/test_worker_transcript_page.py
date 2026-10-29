@@ -32,7 +32,7 @@ class WorkerTranscriptPageTest(unittest.TestCase):
         (self.root / "CLAUDE.md").write_text("## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n"
             "- Tracker: `daily/<date>-tracker.md`\n- Worktrees: `trees/`\n- Timezone: America/Chicago\n")
         self.sid = str(uuid.uuid4())
-        self.item = SimpleNamespace(issue_key="github:example/repo#9", title="Test <task>")
+        self.item = SimpleNamespace(issue_key="github:example/repo#9", title="Test <task>", forge_state="open")
         self.segment = SimpleNamespace(id=14, issue_key=self.item.issue_key, stage="implement", attempt=1,
             runtime="claude", model="sonnet", ended_at=None, outcome="done", started_at=datetime.now(timezone.utc).isoformat(), runner="worker")
         self.run_dir = self.root / ".chief-of-stuff" / "runs" / "9-implement-1"

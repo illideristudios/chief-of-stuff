@@ -36,7 +36,7 @@ import columns  # noqa: E402
 import decision_page  # noqa: E402
 from page_common import markdown_inline  # noqa: E402
 from decision_page import write_if_changed  # noqa: E402
-from fragment import FONTS, TAB_CSS, tab_bar, theme, issue_href  # noqa: E402
+from fragment import DECISIONS_ROUTE, FONTS, TAB_CSS, tab_bar, theme, issue_href  # noqa: E402
 import flow_chart  # noqa: E402
 import panels  # noqa: E402
 from task_forge import PageData, live_worker_keys, source_key, source_workers, source_worker_tasks  # noqa: E402
@@ -281,7 +281,7 @@ def flow_tiles(total: int, held: int, sources: board_sources.Sources, running: i
     approved = sum(c.state == "open" and c.approved for c in sources.changes.values())
     if actual_running is None:
         actual_running = len(source_workers(sources)) if sources.workers or "workers" in sources.fetched else running
-    return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked", "/decisions"),
+    return [panels.Tile("ALL", total, "flow", "all"), panels.Tile("NEEDS INPUT", held, "flow", "blocked", DECISIONS_ROUTE),
             panels.Tile("RUNNING", actual_running, "flow", "running"),
             panels.Tile("APPROVED", approved, "flow", "approved"),
             panels.Tile("ORPHANED", orphaned, "flow", "orphaned"), panels.Tile("DRIFT", drift, "flow", "drift")]

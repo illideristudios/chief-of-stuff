@@ -42,9 +42,12 @@ def colour(value: str) -> str:
     return value
 
 
+# The id of the PENDING block on /decisions (decision_page.index); the Decisions tab and the NEEDS INPUT tile link to it (#1122).
+DECISIONS_ANCHOR = "pending-decisions"
+DECISIONS_ROUTE = f"/decisions#{DECISIONS_ANCHOR}"
 # The Board sections nav (Flow.dc.html) atop every page: (name, route); a tab with no page yet has no route.
 TABS = (("Board", "/"), ("Workers", "/workers"), ("Dispatch", ""), ("Since you last looked", ""), ("Epics", ""),
-        ("Decisions", "/decisions"), ("Limits", ""))
+        ("Decisions", DECISIONS_ROUTE), ("Limits", ""))
 # On the pages' tokens (--fg, --muted, --line, --link); wraps at phone width rather than widening the page.
 # The pages' type: Alegreya Sans for text, Cormorant SC for heads.
 FONTS = "https://fonts.googleapis.com/css2?family=Alegreya+Sans:wght@400;500;600&family=Cormorant+SC:wght@600&display=swap"
