@@ -1669,7 +1669,7 @@ class StandaloneBoardTest(unittest.TestCase):
         (self.pages / ".pid").write_text(str(stale))
         stop = threading.Event()
         with mock.patch.object(pg, "POLL", 0.05):
-            thread = threading.Thread(target=pg.supervise_standalone, args=(self.root, stop), daemon=True)
+            thread = threading.Thread(target=pg.supervise_with_retry, args=(self.root, stop), daemon=True)
             thread.start()
             self.addCleanup(lambda: thread.join(timeout=5))
             self.addCleanup(stop.set)
@@ -1724,7 +1724,7 @@ class StandaloneBoardTest(unittest.TestCase):
         stop, waits = threading.Event(), []
         with mock.patch.object(pg, "supervise") as supervised, \
              mock.patch.object(stop, "wait", side_effect=lambda s: (waits.append(s), len(waits) == 2 and stop.set())[1]):
-            pg.supervise_standalone(self.root, stop)
+            pg.supervise_with_retry(self.root, stop)
         self.assertEqual(supervised.call_count, 2)  # it does not exit for launchd to relaunch it every ten seconds
 
     def test_install_writes_one_board_agent_for_the_configured_workspace(self):
@@ -1738,19 +1738,47 @@ class StandaloneBoardTest(unittest.TestCase):
         self.assertTrue(job["RunAtLoad"] and job["KeepAlive"])
         self.assertEqual(job["WorkingDirectory"], str(self.root.resolve()))
 
-    def test_install_leaves_an_engine_workspace_to_its_engine_and_refuses_without_a_board(self):
+    def test_install_with_an_engine_adds_a_fallback_and_refuses_without_a_board(self):
         engine = pg.supervisor.job_path(pg.supervisor.label("engine", self.root), self.jobs)
         engine.parent.mkdir(parents=True)
         engine.write_bytes(b"")
-        self.assertEqual(pg.install(self.root, self.jobs), "pages: supervised by the engine")
-        self.assertEqual(list(self.jobs.glob("*.plist")), [engine])
+        self.assertEqual(pg.install(self.root, self.jobs), "pages: started")
+        board = pg.supervisor.job_path(pg.supervisor.label("pages", self.root), self.jobs)
+        self.assertTrue(board.exists())
         (self.root / "CLAUDE.md").write_text(
             "## Coordinator\n- User: Robin\n- Daily log dir: `daily/`\n- Tracker: `daily/<date>-tracker.md`\n"
             f"- Timezone: {ZONE}\n- Board: none\n")
         engine.unlink()
+        board.unlink()
         with self.assertRaises(pg.PagesError):
             pg.install(self.root, self.jobs)
         self.assertEqual(list(self.jobs.glob("*.plist")), [])
+
+    def test_waiter_takes_over_after_the_active_supervisor_stops(self):
+        stop = threading.Event()
+        entered = threading.Event()
+        lock_path = pg.supervisor.state_dir(self.root) / "pages-supervisor.lock"
+
+        def ensure(*args, **kwargs):
+            entered.set()
+            return "pages: serving"
+        with mock.patch.object(pg, "RETRY_MAX", 0.05), mock.patch.object(pg, "ensure", side_effect=ensure):
+            thread = threading.Thread(target=pg.supervise_with_retry, args=(self.root, stop), daemon=True)
+            try:
+                with pg.supervisor.lock(lock_path):
+                    thread.start()
+                    self.assertFalse(entered.wait(0.15))
+                self.assertTrue(entered.wait(2), "waiting supervisor did not acquire the released lock")
+            finally:
+                stop.set()
+                thread.join(timeout=2)
+            self.assertFalse(thread.is_alive())
+
+    def test_status_prefers_the_independent_board_agent_when_both_are_installed(self):
+        self.assertEqual(pg.install(self.root, self.jobs), "pages: started")
+        engine = pg.supervisor.job_path(pg.supervisor.label("engine", self.root), self.jobs)
+        engine.write_bytes(b"")
+        self.assertEqual(pg.status(self.root, self.jobs)["agent"], "board")
 
     def test_status_tells_a_missing_engine_from_a_healthy_board(self):
         self.addCleanup(self.stop_server)

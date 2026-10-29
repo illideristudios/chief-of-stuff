@@ -314,13 +314,20 @@ class AgentTest(SupervisorTest):
         self.assertEqual(self.verbs(), ["print", "enable", "bootstrap"])
         self.assertEqual(supervisor.install(self.root, ENGINE, self.jobs), "engine: serving")
 
-    def test_an_engine_install_takes_the_board_over_from_a_standalone_board_agent(self):
-        # #935: a workspace keeps one LaunchAgent; the engine supervises the board itself.
+    def test_board_agent_survives_engine_install_startup_failure_and_uninstall(self):
         board = supervisor.job_path(supervisor.label("pages", self.root), self.jobs)
         board.parent.mkdir(parents=True)
-        board.write_bytes(plistlib.dumps({"Label": board.stem, "WorkingDirectory": str(self.root.resolve())}))
+        original = plistlib.dumps({"Label": board.stem, "WorkingDirectory": str(self.root.resolve())})
+        board.write_bytes(original)
+        # bootstrap accepts the job without proving the engine process starts successfully.
         supervisor.install(self.root, ENGINE, self.jobs)
-        self.assertEqual([p.stem for p in self.jobs.glob("*.plist")], [supervisor.label("engine", self.root)])
+        self.assertEqual(board.read_bytes(), original)
+        self.assertNotIn("bootout", self.verbs())
+        supervisor.uninstall(self.root, self.jobs)
+        self.assertEqual(board.read_bytes(), original)
+        self.assertFalse(supervisor.job_path(supervisor.label("engine", self.root), self.jobs).exists())
+        self.assertFalse(any(call.args[0] == "bootout" and board.stem in call.args[1]
+                             for call in self.launchctl_mock.call_args_list))
 
     def test_install_keeps_limit_paths_from_the_installing_shell(self):
         paths = {

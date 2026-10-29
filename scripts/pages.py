@@ -14,7 +14,7 @@ reloads itself when the file changes.
 
     python3 pages.py --ensure [--root R]              # start it unless it is already serving; print status only
     python3 pages.py serve --dir D --port P --root R  # what --ensure starts, detached
-    python3 pages.py install|uninstall|status [--root R]  # the board LaunchAgent of a workspace with no engine (#935)
+    python3 pages.py install|uninstall|status [--root R]  # the independent board LaunchAgent (#935)
     python3 pages.py supervise [--root R]             # what that LaunchAgent runs: ensure, every POLL seconds
 
 A decision page posts the user's answer to `POST /decisions/<slug>` (`key` and/or `words`, form-encoded).
@@ -975,12 +975,11 @@ def supervise(root: Path, stop: threading.Event) -> None:
                 if stop.wait(delay):
                     return
     except supervisor.ServiceError:
-        print("pages: another engine already holds pages-supervisor.lock", file=sys.stderr, flush=True)
+        print("pages: another supervisor already holds pages-supervisor.lock", file=sys.stderr, flush=True)
 
 
-def supervise_standalone(root: Path, stop: threading.Event) -> None:
-    """The board LaunchAgent's loop, for a workspace no engine supervises (#935). While another supervisor holds
-    the lock it waits and tries again, rather than exit for launchd to relaunch it every ThrottleInterval."""
+def supervise_with_retry(root: Path, stop: threading.Event) -> None:
+    """Retry when another supervisor holds the lock, so either supervisor can take over when the other stops."""
     while not stop.is_set():
         supervise(root, stop)
         stop.wait(RETRY_MAX)
@@ -998,14 +997,11 @@ def _held(path: Path) -> bool:
 
 
 def install(root: Path, jobs_dir: Path | None = None) -> str:
-    """Keep a configured board serving across restarts when no engine LaunchAgent does: one LaunchAgent running
-    `supervise`. A workspace keeps one LaunchAgent, so an engine's is left to supervise its board itself."""
+    """Install an independent board fallback; the supervisor lock coordinates it with a running engine."""
     root = root.resolve()
     from_config(root)  # no Board line, nothing to supervise
     if sys.platform != "darwin":
         raise PagesError("the board supervisor requires macOS (launchd); run `pages supervise` under your own")
-    if supervisor.job_path(supervisor.label("engine", root), jobs_dir).exists():
-        return "pages: supervised by the engine"
     log = supervisor.state_dir(root) / "pages.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     desired = {"Label": supervisor.label("pages", root),
@@ -1034,7 +1030,7 @@ def status(root: Path, jobs_dir: Path | None = None) -> dict:
     supervisor holds the board now."""
     root = root.resolve()
     state = supervisor.state_dir(root)
-    agent = next((kind for kind in ("engine", "pages")
+    agent = next((kind for kind in ("pages", "engine")
                   if supervisor.job_path(supervisor.label(kind, root), jobs_dir).exists()), "none")
     report = {"board": "not configured", "port": None, "pid": None, "pid_live": False,
               "engine": "running" if _held(state / "engine.lock") else "missing",
@@ -1073,7 +1069,7 @@ def main(argv: list[str] | None = None) -> int:
         stop = threading.Event()
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
-        supervise_standalone(root, stop)
+        supervise_with_retry(root, stop)
         return 0
     if args.command in ("install", "uninstall", "status"):
         try:

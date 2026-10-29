@@ -1089,7 +1089,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if not args.once:
                     import pages  # deferred: --once never serves the board
-                    page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                    page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                     page_thread.start()
                 while True:
                     failed = False
@@ -1111,7 +1111,7 @@ def main(argv: list[str] | None = None) -> int:
                         # A temporary supervisor-lock conflict or unexpected thread exit must not
                         # disable board recovery for the remainder of this engine process.
                         print("engine: page supervisor exited; restarting it", file=sys.stderr, flush=True)
-                        page_thread = threading.Thread(target=pages.supervise, args=(root, stop_pages), daemon=True)
+                        page_thread = threading.Thread(target=pages.supervise_with_retry, args=(root, stop_pages), daemon=True)
                         page_thread.start()
             finally:
                 stop_pages.set()

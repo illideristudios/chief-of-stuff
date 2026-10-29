@@ -265,11 +265,8 @@ def install(root: Path, engine: tuple[str, ...] | None = None, jobs_dir: Path | 
                    "WorkingDirectory": str(root), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
                    "EnvironmentVariables": launch_env(),
                    "StandardOutPath": log, "StandardErrorPath": log}
-        started = load_agent(desired, jobs_dir)
-        # The engine supervises the board itself; a workspace keeps one LaunchAgent (#935).
-        if job_path(label("pages", root), jobs_dir).exists():
-            unload_agent(label("pages", root), root, jobs_dir)
-        return "engine: " + started
+        # An explicitly installed board agent remains a fallback if the engine fails to start or is uninstalled.
+        return "engine: " + load_agent(desired, jobs_dir)
 
 
 def uninstall(root: Path, jobs_dir: Path | None = None) -> str:
